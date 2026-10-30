@@ -18,7 +18,7 @@
 //! its characters fast and the gaps between them long, so its speed is the
 //! two speeds together.
 
-use crate::alignment::align_group;
+use crate::alignment::edit_distance;
 use crate::morse::is_scored_char;
 use crate::session::{GroupResult, SessionTiming};
 
@@ -33,8 +33,8 @@ pub const POINTS_PER_CHAR: f64 = 10.0;
 const REFERENCE_ALPHABET: f64 = 26.0;
 /// The quickest a listener can be said to answer, per character: as fast
 /// as anyone types one. An answer this quick costs nothing, and none is kept
-/// as quicker: one finished while the group was still being sent, typed
-/// along, has no response time worth the name.
+/// as quicker: one finished while the group's first send was still going
+/// out, typed along, has no response time worth the name.
 pub const MIN_RESPONSE_MS_PER_CHAR: f64 = 100.0;
 /// What each tenfold of time a character beyond that costs, of the points.
 const TIME_COST_PER_DECADE: f64 = 0.25;
@@ -56,22 +56,19 @@ pub struct GroupCopy {
     pub errors: u32,
     /// The speed it was sent at, in words a minute ([`copy_speed`]).
     pub wpm: f64,
-    /// How long the answer took, a character, from the end of the send.
+    /// How long the answer took, a character, from the end of the latest
+    /// send heard to its end.
     pub ms_per_char: f64,
-    /// How many times it was sent before it was answered.
+    /// How many times it was heard before it was answered.
     pub sends: u32,
 }
 
 impl GroupCopy {
     /// `sent`, copied as `received`.
     pub fn of(sent: &str, received: &str, wpm: f64, ms_per_char: f64, sends: u32) -> Self {
-        let errors = align_group(sent, received)
-            .iter()
-            .filter(|pair| !pair.matched)
-            .count() as u32;
         Self {
             chars: count_valid_letters(sent),
-            errors,
+            errors: count_errors(sent, received),
             wpm,
             ms_per_char,
             sends,
@@ -99,6 +96,25 @@ pub fn error_factor(errors: u32) -> f64 {
     1.0 / f64::from(errors + 1).powi(2)
 }
 
+/// What is left, on average, of a group of `chars` characters each missed
+/// at `miss_rate`: [`error_factor`] for every count of misses the group
+/// could have, by its chance. Nothing missed leaves it all.
+pub fn expected_error_factor(chars: u32, miss_rate: f64) -> f64 {
+    let miss = if miss_rate.is_finite() {
+        miss_rate.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mut ways = 1.0;
+    let mut left = 0.0;
+    for errors in 0..=chars {
+        let chance = ways * miss.powi(errors as i32) * (1.0 - miss).powi((chars - errors) as i32);
+        left += chance * error_factor(errors);
+        ways *= f64::from(chars - errors) / f64::from(errors + 1);
+    }
+    left
+}
+
 /// What is left after answering `ms_per_char` a character: everything as
 /// fast as anyone types, a quarter less for each tenfold beyond that.
 pub fn time_factor(ms_per_char: f64) -> f64 {
@@ -110,8 +126,8 @@ pub fn time_factor(ms_per_char: f64) -> f64 {
     (1.0 - TIME_COST_PER_DECADE * (ms / MIN_RESPONSE_MS_PER_CHAR).log10()).max(SLOWEST_KEEPS)
 }
 
-/// What is left of a group sent `sends` times: half for each send after the
-/// first.
+/// What is left of a group heard `sends` times: half for each send after
+/// the first.
 pub fn repeat_factor(sends: u32) -> f64 {
     RESENT_KEEPS.powi(sends.max(1) as i32 - 1)
 }
@@ -145,7 +161,20 @@ pub fn session_points(copies: &[GroupCopy], effective_alphabet_size: f64) -> f64
     (score * 100.0).round() / 100.0
 }
 
-fn count_valid_letters(text: &str) -> u32 {
+/// The characters missed, wrong or typed in excess, copying `sent` as
+/// `received`: what a group's points are cut for. Each is one edit of the
+/// fewest that turn one into the other.
+pub(crate) fn count_errors(sent: &str, received: &str) -> u32 {
+    // A clean copy is the common case, and needs no table.
+    if sent.eq_ignore_ascii_case(received) {
+        0
+    } else {
+        edit_distance(sent, received)
+    }
+}
+
+/// The characters of `text` that are scored: what a group's points are for.
+pub(crate) fn count_valid_letters(text: &str) -> u32 {
     text.chars()
         .filter(|ch| is_scored_char(ch.to_ascii_uppercase()))
         .count() as u32
@@ -256,6 +285,24 @@ mod tests {
             one_extra.errors, 1,
             "typing a character too many is an error"
         );
+    }
+
+    /// A group of five at a tenth of its characters missed keeps on average
+    /// what its chances of none, one, two or more misses leave; nothing
+    /// missed keeps it all, everything missed what five misses leave.
+    #[test]
+    fn a_miss_rate_cuts_a_group_by_its_chances() {
+        assert_eq!(expected_error_factor(5, 0.0), 1.0);
+        assert!((expected_error_factor(5, 1.0) - error_factor(5)).abs() < 1e-12);
+        let by_hand = 0.9f64.powi(5)
+            + 5.0 * 0.1 * 0.9f64.powi(4) * error_factor(1)
+            + 10.0 * 0.01 * 0.9f64.powi(3) * error_factor(2)
+            + 10.0 * 0.001 * 0.81 * error_factor(3)
+            + 5.0 * 1e-4 * 0.9 * error_factor(4)
+            + 1e-5 * error_factor(5);
+        assert!((expected_error_factor(5, 0.1) - by_hand).abs() < 1e-12);
+        assert_eq!(expected_error_factor(5, f64::NAN), 1.0);
+        assert_eq!(expected_error_factor(5, -1.0), 1.0);
     }
 
     /// Time costs, gently: nothing as fast as anyone types, a quarter for

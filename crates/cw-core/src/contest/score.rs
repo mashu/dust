@@ -10,14 +10,16 @@
 //! What a QSO is worth, and what it counts for, can turn on where you are:
 //! CQ WW's points on your country and continent, ARRL DX's points and
 //! multipliers on your side ([`MyStation`]). A call logged is placed where
-//! it is at home ([`home_country`]); one Dust cannot place is worth no CQ
-//! WW points and no country, and one on your own side of ARRL DX is worth
-//! nothing, as the contest has W/VE work only DX.
+//! it is at home, as it was placed when it was logged where the log keeps
+//! that ([`Placed`]); one Dust cannot place is worth a CQ WW point and no
+//! country, as MorseRunner leaves a call its list cannot place at its
+//! default point (`Log.pas:724`), and one on your own side of ARRL DX is
+//! worth nothing, as the contest has W/VE work only DX.
 
 use std::collections::BTreeSet;
 
 use super::check::QsoCheck;
-use super::data::places::{DX, fold_labrador, home_country, w_ve, w_ve_place};
+use super::data::places::{DX, fold_labrador, home_country, w_ve_country, w_ve_place};
 use super::data::zones::home_continent;
 use super::exchange::Field;
 use super::rules::{Multiplier, Points, Scoring, Side};
@@ -35,6 +37,40 @@ pub struct MyStation<'a> {
     pub continent: &'a str,
 }
 
+/// Where a logged call places its station, as the score counts it: its
+/// country and continent by the call table's keys, none where Dust cannot
+/// place it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Placed<'a> {
+    pub country: Option<&'a str>,
+    pub continent: Option<&'a str>,
+}
+
+impl Placed<'static> {
+    /// Where `call` places its station by this build's tables: where it is
+    /// at home ([`home_country`]), on its prefix's continent
+    /// ([`home_continent`]).
+    pub fn of(call: &str) -> Self {
+        Self {
+            country: home_country(call),
+            continent: home_continent(call),
+        }
+    }
+}
+
+impl Placed<'_> {
+    /// Its side, as the ARRL DX contest has them: W/VE at home in the USA or
+    /// Canada, and DX anywhere else or nowhere Dust can place, as
+    /// [`Side::of_call`] reads a call.
+    fn side(&self) -> Side {
+        if self.country.is_some_and(w_ve_country) {
+            Side::WVe
+        } else {
+            Side::Dx
+        }
+    }
+}
+
 /// One logged QSO, as the score reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScoredQso<'a> {
@@ -45,6 +81,8 @@ pub struct ScoredQso<'a> {
     /// The exchange as you logged it, each field's token or value.
     pub fields: &'a [(Field, String)],
     pub check: &'a QsoCheck,
+    /// Where the call as logged places its station.
+    pub placed: Placed<'a>,
 }
 
 impl ScoredQso<'_> {
@@ -64,7 +102,8 @@ impl ScoredQso<'_> {
     /// is, where nothing multiplies the points, as in Field Day. Nothing for
     /// what counts for none.
     fn multipliers(&self, multiplier: Multiplier) -> Vec<String> {
-        let country = || home_country(self.call).map(str::to_string);
+        let country = || self.placed.country.map(str::to_string);
+        let w_ve = self.placed.side() == Side::WVe;
         match multiplier {
             Multiplier::WpxPrefix => wpx_prefix(self.call).into_iter().collect(),
             Multiplier::Place => self
@@ -75,10 +114,10 @@ impl ScoredQso<'_> {
                 .collect(),
             Multiplier::WVePlace => self
                 .logged(Field::St)
-                .filter(|place| w_ve_place(place) && w_ve(self.call))
+                .filter(|place| w_ve_place(place) && w_ve)
                 .into_iter()
                 .collect(),
-            Multiplier::Country => country().filter(|_| !w_ve(self.call)).into_iter().collect(),
+            Multiplier::Country => country().filter(|_| !w_ve).into_iter().collect(),
             Multiplier::ZoneAndCountry => self
                 .logged(Field::Zn)
                 .map(|zone| format!("zone {zone}"))
@@ -95,7 +134,7 @@ impl ScoredQso<'_> {
     fn points(&self, points: Points, me: &MyStation<'_>) -> u32 {
         match points {
             Points::Each(each) => each,
-            Points::OtherSide(each) if Side::of_call(self.call) != me.side => each,
+            Points::OtherSide(each) if self.placed.side() != me.side => each,
             Points::OtherSide(_) => 0,
             Points::ByDistance => self.distance_points(me),
         }
@@ -104,15 +143,17 @@ impl ScoredQso<'_> {
     /// What it is worth by how far its call puts the station from `me`, as
     /// CQ WW counts it: nothing in your own country, one on your continent,
     /// two between North American countries and three on another
-    /// continent, or yours unknown.
+    /// continent, or yours unknown. A call Dust cannot place is worth one,
+    /// MorseRunner's default for a call it cannot place (`Log.pas:724`,
+    /// `CqWW.pas:258-275`).
     fn distance_points(&self, me: &MyStation<'_>) -> u32 {
-        let Some(country) = home_country(self.call) else {
-            return 0;
+        let Some(country) = self.placed.country else {
+            return 1;
         };
         if country == me.country {
             return 0;
         }
-        match home_continent(self.call) {
+        match self.placed.continent {
             Some(continent) if continent == me.continent && continent == "NA" => 2,
             Some(continent) if continent == me.continent => 1,
             _ => 3,
@@ -128,7 +169,7 @@ pub struct Tally {
     pub score: u32,
 }
 
-/// QSOs an hour.
+/// QSOs an hour, none before the run is a minute old.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rates {
     /// Over the last five minutes of the run, as MorseRunner shows it.
@@ -149,6 +190,12 @@ pub struct ContestScore {
 
 /// The window a rate is counted over.
 const RATE_WINDOW_MS: u64 = 5 * MS_PER_MINUTE;
+
+/// The least run time a rate is counted over: before it there is none, as
+/// one QSO in ten seconds is no rate of 360 an hour. MorseRunner shows a
+/// rate from the start (`Log.pas:1133-1147`); Dust waits the minute,
+/// on the run bar, in History and on a run's results alike.
+const RATE_MIN_MS: u64 = MS_PER_MINUTE;
 
 /// The score of `qsos`, in the order they were logged, over a run of
 /// `run_ms`, as `scoring` counts it for `me`.
@@ -207,7 +254,8 @@ fn tally(
 }
 
 impl Rates {
-    /// The rates of QSOs logged at `times`, over a run of `run_ms`.
+    /// The rates of QSOs logged at `times`, over a run of `run_ms`; none
+    /// for a run shorter than a minute.
     pub fn of(times: &[u64], run_ms: u64) -> Self {
         let window = run_ms.min(RATE_WINDOW_MS);
         let best = times
@@ -215,19 +263,21 @@ impl Rates {
             .map(|&end| count_in(times, end, window))
             .max()
             .unwrap_or(0);
+        let counted = run_ms >= RATE_MIN_MS;
         Self {
             last_5_min: rate_at(times, run_ms),
-            whole_run: (run_ms > 0).then(|| per_hour(times.len(), run_ms)),
-            best_5_min: (window > 0).then(|| per_hour(best, window)),
+            whole_run: counted.then(|| per_hour(times.len(), run_ms)),
+            best_5_min: counted.then(|| per_hour(best, window)),
         }
     }
 }
 
 /// QSOs an hour at `now_ms` of run time, counted over the last five
-/// minutes, or over the run so far while it is shorter; none at its start.
+/// minutes, or over the run so far while it is shorter; none in its first
+/// minute.
 pub fn rate_at(times: &[u64], now_ms: u64) -> Option<f64> {
     let window = now_ms.min(RATE_WINDOW_MS);
-    (window > 0).then(|| per_hour(count_in(times, now_ms, window), window))
+    (now_ms >= RATE_MIN_MS).then(|| per_hour(count_in(times, now_ms, window), window))
 }
 
 /// How many of `times` fall in the `window` that ends at `end`.
@@ -300,6 +350,7 @@ mod tests {
             call,
             fields,
             check,
+            placed: Placed::of(call),
         }
     }
 
@@ -431,11 +482,15 @@ mod tests {
         for scoring in [wpx(), sprint(), cqww(), arrl_dx(), field_day()] {
             for _ in 0..500 {
                 let log: Vec<ScoredQso<'_>> = (0..rng.usize_in(0, 12))
-                    .map(|i| ScoredQso {
-                        at_ms: i as u64 * 40_000,
-                        call: calls[rng.usize_in(0, calls.len() - 1)],
-                        fields: &places[rng.usize_in(0, places.len() - 1)],
-                        check: &checks[rng.usize_in(0, checks.len() - 1)],
+                    .map(|i| {
+                        let call = calls[rng.usize_in(0, calls.len() - 1)];
+                        ScoredQso {
+                            at_ms: i as u64 * 40_000,
+                            call,
+                            fields: &places[rng.usize_in(0, places.len() - 1)],
+                            check: &checks[rng.usize_in(0, checks.len() - 1)],
+                            placed: Placed::of(call),
+                        }
                     })
                     .collect();
                 let score = contest_score(&scoring, &K1, &log, 600_000);
@@ -472,6 +527,7 @@ mod tests {
             call,
             fields,
             check,
+            placed: Placed::of(call),
         };
         let log = [
             at(20_000, "N5KGS", &nm, &clean),
@@ -624,8 +680,10 @@ mod tests {
     /// Every CQ WW points rule, from Europe and from North America: none in
     /// your own country, one on your continent, two between North American
     /// countries, three on another continent; a call Dust cannot place is
-    /// worth nothing, and from a call it cannot place every placed station
-    /// is on another continent.
+    /// worth one, as in MorseRunner, and from a call it cannot place every
+    /// placed station is on another continent. A pair in one country is
+    /// worth nothing on two continents too, as in MorseRunner, whose list
+    /// gives a country one continent.
     #[test]
     fn cqww_points_go_by_country_and_continent() {
         let clean = clean();
@@ -653,8 +711,8 @@ mod tests {
             ("TA1XYZ", 1, 3),
             ("YM1AB", 1, 3),
             ("TA2XYZ", 3, 3),
-            ("C31AB", 0, 0),
-            ("KH2AB", 0, 0),
+            ("C31AB", 1, 1),
+            ("KH2AB", 1, 1),
         ] {
             assert_eq!(points(&DL, call), from_dl, "{call} from DL");
             assert_eq!(points(&K1, call), from_k1, "{call} from K1");
@@ -675,6 +733,12 @@ mod tests {
             ("JA1XYZ", "TA1XYZ", 3),
             ("JA1XYZ", "TA2XYZ", 1),
             ("TA1ABC", "DL2ABC", 1),
+            ("TA2ABC", "TA1XYZ", 0),
+            ("TA1ABC", "TA2XYZ", 0),
+            // VP2 is three countries, told apart by the letter after it.
+            ("VP2E/K1ABC", "VP2MAB", 2),
+            ("VP2E/K1ABC", "VP2EAB", 0),
+            ("VP2E/K1ABC", "VP2VAB", 2),
         ] {
             assert_eq!(points(&me(mine), call), worth, "{call} from {mine}");
         }
@@ -682,7 +746,7 @@ mod tests {
         assert_eq!((nowhere.country, nowhere.continent), ("", ""));
         assert_eq!(points(&nowhere, "DL2ABC"), 3);
         assert_eq!(points(&nowhere, "KH6XYZ"), 3);
-        assert_eq!(points(&nowhere, "C31AB"), 0);
+        assert_eq!(points(&nowhere, "C31AB"), 1);
     }
 
     /// ARRL DX worked by hand from either side: three points a QSO with the
@@ -829,6 +893,7 @@ mod tests {
     #[test]
     fn a_rate_counts_the_last_five_minutes_or_the_run_so_far() {
         assert_eq!(rate_at(&[], 0), None, "no rate at the start");
+        assert_eq!(rate_at(&[5_000], 10_000), None, "nor in the first minute");
         assert_eq!(rate_at(&[], 60_000), Some(0.0));
         // One QSO in the first minute is 60 an hour.
         assert_eq!(rate_at(&[30_000], 60_000), Some(60.0));
@@ -839,5 +904,19 @@ mod tests {
         assert_eq!(rate_at(&[300_000], 600_000), Some(0.0));
         let empty = Rates::of(&[], 0);
         assert_eq!(empty, Rates::default());
+    }
+
+    /// A run ended in its first minute has no rate, whole or over five
+    /// minutes: one QSO ten seconds in is no rate of 360 an hour. A minute
+    /// in, it has.
+    #[test]
+    fn a_run_shorter_than_a_minute_has_no_rate() {
+        assert_eq!(Rates::of(&[5_000], 10_000), Rates::default());
+        assert_eq!(Rates::of(&[5_000, 50_000], 59_999), Rates::default());
+        let minute = Rates::of(&[30_000], 60_000);
+        assert_eq!(
+            (minute.last_5_min, minute.whole_run, minute.best_5_min),
+            (Some(60.0), Some(60.0), Some(60.0))
+        );
     }
 }

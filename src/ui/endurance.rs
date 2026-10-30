@@ -22,9 +22,6 @@ use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 /// The tallest a bar stands, as a share of the chart: room above it for
 /// its figure.
 const TALLEST: f64 = 82.0;
-/// A stretch this many points or more over the start is a warm-up worth
-/// saying so of.
-const WARM_UP_POINTS: f64 = 3.0;
 
 /// How far into a session a place is: "group 20", "minute 6".
 fn place(unit: StretchUnit, at: u32) -> String {
@@ -57,7 +54,8 @@ fn headline(curve: &Endurance) -> (String, bool) {
 }
 
 /// The line under the headline: where it ends up against how you start,
-/// any warm-up, and what to try.
+/// any warm-up, and what to try. A dip or a climb no further than chance
+/// would put it is not called anything.
 fn summary(curve: &Endurance) -> String {
     let start = curve.opening_pct;
     let session = match curve.unit {
@@ -65,11 +63,7 @@ fn summary(curve: &Endurance) -> String {
         StretchUnit::Minutes => "run",
     };
     let warm = curve
-        .points
-        .iter()
-        .skip(1)
-        .max_by(|a, b| a.change.total_cmp(&b.change))
-        .filter(|point| point.change >= WARM_UP_POINTS)
+        .warm_up()
         .map(|point| {
             let unit = match curve.unit {
                 StretchUnit::Groups => "groups",
@@ -95,8 +89,12 @@ fn summary(curve: &Endurance) -> String {
                 -low.change
             )
         }
-        None => format!(
+        None if curve.points.iter().all(|point| point.change > -DROP_POINTS) => format!(
             "You start a {session} copying {start:.0}% and stay within {DROP_POINTS:.0} points of it all the way.{warm} Longer {session}s would show where you tire."
+        ),
+        None => format!(
+            "You start a {session} copying {start:.0}%. Some stretches dip below it, but no further than chance would over {}: more {session}s will tell.{warm}",
+            counted(curve.sessions, session)
         ),
     }
 }
@@ -189,7 +187,7 @@ pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -
                         let value = accuracy(curve, point);
                         let class = if n == 0 {
                             "endu-bar first"
-                        } else if point.change <= -DROP_POINTS {
+                        } else if point.drops() {
                             "endu-bar fades"
                         } else {
                             "endu-bar"
@@ -212,7 +210,7 @@ pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -
             }
             div { class: "endu-axis", "{axis}" }
             p { class: "muted", style: "margin: 0; font-size: 0.85rem;",
-                "Each bar is your character accuracy over that stretch, averaged over your last sessions long enough to tell, each measured against its own start: the first bar, and the dashed line at its level. A bar {DROP_POINTS:.0} points or more below the line is where you start to tire."
+                "Each bar is your character accuracy over that stretch, averaged over your last sessions long enough to tell, each measured against its own start: the first bar, and the dashed line at its level. A copper bar is {DROP_POINTS:.0} points or more below the line, further than chance would put it: where you start to tire."
             }
         }
     }
@@ -223,6 +221,11 @@ mod tests {
     use super::*;
 
     fn curve(unit: StretchUnit, changes: &[f64]) -> Endurance {
+        noisy(unit, changes, 0.0)
+    }
+
+    /// A curve whose every stretch could move `noise` points by chance.
+    fn noisy(unit: StretchUnit, changes: &[f64], noise: f64) -> Endurance {
         let size = match unit {
             StretchUnit::Groups => GROUPS_A_STRETCH,
             StretchUnit::Minutes => MINUTES_A_STRETCH,
@@ -243,6 +246,7 @@ mod tests {
                         from,
                         to: (at + 1) * size,
                         change: *change,
+                        noise,
                         sessions: 3,
                     }
                 })
@@ -280,6 +284,33 @@ mod tests {
         assert_eq!(
             stretch_label(StretchUnit::Groups, &steady.points[1]),
             "6–10"
+        );
+    }
+
+    /// A dip or a climb no further than chance would put it is not called
+    /// a fade or a warm-up, and the line under the headline says so.
+    #[test]
+    fn what_chance_would_do_is_not_called_anything() {
+        let dipping = noisy(StretchUnit::Groups, &[0.0, -2.0, -9.0, 4.0], 5.0);
+        assert_eq!(
+            headline(&dipping),
+            ("Steady through group 20".to_string(), true)
+        );
+        assert_eq!(
+            summary(&dipping),
+            "You start a session copying 89%. Some stretches dip below it, but no further than chance would over 5 sessions: more sessions will tell."
+        );
+        let clear = noisy(StretchUnit::Groups, &[0.0, -2.0, -15.0, 9.0], 2.0);
+        assert_eq!(
+            headline(&clear),
+            ("Fades after group 10".to_string(), false)
+        );
+        assert!(
+            summary(&clear).ends_with(
+                " You warm up: you are at your best over groups 16–20, 9 points above your start."
+            ),
+            "{}",
+            summary(&clear)
         );
     }
 

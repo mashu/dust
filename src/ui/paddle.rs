@@ -16,10 +16,11 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::page_hidden::{PADDLES_HIDDEN, use_page_hidden};
-use crate::state::{AppState, Screen, in_root};
+use crate::state::{AppCtx, AppState, Screen, Toasts, in_root};
 use crate::time::mono_ms;
 #[cfg(not(all(feature = "desktop", not(test))))]
 use crate::time::sleep_ms;
+use crate::ui::training::TOUCH_BUILD;
 use crate::ui::widgets::control_id;
 
 /// How many decoded characters the practice pad keeps: about a line's worth.
@@ -275,8 +276,10 @@ fn paddle_for_press(key: &str, code: &str, held: Held, reading: Reading) -> Opti
 /// one, `/` and `=` on a Dvorak. Nothing in a key event tells the paddle
 /// from the keyboard, so which wins is the learner's to say: by place the
 /// paddle works on any layout, and a `+` those keys type is the paddle's;
-/// not by place, they type, and only a `[` or `]` keys a paddle.
-fn bracket_for_key(key: &str, code: &str, by_place: bool) -> Option<char> {
+/// not by place, they type, and only a `[` or `]` keys a paddle. In a field
+/// the paddles key nothing into they type all the same
+/// ([`PaddleKeys::reading`]).
+pub(super) fn bracket_for_key(key: &str, code: &str, by_place: bool) -> Option<char> {
     match (key, code) {
         ("[", _) => Some('['),
         ("]", _) => Some(']'),
@@ -284,6 +287,34 @@ fn bracket_for_key(key: &str, code: &str, by_place: bool) -> Option<char> {
         (_, "BracketRight") if by_place => Some(']'),
         _ => None,
     }
+}
+
+/// The character Dust sends that a key typing `key` at `code` types, if it
+/// keys a paddle only by where it sits: a German keyboard's `+`, a Dvorak's
+/// `/`, `=`, `?` and `+`.
+fn sent_by_place(key: &str, code: &str, reading: Reading) -> Option<char> {
+    let mut chars = key.chars();
+    let (Some(typed), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    let by_place = bracket_for_key(key, code, false).is_none()
+        && bracket_for_key(key, code, reading.by_place).is_some();
+    (by_place && cw_core::morse_for(typed).is_some()).then_some(typed)
+}
+
+/// What the paddles say the first time a key right of P keys one into a box
+/// while it types `typed`, a character Dust sends: a letter lands there in
+/// its place, and how to type it instead, on the keypad too where a group's
+/// box has one, which holds every character a group can.
+fn by_place_hint(typed: char, group_box: bool) -> String {
+    let keypad = if TOUCH_BUILD && group_box {
+        ", or tap it on the keypad"
+    } else {
+        ""
+    };
+    format!(
+        "That {typed} keyed a paddle: the keys right of P are the paddles. To type {typed}, turn off Paddles on the keys right of P under Settings → Session shape{keypad}. A USB paddle that keys through them needs it on."
+    )
 }
 
 /// What a screen taking paddled letters lends the keyer: whether it is
@@ -323,6 +354,14 @@ pub struct PaddleKeys {
     sidetone_error: Signal<Option<String>>,
     /// Which key events the page's root keys the paddles from.
     root: RootKeys,
+    /// The field the paddles key nothing into that has the cursor, if one
+    /// has ([`use_typed_field`]).
+    typed_field: CopyValue<Option<ScopeId>>,
+    /// Where the app's messages go, to say why a key right of P keyed a
+    /// paddle into a box: none for a screen drawn on its own.
+    toasts: Option<Toasts>,
+    /// Whether that has been said on this install ([`crate::persist::Store::told_of_paddle_keys`]).
+    told_by_place: CopyValue<bool>,
 }
 
 /// Start the app's keyer, and hand it to every screen below.
@@ -331,10 +370,12 @@ pub fn use_paddle_keys(
     screen: Signal<Screen>,
     app: Rc<AppState>,
 ) -> PaddleKeys {
+    let toasts = try_use_context::<AppCtx>().map(|ctx| ctx.toasts);
     // In the root scope, where the keyer's timer runs.
     let mut keys = use_context_provider(|| {
         in_root(|| {
             let playback = &settings.peek().playback;
+            let told_by_place = app.store.told_of_paddle_keys();
             PaddleKeys {
                 keyer: CopyValue::new(Keyer::new(playback.keyer_mode, playback.keyer_wpm)),
                 contacts: CopyValue::new(Contacts::default()),
@@ -346,6 +387,9 @@ pub fn use_paddle_keys(
                 heard: Signal::new(String::new()),
                 sidetone_error: Signal::new(None),
                 root: ROOT_KEYS,
+                typed_field: CopyValue::new(None),
+                toasts,
+                told_by_place: CopyValue::new(told_by_place),
             }
         })
     });
@@ -445,13 +489,38 @@ impl PaddleKeys {
     /// while held: whether it is a paddle, to keep from the page. A press
     /// closes the paddle's contact, and remembers which key did.
     fn key_down(mut self, key: &str, code: &str, held: Held, repeat: bool) -> bool {
-        let Some(paddle) = paddle_for_press(key, code, held, self.reading()) else {
+        let reading = self.reading();
+        let Some(paddle) = paddle_for_press(key, code, held, reading) else {
             return false;
         };
         if !repeat && self.contacts.write().press(paddle, code) {
             self.press(paddle);
+            if let Some(typed) = sent_by_place(key, code, reading) {
+                self.tell_by_place(typed);
+            }
         }
         true
+    }
+
+    /// A key right of P typing `typed`, a character Dust sends, has keyed a
+    /// paddle: if that keys into a box, the first time on this install, say
+    /// why a letter lands there and how to type `typed` instead. A
+    /// learner who meant it would otherwise find only a dit or a dah's letter
+    /// in its place.
+    fn tell_by_place(self, typed: char) {
+        let Some(answer) = *self.answer.peek() else {
+            return;
+        };
+        let mut told = self.told_by_place;
+        if !answer.open || *told.peek() {
+            return;
+        }
+        if let Some(toasts) = self.toasts {
+            told.set(true);
+            self.app.peek().store.mark_told_of_paddle_keys();
+            // A run's fields take a word space; a group's box has none.
+            toasts.show_long(by_place_hint(typed, answer.space.is_none()));
+        }
     }
 
     /// A key typing `key` at `code` let go: whether it was a paddle's. It
@@ -467,12 +536,14 @@ impl PaddleKeys {
         opened.is_some()
     }
 
-    /// How the keys are read as paddles, as the settings stand.
+    /// How the keys are read as paddles, as the settings stand: by place
+    /// only while no field the paddles key nothing into has the cursor,
+    /// where the keys right of P type.
     fn reading(self) -> Reading {
         let playback = &self.settings.peek().playback;
         Reading {
             swap: playback.paddle_swap,
-            by_place: playback.paddle_keys_by_place,
+            by_place: playback.paddle_keys_by_place && self.typed_field.peek().is_none(),
         }
     }
 
@@ -709,6 +780,52 @@ impl PaddleKeys {
     }
 }
 
+/// A field you type into that the paddles key nothing into: the word list,
+/// the unlock order, a call. While it has the cursor the keys right of P
+/// type what they type there, by place or not — a `+` on a German keyboard,
+/// a `/` on a Dvorak — and only `[` and `]` are paddles. The field says so on
+/// the page as well, with `data-typed`, for the page's own listeners
+/// ([`PAGE_PADDLES_SCRIPT`]). Drawn without the app's keyer, it is a field
+/// like any other.
+#[derive(Clone, Copy)]
+pub struct TypedField {
+    keys: Option<PaddleKeys>,
+    /// The field's own scope, which the keyer holds while it has the cursor.
+    field: ScopeId,
+}
+
+/// The calling component's field, as one the paddles key nothing into
+/// ([`TypedField`]), for as long as it is mounted.
+pub fn use_typed_field() -> TypedField {
+    let keys = try_use_context::<PaddleKeys>();
+    let field = use_hook(dioxus::core::current_scope_id);
+    let typed = TypedField { keys, field };
+    // A field taken off the page with the cursor in it may never hear it go.
+    use_drop(move || typed.blur());
+    typed
+}
+
+impl TypedField {
+    /// The field has the cursor.
+    pub fn focus(self) {
+        if let Some(keys) = self.keys {
+            let mut held = keys.typed_field;
+            held.set(Some(self.field));
+        }
+    }
+
+    /// The field has given the cursor up. Only its own: another field that
+    /// has taken it since stays.
+    pub fn blur(self) {
+        if let Some(keys) = self.keys {
+            let mut held = keys.typed_field;
+            if *held.peek() == Some(self.field) {
+                held.set(None);
+            }
+        }
+    }
+}
+
 /// The desktop's window: on Linux it keys the paddles, as it hears them,
 /// and everywhere it opens them as it loses the focus. Elsewhere the page's
 /// script keys them ([`listen_page_paddles`]).
@@ -843,11 +960,12 @@ fn listen_document_paddles(_keys: PaddleKeys) {}
 /// build's ([`listen_document_paddles`]), they hear the paddles from the
 /// whole document: the page's script keeps a bracket from the page, read as
 /// [`bracket_for_key`] reads one, by place as long as the window's flag
-/// does not say otherwise ([`by_place_script`]), and hands it over, a press
-/// that is a shortcut ([`paddle_for_press`]) or a repeat being nothing; a
-/// release is always heard, and so is the release of a key that closed a
-/// paddle, whatever it types by then; and the window losing the focus, or
-/// Command let go, opens both.
+/// does not say otherwise ([`by_place_script`]) and the key is not typed in
+/// a field the paddles key nothing into ([`TypedField`]), and hands it
+/// over, a press that is a shortcut ([`paddle_for_press`]) or a repeat
+/// being nothing; a release is always heard, and so is the release of a
+/// key that closed a paddle, whatever it types by then; and the window
+/// losing the focus, or Command let go, opens both.
 #[cfg(any(
     all(not(feature = "desktop"), not(feature = "web")),
     all(feature = "desktop", not(target_os = "linux")),
@@ -858,7 +976,8 @@ const PAGE_PADDLES_SCRIPT: &str = r#"if (window.__dustPaddleKeys) {
 }
 const byPlace = () => window.__dustPaddlesByPlace !== false;
 const bracketKey = (e) => e.code === "BracketLeft" || e.code === "BracketRight";
-const bracket = (e) => e.key === "[" || e.key === "]" || (byPlace() && bracketKey(e));
+const typedField = (e) => Boolean(e.target && e.target.closest && e.target.closest("[data-typed]"));
+const bracket = (e) => e.key === "[" || e.key === "]" || (byPlace() && bracketKey(e) && !typedField(e));
 const shortcut = (e) => e.metaKey || ((e.ctrlKey || e.altKey) && bracketKey(e));
 const held = new Set();
 const down = (e) => {
@@ -1211,15 +1330,55 @@ mod tests {
         assert_eq!(paddle_for_key("+", "NumpadAdd", Reading::DEFAULT), None);
     }
 
+    /// A key right of P that keys a paddle only by where it sits, typing a
+    /// character Dust sends, is told by that character: a German `+`, a
+    /// Dvorak's `/`, `=` and `?`. One that types a bracket, or something
+    /// Dust never sends, or that types where it sits, is not.
+    #[test]
+    fn a_character_dust_sends_keyed_by_place_is_told_by_what_it_types() {
+        for (key, code) in [
+            ("+", "BracketRight"),
+            ("/", "BracketLeft"),
+            ("=", "BracketRight"),
+            ("?", "BracketLeft"),
+        ] {
+            let typed = key.chars().next();
+            assert_eq!(sent_by_place(key, code, Reading::DEFAULT), typed, "{key}");
+            assert_eq!(sent_by_place(key, code, TYPED), None, "{key}");
+        }
+        for (key, code) in [
+            ("[", "BracketLeft"),
+            ("]", "BracketRight"),
+            ("ü", "BracketLeft"),
+            ("", "BracketRight"),
+            ("+", "NumpadAdd"),
+        ] {
+            assert_eq!(sent_by_place(key, code, Reading::DEFAULT), None, "{key}");
+        }
+        assert!(
+            by_place_hint('+', true).contains("To type +, turn off Paddles on the keys right of P")
+        );
+        // The keypad is a phone's, and a run's has no + to tap.
+        assert_eq!(
+            by_place_hint('+', true).contains("keypad"),
+            TOUCH_BUILD,
+            "{}",
+            by_place_hint('+', true)
+        );
+        assert!(!by_place_hint('+', false).contains("keypad"));
+    }
+
     /// The page's script reads a bracket key as the app does: by place,
-    /// unless the window's flag, which the settings set, says not.
+    /// unless the window's flag, which the settings set, says not, or the
+    /// key is typed in a field the paddles key nothing into.
     #[test]
     fn the_page_reads_a_bracket_key_as_the_app_does() {
         let script = PAGE_PADDLES_SCRIPT;
         for read in [
             "const byPlace = () => window.__dustPaddlesByPlace !== false;",
             r#"const bracketKey = (e) => e.code === "BracketLeft" || e.code === "BracketRight";"#,
-            r#"const bracket = (e) => e.key === "[" || e.key === "]" || (byPlace() && bracketKey(e));"#,
+            r#"const typedField = (e) => Boolean(e.target && e.target.closest && e.target.closest("[data-typed]"));"#,
+            r#"const bracket = (e) => e.key === "[" || e.key === "]" || (byPlace() && bracketKey(e) && !typedField(e));"#,
         ] {
             assert!(script.contains(read), "{read}\n{script}");
         }
@@ -1352,3 +1511,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod page_tests;

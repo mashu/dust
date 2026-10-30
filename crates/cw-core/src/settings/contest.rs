@@ -532,6 +532,24 @@ impl TrainingSettings {
         }
     }
 
+    /// A save from before [`ContestSettings::stations_opened_by_pileup`],
+    /// whose stations range a pile-up opened. Releases before it opened a
+    /// range of one station to one to three callers on Pile-up and kept no
+    /// note of it, so leaving the pile-up kept them, and every Koch session
+    /// after drew up to three stations. A save on Pile-up whose range is
+    /// just what a pile-up opens is taken to be one it opened, and fitted
+    /// to the mode it is in: kept open in a pile-up, one station again
+    /// anywhere else. A range set by hand to the same is taken for one too.
+    pub(super) fn upgrade_stations_opened_by_pileup(&mut self) {
+        let opened = self.contest.contest_style == RunStyle::Pileup
+            && (self.band.stations_min, self.band.stations_max)
+                == (STATIONS_MIN, PILEUP_CALLERS_MAX);
+        if opened {
+            self.contest.stations_opened_by_pileup = true;
+            self.fit_stations_to_pileup();
+        }
+    }
+
     /// A range a pile-up opened, and that is still as it opened it, back to
     /// one station. One set since is the learner's own, and stays.
     fn close_stations_after_pileup(&mut self) {

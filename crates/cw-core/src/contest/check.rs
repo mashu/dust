@@ -41,8 +41,11 @@ pub struct QsoCheck {
     /// Everything wrong with it, in the order a log reads: the call, then
     /// each field. A NIL is only that.
     pub errors: Vec<QsoError>,
-    /// The station was already logged clean: the QSO scores nothing, and is
-    /// no error, as contest rules remove dupes without penalty.
+    /// The station was already logged clean, and this QSO is copied right
+    /// too: it scores nothing, and is no error, as contest rules remove
+    /// dupes without penalty. A QSO with something wrong counts once, by
+    /// what is wrong: MorseRunner marks a dupe by the call as typed, so a
+    /// busted call is never one (`Log.pas:733-738`).
     pub dupe: bool,
 }
 
@@ -100,8 +103,8 @@ pub fn check_qso(
         }
     }
     QsoCheck {
+        dupe: errors.is_empty() && logged_clean(&sent.call),
         errors,
-        dupe: logged_clean(&sent.call),
     }
 }
 
@@ -247,5 +250,25 @@ mod tests {
         assert!(check.is_clean());
         let other = check_qso(&qso("W6XYZ", "9"), Some(&qso("W6XYZ", "9")), worked);
         assert!(!other.dupe);
+    }
+
+    /// A station already logged clean, logged again with its call busted or
+    /// a field wrong, counts once, by what is wrong, as its row reads: no
+    /// dupe beside the error.
+    #[test]
+    fn a_station_worked_again_and_copied_wrong_is_its_error_alone() {
+        let worked = |call: &str| call == "K5XYZ";
+        let busted = check_qso(&qso("K5XYW", "215"), Some(&qso("K5XYZ", "215")), worked);
+        assert_eq!(
+            busted.errors,
+            [QsoError::Call {
+                correct: "K5XYZ".into()
+            }]
+        );
+        assert!(!busted.dupe);
+        assert_eq!(busted.words(), "busted call, was K5XYZ");
+        let wrong = check_qso(&qso("K5XYZ", "251"), Some(&qso("K5XYZ", "215")), worked);
+        assert_eq!(wrong.errors, [QsoError::Field(Field::Nr)]);
+        assert!(!wrong.dupe);
     }
 }

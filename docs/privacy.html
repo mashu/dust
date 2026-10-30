@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privacy policy — Dust</title>
-  <meta name="description" content="Privacy policy for Dust, a CW Morse trainer. Practice stays on the device. The only off-device request is Google Fonts.">
+  <meta name="description" content="Privacy policy for Dust, a CW Morse trainer. No account, no ads, no analytics: Dust keeps your practice on your device and never sends it anywhere.">
   <style>
     :root {
       color-scheme: light;
@@ -60,20 +60,25 @@
       <p class="meta">
         Dust — CW Morse trainer<br>
         Android package <code>dev.dust.morse</code><br>
-        Effective date: 21 October 2026
+        Effective date: 30 October 2026
       </p>
       <p>
-        This policy covers the Dust app on Android, and the same program on the
-        web at <a href="https://mashu.github.io/dust/">mashu.github.io/dust</a>
-        and on desktop. It describes what the app stores, what leaves the
-        device, and who receives it.
+        This policy covers the Dust app on Android and iPhone, and the same
+        program on the web at
+        <a href="https://mashu.github.io/dust/">mashu.github.io/dust</a>
+        and on desktop: Linux, Windows and macOS. It describes what the app
+        stores, where, what leaves the device, and who receives it.
       </p>
 
       <h2>The short version</h2>
       <p>
         Dust stores your practice on the device you are using. It has no
-        account and no server of its own. The only data that leaves the device
-        is the request the app makes to Google to load its typefaces.
+        account and no server of its own, and it never sends your practice
+        anywhere. The app asks Google for its typefaces, and the web app is
+        served by GitHub. A phone’s own backup, when it is on, copies the
+        app’s data to your Google or iCloud account, as it does for other
+        apps. In a browser, the other sites the developer publishes at
+        mashu.github.io share the storage Dust keeps it in.
       </p>
 
       <h2>Who publishes Dust</h2>
@@ -112,9 +117,12 @@
         </li>
         <li>
           <strong>A session in progress.</strong> While a session or contest
-          run is running, when it started, so that if the app closes under it
-          Dust can say so the next time it opens. It is removed when the
-          session ends.
+          run is running, when it started and what it has done so far: the
+          groups answered, with the same details the practice history keeps,
+          and the settings the session runs on, or for a contest run its log
+          of the QSOs worked. If the app closes under it, Dust keeps that part
+          in the practice history the next time it opens, and says so. It is
+          removed when the session ends, or once it has been kept.
         </li>
       </ul>
       <p>
@@ -127,24 +135,85 @@
         if one matches a real station, that is chance.
       </p>
       <p>
-        On Android this stays in the app’s private storage for
-        <code>dev.dust.morse</code>. Other apps cannot read it. Dust does not
-        use it for advertising, and it does not send it to the developer.
+        Dust does not use any of it for advertising, and it does not send it
+        to the developer. Where it is kept, and what else may keep a copy,
+        depends on where you run Dust:
       </p>
+      <ul>
+        <li>
+          On Android all of this is kept in storage that only the app can
+          read. If backup is on in Android settings, Android copies it to your
+          Google account, as it does for most apps, and puts it back on a new
+          phone or when Dust is installed again. Uninstalling the app deletes
+          it from the phone, but not that copy. Turning backup off in Android
+          settings stops it.
+          This is Android’s own backup, not a feature of Dust: the copy is in
+          your Google account, the developer never receives it, and Google
+          holds it under
+          <a href="https://policies.google.com/privacy">Google’s privacy policy</a>.
+          Setting up a new phone straight from the old one can copy it across
+          too. Turning off backup in Android settings stops the copy to your
+          Google account, for every app at once.
+        </li>
+        <li>
+          On an iPhone all of this is kept in storage that only the app can
+          read. iCloud Backup, and a backup of the iPhone on a computer, copy
+          it as they do for other apps, and restoring such a backup puts it
+          back. Deleting the app deletes it from the iPhone, but not those
+          copies.
+          Those are Apple’s backups, not a feature of Dust, and the developer
+          never receives them. In the iPhone’s iCloud settings, iCloud Backup
+          can be turned off for Dust alone.
+        </li>
+        <li>
+          In a browser all of this is kept in the storage of the site
+          mashu.github.io, which every other site the developer publishes
+          there shares: such a site could read it or clear it. Clearing the
+          site data for mashu.github.io deletes it, along with what those
+          sites keep.
+          A browser keeps storage for a whole site, not for each page under
+          it, and every project the developer publishes on GitHub Pages is a
+          page under mashu.github.io. Only the developer’s GitHub repositories
+          can publish there, and whatever a page there loads shares its access.
+          Dust keeps everything under names that begin with
+          <code>dust_</code>, and never touches anything else the site keeps.
+          The room the browser gives the site is shared too: where other
+          pages use some of it, the history keeps fewer of its newest
+          sessions, and the app says so. The app asks the browser to keep this
+          storage rather than clear it to free space; the browser may ask you
+          first. Nothing is synced between browsers or devices.
+        </li>
+        <li>
+          On Linux all of this is kept in ~/.local/share/dust. Uninstalling
+          the app leaves that folder: delete it to delete what Dust stored. A
+          backup of your home folder copies it.
+          Where <code>$XDG_DATA_HOME</code> is set, the folder is
+          <code>$XDG_DATA_HOME/dust</code> instead.
+        </li>
+        <li>
+          On Windows all of this is kept in %APPDATA%\dust. Uninstalling the
+          app leaves that folder: delete it to delete what Dust stored. A
+          backup of your user folder copies it.
+        </li>
+        <li>
+          On a Mac all of this is kept in ~/Library/Application Support/dust.
+          Deleting the app leaves that folder: delete it to delete what Dust
+          stored. A backup of your home folder, such as Time Machine makes,
+          copies it.
+        </li>
+      </ul>
       <p>
-        The web app keeps the same information in that site’s local storage,
-        and asks the browser to keep it rather than clear it to free space;
-        the browser may ask you first. Desktop builds keep it in the app’s
-        data folder. Nothing is synced between devices or between installs.
+        Dust itself syncs nothing between devices: it has no server to sync
+        through. A backup file, below, is how to move your history yourself.
       </p>
       <p>
         <strong>Backups.</strong> Under Stats, History, you can save a backup
         file of your settings and history. The web app hands it to the
         browser as a download; desktop builds and the Android app put it in
         your Downloads folder; the iPhone app puts it in its own folder in
-        the Files app. It goes nowhere else, and the app never sends it
-        anywhere. Restoring a backup reads the file you choose on the device
-        and adds what it holds to the history there.
+        the Files app. The app never sends it anywhere. Restoring a backup
+        reads the file you choose on the device and adds what it holds to the
+        history there.
       </p>
 
       <h2>How that information is used</h2>
@@ -169,12 +238,26 @@
         settings and practice history are not included. Google receives that
         request and handles it under
         <a href="https://policies.google.com/privacy">Google’s privacy policy</a>.
-        Google is the only third party the app sends data to.
+        On Android, iPhone and desktop it is the only request the app makes.
       </p>
       <p>
-        If you install Dust from Google Play, Google also handles the download
-        and the store listing under its own policies. That collection is
-        Google’s, not a feature of the app.
+        The web app is served by GitHub Pages: the page, the program and its
+        styles are loaded from GitHub each time you open it. That sends GitHub
+        your IP address and the same technical data, as opening any web page
+        does, and GitHub keeps a record of the visit under the
+        <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub General Privacy Statement</a>.
+        Your settings and practice history are not part of it. Google and
+        GitHub are the only third parties the web app contacts.
+      </p>
+      <p>
+        A phone’s own backup, described above, is made by Android or iOS, not
+        by the app, and goes to your own Google or iCloud account.
+      </p>
+      <p>
+        If you install Dust from Google Play or the App Store, Google or Apple
+        also handles the download and the store listing under its own
+        policies; if you download it from GitHub, GitHub does. That collection
+        is theirs, not a feature of the app.
       </p>
 
       <h2>Microphone, location, and other sensitive data</h2>
@@ -200,19 +283,40 @@
       <p>
         The history stays on the device until you remove it. Up to 500
         sessions are kept; in a browser, as many of the newest as fit. Older
-        ones are discarded as you practise.
+        ones are discarded as you practise. On every platform any session, or
+        all of them, can be deleted under Stats, History, and clearing Your
+        station removes your callsign and exchange.
       </p>
       <ul>
         <li>
           <strong>Android.</strong> Uninstall Dust, or clear the app’s storage
-          in system settings. That deletes the settings and the history.
+          in system settings. That deletes the settings and the history from
+          the phone. A copy Android has backed up stays in your Google
+          account, and comes back if Dust is installed again while backup is
+          on; turn backup off first to keep it from coming back, or delete the
+          phone’s backup from your Google account.
         </li>
         <li>
-          <strong>Web.</strong> Clear site data for
-          <code>https://mashu.github.io</code>.
+          <strong>iPhone.</strong> Delete the app. That deletes the settings
+          and the history from the iPhone. A backup of the iPhone made before
+          then still holds them, and restoring it brings them back.
         </li>
         <li>
-          <strong>Desktop.</strong> Delete the Dust data folder for your system.
+          <strong>Web.</strong> Delete all the sessions under Stats, History,
+          and clear Your station. That leaves the practice settings, the app’s
+          own counters and marks, none of which say who you are, and any copy
+          of a history Dust could not read and set aside, and touches no other
+          site.
+          Clearing the site data for <code>https://mashu.github.io</code> in
+          your browser’s settings deletes everything Dust keeps there, along
+          with what any other site at mashu.github.io keeps.
+        </li>
+        <li>
+          <strong>Desktop.</strong> Delete the <code>dust</code> folder named
+          above: <code>~/.local/share/dust</code> on Linux,
+          <code>%APPDATA%\dust</code> on Windows,
+          <code>~/Library/Application Support/dust</code> on macOS.
+          Uninstalling the app does not delete it.
         </li>
       </ul>
       <p>
@@ -223,9 +327,9 @@
       <h2>Sharing and sale</h2>
       <p>
         Dust does not sell personal information. It does not share practice
-        history with anyone. The only party that receives data from the app is
-        Google, and only the font request described above. Dust does not share
-        data with advertising networks or data brokers.
+        history with anyone. The app sends data to no one but Google, and only
+        the font request described above; the web app is loaded from GitHub.
+        Dust does not share data with advertising networks or data brokers.
       </p>
 
       <h2>Changes</h2>

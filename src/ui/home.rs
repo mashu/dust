@@ -15,8 +15,21 @@ use crate::ui::settings_station::{
 };
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
 use crate::ui::widgets::{
-    CardHead, Icon, IconName, TextDraft, control_id, keep_focus, range_label,
+    CardHead, Icon, IconName, TextDraft, control_id, focus_script, keep_focus, range_label,
 };
+
+/// Give Start the cursor, as Enter in the hero's last field does.
+fn focus_start() {
+    let id = control_id("btn", "start training");
+    let script = focus_script(&id);
+    // Tests have no page to run it on: the harness looks for the button.
+    #[cfg(test)]
+    crate::testing::ask_focus(&id, &script);
+    #[cfg(not(test))]
+    spawn(async move {
+        let _ = document::eval(&script).await;
+    });
+}
 
 /// Where the learner is, as Home says it: in the hero, and on the tile.
 #[derive(Debug, PartialEq)]
@@ -281,6 +294,17 @@ pub fn Home(
     });
     let missing = contest.as_ref().and_then(|hero| hero.missing.clone());
     let asks = contest.as_ref().and_then(|hero| hero.asks);
+    // Enter keeps what was typed in the hero's field, as leaving it does,
+    // and then the hero may ask for the next field, or for none: the field
+    // goes, and the cursor with it, to nowhere. Once the hero has drawn
+    // what comes next, the cursor goes on to its field, or to Start. A
+    // field left by Tab or a click leaves the cursor where that took it.
+    let mut entered = use_hook(|| CopyValue::new(false));
+    use_effect(use_reactive!(|asks| {
+        if std::mem::take(&mut *entered.write()) {
+            asks.map_or(focus_start as fn(), StationAsk::focus)();
+        }
+    }));
     let call_flagged = contest.as_ref().is_some_and(|hero| hero.call_flagged);
     let refusal = missing.filter(|_| refused() && !call_flagged);
     // A state or a section typed that is no code is kept as none, and the
@@ -367,7 +391,9 @@ pub fn Home(
                     }
                 }
             }
-            section { class: "hero",
+            section {
+                class: "hero",
+                onkeydown: move |e| entered.set(e.key() == Key::Enter),
                 div { class: "hero-top",
                     span { class: "eyebrow", if contest.is_some() { "Contest" } else { "Current alphabet" } }
                     span { class: "hero-level",

@@ -79,6 +79,19 @@ seconds is taken as a pause from where it began, before anything that waited
 out the gap is heard. No answer closes empty for it, and the time away is
 not answering time. The same holds on iOS.
 
+Back goes back through the app's screens: from Stats, Settings, Listen or
+a session's results to Practice. In a session or a contest run it pauses
+first, as putting the app behind does, and Back again leaves the way Exit
+leaves it, keeping what was answered. At Practice it leaves the app. The app moves between its screens by itself, so while it is away from
+Practice it keeps one entry of its own on the webview's history, which
+wry's activity goes back through before it hands Back to Android
+([`src/system_back.rs`](../src/system_back.rs)). Without it Back left the
+app from any screen, and Android 7 to 11, which close an app on Back, took
+a session under way with it. A browser's Back does the same in the web
+app. On Android 16 Back never reaches an app built for it, as Dust is: the
+system puts the app behind instead, which pauses a session as any time out
+of sight does.
+
 Whatever else plays stops out of sight, on every build: the band preview,
 the letters, a sample, Hear a QSO. The stream of groups stops too on a
 phone, where the system may freeze an app out of sight whole, and holds the
@@ -153,13 +166,72 @@ dx bundle --platform android --target aarch64-linux-android --package-types apk 
 Pass `--target` explicitly: without it `dx` builds for the host architecture,
 which on an x86_64 machine means an emulator APK that a phone will not run.
 
+That APK is the debug build type, signed with your own debug key, so it
+installs only where Dust is not installed yet. The native library is
+linked for 16 KB memory pages, which Play requires of an app targeting
+Android 15 or later, whatever the NDK (`.cargo/config.toml`).
+
 On Debian the `google-android-*-installer` packages in contrib fetch Google's
 SDK bits; the official `commandlinetools` zip plus `sdkmanager` gives tighter
 control over NDK versions. Either way you need JDK 17 and
 `ANDROID_HOME`/`ANDROID_NDK_HOME` exported.
 
 Without cutting a release: **Actions → Android APK → Run workflow**, on any
-branch. The APK is attached to that run as an artifact.
+branch. The APK is attached to that run as an artifact. With the release
+profile it is signed with the release key, as a release's is, and installs
+over one; with the debug profile it is a debug build like the one above.
+
+### Release signing
+
+An APK installs over the one before it only if both carry the same key. A
+release's APK is Android's release build type, minified and not
+debuggable, signed with the project's own release key, so each release
+installs over the last and keeps its history. `dx` builds that type only
+when `Dioxus.toml` has a `[bundle.android]` table, so CI writes one at build
+time from four repository secrets
+([`scripts/android-release-signing.sh`](../scripts/android-release-signing.sh)),
+then checks that the APK is not debuggable and carries that key. Without
+the secrets the APK job fails and the release goes out with no APK.
+
+One-time, make the key and add the secrets. The passwords and the alias
+may hold only letters, digits, `.`, `_` and `-`: `dx` passes them to Gradle
+through a template that would change anything else.
+
+```bash
+install -m 700 -d ~/.android
+pw="$(openssl rand -hex 24)"
+printf 'ANDROID_KEYSTORE_PASSWORD=%s\nANDROID_KEY_PASSWORD=%s\nANDROID_KEY_ALIAS=dust\n' \
+  "$pw" "$pw" > ~/.android/dust-release.env
+chmod 600 ~/.android/dust-release.env
+keytool -genkeypair -v \
+  -keystore ~/.android/dust-release.p12 \
+  -storetype PKCS12 \
+  -alias dust \
+  -keyalg RSA -keysize 4096 -validity 10000 \
+  -dname "CN=Dust Morse Trainer, O=Dust, C=US" \
+  -storepass "$pw" \
+  -keypass "$pw"
+chmod 600 ~/.android/dust-release.p12
+base64 < ~/.android/dust-release.p12 | tr -d '\n' | gh secret set ANDROID_KEYSTORE_BASE64
+printf '%s' "$pw" | gh secret set ANDROID_KEYSTORE_PASSWORD
+printf '%s' "$pw" | gh secret set ANDROID_KEY_PASSWORD
+printf 'dust' | gh secret set ANDROID_KEY_ALIAS
+unset pw
+```
+
+Without `gh`, add the same four under Settings → Secrets and variables →
+Actions. Back up `~/.android/dust-release.p12` and the env file beside it:
+GitHub never shows a secret again, and an APK signed with any other key can
+never update an install.
+
+The Play build is signed with Play's own app signing key, so the Play app
+and a GitHub APK, both `dev.dust.morse`, cannot update each other. Nor can
+any later release update an APK from 0.16.1 or before, which carried a
+throwaway debug key. Android refuses such an install. To move across, save
+a backup (Stats → History → Save a backup), uninstall, install the other
+build and restore the backup. Uninstalling deletes the app's data, and on
+Android 9 and older the backup with it, as it lies in the app's own
+`Android/data/dev.dust.morse/files/Download`: copy it elsewhere first.
 
 ### Play Store
 
@@ -248,13 +320,38 @@ and the desktop build on Windows and macOS as well as Linux, where it is
 also tested. The web app is built and its site checked as Pages would serve
 it.
 
+What carries the keys on macOS, Windows and the phones is tested on Linux:
+the page scripts that hear the paddles and a run's keys are run in Node, on
+a page made up for them, and held to what the app does with the same keys.
+What no test runs: the web build's audio (`src/audio/web`), which needs a
+browser's Web Audio, and the platform audio code, which needs the phone —
+the iOS audio session, Android's volume keys and output latency. The
+mixer, the receiver stream and the timing of a send that they hand their
+work to are tested natively.
+
 ## Desktop bundles
 
 `dx bundle --platform desktop --release` writes to
 `target/dx/dust/release/linux/` and friends. Desktop is the system webview
-(WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS). macOS builds
-are unsigned (right-click → Open the first time). Windows needs WebView2,
-already present on typical Windows 10/11.
+(WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS). The Linux
+`.deb` names the packages it needs (WebKitGTK 4.1, GTK 3, ALSA and the
+rest), so `apt install ./dust-….deb` brings them in. Windows needs
+WebView2, already present on typical Windows 10/11.
+
+macOS builds are unsigned, so macOS will not open Dust the first time. On
+macOS 15 and later, go to System Settings → Privacy & Security, choose
+**Open Anyway** beside the message about Dust, and confirm. On macOS 14
+and earlier, Control-click the app and choose **Open**. If macOS says
+instead that Dust is damaged, run
+`xattr -dr com.apple.quarantine /Applications/Dust.app` and open it again.
+
+On macOS Dust has the usual menu bar: the app's menu (About, Hide, Quit),
+Edit and Window ([`src/menus.rs`](../src/menus.rs)). WKWebView turns
+Cmd+V, Cmd+C, Cmd+X, Cmd+A and Cmd+Z into editing only through Edit's
+items, so without them nothing could be pasted into a field. Linux and
+Windows show no menu bar: their webviews take those keys themselves. On
+every desktop a right-click in a field opens the field's own menu, with
+Cut, Copy and Paste; anywhere else in the main window it opens nothing.
 
 On Linux, **Restore a backup** and **Load a text file** open the desktop's
 file chooser portal (`xdg-desktop-portal`, with a backend that chooses
@@ -320,21 +417,51 @@ has; without one it is drawn solid.
 
 ## Where your progress lives
 
-Nothing syncs. Each install keeps its own history, in the place that platform
-gives it:
+Dust syncs nothing. Each install keeps its own history, in the place that
+platform gives it:
 
 | Build | Location |
 | --- | --- |
-| Web | `localStorage` for that exact origin (`https://mashu.github.io`, or `localhost:8080` while developing — the two are separate stores) |
+| Web | `localStorage` for that exact origin (`https://mashu.github.io`, shared with every other Pages site of the account, below; or `localhost:8080` while developing — the two are separate stores) |
 | Linux | `~/.local/share/dust/` (`$XDG_DATA_HOME`) |
-| Windows / macOS | the platform data dir `dirs` reports |
+| Windows | `%APPDATA%\dust\`, the roaming application data `dirs` reports |
+| macOS | `~/Library/Application Support/dust/` |
 | Android | `dust/` in the app's own files folder, which Android names for the user the app runs as: `/data/data/<package>/files/` for the phone's owner, `/data/user/<user>/<package>/files/` for a work profile, another user, Private Space or a cloned app. `dirs` has no `HOME` to work from, so the store asks Android (`Context.getFilesDir()`, over JNI), or failing that works it out from `/proc/self/cmdline` and the process's uid |
 | iOS | `Library/Application Support/dust/` inside the app container |
 
 `DUST_DATA_DIR` overrides the directory on every desktop and mobile build,
 which is what a portable install uses. A build with no data folder to be
 had keeps `dust/` in the temporary folder, never in whatever folder it was
-started in.
+started in. A desktop uninstaller leaves the folder where it is: it is the
+user's, and named `dust`, not after the bundle identifier.
+
+The phones back it up themselves. The manifest `dx` writes sets no
+`android:allowBackup`, so Android's Auto Backup is on: with backup on in the
+phone's settings, the whole files folder, `dust/` included, goes to the
+user's Google account, and comes back on a new phone or a reinstall; setting
+up a new phone straight from the old one copies it too. That is kept on
+purpose, as for most users it is the only copy of the history they have. On
+iOS, iCloud Backup and a backup on a computer take the app container the
+same way. The privacy policy and the Privacy card say all of this, platform
+by platform (`Platform::kept` in `src/ui/privacy.rs`, which a test holds the
+policy to).
+
+A browser keys `localStorage`, its few megabytes of room,
+`navigator.storage.persist()` and Web Locks by origin, not by path, and a
+Pages project site is a path under `https://<owner>.github.io`. So every
+other project the account publishes on Pages shares Dust's store: one can
+read it, clear it (`localStorage.clear()`, or a user clearing that site's
+data), or fill the room, and then the history keeps fewer of its newest
+sessions (`store_newest_that_fit`) and says so. Dust keeps its side clean:
+every key and lock name it uses starts with `dust_`, and it removes only
+keys of its own, by exact name or by its own prefix, never the rest. Giving
+the web app an origin of its own ends the sharing: a custom domain set on
+the Dust repository's own Pages site (a subdomain such as
+`dust.example.org`; one set on the account's user site would carry every
+project site along with it), or a user or organisation site
+(`<name>.github.io`) that holds only Dust. A new origin starts with an empty
+store, so users move with a backup, and the policy and
+`PRIVACY_POLICY_URL` change with it.
 
 A session or contest run is marked open while it runs, and the mark goes
 once it ends, stored or discarded. Each copy of the app marks its own, a
@@ -343,9 +470,17 @@ copy that stops lets go of its lock, however it stops: closed, crashed,
 killed, reloaded, or rebuilt under `dx serve`. So a mark nobody holds was cut
 off, and the app says so, once, on the screen it opens on, or once the
 session it starts next is over, if the window that was running it stopped
-meanwhile. A mark another window still holds is left to it. On desktop and
+meanwhile. A mark another window still holds is left to it. Each group
+answered, and each QSO logged, puts in the mark what Exit would keep were
+it pressed then; the history itself is written only once the session ends.
+A session cut off is kept from its mark as Exit would have kept it, in the
+history and towards its level's run, and the app says that it was. Closing
+the desktop window, or leaving or reloading the page, ends a session there
+and then as Exit does, so nothing is left to find, and stores the settings
+with it, a level it earned included. On desktop and
 mobile the marks are `open/<id>.json`, each beside the `open/<id>.lock` its
-copy holds; one a power cut left empty still says a session was cut off. A
+copy holds, and each written whole, under another name first; one a power
+cut left empty still says a session was cut off. A
 lock file is locked under another name first and only then renamed into
 place, so a copy looking for marks never finds one unheld that is about to
 be held. In a browser they are `dust_open_session_<id>` in `localStorage`,
@@ -357,18 +492,33 @@ rather than take a tab still running for one cut off.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
-`dust_last_backup`, `dust_open_session_*`) and
+`dust_last_backup`, `dust_open_session_*`, `dust_deleted`) and
 file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
 that field. A settings file from before the AGC threshold went comes back
 with a threshold raised under the AGC as the RF gain backed off as far, which
-is how the AGC heard it. A history that
+is how the AGC heard it. A setting a later build added, which this one does
+not read, is kept and written back with the rest, as are the keys a later
+build added to a session, a group, its timing or a counter: a copy of this
+build left open beside a newer one never strips them. A history that
 cannot be read at all is set aside beside the new one rather than written over,
 and if it cannot even be moved, nothing is saved over it until a later read
 of it reads, or sets it aside: a file another program had open for a moment
-holds back no more than the saves made meanwhile. A browser keeps the newest
-five copies it set aside, `dust_sessions_unreadable`, `_2`, `_3`…, and lets
-the oldest go first when a new one needs the room.
+holds back no more than the saves made meanwhile. Sessions that cannot be
+read are set aside the same way, and so are settings that do not read at all,
+a `settings.json` edited by hand and left with a stray comma say, before the
+defaults the app opens with are written over them: `settings.unreadable-*.json`
+beside it, or `dust_settings_unreadable` in a browser. The app says what it set
+aside, once, and how to have it back. A set-aside history is a list of
+sessions, which **Restore a backup** reads too: mended, or in a later version
+that reads what this one could not, it puts its sessions back and leaves the
+settings alone. On a computer the notice names the file; on a phone or in a
+browser the copy stays in the app's own store, out of reach, and a backup is
+the way back. A browser keeps the newest five copies it set aside,
+`dust_sessions_unreadable`, `_2`, `_3`…, and lets the oldest go first when a
+new one needs the room; a copy with no room beside what it is set aside from
+is moved into that room instead, so a large history that cannot be read never
+holds back every save after it.
 
 From contest mode on, a mode added later is written under the name of the
 older mode closest to it, plus a mark only newer builds read, so older builds
@@ -399,8 +549,19 @@ card:
   - iOS puts it in the app's Documents folder, which the Info.plist keys in
     `Dioxus.toml` (`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`)
     show in the Files app under On My iPhone, Dust.
+
+  The app's own folders, on iOS and on Android before 10, are deleted with
+  the app, and the backup in them with the store it backs up: such a file is
+  no backup until it is moved out. There the message after saving says so,
+  and how (with the Files app, to iCloud Drive or another app; with a file
+  manager), the card tells of the last one as saved in Dust's folder, and
+  its note says to move each one out to keep it safe.
 - **Restore a backup** adds the sessions in the file that are not here yet
-  and takes its settings, level included. Undo, in the message that follows,
+  and takes its settings, level included, all but this device's own: its
+  volume, and how its keyboard and paddles key (**Swap [ and ] paddles**,
+  **Paddles on the keys right of P**), which a backup from a phone has no
+  say in on a computer; the card says so before, and the message after, when they
+  differed. Undo, in the message that follows,
   puts both back as they were: what the restore added taken out, what it
   filled in as it was, and what the history let go to make room for it back,
   while whatever another window kept or deleted meanwhile stands. A file that is not a backup, or far too large
@@ -412,7 +573,9 @@ card:
   stands out. When the last one was saved is kept under `dust_last_backup`,
   or in `last_backup.txt`. A restored backup counts as the last one only when
   it holds every session here that had finished by the time it was saved: one
-  from another device leaves this one's own sessions in no backup. A browser never says whether it kept a download,
+  from another device leaves this one's own sessions in no backup. A mark
+  later than now, left by a clock set ahead, counts as made now, so the
+  sessions after it are counted once the clock is right. A browser never says whether it kept a download,
   so the web app's card says the last backup was handed to the browser, not
   saved.
 
@@ -428,7 +591,9 @@ storage (`navigator.storage.persist()`) rather than clear it to make room.
 Chrome decides by itself; Firefox asks once. That guards against the browser,
 not against someone clearing the site's data: only a backup does.
 
-The history keeps your newest 500 sessions. A browser also gives each site only
+The history keeps your newest 500 sessions, newest as they were stored, in
+the order they finished, whatever the clock said: a session stamped by a clock
+set back is not the first to go. A browser also gives each site only
 a few megabytes; should the history outgrow that — hundreds of sessions of
 hundreds of groups, or long contest runs, which take more room — the newest
 that fit are kept, and the app says so.
@@ -440,13 +605,30 @@ few seconds. Deleting a session takes it out of every stat, the calendar,
 the streak and the score board, and out of what the sampler learns from; the
 level you have reached stays where it is.
 
+Two windows or tabs on one store each store what changed in them, laid over
+what the other stored. They store without a lock between them, so one can
+write over a session the other stored a moment before; that window's next
+store puts it back. A session is taken for deleted only when it was deleted
+by hand: each deletion is remembered for 90 days, the newest thousand, in
+`deleted.json`, or `dust_deleted` in a browser, and so is taken out again
+wherever another window still holds it. Undo, or a restore that brings the
+session back, forgets it. A session the history let go for want of room is
+kept by a window that still holds it, and let go again as it stores. A
+deletion made by a build from before this, which remembered none, can come
+back from a window that still held the session.
+
 **Stats → Scores** is the score board: the sessions kept on this device,
 ranked by what they earned a group, with gold, silver and bronze for the top
 three and the personal best on its own card. A session's score is its groups'
 points added up, so a longer session scores more for the same copy; points a
-group compares a 15-group session with a 50-group one fairly. It is the mean,
-so every miss counts, and only sessions of 10 groups or more go on the board,
-since a handful of lucky groups says little. Beside the best is your form:
+group compares a 15-group session with a 50-group one fairly. A longer group
+earns more too, and a miss, which costs its whole group, costs it more, so on
+the board every group counts as five characters: points a group are what a
+session would earn in groups of five, at its speed and the share of characters
+it missed. Groups of two compare with groups of eight, and a Koch session with
+a callsign one, by their copy, at any accuracy. Every miss counts, and only
+sessions of 10 groups or more go on the board, since a handful of lucky groups
+says little. Beside the best is your form:
 the median of your last 10 sessions, which one bad day hardly moves. A chart
 of points a group over time draws the record as it stepped up and the form
 as it went, and pointing at a row (or tapping it) marks when that session

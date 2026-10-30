@@ -28,6 +28,24 @@ fn percent_beside(value: f64, threshold: f64) -> String {
     }
 }
 
+/// Whether a character and effective speed are spaced out, Farnsworth, as
+/// far as whole WPM show it.
+fn spaced_out((char_wpm, effective_wpm): (f64, f64)) -> bool {
+    char_wpm - effective_wpm >= 0.5
+}
+
+/// A speed as the Speed settings put it: "30 WPM", or under Farnsworth
+/// "20/15 WPM", the Character speed and then the Effective speed, as a
+/// session's speed chip shows it.
+fn wpm(speed: (f64, f64)) -> String {
+    let (char_wpm, effective_wpm) = speed;
+    if spaced_out(speed) {
+        format!("{char_wpm:.0}/{effective_wpm:.0} WPM")
+    } else {
+        format!("{char_wpm:.0} WPM")
+    }
+}
+
 /// What to tell the user when a session moved their level.
 pub fn change_message(change: &AutoLevelChange) -> String {
     let verb = if change.raised() {
@@ -37,7 +55,7 @@ pub fn change_message(change: &AutoLevelChange) -> String {
     };
     let at = change
         .at_wpm
-        .map(|wpm| format!(" at {wpm:.0} WPM"))
+        .map(|speed| format!(" at {}", wpm(speed)))
         .unwrap_or_default();
     let evidence = format!(
         "accuracy {}{at}, threshold {}, {} {}",
@@ -98,6 +116,20 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
         format!("{}/{}", progress.below_count, progress.below_target)
     };
     let pass = format!("{} to pass", percent(progress.threshold));
+    // Where adaptive speed lets a session count, each end as the Speed
+    // settings put it.
+    let speed_hint = progress.judged_at.map(|(slowest, fastest)| {
+        let farnsworth = if spaced_out(slowest) || spaced_out(fastest) {
+            " Each reads Character/Effective speed."
+        } else {
+            ""
+        };
+        format!(
+            "Adapt speed to me is on: a session counts only once it comes at the top of your speed range, {}, or its bottom, {}, and is judged on the groups sent there. In between it counts neither way.{farnsworth}",
+            wpm(fastest),
+            wpm(slowest),
+        )
+    });
     rsx! {
         section { class: "card",
             CardHead { icon: IconName::Target, title: "Auto level", note: mixed,
@@ -123,10 +155,13 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
                     }
                 }
             }
-            if let Some((slowest, fastest)) = progress.judged_at {
+            if progress.judged_on_reached {
                 p { class: "muted hint",
-                    "Adapt speed to me is on: a session counts only once it comes at the top of your speed range, {fastest:.0} WPM, or its bottom, {slowest:.0} WPM. In between it counts neither way."
+                    "Adapt group size to me is on: a session is judged on the characters you reached. Those lost off the end of a group it can still shorten are left out, so a session can pass with its own accuracy under the threshold."
                 }
+            }
+            if let Some(hint) = speed_hint {
+                p { class: "muted hint", "{hint}" }
             }
         }
     }
@@ -183,9 +218,18 @@ mod tests {
         assert!(change_message(&short).contains("(accuracy 89%, threshold 90%"));
         // Sent at the top of an adaptive speed range, it says so.
         let mut fast = change(&koch, 0.95);
-        fast.at_wpm = Some(30.0);
+        fast.at_wpm = Some((30.0, 30.0));
         assert!(
             change_message(&fast).contains("(accuracy 95% at 30 WPM, threshold 90%"),
+            "{}",
+            change_message(&fast)
+        );
+        // Under Farnsworth, as the Character and Effective speed it was
+        // sent at, not as the copy speed they make together, 17 WPM, which
+        // no setting shows.
+        fast.at_wpm = Some((20.0, 15.0));
+        assert!(
+            change_message(&fast).contains("(accuracy 95% at 20/15 WPM, threshold 90%"),
             "{}",
             change_message(&fast)
         );

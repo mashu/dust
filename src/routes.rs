@@ -15,7 +15,7 @@ use crate::persist::auto_progress;
 use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen, SessionPick};
-use crate::time::{local_date_string, mono_ms, sleep_ms};
+use crate::time::{as_shown, local_date_string, mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
 use crate::ui::contest_results::NothingKept;
@@ -88,7 +88,9 @@ fn HomeRoute() -> Element {
             last_accuracy: sessions.last().map(|s| s.accuracy),
             session_count: sessions.len(),
             pool: compute_char_pool(&settings).into_iter().collect::<String>(),
-            sessions: sessions.clone(),
+            // The streak and the calendar go by the days sessions count
+            // towards, as the clock reads them.
+            sessions: as_shown(&sessions).into_owned(),
             today: local_date_string(),
             auto_progress: progress(),
             on_start,
@@ -248,6 +250,7 @@ fn StatsRoute() -> Element {
                 last: *ctx.last_backup.read(),
                 can_save: ctx.app().store.saves_backups(),
                 confirmed: ctx.app().store.confirms_backups(),
+                inside_app: ctx.app().store.backups_inside_app(),
                 on_save: EventHandler::new(move |()| ctx.save_backup()),
                 on_restore: EventHandler::new(move |backup| ctx.restore_backup(backup)),
             },
@@ -356,6 +359,8 @@ fn TrainingRoute() -> Element {
                 countdown: view.countdown,
                 countdown_to: view.countdown_to,
                 paused: view.paused,
+                sound_stopped: view.sound_stopped,
+                held: view.held,
                 speed: view.speed,
                 answer: ctx.answer,
                 on_change,

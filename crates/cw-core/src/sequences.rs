@@ -105,23 +105,38 @@ impl TrainingSettings {
             })
     }
 
-    /// Choose an unlock order. Custom starts from the order showing, so the
-    /// user edits what they were looking at.
+    /// Choose an unlock order. A preset chosen in place of an order the
+    /// learner typed keeps theirs aside, and Custom brings it back: trying
+    /// a preset should not cost what took typing. With none kept, Custom
+    /// starts from the order showing, so the user edits what they were
+    /// looking at.
     pub fn choose_sequence(&mut self, choice: SequenceChoice) {
+        let was_custom = self.sequence_choice() == SequenceChoice::Custom;
         let curriculum = &mut self.curriculum;
         match choice {
             SequenceChoice::Custom => {
-                if curriculum.custom_sequence.is_empty() {
+                if !was_custom && !curriculum.kept_sequence.is_empty() {
+                    curriculum.custom_sequence = std::mem::take(&mut curriculum.kept_sequence);
+                } else if curriculum.custom_sequence.is_empty() {
                     curriculum.custom_sequence = LCWO_SEQUENCE.to_vec();
                 }
                 curriculum.sequence_is_custom = true;
             }
-            SequenceChoice::Preset(PresetId::Lcwo) => {
-                curriculum.custom_sequence.clear();
-                curriculum.sequence_is_custom = false;
-            }
             SequenceChoice::Preset(id) => {
-                curriculum.custom_sequence = id.preset().sequence.to_vec();
+                // A preset's order, copied to Custom and left as it was, is
+                // to be had from its pill: only an order of their own is
+                // kept.
+                let typed = !SEQUENCE_PRESETS
+                    .iter()
+                    .any(|preset| preset.sequence == curriculum.custom_sequence);
+                if was_custom && typed {
+                    curriculum.kept_sequence = std::mem::take(&mut curriculum.custom_sequence);
+                }
+                curriculum.custom_sequence = match id {
+                    // LCWO's is the empty order, as saves have always had it.
+                    PresetId::Lcwo => Vec::new(),
+                    _ => id.preset().sequence.to_vec(),
+                };
                 curriculum.sequence_is_custom = false;
             }
         }
@@ -131,7 +146,8 @@ impl TrainingSettings {
     /// Take an unlock order the learner typed out. Only what can be sent
     /// counts, each character once. A preset's own order is that preset,
     /// however it got there, and nothing at all is LCWO's, the order an empty
-    /// sequence has always meant; anything else is the learner's own.
+    /// sequence has always meant; anything else is the learner's own, in
+    /// place of any kept.
     pub fn type_sequence(&mut self, typed: &str) {
         let order = Self::unique_alphabet(&typed.chars().collect::<Vec<_>>());
         if order.is_empty() {
@@ -142,6 +158,7 @@ impl TrainingSettings {
         }
         self.curriculum.custom_sequence = order;
         self.curriculum.sequence_is_custom = true;
+        self.curriculum.kept_sequence.clear();
     }
 }
 
@@ -253,6 +270,59 @@ mod tests {
         assert!(settings.curriculum.custom_sequence.is_empty());
         assert!(!settings.curriculum.sequence_is_custom);
         assert_eq!(settings.sequence(), LCWO_SEQUENCE);
+    }
+
+    /// A preset tried in place of an order the learner typed keeps theirs,
+    /// and Your own brings it back, whichever presets were tried between:
+    /// LCWO, which empties the order, and an emptied box, which is LCWO,
+    /// keep it too.
+    #[test]
+    fn a_preset_tried_in_place_of_ones_own_order_keeps_it_for_your_own() {
+        let own = |settings: &TrainingSettings| settings.sequence().iter().collect::<String>();
+        let mut settings = TrainingSettings::default();
+        settings.type_sequence("ZQXJKMRSU");
+        settings.choose_sequence(SequenceChoice::Preset(PresetId::MorseMania));
+        assert_eq!(settings.sequence(), TRADITIONAL_KOCH_SEQUENCE);
+        settings.choose_sequence(SequenceChoice::Preset(PresetId::Lcwo));
+        assert_eq!(settings.sequence(), LCWO_SEQUENCE);
+        settings.choose_sequence(SequenceChoice::Custom);
+        assert_eq!(settings.sequence_choice(), SequenceChoice::Custom);
+        assert_eq!(own(&settings), "ZQXJKMRSU");
+        assert!(settings.curriculum.kept_sequence.is_empty());
+
+        settings.type_sequence(" ");
+        assert_eq!(
+            settings.sequence_choice(),
+            SequenceChoice::Preset(PresetId::Lcwo)
+        );
+        settings.choose_sequence(SequenceChoice::Custom);
+        assert_eq!(own(&settings), "ZQXJKMRSU");
+
+        // Your own again while it is chosen leaves it as it is.
+        settings.choose_sequence(SequenceChoice::Custom);
+        assert_eq!(own(&settings), "ZQXJKMRSU");
+    }
+
+    /// Only an order of the learner's own is kept: a preset's, copied to
+    /// Your own and left as it was, is to be had from its pill, and Your own
+    /// starts from the order showing again. An order typed while a preset is
+    /// chosen is their own from then on, in place of the one kept.
+    #[test]
+    fn only_an_order_of_ones_own_is_kept_and_the_newest_typed_wins() {
+        let mut settings = TrainingSettings::default();
+        settings.choose_sequence(SequenceChoice::Custom);
+        settings.choose_sequence(SequenceChoice::Preset(PresetId::MorseMania));
+        assert!(settings.curriculum.kept_sequence.is_empty());
+        settings.choose_sequence(SequenceChoice::Custom);
+        assert_eq!(settings.sequence(), TRADITIONAL_KOCH_SEQUENCE);
+
+        settings.type_sequence("ZQX");
+        settings.choose_sequence(SequenceChoice::Preset(PresetId::CwAcademy));
+        settings.type_sequence("KMR");
+        assert!(settings.curriculum.kept_sequence.is_empty());
+        settings.choose_sequence(SequenceChoice::Preset(PresetId::Alphabetical));
+        settings.choose_sequence(SequenceChoice::Custom);
+        assert_eq!(settings.sequence(), ['K', 'M', 'R']);
     }
 
     #[test]

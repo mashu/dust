@@ -6,11 +6,14 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::alignment::{CopyTally, LetterAccuracy};
-use crate::contest::{CONTEST_MARK, ContestLog};
+use crate::auto_level::judged_copy;
+use crate::contest::{CONTEST_MARK, ContestLog, PauseWhy};
 use crate::level::LEVEL_MIN;
 use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
+use crate::sampling::length_floor;
 use crate::score::{
     GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
     compute_average_response_ms, copy_speed, session_points,
@@ -111,6 +114,18 @@ struct Sounding {
     resent: Option<MonoMs>,
 }
 
+/// An answer complete, and what had been heard of its group by then.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Completed {
+    /// The moment its length first matched, or the confirm.
+    at: MonoMs,
+    /// How many times the group had been heard by then.
+    heard: u32,
+    /// When the latest send heard to its end had ended by then, if one had:
+    /// what the answer is timed from.
+    after: Option<MonoMs>,
+}
+
 /// Where a session is. Every phase that is about a group names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
@@ -132,11 +147,13 @@ pub enum SessionPhase {
     AwaitingAnswer {
         index: usize,
     },
-    /// Put on hold while nobody can hear it — the page out of sight — until
-    /// it is resumed, with group `index` the one it goes on with. Nothing is
-    /// sent, nothing can be typed and no answer window runs meanwhile.
+    /// Put on hold while nobody can hear it — the page out of sight, or its
+    /// sound stopped, `why` — until it is resumed, with group `index` the
+    /// one it goes on with. Nothing is sent, nothing can be typed and no
+    /// answer window runs meanwhile.
     Paused {
         index: usize,
+        why: PauseWhy,
     },
     Finished,
     Aborted,
@@ -161,11 +178,11 @@ pub struct Group {
     /// when there is one.
     tally: Option<CopyTally>,
     start_at: MonoMs,
-    /// When the last send of the group ended; none while it is still going.
+    /// When the latest send of the group heard to its end ended, since the
+    /// group last began from the start; none before one has.
     end_at: Option<MonoMs>,
-    /// When the answer was complete: the moment its length first matched,
-    /// or the confirm.
-    answer_at: Option<MonoMs>,
+    /// The answer, once it is complete.
+    answer: Option<Completed>,
     /// The character and effective speed it was sent at, once its first
     /// send starts.
     played_wpm: Option<(f64, f64)>,
@@ -179,8 +196,16 @@ pub struct Group {
     planned_wpm: Option<(f64, f64)>,
     /// How many times this group is sent before the answer window opens.
     repeats: u32,
-    /// Sends already finished for this group.
+    /// Sends finished since the group last began from the start.
     plays_done: u32,
+    /// How many times the group has been heard, the send going out aside:
+    /// every send finished, and every one a pause cut short once its first
+    /// character had sounded. A send some of which went unheard is none.
+    heard: u32,
+    /// When the send going out has its first character heard: from then on
+    /// it has given something away, and counts as heard. None for a send
+    /// some of which went unheard.
+    sending: Option<MonoMs>,
     /// Its answer was complete when the session was paused. It stands as
     /// it was timed, unless it is changed after the pause: keys either
     /// side of a pause cannot be timed against one send.
@@ -195,13 +220,15 @@ impl Group {
             tally: None,
             start_at: MonoMs::default(),
             end_at: None,
-            answer_at: None,
+            answer: None,
             played_wpm: None,
             sounding: None,
             keys: Keys::default(),
             planned_wpm: None,
             repeats: 1,
             plays_done: 0,
+            heard: 0,
+            sending: None,
             paused_complete: false,
         }
     }
@@ -228,24 +255,39 @@ impl Group {
         })
     }
 
-    /// How long the answer took, from the end of the send — never quicker
-    /// than a person types — and what its characters' recognition is read
-    /// from ([`CharTimes`]), where its first send can be timed. `box_open`
-    /// is whether the box took keys while the group was sent.
+    /// The answer complete at `now`, with what had been heard by then: the
+    /// send going out counts once its first character has sounded.
+    fn completed(&self, now: MonoMs) -> Completed {
+        let sounding = self.sending.is_some_and(|heard| heard <= now);
+        Completed {
+            at: now,
+            heard: self.heard.saturating_add(u32::from(sounding)),
+            after: self.end_at,
+        }
+    }
+
+    /// How long the answer took, from the end of the latest send heard to
+    /// its end before it — never quicker than a person types — how many
+    /// times the group was heard by then, and what its characters'
+    /// recognition is read from ([`CharTimes`]), where its first send can be
+    /// timed. `box_open` is whether the box took keys while the group was
+    /// sent.
     fn timing(&self, box_open: bool) -> SessionTiming {
         let chars = self.sent.chars().count().max(1) as f64;
-        let measured = match (self.end_at, self.answer_at) {
-            (Some(end), Some(answer)) => answer.since(end) as f64,
-            // Answered before the send ended: as fast as it gets.
-            _ => 0.0,
-        };
+        let (measured, sends) = self.answer.map_or((0, 1), |answer| {
+            // No send heard to its end before it, typed along the first:
+            // as fast as it gets.
+            let measured = answer.after.map_or(0, |end| answer.at.since(end));
+            (measured, answer.heard)
+        });
         SessionTiming {
-            time_to_complete_ms: measured.max(MIN_RESPONSE_MS_PER_CHAR * chars),
+            time_to_complete_ms: (measured as f64).max(MIN_RESPONSE_MS_PER_CHAR * chars),
             char_wpm: self.played_wpm.map(|(char_wpm, _)| char_wpm),
             effective_wpm: self.played_wpm.map(|(_, effective_wpm)| effective_wpm),
-            // A group answered before its last send was heard was heard
-            // fewer times than planned, and is scored for what it was.
-            sends: self.plays_done.clamp(1, self.repeats.max(1)),
+            // Every hearing before the answer costs, the send it was typed
+            // along included; a group answered before its last send was
+            // heard is scored for the sends it was.
+            sends: sends.max(1),
             char_times: self
                 .sounding
                 .as_ref()
@@ -282,6 +324,11 @@ pub struct SessionView {
     pub countdown_to: CountdownTo,
     /// The session is on hold until it is resumed.
     pub paused: bool,
+    /// It is on hold because its sound stopped, not because the page went
+    /// out of sight.
+    pub sound_stopped: bool,
+    /// It is on hold because you asked it to, with the system's Back.
+    pub held: bool,
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
     pub repeat_done: u32,
@@ -412,6 +459,20 @@ impl GroupSession {
             countdown: self.countdown(),
             countdown_to: self.countdown_to(),
             paused: self.paused(),
+            sound_stopped: matches!(
+                self.phase,
+                SessionPhase::Paused {
+                    why: PauseWhy::Sound,
+                    ..
+                }
+            ),
+            held: matches!(
+                self.phase,
+                SessionPhase::Paused {
+                    why: PauseWhy::You,
+                    ..
+                }
+            ),
             repeat_total: current.map_or(1, |g| g.repeats.max(1)),
             repeat_done: current.map_or(0, |g| g.plays_done),
             speed: self.chosen_speed(self.current_group),
@@ -515,11 +576,11 @@ impl GroupSession {
         }
     }
 
-    /// Group `index` was paused for `ms` with its answer open: the answer
-    /// is timed from the group's end as if the pause had not been, and keys
-    /// typed either side of the pause cannot be timed against its
-    /// characters. An answer already complete when it paused is timed as it
-    /// stands.
+    /// Group `index` was paused for `ms` with its answer open, to be answered
+    /// or sent again: the answer is timed from the end of its send as if the
+    /// pause had not been, and keys typed either side of the pause cannot be
+    /// timed against its characters. An answer already complete when it
+    /// paused is timed as it stands.
     pub(crate) fn note_paused(&mut self, index: usize, ms: u64) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
@@ -527,37 +588,35 @@ impl GroupSession {
         if group.confirmed() {
             return;
         }
+        // Complete already, it stands as timed, and one corrected after the
+        // pause is timed from the end of the send less the pause, as one
+        // not complete is.
         group.end_at = group.end_at.map(|end| end.plus(ms));
-        match &mut group.answer_at {
-            // Complete already: moved on with the end, so it stands as
-            // timed, and an answer corrected after the pause is timed from
-            // the end of the send less the pause, as one not complete is.
-            Some(answer) => {
-                *answer = answer.plus(ms);
-                group.paused_complete = true;
-            }
-            None => {
-                if let Some(sounding) = &mut group.sounding {
-                    sounding.trusted = false;
-                }
-            }
+        if group.answer.is_some() {
+            group.paused_complete = true;
+        } else if let Some(sounding) = &mut group.sounding {
+            sounding.trusted = false;
         }
     }
 
+    /// Group `index` goes out from the start at `now`: an answer from here
+    /// on is timed from its sends from here on. What was heard of it before
+    /// still counts.
     pub(crate) fn begin_group(&mut self, index: usize, now: MonoMs) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
         };
         group.start_at = now;
         group.plays_done = 0;
+        group.end_at = None;
         self.current_group = index;
         self.focused_group = index;
     }
 
-    /// A send of `index` started, as `start` says: its speeds, and for its
-    /// first send, what its characters are timed from. The first send tried
-    /// again cannot be timed: it was heard in part already. A later send
-    /// marks where keys stop being timed.
+    /// A send of `index` started, as `start` says: its speeds, when it is
+    /// first heard, and for its first send, what its characters are timed
+    /// from. The first send tried again cannot be timed: it was heard in
+    /// part already. A later send marks where keys stop being timed.
     pub(crate) fn start_playback(&mut self, index: usize, start: &SendStart) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
@@ -565,6 +624,14 @@ impl GroupSession {
         if start.char_wpm > 0.0 && start.effective_wpm > 0.0 {
             group.played_wpm = Some((start.char_wpm, start.effective_wpm));
         }
+        // Heard once its first character has reached the ear: a send cut
+        // before then gave nothing away.
+        let first = start
+            .char_ends_ms
+            .first()
+            .copied()
+            .unwrap_or(start.first_char_ms);
+        group.sending = Some(start.heard_at().plus(u64::from(first)));
         match (&mut group.sounding, group.plays_done) {
             (None, 0) => {
                 group.sounding = Some(Sounding {
@@ -586,10 +653,34 @@ impl GroupSession {
         }
     }
 
-    /// Count one finished send of `index`.
+    /// Count one finished send of `index`: heard, to its end.
     pub(crate) fn note_play_finished(&mut self, index: usize) {
         if let Some(group) = self.groups.get_mut(index) {
             group.plays_done = group.plays_done.saturating_add(1);
+            group.heard = group.heard.saturating_add(1);
+            group.sending = None;
+        }
+    }
+
+    /// The send of `index` going out was cut short at `at` by a pause, and
+    /// goes out again from the start: heard in part, it counts as heard
+    /// once its first character had sounded.
+    pub(crate) fn cut_send(&mut self, index: usize, at: MonoMs) {
+        if let Some(group) = self.groups.get_mut(index)
+            && let Some(heard) = group.sending.take()
+        {
+            group.heard = group.heard.saturating_add(u32::from(heard <= at));
+        }
+    }
+
+    /// Some of the send of `index` going out went unheard, the browser
+    /// fallen behind its audio clock: it counts as no hearing, however it
+    /// ends. Where in it the skip fell is not said, so neither is whether
+    /// its first character was heard, and a sound that failed is no choice
+    /// of the learner's: it costs only the time of sending it again.
+    pub(crate) fn drop_send(&mut self, index: usize) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.sending = None;
         }
     }
 
@@ -606,7 +697,8 @@ impl GroupSession {
         }
     }
 
-    /// The last send of `index` was seen to end at `now`.
+    /// A send of `index` heard to its end was seen to end at `now`: what an
+    /// answer after it is timed from.
     pub(crate) fn end_playback(&mut self, index: usize, now: MonoMs) {
         if let Some(group) = self.groups.get_mut(index) {
             group.end_at = Some(now);
@@ -636,13 +728,14 @@ impl GroupSession {
     }
 
     /// Stamp the moment the answer reached the group's length, the first
-    /// time it does; withdraw the stamp when it no longer does.
+    /// time it does, with what had been heard of the group by then;
+    /// withdraw the stamp when it no longer does.
     pub(crate) fn mark_answer_complete(&mut self, index: usize, complete: bool, now: MonoMs) {
         if let Some(group) = self.groups.get_mut(index)
             && !group.confirmed()
         {
-            group.answer_at = if complete {
-                group.answer_at.or(Some(now))
+            group.answer = if complete {
+                group.answer.or_else(|| Some(group.completed(now)))
             } else {
                 None
             };
@@ -660,7 +753,7 @@ impl GroupSession {
         if group.confirmed() {
             return None;
         }
-        group.answer_at = group.answer_at.or(Some(now));
+        group.answer = group.answer.or_else(|| Some(group.completed(now)));
         self.focused_group = (index + 1).min(last);
         group.tally = Some(CopyTally::of(&group.sent, &group.input));
         group.answered()
@@ -730,6 +823,8 @@ impl GroupSession {
             effective_wpm,
             alphabet_fingerprint: self.settings.alphabet_fingerprint(),
             contest: None,
+            unread: UnreadKeys::default(),
+            length_floor: length_floor(&self.settings).map(|floor| floor as u32),
         };
         result.score = result.points();
         result
@@ -771,8 +866,9 @@ pub struct GroupResult {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionTiming {
-    /// From the end of the send to the answer, never quicker than
-    /// [`MIN_RESPONSE_MS_PER_CHAR`] a character.
+    /// From the end of the latest send heard to its end before the answer,
+    /// to the answer, never quicker than [`MIN_RESPONSE_MS_PER_CHAR`] a
+    /// character.
     pub time_to_complete_ms: f64,
     #[serde(default)]
     pub char_wpm: Option<f64>,
@@ -780,8 +876,9 @@ pub struct SessionTiming {
     /// have been sent with the session's spacing.
     #[serde(default)]
     pub effective_wpm: Option<f64>,
-    /// How many times the group was sent before it was answered. Older saves
-    /// sent each group once.
+    /// How many times the group was heard before it was answered: each send
+    /// once its first character had sounded. Older saves sent each group
+    /// once.
     #[serde(default = "one_send")]
     pub sends: u32,
     /// What its characters' recognition times are read from
@@ -835,8 +932,8 @@ fn session_wpm_default() -> f64 {
     18.0
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", from = "StoredSession")]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(from = "StoredSession")]
 pub struct SessionResult {
     pub date: String,
     /// Wall time the session finished, in milliseconds: what history is
@@ -846,7 +943,6 @@ pub struct SessionResult {
     pub group_timings: Vec<SessionTiming>,
     pub accuracy: f64,
     /// What was copied, character by character.
-    #[serde(flatten)]
     pub tally: CopyTally,
     pub avg_response_ms: f64,
     pub total_chars: u32,
@@ -855,7 +951,6 @@ pub struct SessionResult {
     pub digits_level: u32,
     /// Contest is written "callsign", so a build that knows no contests
     /// still reads the session.
-    #[serde(serialize_with = "mode_on_disk")]
     pub char_set_mode: CharSetMode,
     pub char_wpm: f64,
     pub effective_wpm: f64,
@@ -864,22 +959,142 @@ pub struct SessionResult {
     /// [`CONTEST_MARK`] and names the contest: it outlives a lost log.
     pub alphabet_fingerprint: String,
     /// A contest run's log, as it was written.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contest: Option<ContestLog>,
+    /// While adaptive group size drew the lengths, the shortest group it
+    /// drew: a longer group's lost end was the length's to answer for, and
+    /// no miss of the characters lost ([`Self::letter_accuracy`]). None
+    /// where the length did not adapt, and on older saves.
+    pub length_floor: Option<u32>,
+    /// What the stored session held that this build does not read.
+    pub unread: UnreadKeys,
+}
+
+/// What a stored session holds that this build does not read: keys a later
+/// build wrote, on the session and on each of its groups and their timings.
+/// They are kept as they were read and written back with the session, so a
+/// copy of an older build left open never strips them from the history.
+///
+/// So a key a later build renames is read beside its old name, as an older
+/// build carries the new one along: the new name is to be read as the old
+/// one's successor, not as an alias of it, which serde refuses to read
+/// twice.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UnreadKeys {
+    /// The session's own.
+    pub session: Map<String, Value>,
+    /// Each group's, by its place; none at all where no group has any.
+    pub groups: Vec<Map<String, Value>>,
+    /// Each timing's, by its place; none at all where no timing has any.
+    pub timings: Vec<Map<String, Value>>,
+}
+
+/// Keys of a session earlier builds wrote and no build reads any more: let
+/// go of as a session is read, rather than carried along.
+const RETIRED_SESSION_KEYS: &[&str] = &[
+    "alphabetSize",
+    "effectiveAlphabetSize",
+    "finishedAt",
+    "startedAt",
+];
+
+/// The same, of a group's timing.
+const RETIRED_TIMING_KEYS: &[&str] = &["perCharMs", "recognitionMs", "typedAlong"];
+
+/// A session as it is written: every key this build reads, and after them
+/// whatever it held that this build does not ([`UnreadKeys`]), each part's
+/// where it was read.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionOnDisk<'a> {
+    date: &'a str,
+    timestamp: u64,
+    groups: Vec<WithUnread<'a, GroupResult>>,
+    group_timings: Vec<WithUnread<'a, SessionTiming>>,
+    accuracy: f64,
+    #[serde(flatten)]
+    tally: &'a CopyTally,
+    avg_response_ms: f64,
+    total_chars: u32,
+    score: f64,
+    level: u32,
+    digits_level: u32,
+    #[serde(serialize_with = "mode_on_disk")]
+    char_set_mode: &'a CharSetMode,
+    char_wpm: f64,
+    effective_wpm: f64,
+    alphabet_fingerprint: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contest: Option<&'a ContestLog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    length_floor: Option<u32>,
+    #[serde(flatten)]
+    unread: &'a Map<String, Value>,
+}
+
+/// A part of a session as it is written, and what it held that this build
+/// does not read.
+#[derive(Serialize)]
+struct WithUnread<'a, T> {
+    #[serde(flatten)]
+    known: &'a T,
+    #[serde(flatten)]
+    unread: &'a Map<String, Value>,
+}
+
+/// Each of `parts`, with what it held that this build does not read: by
+/// its place in `unread`, or `none`.
+fn with_unread<'a, T>(
+    parts: &'a [T],
+    unread: &'a [Map<String, Value>],
+    none: &'a Map<String, Value>,
+) -> Vec<WithUnread<'a, T>> {
+    parts
+        .iter()
+        .enumerate()
+        .map(|(at, known)| WithUnread {
+            known,
+            unread: unread.get(at).unwrap_or(none),
+        })
+        .collect()
+}
+
+impl Serialize for SessionResult {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let none = Map::new();
+        SessionOnDisk {
+            date: &self.date,
+            timestamp: self.timestamp,
+            groups: with_unread(&self.groups, &self.unread.groups, &none),
+            group_timings: with_unread(&self.group_timings, &self.unread.timings, &none),
+            accuracy: self.accuracy,
+            tally: &self.tally,
+            avg_response_ms: self.avg_response_ms,
+            total_chars: self.total_chars,
+            score: self.score,
+            level: self.level,
+            digits_level: self.digits_level,
+            char_set_mode: &self.char_set_mode,
+            char_wpm: self.char_wpm,
+            effective_wpm: self.effective_wpm,
+            alphabet_fingerprint: &self.alphabet_fingerprint,
+            contest: self.contest.as_ref(),
+            length_floor: self.length_floor,
+            unread: &self.unread.session,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// A session as it is read: the keys this version knows, with what older
-/// saves lack filled in. Keys it does not read are dropped, not carried
-/// along: a catch-all would keep retired keys alive and could write a key
-/// twice. The contest log is the one part kept that this version does not
-/// read, and it is kept by name.
+/// saves lack filled in, and whatever else it holds, carried along
+/// ([`UnreadKeys`]). The contest log is kept whole, by name.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSession {
     date: String,
     timestamp: u64,
-    groups: Vec<GroupResult>,
-    group_timings: Vec<SessionTiming>,
+    groups: Vec<ReadWithUnread<GroupResult>>,
+    group_timings: Vec<ReadWithUnread<SessionTiming>>,
     accuracy: f64,
     #[serde(flatten)]
     tally: CopyTally,
@@ -901,6 +1116,40 @@ struct StoredSession {
     alphabet_fingerprint: String,
     #[serde(default)]
     contest: Option<ContestLog>,
+    #[serde(default)]
+    length_floor: Option<u32>,
+    #[serde(flatten)]
+    unread: Map<String, Value>,
+}
+
+/// A part of a session as it is read, and what it holds that this build
+/// does not read.
+#[derive(Deserialize)]
+struct ReadWithUnread<T> {
+    #[serde(flatten)]
+    known: T,
+    #[serde(flatten)]
+    unread: Map<String, Value>,
+}
+
+/// The parts read, and what each held that this build does not read but
+/// `retired`: by place, or nothing at all where none held any.
+fn split_unread<T>(
+    read: Vec<ReadWithUnread<T>>,
+    retired: &[&str],
+) -> (Vec<T>, Vec<Map<String, Value>>) {
+    let (parts, mut unread): (Vec<T>, Vec<Map<String, Value>>) = read
+        .into_iter()
+        .map(|part| {
+            let mut unread = part.unread;
+            unread.retain(|key, _| !retired.contains(&key.as_str()));
+            (part.known, unread)
+        })
+        .unzip();
+    if unread.iter().all(Map::is_empty) {
+        unread = Vec::new();
+    }
+    (parts, unread)
 }
 
 impl From<StoredSession> for SessionResult {
@@ -908,11 +1157,16 @@ impl From<StoredSession> for SessionResult {
     /// knew no contests has saved it without the log.
     fn from(stored: StoredSession) -> Self {
         let run = stored.contest.is_some() || stored.alphabet_fingerprint.starts_with(CONTEST_MARK);
+        let mut unread = stored.unread;
+        unread.retain(|key, _| !RETIRED_SESSION_KEYS.contains(&key.as_str()));
+        let (groups, unread_groups) = split_unread(stored.groups, &[]);
+        let (group_timings, unread_timings) =
+            split_unread(stored.group_timings, RETIRED_TIMING_KEYS);
         Self {
             date: stored.date,
             timestamp: stored.timestamp,
-            groups: stored.groups,
-            group_timings: stored.group_timings,
+            groups,
+            group_timings,
             accuracy: stored.accuracy,
             tally: stored.tally,
             avg_response_ms: stored.avg_response_ms,
@@ -929,6 +1183,12 @@ impl From<StoredSession> for SessionResult {
             effective_wpm: stored.effective_wpm,
             alphabet_fingerprint: stored.alphabet_fingerprint,
             contest: stored.contest,
+            unread: UnreadKeys {
+                session: unread,
+                groups: unread_groups,
+                timings: unread_timings,
+            },
+            length_floor: stored.length_floor,
         }
     }
 }
@@ -967,14 +1227,19 @@ impl SessionResult {
     }
 
     /// How each character sent was copied. Sessions saved before that was
-    /// recorded have it worked out again from their groups.
+    /// recorded have it worked out again from their groups, and so does one
+    /// whose lengths adaptive group size drew: the characters lost off the
+    /// end of a group it could still send shorter were the length's to
+    /// answer for, and are no miss of theirs ([`judged_copy`]). What every
+    /// character's belief, mastery and tally is read from.
     pub fn letter_accuracy(&self) -> Cow<'_, BTreeMap<char, LetterAccuracy>> {
-        if !self.tally.sent.is_empty() || self.groups.is_empty() {
+        let floor = self.length_floor.map(|floor| floor as usize);
+        if floor.is_none() && (!self.tally.sent.is_empty() || self.groups.is_empty()) {
             return Cow::Borrowed(&self.tally.sent);
         }
         let mut tally = CopyTally::default();
         for group in &self.groups {
-            tally.add(&group.sent, &group.received);
+            tally.merge(&judged_copy(&group.sent, &group.received, floor));
         }
         Cow::Owned(tally.sent)
     }
@@ -1000,8 +1265,54 @@ impl SessionResult {
             effective_wpm: 18.0,
             alphabet_fingerprint: String::new(),
             contest: None,
+            unread: UnreadKeys::default(),
+            length_floor: None,
         }
     }
+}
+
+/// Settle, for showing, the sessions of a history that were stamped later
+/// than `now`: finished while the clock was set ahead. Shown as stamped, one
+/// a year ahead would squeeze every real session into the left of the
+/// Scores timeline, and sit on the calendar on a day still to come. So each
+/// is taken as finished just after the latest session that was not, on that
+/// session's day, in the order they were stamped. The order of the history
+/// is left as it was, so whatever goes by the order alone reads it the same
+/// settled or not; and once the clock passes a session's stamp, it reads as
+/// stamped again.
+///
+/// It goes by a clock that may itself be wrong: set behind, every session
+/// since would read as stamped ahead. So it is for showing only, never for
+/// what is stored, and it trusts the clock only over a history most of
+/// whose sessions agree with it: where as many are stamped ahead as not, it
+/// is likelier the clock is behind, and the history is left as stamped. A
+/// history with nothing stamped ahead is left as it is.
+pub fn settle_clock_ahead(sessions: &mut [SessionResult], now: u64) {
+    let ahead = sessions
+        .iter()
+        .filter(|session| session.timestamp > now)
+        .count();
+    if ahead == 0 || ahead * 2 >= sessions.len() {
+        return;
+    }
+    let Some((at, day)) = sessions
+        .iter()
+        .filter(|session| session.timestamp <= now)
+        .max_by_key(|session| session.timestamp)
+        .map(|latest| (latest.timestamp, latest.date.clone()))
+    else {
+        return;
+    };
+    let mut ahead: Vec<&mut SessionResult> = sessions
+        .iter_mut()
+        .filter(|session| session.timestamp > now)
+        .collect();
+    ahead.sort_by_key(|session| session.timestamp);
+    for (after, session) in (1..).zip(ahead) {
+        session.timestamp = at.saturating_add(after);
+        session.date.clone_from(&day);
+    }
+    sessions.sort_by_key(|session| session.timestamp);
 }
 
 #[cfg(test)]
@@ -1546,6 +1857,88 @@ mod tests {
         assert!(json.get("inserted").is_none());
     }
 
+    /// A key a later build added, to a session, a group or its timing, is
+    /// read beside the rest and written back where it was, so a copy of an
+    /// older build left open does not strip it from every stored session.
+    /// It used to be dropped as the session was read.
+    #[test]
+    fn keys_a_later_build_added_are_written_back_where_they_were() {
+        let mut written = SessionResult::empty_for_test();
+        written.groups = vec![GroupResult::default(); 2];
+        written.group_timings = vec![SessionTiming::default(); 2];
+        let mut later = serde_json::to_value(&written).unwrap();
+        later["laterKey"] = serde_json::json!({ "v": 2 });
+        later["groups"][1]["laterGroupKey"] = serde_json::json!([1, 2]);
+        later["groupTimings"][0]["laterTimingKey"] = serde_json::json!(0.5);
+        let read: SessionResult = serde_json::from_value(later.clone()).unwrap();
+        assert_eq!(read.groups, written.groups);
+        assert_eq!(read.group_timings, written.group_timings);
+        assert_eq!(read.unread.session.len(), 1);
+        assert_eq!(serde_json::to_value(&read).unwrap(), later);
+        let again: SessionResult =
+            serde_json::from_value(serde_json::to_value(&read).unwrap()).unwrap();
+        assert_eq!(again, read, "the same, read again");
+
+        // A session without any writes none, as before.
+        let plain = serde_json::to_value(&written).unwrap();
+        let read: SessionResult = serde_json::from_value(plain.clone()).unwrap();
+        assert_eq!(read.unread, UnreadKeys::default());
+        assert_eq!(serde_json::to_value(&read).unwrap(), plain);
+
+        // What earlier builds wrote and no build reads is let go of.
+        let mut older = plain;
+        older["startedAt"] = serde_json::json!(0);
+        older["groupTimings"][1]["typedAlong"] = serde_json::json!(true);
+        let read: SessionResult = serde_json::from_value(older).unwrap();
+        assert_eq!(read.unread, UnreadKeys::default());
+    }
+
+    /// With adaptive group size drawing the lengths, a group is sent long on
+    /// purpose, and the characters lost off its end are the length's: each
+    /// character's tally leaves them out, as auto level does, while what was
+    /// misheard still counts, and a group with nothing typed is its first
+    /// character missed. The session's own accuracy is scored as ever, and
+    /// the shortest length is saved with it, so the history reads it the
+    /// same way. With 2 to 8 characters, "KMR" for "KMRSU" used to count
+    /// S and U as misses, and every character came to look unmastered.
+    #[test]
+    fn a_lost_end_the_length_answers_for_is_no_miss_of_its_characters() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.adaptive_group_size = true;
+        settings.curriculum.min_group_size = 2;
+        settings.curriculum.max_group_size = 8;
+        let copies = [
+            ("KMRSU", "KMR", 400),
+            ("KMRSU", "KXRSU", 400),
+            ("KMRSU", "", 400),
+        ];
+        let adaptive = result(&answered(settings.clone(), &copies));
+        assert_eq!(adaptive.length_floor, Some(2));
+        assert!(
+            (adaptive.accuracy - 7.0 / 15.0).abs() < 1e-9,
+            "scored as ever"
+        );
+        let letters = adaptive.letter_accuracy();
+        let tally = |c: char| letters.get(&c).map(|l| (l.correct, l.total));
+        assert_eq!(tally('K'), Some((2, 3)), "the blank is its first missed");
+        assert_eq!(tally('M'), Some((1, 2)), "a mishearing still counts");
+        assert_eq!(tally('S'), Some((1, 1)), "the lost end does not");
+        assert_eq!(tally('U'), Some((1, 1)));
+
+        let back: SessionResult =
+            serde_json::from_value(serde_json::to_value(&adaptive).unwrap()).unwrap();
+        assert_eq!(back.letter_accuracy(), adaptive.letter_accuracy());
+
+        // With the length fixed, the lost end is every one a miss.
+        settings.curriculum.adaptive_group_size = false;
+        let fixed = result(&answered(settings, &copies));
+        assert_eq!(fixed.length_floor, None);
+        let json = serde_json::to_value(&fixed).unwrap();
+        assert!(json.get("lengthFloor").is_none(), "older builds read it");
+        assert_eq!(fixed.letter_accuracy().get(&'S').map(|l| l.total), Some(3));
+    }
+
     /// Older saves carry fields this version no longer writes, and lack ones
     /// it added. Both still load.
     #[test]
@@ -1794,5 +2187,79 @@ mod tests {
         assert_eq!(MonoMs(1_500).since(MonoMs(1_000)), 500);
         assert_eq!(MonoMs(1_000).since(MonoMs(1_500)), 0);
         assert_eq!(MonoMs(u64::MAX).plus(5), MonoMs(u64::MAX));
+    }
+
+    /// A session stamped ahead of the clock is taken as finished just
+    /// after the latest one that was not, on its day, keeping its place
+    /// among any others stamped ahead; with nothing to put it after, or as
+    /// many stamped ahead as not, it is left as stamped, and a settled
+    /// history settles to itself.
+    #[test]
+    fn a_session_stamped_ahead_of_the_clock_settles_after_the_latest() {
+        let at = |timestamp: u64, date: &str| SessionResult {
+            timestamp,
+            date: date.into(),
+            ..SessionResult::empty_for_test()
+        };
+        let read = |history: &[SessionResult]| -> Vec<(u64, String)> {
+            history
+                .iter()
+                .map(|session| (session.timestamp, session.date.clone()))
+                .collect()
+        };
+        let now = 1_000;
+        let mut history = vec![
+            at(100, "2026-10-28"),
+            at(50_000, "2027-10-30"),
+            at(400, "2026-10-29"),
+            at(40_000, "2027-10-29"),
+            at(250, "2026-10-28"),
+        ];
+        settle_clock_ahead(&mut history, now);
+        let day = |timestamp: u64, date: &str| (timestamp, date.to_string());
+        assert_eq!(
+            read(&history),
+            [
+                day(100, "2026-10-28"),
+                day(250, "2026-10-28"),
+                day(400, "2026-10-29"),
+                day(401, "2026-10-29"),
+                day(402, "2026-10-29"),
+            ]
+        );
+        let settled = history.clone();
+        settle_clock_ahead(&mut history, now + 5);
+        assert_eq!(history, settled);
+
+        let mut all_ahead = vec![at(5_000, "2027-01-01")];
+        settle_clock_ahead(&mut all_ahead, now);
+        assert_eq!(all_ahead[0].timestamp, 5_000);
+    }
+
+    /// A clock set behind leaves the history as stamped: with one session
+    /// finished while it was, and every real one after it, the clock is
+    /// the odd one out, not the history, and no session is moved onto
+    /// that one session's day; nor with as many on each side.
+    #[test]
+    fn a_clock_set_behind_settles_nothing() {
+        let at = |timestamp: u64, date: &str| SessionResult {
+            timestamp,
+            date: date.into(),
+            ..SessionResult::empty_for_test()
+        };
+        let now = 1_000;
+        let stamped = vec![
+            at(900, "2000-01-01"),
+            at(40_000, "2026-10-28"),
+            at(50_000, "2026-10-29"),
+            at(60_000, "2026-10-30"),
+        ];
+        let mut history = stamped.clone();
+        settle_clock_ahead(&mut history, now);
+        assert_eq!(history, stamped);
+        let even = vec![at(900, "2000-01-01"), at(40_000, "2026-10-28")];
+        let mut history = even.clone();
+        settle_clock_ahead(&mut history, now);
+        assert_eq!(history, even);
     }
 }

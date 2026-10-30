@@ -45,13 +45,22 @@ pub fn clock(timestamp: u64) -> Option<String> {
     local_at(timestamp).map(|at| at.format("%H:%M").to_string())
 }
 
-/// When a session kept on `date` finished at `timestamp`, as a list of
-/// them says it: "Fri 16 Oct 2026 · 14:32", or the day alone where the
-/// time cannot be read.
+/// When a session kept on `date`, the day it started, finished at
+/// `timestamp`, as a list of them says it: "Fri 16 Oct 2026 · 14:32", or
+/// the day alone where the time cannot be read. One that finished on a
+/// later day says that day too, "Fri 16 Oct 2026 · ended Sat 17 Oct 00:05",
+/// as its time alone would read as the night before it ended.
 pub fn day_and_clock(date: &str, timestamp: u64) -> String {
-    match clock(timestamp) {
-        Some(time) => format!("{} · {time}", short_date(date)),
-        None => short_date(date),
+    let Some(time) = clock(timestamp) else {
+        return short_date(date);
+    };
+    match day_of(timestamp).filter(|ended| ended != date) {
+        Some(ended) => format!(
+            "{} · ended {} {time}",
+            short_date(date),
+            date_as(&ended, "%a %-d %b")
+        ),
+        None => format!("{} · {time}", short_date(date)),
     }
 }
 
@@ -115,6 +124,28 @@ pub fn ordinal(place: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session that ran past midnight is listed on the day it started,
+    /// with the day it ended beside its time.
+    #[test]
+    fn a_session_past_midnight_says_the_day_it_ended() {
+        let at = |day: &str, hour: u32, minute: u32| {
+            let day = parse_date(day)
+                .unwrap()
+                .and_hms_opt(hour, minute, 0)
+                .unwrap();
+            let at = chrono::Local.from_local_datetime(&day).single().unwrap();
+            u64::try_from(at.timestamp_millis()).unwrap()
+        };
+        assert_eq!(
+            day_and_clock("2026-10-16", at("2026-10-16", 23, 50)),
+            "Fri 16 Oct 2026 · 23:50"
+        );
+        assert_eq!(
+            day_and_clock("2026-10-16", at("2026-10-17", 0, 5)),
+            "Fri 16 Oct 2026 · ended Sat 17 Oct 00:05"
+        );
+    }
 
     #[test]
     fn a_date_reads_in_words() {

@@ -3,10 +3,11 @@
 //! and its help reads as one text.
 
 use cw_core::{
-    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
-    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS, MASTERED_MIN_ACCURACY,
-    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS,
-    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, EARLIER_TRIES,
+    ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS,
+    MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RATED_GROUP_CHARS,
+    REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW,
+    Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -41,7 +42,7 @@ pub fn next_up(limit: f64) -> Element {
         dl { class: "help-terms",
             dt { "Under your {limit}" }
             dd {
-                "Green: wrong less than {limit} of the time. {limit} is what your Auto level threshold of {pass} right leaves (Settings → Auto level)."
+                "Green: wrong less than {limit} of the time. {limit} is what your Auto level threshold of {pass} right leaves (Settings → Auto level, in a mode with a level to move)."
             }
             dt { "Over it" }
             dd { "Copper: wrong more often than that. These hold your copy back: the ones to work on." }
@@ -86,9 +87,9 @@ pub fn letters(bands: RecognitionBands) -> Element {
             dt { "Few tries" }
             dd { "Grey, dashed: sent fewer than {MASTERED_MIN_ATTEMPTS} times, too few to call." }
             {likely_and_notch(format!("The Mastered line, {mastered}."))}
-            dt { "↑ 8 lately" }
+            dt { "↑ 30 lately" }
             dd {
-                "Your last {RECENT_TRIES} tries of it against the ones before, in points: up in green, down in copper, shown from 5 points either way."
+                "Your last {RECENT_TRIES} tries of it against the {EARLIER_TRIES} or so before them, in points: up in green, down in copper, shown only when the move is more than chance would make over that many tries."
             }
             dt { "Recognised in" }
             dd {
@@ -126,7 +127,9 @@ pub fn speed(aim: f64) -> Element {
             dd { "Copper: more than 10 points under it." }
             {likely_and_notch(format!("Your aim, {aim}."))}
             dt { "Your aim · about 21 WPM" }
-            dd { "The speed at which you copy your aim: Copy speed on the Overview." }
+            dd {
+                "The speed at which you copy your aim: Copy speed on the Overview. Over the fastest you have been sent, it says only that: nothing yet shows how much faster you could go."
+            }
             dt { "Chance next" }
             dd {
                 "How likely the next group is to come at about that speed. With Adapt speed to me the trainer leans towards where you copy your aim; without it, every speed in the range is as likely."
@@ -153,7 +156,9 @@ pub fn group_length(aim: f64) -> Element {
             dd { "Copper: more than 10 points under it." }
             {likely_and_notch(format!("Your aim, {aim}."))}
             dt { "Your aim · up to 4 characters" }
-            dd { "The longest length you copy whole as often as your aim asks." }
+            dd {
+                "The longest length you copy whole as often as your aim asks, never past the longest group you have been sent."
+            }
             dt { "Chance next" }
             dd {
                 "How likely the next group is to be that long. With Adapt group size to me the trainer leans towards the lengths you copy as your aim asks; without it, every length is as likely."
@@ -174,9 +179,11 @@ pub fn endurance() -> Element {
             dt { "The dashed line" }
             dd { "Your start's level, carried across the rest, to hold each stretch against." }
             dt { "A copper bar" }
-            dd { "{DROP_POINTS:.0} points or more under your start: where you begin to tire." }
+            dd {
+                "{DROP_POINTS:.0} points or more under your start, and further than chance would put it over the sessions read: where you begin to tire. A few sessions can show only a big drop; more show a smaller one."
+            }
             dt { "Steady through · Fades after" }
-            dd { "How far into a session you stay within {DROP_POINTS:.0} points of your start." }
+            dd { "How far into a session you go before the first copper bar." }
         }
     }
 }
@@ -200,12 +207,12 @@ pub fn confusions() -> Element {
 pub fn hardest_pairs() -> Element {
     rsx! {
         p {
-            "A pair is two characters one after the other: the one you heard first, then the one that went wrong. These are the pairs where the second goes wrong clearly more often after the first than it does anywhere else: the pair trips you, not the letter."
+            "A pair is two characters one after the other: the one you heard first, then the one that went wrong. These are the pairs where the second goes wrong clearly more often after the first than it does overall: the pair trips you, not the letter."
         }
         dl { class: "help-terms",
             dt { "Listed" }
             dd {
-                "Once a pair has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong at least 10 points and half again more often than its second character does overall."
+                "Once a pair has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong at least 10 points and half again more often than its second character does overall, by more than chance would make it. With many pairs heard a few always go wrong more often by luck, so the more pairs you have heard, the clearer a pair has to be."
             }
             dt { "The bar" }
             dd { "How often the second character went wrong after the first; the mark on it, how often it goes wrong overall." }
@@ -217,7 +224,7 @@ pub fn hardest_pairs() -> Element {
 pub fn bigram() -> Element {
     rsx! {
         p {
-            "Each square is a pair: the character at the start of its row, followed by the one at the head of its column. Its colour is how often the second went wrong after the first: the deeper, the more often. An empty square was never heard; ▸ is the start of a group."
+            "Each square is a pair: the character at the start of its row, followed by the one at the head of its column. Its colour is how often the second went wrong after the first: the deeper, the more often. A pair heard only a few times is drawn near how often its second character goes wrong overall. An empty square was never heard; ▸ is the start of a group."
         }
         dl { class: "help-terms",
             dt { "A square" }
@@ -257,6 +264,14 @@ pub fn copy_span() -> Element {
         dl { class: "help-terms",
             dt { "± and the band" }
             dd { "How sure the model is: the shaded band is one spread either side of its best guess." }
+            dt { "Over 3 chars" }
+            dd {
+                "You copy the longest groups you have been sent whole more often than not, so all that can be said is that your span is longer. Longer groups would show how much."
+            }
+            dt { "Up · down · steady" }
+            dd {
+                "How it moved over the sessions drawn: steady unless the move is more than twice the spreads of the first and the last together."
+            }
             dt { "Adapting" }
             dd { "Adapt group size to me is on, and steering the length of your groups by it now." }
         }
@@ -273,6 +288,14 @@ pub fn copy_speed(aim: f64) -> Element {
         dl { class: "help-terms",
             dt { "± and the band" }
             dd { "How sure the model is: the shaded band is one spread either side of its best guess." }
+            dt { "Over 20 WPM" }
+            dd {
+                "You copy {aim} right even at the fastest you have been sent, so all that can be said is that your copy speed is higher. Faster sends would show how much."
+            }
+            dt { "Up · down · steady" }
+            dd {
+                "How it moved over the sessions drawn: steady unless the move is more than twice the spreads of the first and the last together."
+            }
             dt { "Adapting" }
             dd { "Adapt speed to me is on, and steering the speed of your groups by it now." }
         }
@@ -325,11 +348,11 @@ pub fn board(ranking: Ranking) -> Element {
         dl { class: "help-terms",
             dt { "Points a group" }
             dd {
-                "A session's score is what its groups earn, more for copy at speed. Ranked by what it earned a group, a long session is no better than a short one for the same copy. A session goes on with {BOARD_MIN_GROUPS} groups or more."
+                "A session's score is what its groups earn: more for copy at speed and for a longer group, and a miss costs its whole group. Points a group are what a session would earn in groups of {RATED_GROUP_CHARS} characters, at its speed and the share of characters it missed, so for the same copy a long session is no better than a short one, and groups of any length rate alike. A session goes on with {BOARD_MIN_GROUPS} groups or more."
             }
             dt { "Contest runs" }
             dd {
-                "Under Contest, each contest has a board of its own, ranked by its own measure: the verified score, of what was logged clean, among runs set to the same length; or the QSOs logged clean an hour, fair between lengths. A run goes on once it ran {runs} minutes or more and logged a QSO clean."
+                "Under Contest, each contest has a board of its own, ranked by its own measure: the verified score, of what was logged clean, among runs set to the same length; or the QSOs logged clean an hour, fair between lengths. A run goes on once it ran {runs} minutes or more and logged a QSO clean. Its QSOs are every one it logged, as History counts them: a NIL, one not in the station's log, is among them and is never clean."
             }
             dt { "Assisted" }
             dd { "A run with Show copy on: listed greyed, never placed, and kept out of the record and the form." }
@@ -380,11 +403,11 @@ pub fn character_set() -> Element {
             dt { "Callsigns" }
             dd { "Real callsigns, as they are heard on the air. The tier sets how hard they come; each keeps what the ones below send." }
             dt { "Words" }
-            dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =." }
+            dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =. Where your keyboard has + or = on the keys right of P, those keys are the paddles in the answer box: turn off Paddles on the keys right of P (Session shape) to type them there." }
             dt { "Contest" }
             dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange. A caller that is sending cannot hear you, one caller or a pile-up, as on the air: wait for it to finish before you send, and ask with ? (F7) if you missed it." }
             dt { "Unlock order" }
-            dd { "The order new characters come in: LCWO, MorseMania, CW Academy, alphabetical, or your own." }
+            dd { "The order new characters come in: LCWO, MorseMania, CW Academy, alphabetical, or your own, typed in the box. An order of your own is kept while you try a preset: Your own brings it back." }
             dt { "Level" }
             dd { "How many characters are in play. Auto level moves it for you." }
             dt { "Practice window" }
@@ -397,7 +420,7 @@ pub fn character_set() -> Element {
 pub fn station() -> Element {
     rsx! {
         p {
-            "What you send in a run: your call, and the exchange your contest asks for, a name, state, zone, power or class and section. Callers check it as a real station would, and a run needs it set. Stored on this device only."
+            "What you send in a run: your call, and the exchange your contest asks for, a name, state, zone, power or class and section. Callers check it as a real station would, and a run needs it set. Dust never sends it off this device."
         }
     }
 }
@@ -421,7 +444,9 @@ pub fn session_shape() -> Element {
             dt { "Aim for" }
             dd { "How hard adapting pushes: Comfortable keeps copy mostly clean, Stretch pushes to where you miss often." }
             dt { "Sends per group" }
-            dd { "How many times each group is sent before the answer box opens, a word space apart." }
+            dd {
+                "How many times each group is sent, a word space apart. Type along from the first send; with Lock typing while sending on, the box opens after the last. Each send after the first that you hear, typing along or not, halves what the group scores."
+            }
             dt { "Lock typing while sending" }
             dd {
                 "Keeps you copying by ear rather than typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters cannot be timed (Stats → Letters)."
@@ -511,7 +536,7 @@ pub fn auto_level() -> Element {
     rsx! {
         dl { class: "help-terms",
             dt { "Adjust the level for me" }
-            dd { "Moves your level, how many characters are in play, by how your sessions go." }
+            dd { "Moves your level, how many characters are in play, by how your sessions go. In Callsigns it moves the callsign tier, the shape of the calls, instead." }
             dt { "Accuracy threshold" }
             dd { "The share of characters right that counts a session as good. It is also the line What comes up next marks." }
             dt { "With Adapt group size to me" }
@@ -520,12 +545,12 @@ pub fn auto_level() -> Element {
             }
             dt { "With Adapt speed to me" }
             dd {
-                "The speed is moved to keep your characters right at your aim, so in the middle of your Character speed range a session counts neither way. Once it comes at the top or the bottom of the range, where the speed can go no further, it counts as a session at one speed does: up at the threshold or better, down below it. Set the top to the speed you are training for: a new character comes in once you copy the threshold there."
+                "The speed is moved to keep your characters right at your aim, so in the middle of your speed range a session counts neither way. Once it comes at the top or the bottom of the range, where the speed can go no further, it is judged on the groups sent there, as a session at that one speed is: up at the threshold or better, down below it. Under Farnsworth the range runs from your slowest Character and Effective speed to your fastest. Set the top to the speed you are training for: a new character comes in once you copy the threshold there."
             }
             dt { "Sessions above to level up" }
-            dd { "How many good sessions it takes to unlock a new character. Zero never levels up." }
+            dd { "How many good sessions it takes to unlock a new character, or a harder callsign tier. Zero never levels up." }
             dt { "Sessions below to level down" }
-            dd { "How many sessions under the threshold it takes to set the newest character aside. Zero never levels down." }
+            dd { "How many sessions under the threshold it takes to set the newest character aside, or go back a callsign tier. Zero never levels down." }
         }
     }
 }
@@ -567,7 +592,7 @@ pub fn band() -> Element {
             dt { "RF gain" }
             dd { "Turns down everything reaching the receiver, ahead of the AGC: the noise, the static and every station alike. With the AGC on, strong stations stay nearly as loud while the hiss and the weak ones drop, which is how operators quiet a noisy band; with it off, the whole band gets quieter. The volume does not make it up, as on a rig." }
             dt { "AGC" }
-            dd { "Evens out strong and weak stations, as a rig's AGC does: a station clear of the noise comes out within a few dB of the others, while one down in the noise keeps its own level. It does not make a weak station more readable: the hiss under it comes up with it, and the hiss ducks under a strong station and comes back between overs. Off, every station keeps its own level." }
+            dd { "Evens out strong and weak stations, as a rig's AGC does: a station clear of the noise comes out within a few dB of the others, while one down in the noise keeps its own level. It does not make a weak station more readable: the hiss under it comes up with it, and the hiss ducks under a strong station and comes back between overs. Off, every station keeps its own level, and full volume is lower in a pile-up, so callers keyed together do not distort." }
             dt { "AGC decay" }
             dd { "How fast the gain comes back once a signal has gone. Fast is back by the next word; Slow holds through an over and comes back over a second or so, so a weak station straight after a strong one starts quiet." }
             dt { "Live preview" }

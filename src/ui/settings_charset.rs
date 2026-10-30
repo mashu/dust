@@ -8,10 +8,12 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::playback::Dialogue;
+use crate::state::AppCtx;
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
+use crate::ui::paddle::use_typed_field;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, TextDraft, TextField,
     control_id, range_label, whole,
@@ -631,8 +633,11 @@ fn list_report(list: &WordList, source: Option<&str>) -> String {
 
 /// Make `list` the words, and say what reading it came to. A list that kept
 /// nothing leaves the words as they were, unless it was meant to be empty:
-/// emptying the box goes back to the starter words.
+/// emptying the box goes back to the starter words. In the app a message
+/// says so and offers Undo ([`AppCtx::starter_words`]), and the line under
+/// the box goes back to the count, so that it is still right after Undo.
 fn take_list(
+    app: Option<AppCtx>,
     mut settings: Signal<TrainingSettings>,
     mut report: Signal<Option<String>>,
     text: &str,
@@ -640,8 +645,16 @@ fn take_list(
 ) {
     let list = WordList::read(text);
     if list.words.is_empty() && list.left_out() == 0 {
-        settings.write().curriculum.word_list.clear();
-        report.set(Some("Back to the starter words.".to_string()));
+        match app {
+            Some(app) => {
+                report.set(None);
+                app.starter_words();
+            }
+            None => {
+                settings.write().curriculum.word_list.clear();
+                report.set(Some("Back to the starter words.".to_string()));
+            }
+        }
         return;
     }
     if list.words.is_empty() {
@@ -657,6 +670,7 @@ fn take_list(
 
 /// Take a chosen file as the word list.
 fn take_word_file(
+    app: Option<AppCtx>,
     settings: Signal<TrainingSettings>,
     mut report: Signal<Option<String>>,
     file: ChosenFile,
@@ -669,7 +683,7 @@ fn take_word_file(
         return;
     }
     match text {
-        Some(text) => take_list(settings, report, &text, Some(&name)),
+        Some(text) => take_list(app, settings, report, &text, Some(&name)),
         None => report.set(Some(format!(
             "{name} could not be read as text: is it a plain .txt file?"
         ))),
@@ -682,10 +696,15 @@ fn take_word_file(
 /// What is typed stays as typed until it is committed, on leaving the box,
 /// and is then read as a list: upper-cased, each word once, what cannot be
 /// sent left out and said. A key does not redraw the box ([`TextDraft`]),
-/// so the count of what is being typed is drawn beside it instead.
+/// so the count of what is being typed is drawn beside it instead. The
+/// paddles key nothing into it, so the keys right of P type there: the
+/// starter list's `+` and `=` on any keyboard
+/// ([`crate::ui::paddle::TypedField`]).
 #[component]
 fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: bool) -> Element {
+    let app = try_use_context::<AppCtx>();
     let draft = TextDraft::use_draft();
+    let typed = use_typed_field();
     // The text being typed again, for the count under the box, which alone
     // reads it: the box goes by the draft, which redraws nothing.
     let mut counting = use_signal(|| None::<String>);
@@ -710,13 +729,16 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
             aria_label: "Your words, one to a line",
             autocapitalize: "characters",
             spellcheck: false,
+            "data-typed": "true",
+            onfocus: move |_| typed.focus(),
+            onblur: move |_| typed.blur(),
             oninput: move |e| {
                 draft.hold(e.value());
                 counting.set(Some(e.value()));
             },
             onchange: move |e| {
                 settle();
-                take_list(settings, report, &e.value(), None);
+                take_list(app, settings, report, &e.value(), None);
             },
         }
         div { class: "word-tools",
@@ -728,7 +750,7 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
                 label: "Load a text file",
                 on_choose: move |file| {
                     settle();
-                    take_word_file(settings, report, file);
+                    take_word_file(app, settings, report, file);
                 },
             }
             if own {
@@ -739,7 +761,7 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
                     title: "Send the starter words instead of yours",
                     onclick: move |_| {
                         settle();
-                        take_list(settings, report, "", None);
+                        take_list(app, settings, report, "", None);
                     },
                     Icon { name: IconName::Reset }
                     "Starter words"

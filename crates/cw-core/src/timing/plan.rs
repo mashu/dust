@@ -14,6 +14,13 @@ use crate::settings::TrainingSettings;
 /// The level of a station at full volume, before the receiver.
 pub const DEFAULT_TARGET_GAIN: f64 = 0.3;
 
+/// What of PARIS's fifty dits is keyed inside its letters at the book's
+/// ratio: ten dits, four dahs of three and the nine gaps between elements.
+/// The other nineteen are the gaps between letters and words.
+const PARIS_IN_LETTERS: f64 = 31.0;
+/// The dahs of PARIS, which a fist's dash ratio lengthens or shortens.
+const PARIS_DAHS: f64 = 4.0;
+
 /// How long a stopped send takes to reach silence, on either player.
 ///
 /// Matched to the keying envelope's own rise time: a trainer this careful
@@ -245,7 +252,6 @@ pub(crate) fn plan_morse_playback_at(
     let extra = clamp_extra_spacing(settings.playback.extra_word_space_multiplier);
     let side_tone = voice.tone_hz;
 
-    let dot_char = dot_seconds(resolved_char_wpm);
     let unit = spacing_unit_sec(resolved_char_wpm, resolved_effective_wpm);
     // The operator's fist. Every element is stretched or clipped by the
     // same share of a dit, as a keyer's weight does, and the gap after it
@@ -253,7 +259,13 @@ pub(crate) fn plan_morse_playback_at(
     // than simply sending slower — which is what weight actually is, and
     // why it does not quietly change the speed.
     let weight = voice.weight.clamp(0.7, 1.3);
+    // Its dahs run long or short against its dits, which alone would send
+    // it slower or faster than its speed. So its letters are keyed on a
+    // dit that keys PARIS's letters in the time the book's ratio does, and
+    // a word goes at the speed the station is credited with.
     let dash_ratio = voice.dash_ratio.clamp(2.0, 4.5);
+    let dot_char = dot_seconds(resolved_char_wpm) * PARIS_IN_LETTERS
+        / (PARIS_IN_LETTERS + PARIS_DAHS * (dash_ratio - 3.0));
     let dot_duration = dot_char * weight;
     let dash_duration = dot_char * (dash_ratio + weight - 1.0);
     let symbol_space = dot_char * (2.0 - weight);
@@ -782,6 +794,65 @@ mod tests {
                 .sum::<f64>()
         };
         assert!(down(&heavy) > down(&light) * 1.2, "the fists sound alike");
+    }
+
+    /// The dash ratio is how a fist's dahs stand against its dits, not how
+    /// fast it sends: a word of PARIS takes as long whatever the ratio and
+    /// the weight, with Farnsworth spacing or without, so the speed a
+    /// station is credited with is the speed it sends at.
+    #[test]
+    fn a_long_dah_fist_is_not_a_slow_one() {
+        let s = fist(1.0);
+        for (char_wpm, effective_wpm) in [(20.0, 20.0), (80.0, 80.0), (30.0, 10.0)] {
+            let keyer = StationVoice {
+                tone_hz: 600.0,
+                char_wpm,
+                effective_wpm,
+                volume: 1.0,
+                weight: 1.0,
+                dash_ratio: 3.0,
+            };
+            // One word: from where the first PARIS starts to where the
+            // second does.
+            let word = |voice: &StationVoice| {
+                let at = |text| plan_morse_playback_for(text, &s, voice).duration_sec;
+                at("PARIS PARIS") - at("PARIS")
+            };
+            let book = 60.0 / effective_wpm;
+            assert!((word(&keyer) - book).abs() < 1e-9, "{effective_wpm} WPM");
+            for (dash_ratio, weight) in [(2.55, 1.0), (3.45, 1.0), (2.0, 1.18), (4.5, 0.82)] {
+                let fist = StationVoice {
+                    dash_ratio,
+                    weight,
+                    ..keyer
+                };
+                let sent = word(&fist);
+                assert!(
+                    (sent - book).abs() < 1e-9,
+                    "{char_wpm}/{effective_wpm} WPM at {dash_ratio}: {sent:.4}s against {book:.4}s"
+                );
+            }
+        }
+        // But a long-dah fist's dahs really are longer against its dits,
+        // which is the audible part.
+        let ratio = |dash_ratio: f64| {
+            let voice = StationVoice {
+                tone_hz: 600.0,
+                char_wpm: 20.0,
+                effective_wpm: 20.0,
+                volume: 1.0,
+                weight: 1.0,
+                dash_ratio,
+            };
+            let keyed: Vec<f64> = plan_morse_playback_for("A", &s, &voice)
+                .events
+                .iter()
+                .map(|e| e.keyed_sec)
+                .collect();
+            keyed[1] / keyed[0]
+        };
+        assert!((ratio(3.45) - 3.45).abs() < 1e-9);
+        assert!((ratio(2.55) - 2.55).abs() < 1e-9);
     }
 
     /// Each element is heard for as long as it is keyed: its tone rises from

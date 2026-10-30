@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::refocus_run;
 use crate::keep_awake::use_keep_awake;
+use crate::page_closed::use_end_on_close;
 use crate::page_hidden::{APP_HIDDEN, use_page_hidden};
 use crate::routes::Route;
 use crate::session_runtime::finish_run;
@@ -120,6 +121,13 @@ pub fn App() -> Element {
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
     use_keep_awake(screen, ctx.runtime, ctx.contest, ctx.preview);
+    // A session or run is kept as the app is closed, where the platform
+    // says it is closing.
+    use_end_on_close(ctx);
+    // Back on a phone, or in a browser, goes back through the app's screens
+    // rather than out of it (src/system_back.rs).
+    #[cfg(any(test, feature = "web", target_os = "android"))]
+    crate::system_back::use_system_back(ctx);
     // Each screen opens at its top, wherever the one before it was scrolled
     // to: a run started from the foot of its results would otherwise begin
     // with its clock and its fields out of sight.
@@ -278,6 +286,7 @@ pub fn App() -> Element {
                                         ToastAction::UndoDelete => ctx.undo_delete(),
                                         ToastAction::UndoRestore => ctx.undo_restore(),
                                         ToastAction::PutCardBack => ctx.undo_reset(),
+                                        ToastAction::PutWordsBack => ctx.undo_starter_words(),
                                     }
                                     toasts.dismiss(&toast);
                                 },
@@ -341,10 +350,11 @@ fn use_stored_settings(ctx: AppCtx) {
 }
 
 /// Store the settings at once, rather than once an edit on the settings
-/// screen has been still for a moment: the page has gone out of sight, and a
+/// screen has been still for a moment, or once the effect that stores them
+/// next runs: the page has gone out of sight, or the app is closing, and a
 /// tab closed or an app put away straight after an edit would lose it while
 /// it waited. Not while a session runs, which stores nothing until it ends.
-fn store_settings_now(ctx: AppCtx) {
+pub(crate) fn store_settings_now(ctx: AppCtx) {
     if *ctx.screen.peek() != Screen::Training {
         ctx.store_settings();
     }
@@ -724,6 +734,28 @@ mod ui_tests {
         });
     }
 
+    /// A session whose sound stopped says that, not that the page went,
+    /// and goes on from Resume once the sound is back.
+    #[test]
+    fn a_session_whose_sound_stopped_says_so_and_resumes_from_its_button() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(short_session());
+            recorder.set(crate::audio::fake::Behaviour::FailMidSend);
+            ui.click("btn-start-training");
+            assert!(
+                ui.run_until(30_000, |ui| ui.has("Sound stopped — Resume to carry on."))
+                    .await,
+                "{}",
+                ui.html()
+            );
+            assert!(!ui.has("out of sight"));
+            assert_eq!(ui.screen(), "training");
+            recorder.set(crate::audio::fake::Behaviour::Play);
+            ui.click("btn-resume");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+        });
+    }
+
     #[test]
     fn a_group_locks_while_it_plays_then_unlocks() {
         run(|| async {
@@ -855,6 +887,149 @@ mod ui_tests {
         });
     }
 
+    /// A session the app stops under, with no Exit — a crash, the phone
+    /// taking the app back — keeps what Exit would have
+    /// kept then: the groups answered, in the history, and counted towards
+    /// the level's run, which here earns a level. The next launch keeps it
+    /// and says so; nothing was stored while it ran.
+    #[test]
+    fn a_session_the_app_stops_under_keeps_what_was_answered() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.auto_level.auto_adjust_level = true;
+            settings.auto_level.auto_adjust_above_threshold_count = 1;
+            settings.auto_level.auto_adjust_threshold = 50.0;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            let store = ui.store.clone();
+            assert!(store.load_sessions().is_empty(), "stored mid-session");
+            drop(ui);
+
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
+            let kept = store.load_sessions();
+            assert_eq!(kept.len(), 1, "the session was kept");
+            assert_eq!(kept[0].groups.len(), 1);
+            assert!(kept[0].groups[0].correct);
+            assert!(
+                ui.has("Dust closed while it ran. The groups you had answered were kept."),
+                "{}",
+                ui.html()
+            );
+            assert_eq!(
+                ui.with_app(|ctx| ctx.settings.peek().curriculum.level),
+                2,
+                "as Exit would have, it counted towards the level"
+            );
+            assert_eq!(store.open(), None, "kept once");
+            let (ui, _recorder) = Ui::launch(store.clone());
+            assert_eq!(store.load_sessions().len(), 1);
+            assert!(!ui.has("was cut off"));
+        });
+    }
+
+    /// A session the app stopped under just as it was stored, before its
+    /// mark was let go, is not kept again at the next launch: the mark holds
+    /// it as it was stored, and the history has it already.
+    #[test]
+    fn a_session_stored_as_the_app_stopped_is_kept_once() {
+        run(|| async {
+            let (mut ui, recorder) = awaiting_answer(test_settings()).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            ui.with_app(|_| crate::page_closed::close_app());
+            let store = ui.store.clone();
+            let kept = store.load_sessions();
+            assert_eq!(kept.len(), 1);
+            drop(ui);
+            // Its mark, as it was held while the history was stored.
+            store.mark_open(Some(OpenSession {
+                started_at: kept[0].timestamp,
+                run: false,
+                so_far: Some(Box::new(crate::persist::SoFar {
+                    result: kept[0].clone(),
+                    settings: None,
+                })),
+            }));
+
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
+            assert_eq!(store.load_sessions().len(), 1, "kept once");
+            assert_eq!(store.open(), None);
+            drop(ui);
+        });
+    }
+
+    /// A session going on as the app is closed — the window's close button,
+    /// the page left or reloaded — is ended there and then as Exit ends it,
+    /// and kept at once: the next launch has nothing cut off to tell of.
+    #[test]
+    fn closing_the_app_mid_session_keeps_it_at_once() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            ui.with_app(|_| crate::page_closed::close_app());
+            let store = ui.store.clone();
+            let kept = store.load_sessions();
+            assert_eq!(kept.len(), 1, "kept as the app closed");
+            assert_eq!(kept[0].groups.len(), 1);
+            assert_eq!(store.open(), None, "nothing left marked open");
+            drop(ui);
+
+            let (ui, _recorder) = Ui::launch(store.clone());
+            assert!(!ui.has("was cut off"));
+            assert_eq!(store.load_sessions().len(), 1);
+        });
+    }
+
+    /// A session ended as the app closes that earns a level stores the
+    /// level there and then, with the run it cleared to earn it: the window
+    /// is gone before the app's settings effect would have stored it, and
+    /// the level would be lost with the run.
+    #[test]
+    fn closing_the_app_as_a_session_earns_a_level_stores_the_level() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.auto_level.auto_adjust_level = true;
+            settings.auto_level.auto_adjust_above_threshold_count = 2;
+            settings.auto_level.auto_adjust_threshold = 50.0;
+            let key = cw_core::CountersKey::of(&settings);
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            // One session above the threshold already: this one earns it.
+            let run_so_far = cw_core::AutoLevelCounters { above: 1, below: 0 };
+            ui.store.save_auto_counters(&key, run_so_far);
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            let store = ui.store.clone();
+            // Read as the close is heard, before anything else of the app
+            // runs.
+            let level = ui.with_app(|_| {
+                crate::page_closed::close_app();
+                store.load_settings().curriculum.level
+            });
+            assert_eq!(level, 2, "the level the session earned");
+            assert_eq!(
+                store.load_auto_counters(&key),
+                cw_core::AutoLevelCounters::default(),
+                "the run that earned it, cleared"
+            );
+            drop(ui);
+
+            let (mut ui, _recorder) = Ui::launch(store);
+            assert_eq!(ui.with_app(|ctx| ctx.settings.peek().curriculum.level), 2);
+        });
+    }
+
     /// A session or run the last copy of the app stopped under is told of
     /// as the app opens, once, until it is put away. One another copy is
     /// still running is left to it, and told of if that copy stops under it
@@ -869,6 +1044,7 @@ mod ui_tests {
             store.mark_open(Some(OpenSession {
                 started_at,
                 run: false,
+                so_far: None,
             }));
             let (mut ui, _recorder) = Ui::launch(store.clone());
             ui.advance(20).await;
@@ -878,7 +1054,7 @@ mod ui_tests {
                 "{}",
                 ui.html()
             );
-            assert_eq!(store.open.get(), None, "told of once");
+            assert_eq!(store.open(), None, "told of once");
             ui.click("btn-dismiss-notice");
             assert!(!ui.has("was cut off"));
 
@@ -886,6 +1062,7 @@ mod ui_tests {
             store.mark_open(Some(OpenSession {
                 started_at,
                 run: true,
+                so_far: None,
             }));
             store.open_elsewhere.set(true);
             let (mut ui, _recorder) = Ui::launch(store.clone());
@@ -1067,6 +1244,7 @@ mod ui_tests {
             store.mark_open(Some(OpenSession {
                 started_at: crate::time::now_ms(),
                 run: false,
+                so_far: None,
             }));
             let (mut ui, _recorder) = Ui::launch(store);
             ui.advance(20).await;
@@ -1238,6 +1416,92 @@ mod ui_tests {
             ui.press_enter("group-input-0");
             assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
             assert_eq!(ui.store.load_sessions()[0].groups[0].received, "EEA");
+        });
+    }
+
+    /// A key right of P that keys a paddle into the box only by where it
+    /// sits, typing a character Dust sends — a German keyboard's `+` —
+    /// says why a letter landed there and how to type the `+` instead; a
+    /// `]`, which is the paddle by what it types, says nothing. It is said
+    /// once, and up long enough to read.
+    #[test]
+    fn a_character_keyed_by_place_into_the_box_says_how_to_type_it_once() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.curriculum.min_group_size = 3;
+            settings.curriculum.max_group_size = 3;
+            settings.playback.keyer_mode = cw_core::KeyerMode::IambicA;
+            settings.playback.keyer_wpm = 20.0;
+            let (mut ui, _recorder) = awaiting_answer(settings).await;
+            let toast =
+                |ui: &mut Ui| ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+            let dah = |ui: &mut Ui, key: &str, down: bool| {
+                let key = Key::Character(key.into());
+                if down {
+                    ui.press_key("group-input-0", key, Code::BracketRight);
+                } else {
+                    ui.release_key("group-input-0", key, Code::BracketRight);
+                }
+            };
+            dah(&mut ui, "]", true);
+            ui.advance(100).await;
+            dah(&mut ui, "]", false);
+            ui.advance(600).await;
+            assert!(box_shows(&ui, "T"), "{}", ui.input_tag("group-input-0"));
+            assert_eq!(toast(&mut ui), None, "a ] is the paddle by what it types");
+
+            dah(&mut ui, "+", true);
+            ui.advance(100).await;
+            dah(&mut ui, "+", false);
+            let told = toast(&mut ui).unwrap_or_default();
+            assert!(told.starts_with("That + keyed a paddle"), "{told}");
+            assert!(
+                told.contains("To type +, turn off Paddles on the keys right of P"),
+                "{told}"
+            );
+            ui.advance(u64::from(crate::state::TOAST_MS) + 100).await;
+            assert_eq!(
+                toast(&mut ui).as_deref(),
+                Some(told.as_str()),
+                "read through"
+            );
+            ui.advance(u64::from(crate::state::ACTION_TOAST_MS)).await;
+            assert_eq!(toast(&mut ui), None);
+            assert!(box_shows(&ui, "TT"), "{}", ui.input_tag("group-input-0"));
+
+            dah(&mut ui, "+", true);
+            ui.advance(100).await;
+            dah(&mut ui, "+", false);
+            assert_eq!(toast(&mut ui), None, "said once");
+            assert!(ui.store.told_of_paddle_keys(), "and remembered");
+        });
+    }
+
+    /// Told once on this install, it is not told again at the next launch:
+    /// a USB paddle keys through those keys every day.
+    #[test]
+    fn a_character_keyed_by_place_is_not_told_of_again_at_the_next_launch() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.curriculum.min_group_size = 3;
+            settings.curriculum.max_group_size = 3;
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.save_settings(&settings);
+            store.mark_tutorial_done();
+            store.told_of_paddle_keys.set(true);
+            let (mut ui, _recorder) = Ui::launch(store);
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let plus = Key::Character("+".into());
+            ui.press_key("group-input-0", plus.clone(), Code::BracketRight);
+            ui.advance(100).await;
+            ui.release_key("group-input-0", plus, Code::BracketRight);
+            ui.advance(600).await;
+            assert!(box_shows(&ui, "T"), "{}", ui.input_tag("group-input-0"));
+            assert_eq!(
+                ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text)),
+                None
+            );
         });
     }
 
@@ -2402,6 +2666,46 @@ mod ui_tests {
             // With nothing to type, it is an ordinary button.
             let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
             assert!(ui.mouse_down("btn-listen-to-letters"));
+        });
+    }
+
+    /// Enter in the hero's field keeps what was typed, and the field gives
+    /// way to the next the hero asks for, or to none: the cursor goes on to
+    /// that field, or to Start, rather than to nowhere with the field it was
+    /// in. A call that does not read keeps its field and the cursor, and a
+    /// field left by Tab or a click leaves the cursor where that took it.
+    #[test]
+    fn enter_in_the_heros_field_takes_the_cursor_on() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            let call = "field-your-callsign";
+            ui.type_into(call, "abc");
+            ui.press_enter(call);
+            ui.commit(call, "abc");
+            assert!(ui.shows(call));
+            assert!(ui.take_focused().is_empty(), "the cursor is still there");
+            ui.type_into(call, "dl1abc");
+            ui.press_enter(call);
+            ui.commit(call, "dl1abc");
+            assert!(!ui.shows(call));
+            assert_eq!(ui.take_focused(), ["field-your-name"]);
+            ui.type_into("field-your-name", "mat");
+            ui.press_enter("field-your-name");
+            ui.commit("field-your-name", "mat");
+            assert!(ui.has("You send 599 + name, as DL1ABC"));
+            assert_eq!(ui.take_focused(), ["btn-start-training"]);
+
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into(call, "dl1abc");
+            ui.press_key(call, Key::Tab, Code::Tab);
+            ui.commit(call, "dl1abc");
+            assert!(!ui.shows(call));
+            assert!(ui.take_focused().is_empty(), "Tab took it to Start");
         });
     }
 

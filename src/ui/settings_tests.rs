@@ -94,6 +94,24 @@ fn random_opens_every_fixed_value_into_a_range() {
     });
 }
 
+/// Sends per group says what the box does while a group is sent again, as
+/// Lock typing while sending has it: off, as it ships, you type along from
+/// the first send; on, the box opens once the last has gone.
+#[test]
+fn sends_per_group_says_when_you_can_type_as_the_lock_has_it() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.playback.lock_input_during_group_playback = false;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(ui.has("type along from the first send"), "{}", ui.html());
+        assert!(!ui.has("before the answer box opens"));
+        ui.commit("switch-lock-typing-while-sending", "true");
+        assert!(ui.has("before the answer box opens"));
+        assert!(!ui.has("type along from the first send"));
+    });
+}
+
 /// A number committed past what the field allows comes back as the most it
 /// allows, even when that is what the setting already was. Until then the
 /// 999 is the box's own: nothing is written over it while it is typed.
@@ -771,6 +789,23 @@ fn the_starter_list_unfolds_and_folds() {
     });
 }
 
+/// Auto level moves a level, and a word list has none: Words shows no Auto
+/// level card, where its switch used to promise a new character that never
+/// came. In Callsigns it says what it moves there, the callsign tier.
+#[test]
+fn auto_level_says_what_it_moves_and_is_gone_where_nothing_moves() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        assert!(!ui.shows("switch-adjust-the-level-for-me"), "{}", ui.html());
+        ui.click("seg-callsigns");
+        assert!(ui.shows("switch-adjust-the-level-for-me"));
+        assert!(ui.has("Moves to a harder callsign tier after a run of good sessions."));
+        assert!(!ui.has("Unlocks a new character"));
+        ui.click("seg-koch");
+        assert!(ui.has("Unlocks a new character after a run of good sessions."));
+    });
+}
+
 /// Callsigns are sent whole too: a few calls of the tier, with more to
 /// come, and no character on its own.
 #[test]
@@ -817,16 +852,55 @@ fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
         let stored = ui.stored_settings().await;
         assert_eq!(stored.curriculum.word_list, ["PARIS", "CODEX", "73"]);
 
-        // Emptying the box goes back to the starter words.
+        // Emptying the box goes back to the starter words, as a message
+        // says, which offers Undo.
         ui.commit("field-word-list", "  \n");
-        assert_eq!(word_report(&ui), "Back to the starter words.");
+        assert!(ui.has("Back to the starter words"), "{}", ui.html());
+        assert!(ui.shows("toast-undo"));
+        assert_eq!(word_report(&ui), "");
         assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
     });
 }
 
+/// The paddles are on the keys right of P by place, as they ship, but in
+/// the boxes they key nothing into those keys type: the starter words' `+`
+/// and `=` in the word list, on a German keyboard or a Dvorak, and a
+/// Dvorak's `/` in the unlock order. Out of the box, they are the paddles
+/// again, and kept from the page.
+#[test]
+fn the_keys_right_of_p_type_in_the_word_list_and_the_unlock_order() {
+    run(|| async {
+        use dioxus::prelude::{Code, Key};
+        // Whether the page left the key to type.
+        let press = |ui: &mut Ui, at: &str, typed: &str, code: Code| {
+            let key = Key::Character(typed.into());
+            let left = ui.press_key(at, key.clone(), code);
+            ui.release_key(at, key, code);
+            left
+        };
+        let (mut ui, _recorder) = on_words();
+        assert!(ui.stored_settings().await.playback.paddle_keys_by_place);
+        let words = "field-word-list";
+        ui.focus(words);
+        assert!(press(&mut ui, words, "+", Code::BracketRight), "+ kept");
+        assert!(press(&mut ui, words, "=", Code::BracketRight), "= kept");
+        ui.blur(words);
+        assert!(!press(&mut ui, words, "+", Code::BracketRight));
+        ui.advance(1_000).await;
+
+        ui.click("seg-koch");
+        let order = "field-sequence-order";
+        ui.focus(order);
+        assert!(press(&mut ui, order, "/", Code::BracketLeft), "/ kept");
+        ui.blur(order);
+        assert!(!press(&mut ui, order, "/", Code::BracketLeft));
+    });
+}
+
 /// A text file loads as the words, and says what it came to; Starter words
-/// puts the starter list back.
+/// puts the starter list back, and Undo the words again: the box shows
+/// them, and the line under it counts them.
 #[test]
 fn a_text_file_loads_as_the_words() {
     run(|| async {
@@ -842,8 +916,19 @@ fn a_text_file_loads_as_the_words() {
         );
 
         ui.click("btn-starter-words");
-        assert_eq!(word_report(&ui), "Back to the starter words.");
+        assert!(ui.has("Back to the starter words"), "{}", ui.html());
+        assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
+
+        ui.click("toast-undo");
+        assert!(!ui.shows("toast-undo"));
+        assert_eq!(value_of(&ui, "field-word-list"), "CQ\nDE\nTEST");
+        assert_eq!(word_report(&ui), "3 words");
+        assert!(ui.has("Your own words, sent whole · 3 words"));
+        assert_eq!(
+            ui.stored_settings().await.curriculum.word_list,
+            ["CQ", "DE", "TEST"]
+        );
     });
 }
 
@@ -1393,6 +1478,33 @@ fn the_character_sets_reset_leaves_an_order_of_ones_own() {
         let stored = ui.stored_settings().await;
         assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Mixed);
         assert_eq!(stored.curriculum.word_list, ["PARIS"]);
+    });
+}
+
+/// A preset tried in place of an unlock order of the learner's own does
+/// not cost it: Your own brings it back, whichever presets were tried, and
+/// it is stored aside meanwhile.
+#[test]
+fn a_preset_tried_keeps_an_unlock_order_of_ones_own() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.commit("field-sequence-order", "ZQXJKMRSU");
+        ui.click("pill-morsemania");
+        assert_eq!(
+            value_of(&ui, "field-sequence-order"),
+            "KMRSUAPTLOWINJEF0YVG5Q9ZH38B?427C16DX/=+"
+        );
+        ui.click("pill-lcwo");
+        let stored = ui.stored_settings().await.curriculum.kept_sequence;
+        assert_eq!(stored.iter().collect::<String>(), "ZQXJKMRSU");
+
+        ui.click("pill-your-own");
+        assert!(ui.input_tag("pill-your-own").contains("active"));
+        assert_eq!(value_of(&ui, "field-sequence-order"), "ZQXJKMRSU");
+        assert!(ui.has("Unlocked in your own order"));
+        let stored = ui.stored_settings().await.curriculum.custom_sequence;
+        assert_eq!(stored.iter().collect::<String>(), "ZQXJKMRSU");
     });
 }
 

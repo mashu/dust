@@ -461,6 +461,8 @@ fn stats_count_sessions_from_every_character_set() {
     assert!(html.contains("2 sessions ·"));
     // Average of 90% and 70%.
     assert!(html.contains("80%"));
+    // Neither session is long enough to be a best.
+    assert!(html.contains(r#"<div class="tiny">Best</div><div class="value">—</div>"#));
 }
 
 #[test]
@@ -479,6 +481,7 @@ fn auto_level_card_shows_both_meters() {
                     alternating_mixed: true,
                     next_mixed_axis: Some(MixedAutoLevelAxis::Letters),
                     judged_at: None,
+                    judged_on_reached: false,
                 },
             }
         }
@@ -487,6 +490,7 @@ fn auto_level_card_shows_both_meters() {
     assert!(html.contains("3/5"));
     assert!(html.contains("90% to pass"));
     assert!(!html.contains("Adapt speed to me"));
+    assert!(!html.contains("Adapt group size to me"));
 }
 
 /// With adaptive speed steering, the card says where a session counts.
@@ -505,15 +509,83 @@ fn auto_level_card_says_where_adaptive_speed_counts() {
                     below_disabled: false,
                     alternating_mixed: false,
                     next_mixed_axis: None,
-                    judged_at: Some((15.0, 30.0)),
+                    judged_at: Some(((15.0, 15.0), (30.0, 30.0))),
+                    judged_on_reached: false,
                 },
             }
         }
     });
     assert!(html.contains("90% to pass"), "{html}");
     assert!(html.contains(
-        "a session counts only once it comes at the top of your speed range, 30 WPM, or its bottom, 15 WPM. In between it counts neither way."
+        "a session counts only once it comes at the top of your speed range, 30 WPM, or its bottom, 15 WPM, and is judged on the groups sent there. In between it counts neither way."
     ));
+    assert!(!html.contains("Character/Effective"));
+}
+
+/// Under Farnsworth, the ends are named as the Speed settings put them,
+/// not as the copy speed the characters and the spacing make together:
+/// Character speed 20 with Effective speed 8 to 15 used to read "17 WPM"
+/// and "13 WPM", which no setting shows.
+#[test]
+fn auto_level_card_names_the_ends_as_the_speed_settings_do() {
+    let html = render(|| {
+        rsx! {
+            AutoLevelCard {
+                progress: AutoLevelProgress {
+                    threshold: 90.0,
+                    above_count: 0,
+                    above_target: 2,
+                    below_count: 0,
+                    below_target: 1,
+                    above_disabled: false,
+                    below_disabled: false,
+                    alternating_mixed: false,
+                    next_mixed_axis: None,
+                    judged_at: Some(((20.0, 8.0), (20.0, 15.0))),
+                    judged_on_reached: false,
+                },
+            }
+        }
+    });
+    assert!(
+        html.contains("top of your speed range, 20/15 WPM, or its bottom, 20/8 WPM"),
+        "{html}"
+    );
+    assert!(html.contains("Each reads Character/Effective speed."));
+}
+
+/// With adaptive group size steering, a session is judged on what was
+/// reached, not the accuracy it shows, and the card says so: Last accuracy
+/// under the chip's threshold while Up still counts is no contradiction.
+#[test]
+fn auto_level_card_says_how_adaptive_group_size_is_judged() {
+    let html = render(|| {
+        rsx! {
+            AutoLevelCard {
+                progress: AutoLevelProgress {
+                    threshold: 90.0,
+                    above_count: 1,
+                    above_target: 2,
+                    below_count: 0,
+                    below_target: 1,
+                    above_disabled: false,
+                    below_disabled: false,
+                    alternating_mixed: false,
+                    next_mixed_axis: None,
+                    judged_at: None,
+                    judged_on_reached: true,
+                },
+            }
+        }
+    });
+    assert!(
+        html.contains(
+            "Adapt group size to me is on: a session is judged on the characters you reached."
+        ),
+        "{html}"
+    );
+    assert!(html.contains("a session can pass with its own accuracy under the threshold"));
+    assert!(!html.contains("Adapt speed to me"));
 }
 
 #[test]
@@ -652,7 +724,7 @@ fn settings_renders_every_card() {
         "disclosure-recognition",
         "disclosure-character-sampling",
         "disclosure-display",
-        "Practice stays on this device",
+        "No account, no ads, no analytics",
         "disclosure-privacy",
         "Credits",
         "The people who make Dust",
@@ -690,8 +762,8 @@ fn settings_renders_every_card() {
         r#"aria-label="Character speed, min (WPM)""#,
         r#"aria-label="Character speed, max (WPM)""#,
         r#"aria-label="Decrease Group size, min (characters)""#,
-        r#"aria-label="Random character speed" aria-pressed="true""#,
-        r#"aria-label="Random sends per group" aria-pressed="false""#,
+        r#"aria-label="Random character speed""#,
+        r#"aria-label="Fixed sends per group""#,
         r#"aria-label="Help on Speed""#,
         r#"aria-label="Help on Band conditions""#,
         r#"role="group" aria-label="Key""#,
@@ -707,6 +779,22 @@ fn settings_renders_every_card() {
     }
     assert!(!html.contains(r#"aria-label="What does this mean?""#));
     assert_eq!(html.matches(r#"aria-label="Min (WPM)""#).count(), 0);
+    // Each Fixed/Random toggle is named by the word it shows, so that
+    // "click Fixed" finds it, and, as that word changes when it is
+    // pressed, says no pressed state besides.
+    let toggles: Vec<&str> = html.split(r#"id="link-"#).skip(1).collect();
+    assert!(toggles.len() > 4, "{html}");
+    for toggle in toggles {
+        let (tag, rest) = toggle.split_once('>').unwrap_or_default();
+        let shown = rest
+            .split("</button>")
+            .next()
+            .and_then(|inner| inner.rsplit('>').next())
+            .unwrap_or_default();
+        assert!(matches!(shown, "Fixed" | "Random"), "{toggle}");
+        assert!(tag.contains(&format!(r#"aria-label="{shown} "#)), "{tag}");
+        assert!(!tag.contains("aria-pressed"), "{tag}");
+    }
 }
 
 /// In Contest mode the Character set card shows the contest in place of an
@@ -753,7 +841,7 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
             "CQ zone 14",
             "WPX prefix DL1",
         ]),
-        "Stored on this device only.",
+        "Dust never sends it off this device.",
         "Minutes per run",
         "Band activity",
     ] {
@@ -831,7 +919,7 @@ fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
         r#"id="contest-cq-wpx" class="pill""#,
         "You send 599 + name\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}NAME",
         ">CQ CQ DE DL1ABC DL1ABC K<",
-        ">DL1ABC DE K5XYZ K5XYZ K<",
+        ">DL1ABC DE K5XYZ K<",
         ">K5XYZ DE DL1ABC UR 599 599 NAME &#60;your name&#62; &#60;your name&#62; BK<",
         ">R TNX UR 579 579 NAME BOB BOB BK<",
         ">TU BOB 73 EE<",
@@ -1659,8 +1747,9 @@ fn a_contest_run_is_placed_among_runs_of_its_contest() {
 fn results_say_where_the_session_stands_on_the_board() {
     fn long() -> SessionResult {
         let mut result = session("2026-09-03", 0.9);
-        result.groups = (0..5).flat_map(|_| result.groups.clone()).collect();
-        result.score = 600.0;
+        result.groups = vec![result.groups[0].clone(); 10];
+        // Twenty characters sent, copied clean: 60 points for every five.
+        result.score = 240.0;
         result
     }
     let best = render(|| {
@@ -1993,7 +2082,7 @@ fn training_without_repeats_omits_the_counter() {
     assert!(!html.contains("per group"));
     // One short line to answer by. How to key with the paddles is said on
     // the settings screen, beside them.
-    assert!(html.contains(">Type what you heard — no rush.<"), "{html}");
+    assert!(html.contains(">Type what you heard.<"), "{html}");
     assert!(!html.contains("dits"), "{html}");
     // The confirmed group shows its comparison.
     assert!(html.contains("ch sent-row"));
@@ -2478,7 +2567,7 @@ mod interactions {
             },
         );
         assert!(ui.shows("pill-all-modes") && ui.shows("pill-contest"));
-        assert!(ui.has("A WPX run earns about 30% less a group"));
+        assert!(ui.has("Runs are rated here as any session is"));
         assert!(!ui.shows("kind-cq-wpx"), "no contest chosen yet");
         ui.click("pill-contest");
         assert!(
@@ -2486,7 +2575,7 @@ mod interactions {
             "{}",
             ui.html()
         );
-        assert!(!ui.has("A WPX run earns about 30% less a group"));
+        assert!(!ui.has("Runs are rated here as any session is"));
         assert!(ui.has("Ranked by verified contest score, of what was logged clean, among runs set to 10 minutes."));
         assert!(ui.has("The board takes runs of 5 minutes or more that hold 10 groups or more"));
         assert!(ui.has(" verified points</span>"), "{}", ui.html());
@@ -2576,6 +2665,31 @@ mod interactions {
         let mut ui = stats(true, CharSetMode::Callsign);
         ui.click("seg-sampling");
         assert!(ui.has(">Speed<"));
+    }
+
+    /// Before any session of the set chosen, the Group length and Speed
+    /// cards say there is none to read, rather than reading the model's
+    /// first guess out as how you copy.
+    #[test]
+    fn the_sampling_cards_say_when_there_is_no_history_to_read() {
+        let mut ui = stats(true, CharSetMode::Koch);
+        ui.click("seg-sampling");
+        assert!(ui.has(">Group length<") && ui.has(">Speed<"));
+        assert_eq!(
+            ui.html().matches("No Koch sessions to read yet.").count(),
+            2,
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Your aim ·"));
+        assert!(!ui.has("Across your range"));
+        assert!(!ui.shows("next-length-2") && !ui.shows("next-speed-16"));
+
+        // The set with a history reads it.
+        let mut ui = stats(true, CharSetMode::Mixed);
+        ui.click("seg-sampling");
+        assert!(!ui.has("No Mixed sessions"));
+        assert!(ui.has(">Your aim · 70% whole<") && ui.has(">Your aim · 94% right<"));
     }
 
     /// Mixed history from `history`, and a Koch session that missed Q, seen
@@ -2848,7 +2962,9 @@ mod interactions {
         assert!(ui.has("class=\"help-note\""));
         assert!(ui.has(">Under your 10%<"), "{}", ui.html());
         assert!(
-            ui.has("what your Auto level threshold of 90% right leaves (Settings → Auto level)")
+            ui.has(
+                "what your Auto level threshold of 90% right leaves (Settings → Auto level, in a mode with a level to move)"
+            )
         );
         assert!(
             ui.input_tag("help-what-comes-up-next")
@@ -2947,10 +3063,22 @@ mod interactions {
     }
 
     /// A mouse opens a day's card by pointing at the square and closes it by
-    /// M after K copied wrong four times in five, taken for N; M after U
-    /// right six times out of six.
+    /// M after K copied wrong sixteen times in twenty, taken for N; M after
+    /// U right twenty-four times out of twenty-four.
     #[component]
     fn MistakesHarness() -> Element {
+        let mut groups = vec![("KM", "KN"); 16];
+        groups.extend([("KM", "KM"); 4]);
+        groups.extend([("UM", "UM"); 24]);
+        rsx! {
+            crate::ui::stats_detail::MistakesTab { sessions: vec![stored_session("2026-09-08", &groups)] }
+        }
+    }
+
+    /// The same shares as [`MistakesHarness`], over a quarter of the tries:
+    /// M after K wrong four times in five, M after U right six times.
+    #[component]
+    fn FewMistakesHarness() -> Element {
         let mut groups = vec![("KM", "KN"); 4];
         groups.push(("KM", "KM"));
         groups.extend([("UM", "UM"); 6]);
@@ -2968,7 +3096,7 @@ mod interactions {
         let ui = Ui::new(MistakesHarness, ());
         assert!(ui.has("Hardest pairs"));
         assert!(ui.has("class=\"pair-name\">M after K<"), "{}", ui.html());
-        assert!(ui.has(">4 of 5<"));
+        assert!(ui.has(">16 of 20<"));
         assert!(ui.has(">80% here · M 36% overall<"));
         // The bar marks where M stands overall.
         assert!(ui.has("class=\"bar-mark\" style=\"left: 36.4%;\""));
@@ -2983,10 +3111,19 @@ mod interactions {
         assert!(unheard.contains("aria-label=\"K after K: not heard yet\""));
         assert!(
             ui.input_tag("pair-k-m")
-                .contains("aria-label=\"M after K: 4 of 5 wrong\"")
+                .contains("aria-label=\"M after K: 16 of 20 wrong\"")
         );
         assert!(ui.has("Tap a pair for details."));
         assert!(!ui.has("pair-card"));
+
+        // The same shares over five tries could be chance.
+        let mut few = Ui::new(FewMistakesHarness, ());
+        assert!(few.has("No pair stands out yet"), "{}", few.html());
+        assert!(!few.has("class=\"pair-name\""));
+        few.click("pair-k-m");
+        assert!(few.has(
+            ">Wrong 2.2× as often as M overall, but over too few tries to tell from chance.<"
+        ));
     }
 
     /// Each confusion shows the two characters in Morse, the elements that
@@ -2997,7 +3134,7 @@ mod interactions {
         assert!(ui.has(">Common confusions<"));
         let html = ui.html();
         let at = html
-            .find("aria-label=\"M taken for N: 4 times, 36% of every M sent\"")
+            .find("aria-label=\"M taken for N: 16 times, 36% of every M sent\"")
             .expect("M taken for N");
         let row = &html[at..];
         let row = &row[..row.find("of every M<").expect("its share")];
@@ -3008,7 +3145,7 @@ mod interactions {
             .map(|rest| rest.split('"').next().unwrap_or(""))
             .collect();
         assert_eq!(marks, ["dah", "dah differs", "dah", "dit differs"]);
-        assert!(row.contains(">4×<"));
+        assert!(row.contains(">16×<"));
         assert!(row.contains("width: 36.4%;"));
         assert!(!ui.has("Once each"), "one confusion, drawn in full");
     }
@@ -3043,11 +3180,11 @@ mod interactions {
         assert_eq!(first_square(&ui), "pair-k-m");
     }
 
-    /// Three sessions of twenty groups, the first ten copied clean, then
-    /// two groups in the third five each with a character wrong, and three
-    /// in the last five.
+    /// `sessions` sessions of twenty groups, the first ten copied clean,
+    /// then two groups in the third five each with a character wrong, and
+    /// three in the last five.
     #[component]
-    fn EnduranceHarness(long: bool) -> Element {
+    fn EnduranceHarness(long: bool, sessions: usize) -> Element {
         let mut groups = vec![("KM", "KM"); 10];
         groups.extend([("KM", "KE"); 2]);
         groups.extend([("KM", "KM"); 3]);
@@ -3056,7 +3193,7 @@ mod interactions {
         if !long {
             groups.truncate(8);
         }
-        let sessions = (0..3)
+        let sessions = (0..sessions)
             .map(|_| stored_session("2026-09-08", &groups))
             .collect();
         rsx! {
@@ -3065,13 +3202,20 @@ mod interactions {
     }
 
     /// The Endurance card says how far into a session copy holds, and
-    /// before there are sessions long enough, what it takes.
+    /// before there are sessions long enough, what it takes. Three sessions
+    /// are too few to call the same dips a fade.
     #[test]
     fn the_endurance_card_says_how_far_copy_holds() {
-        let ui = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: true });
+        let ui = Ui::new(
+            EnduranceHarness,
+            EnduranceHarnessProps {
+                long: true,
+                sessions: 12,
+            },
+        );
         assert!(ui.has(">Endurance<"));
         assert!(
-            ui.has("Accuracy as a session goes on · Koch · last 3 sessions"),
+            ui.has("Accuracy as a session goes on · Koch · last 12 sessions"),
             "{}",
             ui.html()
         );
@@ -3087,7 +3231,28 @@ mod interactions {
         assert_eq!(ui.html().matches("class=\"endu-bar fades\"").count(), 2);
         assert_eq!(ui.html().matches("class=\"endu-bar first\"").count(), 1);
 
-        let short = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: false });
+        let few = Ui::new(
+            EnduranceHarness,
+            EnduranceHarnessProps {
+                long: true,
+                sessions: 3,
+            },
+        );
+        assert!(few.has("class=\"endu-headline good\">Steady through group 20<"));
+        assert!(
+            few.has(
+                "Some stretches dip below it, but no further than chance would over 3 sessions"
+            )
+        );
+        assert!(!few.has("class=\"endu-bar fades\""));
+
+        let short = Ui::new(
+            EnduranceHarness,
+            EnduranceHarnessProps {
+                long: false,
+                sessions: 3,
+            },
+        );
         assert!(short.has(">Endurance<"));
         assert!(
             short
@@ -3107,12 +3272,12 @@ mod interactions {
             "class=\"tip-date\">M after K<",
             ">Wrong<",
             ">80%<",
-            ">4 of 5<",
+            ">16 of 20<",
             ">M overall<",
             ">36%<",
-            ">4 of 11<",
+            ">16 of 44<",
             ">Taken for<",
-            ">N 4×<",
+            ">N 16×<",
             ">Wrong 2.2× as often as M overall: the pair is the trouble.<",
         ] {
             assert!(ui.has(text), "no {text} on the card: {}", ui.html());
@@ -3962,6 +4127,117 @@ mod interactions {
             ui.advance(1_000).await;
             assert!(ui.has(">E<"), "{}", ui.html());
         });
+    }
+
+    /// A field the paddles key nothing into, the unlock order, with the
+    /// paddles beside it, keyed as on Linux by the window as well where
+    /// `on_linux`; and a button that takes the field off the page.
+    #[component]
+    fn TypedFieldHarness(on_linux: bool) -> Element {
+        let mut shown = use_signal(|| true);
+        rsx! {
+            Keyed { screen: Screen::Settings, on_linux,
+                if shown() {
+                    crate::ui::widgets::TextField {
+                        label: "Sequence order",
+                        value: String::new(),
+                        on_commit: move |_: String| {},
+                    }
+                }
+                button {
+                    id: control_id("btn", "drop field"),
+                    onclick: move |_| shown.set(false),
+                }
+                WindowPlus {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// Buttons that hand the paddles what the desktop's window hears on
+    /// Linux: a German keyboard's `+`, pressed and let go.
+    #[component]
+    fn WindowPlus() -> Element {
+        let keys = use_context::<PaddleKeys>();
+        rsx! {
+            button {
+                id: control_id("btn", "window plus down"),
+                onclick: move |_| window_key(keys, "+", "BracketRight", true),
+            }
+            button {
+                id: control_id("btn", "window plus up"),
+                onclick: move |_| window_key(keys, "+", "BracketRight", false),
+            }
+        }
+    }
+
+    /// A German keyboard's `+` pressed in `at` and let go, heard by the
+    /// root and, `on_linux`, by the window as well: whether the page left
+    /// it to type.
+    async fn tap_plus(ui: &mut Ui, at: &str, on_linux: bool) -> bool {
+        let plus = Key::Character("+".into());
+        let left = ui.press_key(at, plus.clone(), Code::BracketRight);
+        if on_linux {
+            ui.click("btn-window-plus-down");
+        }
+        ui.advance(100).await;
+        ui.release_key(at, plus, Code::BracketRight);
+        if on_linux {
+            ui.click("btn-window-plus-up");
+        }
+        ui.advance(1_000).await;
+        left
+    }
+
+    /// In a field the paddles key nothing into, the keys right of P type
+    /// what they type, paddles by place or not: a German keyboard's `+` is
+    /// left to the unlock order and keys nothing, from the page or, on
+    /// Linux, the window, while a `[` is still a paddle, kept from the
+    /// field. With the cursor gone from the field, or the field gone from
+    /// the page with the cursor in it, the `+` is the dah again.
+    #[test]
+    fn a_bracket_key_types_in_a_field_the_paddles_key_nothing_into() {
+        for on_linux in [false, true] {
+            crate::testing::run(|| async move {
+                let mut ui = Ui::new(TypedFieldHarness, TypedFieldHarnessProps { on_linux });
+                let field = "field-sequence-order";
+                assert!(
+                    ui.input_tag(field).contains(r#"data-typed="true""#),
+                    "{}",
+                    ui.input_tag(field)
+                );
+                ui.focus(field);
+                assert!(
+                    tap_plus(&mut ui, field, on_linux).await,
+                    "the + was kept from the field"
+                );
+                assert!(ui.has(">· −<"), "a paddle keyed: {}", ui.html());
+                let dit = Key::Character("[".into());
+                assert!(
+                    !ui.press_key(field, dit.clone(), Code::BracketLeft),
+                    "the [ was left to the field"
+                );
+                ui.advance(30).await;
+                ui.release_key(field, dit, Code::BracketLeft);
+                ui.advance(1_000).await;
+
+                ui.blur(field);
+                assert!(
+                    !tap_plus(&mut ui, "keyed-root", on_linux).await,
+                    "the + was left to the page"
+                );
+                // The root keyed the `[` too, but for the window on Linux.
+                let heard = if on_linux { ">T<" } else { ">ET<" };
+                assert!(ui.has(heard), "{}", ui.html());
+
+                ui.focus(field);
+                ui.click("btn-drop-field");
+                assert!(!ui.shows(field));
+                assert!(!tap_plus(&mut ui, "keyed-root", on_linux).await);
+                let heard = if on_linux { ">TT<" } else { ">ETT<" };
+                assert!(ui.has(heard), "{}", ui.html());
+            });
+        }
     }
 
     /// The window losing the focus, or the page going, takes the key

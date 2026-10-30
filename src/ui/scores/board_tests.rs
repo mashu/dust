@@ -5,10 +5,10 @@ use super::*;
 use crate::testing::{Ui, assisted, stored_run, stored_session};
 use crate::ui::format::ordinal;
 
-/// A session of ten groups on the `day`th of October 2026, that earned
-/// `per_group` each.
+/// A session of ten groups of five on the `day`th of October 2026, that
+/// earned `per_group` each.
 fn run_of(day: u32, per_group: f64, mode: CharSetMode) -> SessionResult {
-    let mut session = stored_session(&format!("2026-10-{day:02}"), &[("KM", "KM"); 10]);
+    let mut session = stored_session(&format!("2026-10-{day:02}"), &[("KMRSU", "KMRSU"); 10]);
     session.timestamp = 1_790_000_000_000 + u64::from(day) * 86_400_000;
     session.score = per_group * 10.0;
     session.char_set_mode = mode;
@@ -226,10 +226,10 @@ fn a_board_of_runs_alone_names_the_run_rule() {
         ui.html()
     );
     assert!(!ui.has("over sessions of"));
-    assert!(!ui.has("A WPX run earns about 30% less"));
+    assert!(!ui.has("Runs are rated here as any session is"));
 
     let ui = board(vec![wpx_run(1, 5), koch(2, 40.0)]);
-    assert!(ui.has("A WPX run earns about 30% less"));
+    assert!(ui.has("Runs are rated here as any session is"));
     assert!(ui.has("over sessions of 10 groups or more"));
 }
 

@@ -1,8 +1,6 @@
 //! The shapes the Stats sparklines are drawn from: where each session sits,
 //! and the SVG lines, paths and bands through them.
 
-use cw_core::Estimate;
-
 // 420×96 keeps the drawing box at the same aspect the card gives it, so the
 // SVG can scale uniformly: stretched coordinates would turn the dots into
 // ellipses and thin the stroke unevenly.
@@ -65,8 +63,8 @@ pub fn marks(coords: &[(f64, f64)], sessions: usize) -> Vec<(f64, f64)> {
 }
 
 /// An estimate over sessions — the copy span, the copy speed — drawn as its
-/// mean, with a band one standard deviation either side that narrows as the
-/// estimate firms up.
+/// mean, with a band about one standard deviation either side that narrows
+/// as the estimate firms up.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrendChart {
     pub line: String,
@@ -77,26 +75,27 @@ pub struct TrendChart {
     pub high: f64,
 }
 
-/// The chart of `estimates`, one a session, oldest first. Nothing to draw
-/// without one.
-pub fn trend_chart(estimates: &[Estimate]) -> Option<TrendChart> {
-    if estimates.is_empty() {
+/// The chart of `bands`, one a session, oldest first, each as (below,
+/// mean, above). Nothing to draw without one.
+pub fn trend_chart(bands: &[(f64, f64, f64)]) -> Option<TrendChart> {
+    if bands.is_empty() {
         return None;
     }
-    let below = |e: &Estimate| e.mean - e.sd;
-    let above = |e: &Estimate| e.mean + e.sd;
-    let low = estimates.iter().map(below).fold(f64::INFINITY, f64::min);
-    let high = estimates
+    let low = bands
         .iter()
-        .map(above)
+        .map(|(below, _, _)| *below)
+        .fold(f64::INFINITY, f64::min);
+    let high = bands
+        .iter()
+        .map(|(_, _, above)| *above)
         .fold(f64::NEG_INFINITY, f64::max);
     let low = low.floor().max(0.0);
     let high = high.ceil().max(low + 2.0);
     let y_at = |value: f64| (CHART_H - (value - low) / (high - low) * CHART_H).clamp(0.0, CHART_H);
 
-    let means: Vec<f64> = estimates.iter().map(|e| e.mean).collect();
-    let tops: Vec<f64> = estimates.iter().map(above).collect();
-    let bottoms: Vec<f64> = estimates.iter().map(below).collect();
+    let means: Vec<f64> = bands.iter().map(|(_, mean, _)| *mean).collect();
+    let tops: Vec<f64> = bands.iter().map(|(_, _, above)| *above).collect();
+    let bottoms: Vec<f64> = bands.iter().map(|(below, _, _)| *below).collect();
     let coords = series(&means, y_at);
     let edge = series(&tops, y_at)
         .into_iter()
@@ -105,7 +104,7 @@ pub fn trend_chart(estimates: &[Estimate]) -> Option<TrendChart> {
     Some(TrendChart {
         line: polyline(&coords),
         band: format!("{} Z", path(edge)),
-        dots: marks(&coords, estimates.len()),
+        dots: marks(&coords, bands.len()),
         low,
         high,
     })
@@ -115,8 +114,8 @@ pub fn trend_chart(estimates: &[Estimate]) -> Option<TrendChart> {
 mod tests {
     use super::*;
 
-    fn estimate(mean: f64, sd: f64) -> Estimate {
-        Estimate { mean, sd }
+    fn estimate(mean: f64, sd: f64) -> (f64, f64, f64) {
+        (mean - sd, mean, mean + sd)
     }
 
     #[test]

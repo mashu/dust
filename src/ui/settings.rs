@@ -105,6 +105,8 @@ pub fn SettingsView(
     // set a preset for.
     let contest =
         use_memo(move || settings.read().curriculum.char_set_mode == CharSetMode::Contest)();
+    // Nor has a word list a level for auto level to move.
+    let levels = use_memo(move || settings.read().curriculum.char_set_mode.levels())();
     rsx! {
         div { class: "stack",
             header { class: "page-head",
@@ -131,7 +133,7 @@ pub fn SettingsView(
             SpeedCard { settings }
             SessionShapeCard { settings }
             ToneCard { settings }
-            if !contest {
+            if levels {
                 AutoLevelSettingsCard { settings }
             }
             BandConditionsCard {
@@ -329,6 +331,13 @@ fn AimFor(settings: Signal<TrainingSettings>, aim: Aim, note: String) -> Element
 fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
     let shape = use_memo(move || SessionShape::of(&settings.read()));
     let s = shape.read();
+    // When the box takes typing while a group is sent again, as the lock
+    // has it.
+    let repeat_hint = if s.lock_input {
+        "Each group is sent this many times before the answer box opens — one word space apart, like a station repeating its call. Switch to Random to vary it per group."
+    } else {
+        "Each group is sent this many times, one word space apart, like a station repeating its call: type along from the first send. Switch to Random to vary it per group."
+    };
     rsx! {
         div { class: "card stack-sm",
             SectionHead {
@@ -456,7 +465,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     min_bound: f64::from(GROUP_REPEAT_MIN),
                     max_bound: f64::from(GROUP_REPEAT_MAX),
                     step: 1.0,
-                    hint: "Each group is repeated this many times before the answer box opens — one word space apart, like a station repeating its call. Switch to Random to vary it per group.",
+                    hint: repeat_hint,
                 }
                 Switch {
                     title: "Lock typing while sending",
@@ -500,7 +509,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
             }
             Switch {
                 title: "Paddles on the keys right of P",
-                description: "The two keys right of P are the paddles, whatever your keyboard types on them, as a USB paddle needs. Turn this off to type what they type, such as + on a German keyboard; then only [ and ] key the paddles.",
+                description: "The two keys right of P are the paddles, whatever your keyboard types on them, as a USB paddle needs; in a box they key nothing into, such as your words or your call, they type. Turn this off to type what they type in the answer box too, such as + on a German keyboard or / and = on a Dvorak; then only [ and ] key the paddles.",
                 checked: s.paddle_keys_by_place,
                 onchange: move |on| settings.write().playback.paddle_keys_by_place = on,
             }
@@ -904,6 +913,14 @@ fn use_auto_level(settings: Signal<TrainingSettings>) -> Memo<AutoLevelSettings>
 fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
     let auto = use_auto_level(settings);
     let a = auto.read();
+    // In Callsigns the level is the callsign tier: the shape of the calls
+    // climbs, not the characters.
+    let callsigns = use_memo(move || settings.read().curriculum.char_set_mode.sends_callsigns());
+    let does = if callsigns() {
+        "Moves to a harder callsign tier after a run of good sessions."
+    } else {
+        "Unlocks a new character after a run of good sessions."
+    };
     rsx! {
         div { class: "card stack-sm",
             SectionHead {
@@ -916,7 +933,7 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
             }
             Switch {
                 title: "Adjust the level for me",
-                description: "Unlocks a new character after a run of good sessions.",
+                description: does,
                 checked: a.auto_adjust_level,
                 onchange: move |on| settings.write().auto_level.auto_adjust_level = on,
             }

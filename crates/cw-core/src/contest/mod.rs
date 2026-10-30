@@ -71,7 +71,7 @@ pub(crate) use record::LAYOUT;
 pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use rules::{ContestRules, Fill, Multiplier, PerSide, Points, Scoring, Side};
-pub use score::{ContestScore, MyStation, Rates, ScoredQso, Tally, contest_score, rate_at};
+pub use score::{ContestScore, MyStation, Placed, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};
 pub use turn::{Fade, MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
 

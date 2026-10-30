@@ -21,7 +21,7 @@ use crate::{
     Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CallerHabits, CharSamplingState,
     CharSetMode, ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Fields, MonoMs, OpKey, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, Placed, QsoError,
     RECOGNITION_MAX_MS, Rng, RowStatus, RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso,
     Sender, SessionId, SessionPhase, SessionResult, SplitMix64, TrainingSettings, Transmission,
     WPM_MIN, align_group, compute_char_pool, contest_score, evaluate_auto_level,
@@ -520,7 +520,8 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 );
             }
             // Once a group is answered, only Discard leaves without keeping
-            // the session: a send stopped or failed, or End session, keeps it.
+            // the session: End session keeps it, and a send stopped or
+            // failed pauses it.
             if answered && event != SessionEvent::Abort {
                 assert!(
                     !effects.contains(&SessionEffect::AbortToHome),
@@ -548,7 +549,7 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                     "seed {seed} step {step}: counting down from {remaining} mid-session"
                 );
             }
-            if let SessionPhase::Paused { index } = machine.phase() {
+            if let SessionPhase::Paused { index, .. } = machine.phase() {
                 assert!(
                     index < groups
                         && machine
@@ -1979,6 +1980,7 @@ fn soak_contest_runs(style: RunStyle) {
                     call: &row.call,
                     fields: &row.fields,
                     check,
+                    placed: Placed::of(&row.call),
                 }),
                 RowStatus::Pending => None,
             })

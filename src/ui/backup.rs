@@ -20,6 +20,9 @@ pub struct Backups {
     /// A backup file this build hands over is known to be saved. A
     /// browser's download is only handed over: it may block it unsaid.
     pub confirmed: bool,
+    /// A backup file this build saves is kept inside the app, and deleted
+    /// with it, until it is moved out as this says.
+    pub inside_app: Option<&'static str>,
     pub on_save: EventHandler<()>,
     pub on_restore: EventHandler<Backup>,
 }
@@ -30,6 +33,9 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
 } else {
     "if this device's data is lost"
 };
+
+/// What a restore does: no more, and no less.
+const RESTORING: &str = "adds the sessions missing here and takes its settings, level included, though not this device's volume and paddle keys. Undo, in the message that follows, puts both back";
 
 /// The files offered to restore from. An Android picker that filters by
 /// type hides a backup that another app stored untyped, so on Android —
@@ -85,23 +91,44 @@ pub fn BackupCard(
         last,
         can_save,
         confirmed,
+        inside_app,
         on_save,
         on_restore,
     } = backups;
     let due = can_save && since >= BACKUP_DUE_AFTER;
     let last_day = last.and_then(day_of).map(|day| short_date(&day));
-    let saved = if confirmed {
-        "Last saved"
-    } else {
-        "Last handed to your browser"
+    let saved = |day: &str| match (confirmed, inside_app) {
+        (false, _) => format!("Last handed to your browser {day}"),
+        (true, Some(_)) => format!("Last saved {day} in Dust's folder"),
+        (true, None) => format!("Last saved {day}"),
     };
     let status = match (&last_day, since) {
-        (Some(day), 0) => format!("{saved} {day} · nothing new since"),
-        (Some(day), _) => format!("{saved} {day} · {} since", counted(since, "session")),
+        (Some(day), 0) => format!("{} · nothing new since", saved(day)),
+        (Some(day), _) => format!("{} · {} since", saved(day), counted(since, "session")),
         (None, _) => "No backup yet".to_string(),
     };
-    let note = if !can_save {
-        "Bring in a backup saved by the web app or on a computer: restoring it adds the sessions missing here and takes its settings.".to_string()
+    let note = if let (true, Some(how)) = (can_save, inside_app) {
+        // Saved inside the app, a file goes with it: safe once moved out.
+        let move_out = format!("move it out of Dust's folder {how} to keep them safe");
+        if due && last.is_some() {
+            format!(
+                "{} since your last backup. Save a new one and {move_out}.",
+                counted(since, "session")
+            )
+        } else if due {
+            format!(
+                "{} and no backup yet. Save one and {move_out}, and to move them to another device.",
+                counted(since, "session")
+            )
+        } else {
+            format!(
+                "A backup file is saved in Dust's own folder, which goes if Dust is deleted: move each one out {how} to keep your history and settings safe. Restoring one {RESTORING}."
+            )
+        }
+    } else if !can_save {
+        format!(
+            "Bring in a backup saved by the web app or on a computer: restoring it {RESTORING}."
+        )
     } else if due && last.is_some() {
         format!(
             "{} since your last backup. A new one keeps them safe {AT_RISK}.",
@@ -114,7 +141,7 @@ pub fn BackupCard(
         )
     } else {
         format!(
-            "A backup file keeps your history and settings safe {AT_RISK}. Restoring one puts back whatever is missing here."
+            "A backup file keeps your history and settings safe {AT_RISK}. Restoring one {RESTORING}."
         )
     };
     rsx! {

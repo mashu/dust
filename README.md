@@ -14,11 +14,15 @@ Linux, Windows, macOS, Android or iOS from
 ## Build
 
 ```bash
-curl -sSL https://dioxus.dev/install.sh | bash   # once
+cargo install dioxus-cli --version 0.7.10 --locked   # once
 
 dx serve --platform desktop
 dx serve --platform web
 ```
+
+`dx` must match the `dioxus` in `Cargo.lock`. CI builds with the Rust release
+named by `RUST_TOOLCHAIN` in `.github/workflows`, so its lints are that
+release's.
 
 On Linux, install ALSA and WebKitGTK first:
 
@@ -36,10 +40,29 @@ cargo test -p cw-core
 cargo test -p dust --features desktop
 ```
 
+The app's tests draw a fresh seed on every run for the stations, calls and
+timing they meet. A test that fails says which seed it drew; give it back to
+draw the same run again:
+
+```bash
+DUST_TEST_SEED=1234567 cargo test -p dust --features desktop name_of_the_test
+```
+
+A failure in CI's silent build draws its seeds there, so replay it the same
+way, with `--no-default-features --features mobile-silent` in place of
+`--features desktop`.
+
+The tests of the page's key scripts run them in [Node](https://nodejs.org).
+Without Node on the path they say so and pass; CI has it, and fails them
+without it.
+
 ## Release
 
 Push a tag `v` + the version in `Cargo.toml`, e.g. `git tag v1.2.3 && git push
-origin v1.2.3`. CI builds every bundle and attaches it to the release.
+origin v1.2.3`, on a commit pushed to `main`. The release waits for that
+commit's CI run and stops unless it passed; then it builds every bundle and
+attaches it to the release. The Android APK needs the release key:
+[docs/platforms.md](docs/platforms.md#release-signing).
 
 ## License
 

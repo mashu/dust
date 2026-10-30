@@ -4,7 +4,7 @@ use crate::time::sleep_ms;
 
 /// Tips for training on groups.
 pub const TIPS: &[&str] = &[
-    "Hear the group first, then type it—let it buffer so you recognize whole letters and words.",
+    "Type each character the moment you hear it—that is how Stats → Letters times how fast you recognise it.",
     "Stay relaxed; short, regular sessions work better than long cramming.",
     "If you fall behind, press Next to move on to the next group, keep your rhythm and avoid pile-up.",
     "If you miss a letter, learn to let it go.",
@@ -13,7 +13,7 @@ pub const TIPS: &[&str] = &[
 /// Tips for a contest run, which has no groups to move on from.
 pub const CONTEST_TIPS: &[&str] = &[
     "Enter sends what the QSO needs next: CQ, then the call you typed with your exchange, then TU as it logs.",
-    "Not sure of the call? Type the part you have with a ? for the rest, K5?, and Enter asks for it again.",
+    "Not sure of the call? Type the part you have with a ? for the rest, K5?, and Enter asks for it again. Where ? is on a key right of P, that key is a paddle: turn off Paddles on the keys right of P to type it.",
     "Missed the number? Enter sends ? while the exchange is empty, and the station sends it again.",
     "Stay relaxed; short, regular sessions work better than long cramming.",
 ];

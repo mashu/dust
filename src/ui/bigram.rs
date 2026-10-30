@@ -2,10 +2,7 @@
 //! list, and every pair as a grid of squares, each one a button that shows
 //! the pair's card.
 
-use cw_core::{
-    BigramCell, BigramHeatmap, CharTally, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_MIN_TRIES,
-    HARD_PAIR_RATIO,
-};
+use cw_core::{BigramCell, BigramHeatmap, CharTally, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_RATIO};
 use dioxus::prelude::*;
 
 use crate::ui::elsewhere::{PAIR_CARD, use_click_elsewhere};
@@ -127,7 +124,8 @@ fn taken_for(typed: &[(Option<char>, u32)]) -> String {
 }
 
 /// Whether the pair is the trouble, or the letter: how often it goes wrong
-/// here against how often it does overall.
+/// here against how often it does overall, and whether that is more than
+/// chance would make it ([`BigramCell::stands_out`]).
 fn verdict(cell: &BigramCell, overall: CharTally) -> String {
     let col = cell.col;
     let usual = overall.rate();
@@ -135,9 +133,14 @@ fn verdict(cell: &BigramCell, overall: CharTally) -> String {
         "Copied right every time here.".to_string()
     } else if usual <= 0.0 {
         format!("{col} goes wrong only here.")
-    } else if cell.rate >= usual * HARD_PAIR_RATIO {
+    } else if cell.stands_out {
         format!(
             "Wrong {:.1}× as often as {col} overall: the pair is the trouble.",
+            cell.rate / usual
+        )
+    } else if cell.rate >= usual * HARD_PAIR_RATIO {
+        format!(
+            "Wrong {:.1}× as often as {col} overall, but over too few tries to tell from chance.",
             cell.rate / usual
         )
     } else if cell.rate * HARD_PAIR_RATIO <= usual {
@@ -175,7 +178,8 @@ fn order(heat: &BigramHeatmap, most_errors: bool) -> (Vec<usize>, Vec<usize>) {
 }
 
 /// The pairs that go wrong more often than their second character does
-/// overall, where it is the pair that trips you rather than the letter.
+/// overall, by more than chance would make it: where it is the pair that
+/// trips you rather than the letter.
 pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
     rsx! {
         div { class: "card stack-sm",
@@ -187,7 +191,7 @@ pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
             }
             if heat.hardest.is_empty() {
                 p { class: "muted hint",
-                    "None stands out yet. A pair is listed once it has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong more often than its second character does overall."
+                    "No pair stands out yet: none goes wrong more often than its second character does overall by more than chance would, over every pair you have heard."
                 }
             } else {
                 div { class: "confusions",
@@ -250,7 +254,7 @@ fn line_css(shown: Option<Pair>, pinned: Option<Pair>) -> String {
 }
 
 /// Every pair as a square, darker the more often its second character went
-/// wrong there. A mouse pointing at a square shows its card until it points
+/// wrong there, as far as its tries can tell ([`BigramCell::shade`]). A mouse pointing at a square shows its card until it points
 /// at another or leaves the grid; a tap pins it until the same square is
 /// tapped again, anywhere else is, or Escape is pressed. Touch has no
 /// pointing, so only a mouse's counts. The pair shown lights up its row and
@@ -355,7 +359,7 @@ fn PairGrid(
                         {
                             let pair = (cell.row, cell.col);
                             let heard = cell.total > 0;
-                            let alpha = if heat.max_rate <= 0.0 { 0.0 } else { cell.rate / heat.max_rate } * 0.85;
+                            let alpha = if heat.max_shade <= 0.0 { 0.0 } else { (cell.shade / heat.max_shade).min(1.0) } * 0.85;
                             let style = heard.then(|| {
                                 format!("background-image: linear-gradient(rgba(180, 83, 9, {alpha:.3}), rgba(180, 83, 9, {alpha:.3}));")
                             });
@@ -454,13 +458,16 @@ mod tests {
     use super::*;
 
     fn cell(row: char, col: char, wrong: u32, total: u32) -> BigramCell {
+        let rate = f64::from(wrong) / f64::from(total.max(1));
         BigramCell {
             row,
             col,
-            rate: f64::from(wrong) / f64::from(total.max(1)),
+            rate,
             total,
             wrong,
             taken_for: Vec::new(),
+            shade: rate,
+            stands_out: false,
         }
     }
 
@@ -494,7 +501,7 @@ mod tests {
             ],
             rows,
             cols,
-            max_rate: 0.5,
+            max_shade: 0.5,
             hardest: Vec::new(),
         };
         assert_eq!(order(&heat, false), (vec![0, 1, 2], vec![0, 1]));
@@ -567,6 +574,7 @@ mod tests {
     #[test]
     fn a_pair_card_holds_it_against_its_letter_overall() {
         let mut km = cell('K', 'M', 3, 6);
+        km.stands_out = true;
         km.taken_for = vec![(Some('N'), 2), (None, 1)];
         let card = pair_card(
             &km,
@@ -609,6 +617,12 @@ mod tests {
         assert_eq!(said(1, 10), "Wrong less often than M overall.");
         assert_eq!(
             said(4, 10),
+            "Wrong 2.0× as often as M overall, but over too few tries to tell from chance."
+        );
+        let mut clear = cell('K', 'M', 4, 10);
+        clear.stands_out = true;
+        assert_eq!(
+            verdict(&clear, overall),
             "Wrong 2.0× as often as M overall: the pair is the trouble."
         );
         // A card always has a tally under it, but nothing divides by none.

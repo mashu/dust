@@ -222,6 +222,12 @@ impl CharSetMode {
     pub fn sends_callsigns(self) -> bool {
         matches!(self, Self::Callsign | Self::Contest)
     }
+
+    /// Whether auto level can move a level here: not a word list, which has
+    /// no level to move, nor a contest, whose runs never move one.
+    pub fn levels(self) -> bool {
+        !matches!(self, Self::Words | Self::Contest)
+    }
 }
 
 /// How much of what is unlocked a session draws from: all of it, or only
@@ -291,6 +297,10 @@ pub struct CurriculumSettings {
     pub custom_sequence: Vec<char>,
     /// True when the user chose Unlock order → Your own, even if the order still matches a preset.
     pub sequence_is_custom: bool,
+    /// An unlock order of the learner's own, kept while a preset is chosen
+    /// in its place, for Your own to bring back. Empty while their own is
+    /// chosen, and when they have none.
+    pub kept_sequence: Vec<char>,
     pub practice_window: PracticeWindow,
     /// Callsign structure tier, the level of the callsign character set. Its own
     /// field, the way digits have one, so switching modes never reinterprets a
@@ -322,6 +332,7 @@ impl Default for CurriculumSettings {
             mixed_letters_percent: 70,
             custom_sequence: Vec::new(),
             sequence_is_custom: false,
+            kept_sequence: Vec::new(),
             practice_window: PracticeWindow::All,
             callsign_level: LEVEL_MIN,
             word_list: Vec::new(),
@@ -698,6 +709,11 @@ pub struct TrainingSettings {
     /// slow, on Letter accuracy.
     pub recognition: RecognitionBands,
     pub contest: ContestSettings,
+    /// What a save held that this build does not read: settings a later
+    /// build added, kept as they were read and written back with the rest,
+    /// so that a copy of an older build left open never strips them
+    /// ([`save`]).
+    pub unread: serde_json::Map<String, serde_json::Value>,
 }
 
 mod clamp;
@@ -1753,13 +1769,14 @@ mod tests {
     /// What no card's reset touches. Progress, not preference: where you have
     /// got to, and what the sampler has learned. And what the learner made,
     /// which one press should not cost them: an unlock order of their own,
-    /// and their word list.
+    /// kept aside or not, and their word list.
     const LEFT_BY_RESETS: &[&str] = &[
         "level",
         "digitsLevel",
         "callsignLevel",
         "customSequence",
         "sequenceIsCustom",
+        "keptSequence",
         "wordList",
     ];
 
@@ -1788,8 +1805,8 @@ mod tests {
     }
 
     /// The Character set's reset puts back an unlock order a preset gave,
-    /// and leaves one of the learner's own, and their word list, as they
-    /// are. In Contest mode it puts the contest's own choices back and stays
+    /// and leaves one of the learner's own, chosen or kept aside for the
+    /// preset, and their word list, as they are. In Contest mode it puts the contest's own choices back and stays
     /// in Contest: the contest is where the card is.
     #[test]
     fn the_character_sets_reset_keeps_what_the_learner_made_and_the_contest() {
@@ -1802,6 +1819,9 @@ mod tests {
         );
         assert_eq!(preset.curriculum.char_set_mode, CharSetMode::Mixed);
         assert_eq!(preset.curriculum.word_list, ["PARIS", "QRZ"]);
+        // Their own order, kept aside for the preset, is kept still.
+        preset.choose_sequence(SequenceChoice::Custom);
+        assert_eq!(preset.curriculum.custom_sequence, ['Z', 'Q']);
 
         let mut own = wildly_different();
         own.reset_section(SettingsSection::CharacterSet);
@@ -1850,6 +1870,39 @@ mod tests {
         assert_eq!(pileup.band.stations_max, STATIONS_MIN);
         pileup.restore_section(SettingsSection::CharacterSet, &before);
         assert_eq!(pileup, before);
+    }
+
+    /// Band conditions put back during a pile-up keep it one: the stations
+    /// range goes back to the single station it ships with, and the pile-up
+    /// still chosen opens it again, as picking it did. Undo puts the range
+    /// back as it was.
+    #[test]
+    fn a_band_reset_leaves_a_pileup_with_callers_to_pile_up() {
+        let mut pileup = TrainingSettings::default();
+        pileup.set_char_set_mode(CharSetMode::Contest);
+        pileup.set_contest_style(crate::contest::RunStyle::Pileup);
+        pileup.band.qsb_depth = 0.9;
+        pileup.set_range_max(RangeSetting::Stations, 5.0);
+        let before = pileup.clone();
+        pileup.reset_section(SettingsSection::BandConditions);
+        assert_eq!(
+            pileup.contest.contest_style,
+            crate::contest::RunStyle::Pileup
+        );
+        assert_eq!(
+            (pileup.band.stations_min, pileup.band.stations_max),
+            (STATIONS_MIN, 3)
+        );
+        assert!(pileup.contest.stations_opened_by_pileup);
+        pileup.restore_section(SettingsSection::BandConditions, &before);
+        assert_eq!(pileup, before);
+
+        // A single caller keeps its one station.
+        let mut single = TrainingSettings::default();
+        single.set_char_set_mode(CharSetMode::Contest);
+        single.reset_section(SettingsSection::BandConditions);
+        assert_eq!(single.band.stations_max, STATIONS_MIN);
+        assert!(!single.contest.stations_opened_by_pileup);
     }
 
     /// And a reset stays inside its own card: changing everything, then
@@ -1921,6 +1974,9 @@ mod tests {
         s.curriculum.mixed_letters_percent = 33;
         s.curriculum.custom_sequence = vec!['Z', 'Q'];
         s.curriculum.sequence_is_custom = true;
+        // Never kept beside an order of their own chosen in the app, but
+        // moved all the same, so that a reset that touched it would show.
+        s.curriculum.kept_sequence = vec!['X', 'J'];
         s.curriculum.practice_window = PracticeWindow::Last3;
         s.curriculum.word_list = vec!["PARIS".to_string(), "QRZ".to_string()];
         s.playback.char_wpm_min = 31.0;

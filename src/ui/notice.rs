@@ -4,10 +4,10 @@
 
 use dioxus::prelude::*;
 
-use crate::persist::CutOff;
+use crate::persist::{CutOff, SetAside};
 use crate::state::{AppCtx, Notice};
 use crate::time::local_date_string;
-use crate::ui::format::{clock, day_of, short_date};
+use crate::ui::format::{clock, counted, day_of, short_date};
 use crate::ui::widgets::{Icon, IconName, control_id};
 
 #[component]
@@ -46,24 +46,64 @@ fn notice_text(notice: &Notice) -> String {
             let when = started(open.started_at)
                 .map(|when| format!(" {when}"))
                 .unwrap_or_default();
-            format!("Your {what}{when} was cut off: Dust closed while it ran, so it was not kept.")
+            let kept = match (open.so_far.is_some(), open.run) {
+                (false, _) => ", so it was not kept.",
+                (true, false) => ". The groups you had answered were kept.",
+                (true, true) => ". The QSOs you had logged were kept.",
+            };
+            format!("Your {what}{when} was cut off: Dust closed while it ran{kept}")
         }
         Notice::CutOff(CutOff::Unread) => {
             "Your last session was cut off: Dust closed while it ran, so it was not kept.".into()
         }
-        Notice::SoundStopped { why, answered } => {
-            let why = why.trim_end_matches('.');
-            if *answered {
-                format!(
-                    "The session ended early because its sound stopped: {why}. The groups you answered were scored."
-                )
-            } else {
-                format!(
-                    "The session ended before any group was answered, because its sound stopped: {why}."
-                )
-            }
-        }
         Notice::History(problem) => problem.clone(),
+        Notice::SetAside(set_aside) => set_aside_text(set_aside),
+    }
+}
+
+/// What was set aside as it could not be read, and how to have it back:
+/// from the copy, where the user can reach it, or else from a backup.
+fn set_aside_text(set_aside: &SetAside) -> String {
+    match set_aside {
+        SetAside::Settings { kept } => {
+            let back = match kept {
+                Some(file) => format!(
+                    "The file was kept as {file}: with Dust closed, mend it and put it back as settings.json, or restore a backup."
+                ),
+                None => "Restore a backup to put yours back.".into(),
+            };
+            format!("Your settings could not be read, so Dust opened with its defaults. {back}")
+        }
+        SetAside::History { kept } => {
+            let back = match kept {
+                Some(file) => format!(
+                    "It was kept as {file}. Restore a backup, or that file once it is mended, to put your sessions back."
+                ),
+                None => "Restore a backup to put your sessions back.".into(),
+            };
+            format!(
+                "Your history could not be read, so Dust set it aside and started a new one. {back}"
+            )
+        }
+        SetAside::Sessions { count, kept } => {
+            let (were, them) = if *count == 1 {
+                ("it was", "it")
+            } else {
+                ("they were", "them")
+            };
+            let back = match kept {
+                Some(file) => format!(
+                    "{were} set aside as {file}. Restoring that file in a Dust that reads {them} puts {them} back."
+                ),
+                None => format!(
+                    "{were} set aside. A backup restored in a Dust that reads {them} puts {them} back."
+                ),
+            };
+            format!(
+                "{} in your history could not be read, perhaps saved by a newer Dust, so {back}",
+                counted(*count, "session")
+            )
+        }
     }
 }
 
@@ -89,6 +129,7 @@ mod tests {
         let text = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
             started_at: at,
             run: false,
+            so_far: None,
         })));
         let time = clock(at).expect("a time today");
         assert_eq!(
@@ -100,6 +141,7 @@ mod tests {
         let run = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
             started_at: at - 3 * 86_400_000,
             run: true,
+            so_far: None,
         })));
         assert!(run.starts_with("Your contest run started "), "{run}");
         assert!(run.contains(" at "), "{run}");
@@ -109,23 +151,63 @@ mod tests {
         );
     }
 
+    /// What was set aside says so, and how to have it back: from the copy,
+    /// where it can be reached, or else from a backup.
     #[test]
-    fn a_session_its_sound_stopped_says_why_and_whether_any_was_answered() {
-        let answered = notice_text(&Notice::SoundStopped {
-            why: "Audio playback stalled.".into(),
-            answered: true,
-        });
+    fn what_was_set_aside_says_how_to_have_it_back() {
+        let text = |set_aside| notice_text(&Notice::SetAside(set_aside));
         assert_eq!(
-            answered,
-            "The session ended early because its sound stopped: Audio playback stalled. The groups you answered were scored."
+            text(SetAside::Settings {
+                kept: Some("/d/settings.unreadable-9.json".into())
+            }),
+            "Your settings could not be read, so Dust opened with its defaults. The file was kept as /d/settings.unreadable-9.json: with Dust closed, mend it and put it back as settings.json, or restore a backup."
         );
-        let none = notice_text(&Notice::SoundStopped {
-            why: "Audio stream: device is gone".into(),
-            answered: false,
-        });
         assert_eq!(
-            none,
-            "The session ended before any group was answered, because its sound stopped: Audio stream: device is gone."
+            text(SetAside::History { kept: None }),
+            "Your history could not be read, so Dust set it aside and started a new one. Restore a backup to put your sessions back."
+        );
+        assert_eq!(
+            text(SetAside::Sessions {
+                count: 3,
+                kept: Some("/d/sessions.unreadable-9.json".into())
+            }),
+            "3 sessions in your history could not be read, perhaps saved by a newer Dust, so they were set aside as /d/sessions.unreadable-9.json. Restoring that file in a Dust that reads them puts them back."
+        );
+        assert_eq!(
+            text(SetAside::Sessions {
+                count: 1,
+                kept: None
+            }),
+            "1 session in your history could not be read, perhaps saved by a newer Dust, so it was set aside. A backup restored in a Dust that reads it puts it back."
+        );
+    }
+
+    /// One whose mark held what it had done by then says that was kept.
+    #[test]
+    fn a_cut_off_session_kept_so_far_says_so() {
+        let at = crate::time::now_ms();
+        let time = clock(at).expect("a time today");
+        let kept = |run| {
+            notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
+                started_at: at,
+                run,
+                so_far: Some(Box::new(crate::persist::SoFar {
+                    result: cw_core::SessionResult::empty_for_test(),
+                    settings: None,
+                })),
+            })))
+        };
+        assert_eq!(
+            kept(false),
+            format!(
+                "Your session started at {time} was cut off: Dust closed while it ran. The groups you had answered were kept."
+            )
+        );
+        assert_eq!(
+            kept(true),
+            format!(
+                "Your contest run started at {time} was cut off: Dust closed while it ran. The QSOs you had logged were kept."
+            )
         );
     }
 }

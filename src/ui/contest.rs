@@ -1193,14 +1193,26 @@ mod tests {
                 ui.advance(8_000).await;
                 let call = recorder.starts()[0].transcript.others[0].text.clone();
                 ui.type_into("field-call", &call);
+                // Each key once the caller has finished: sending, it cannot
+                // hear you.
+                assert!(ui.until_the_air_is_quiet(30_000).await);
                 ui.press_enter("field-call");
                 ui.advance(8_000).await;
-                let starts = recorder.starts();
-                assert_eq!(starts.len(), 2, "your call and exchange, and its own");
-                let exchange = starts[1].transcript.others[0].text.clone();
+                let exchange = recorder
+                    .starts()
+                    .iter()
+                    .find(|start| start.transcript.text.starts_with(&call))
+                    .expect("your call and exchange, and its own")
+                    .transcript
+                    .others[0]
+                    .text
+                    .clone();
                 let serial = exchange.split_whitespace().last().unwrap_or_default();
                 ui.type_into("field-exchange", serial);
+                assert!(ui.until_the_air_is_quiet(30_000).await);
+                let starts = recorder.starts().len();
                 ui.press_enter("field-exchange");
+                assert_eq!(recorder.starts().len(), starts + 1, "your TU");
                 assert_eq!(text_of(&ui, "log-call"), call);
                 assert_eq!(text_of(&ui, "log-fields"), serial);
                 assert_eq!(text_of(&ui, "log-check"), "…", "the TU is on the air");
@@ -1243,7 +1255,7 @@ mod tests {
                 .nth(2)
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(answer, format!("DL1ABC DE {call} {call} K"));
+            assert_eq!(answer, format!("DL1ABC DE {call} K"));
             assert!(ui.has("Exchange · RST NAME"));
             // Nothing in the exchange is numbered: F12 asks AGN.
             assert!(ui.has("<kbd>F12</kbd>AGN</button>"), "{}", ui.html());
@@ -1325,6 +1337,8 @@ mod tests {
             ui.html()
         );
         ui.type_into("field-call", &his);
+        // Once it has finished calling: sending, it cannot hear you.
+        assert!(ui.until_the_air_is_quiet(30_000).await);
         ui.press_enter("field-call");
         ui.advance(300).await;
         // What is still to go: their call from the character sounding, as
@@ -1364,6 +1378,8 @@ mod tests {
             .filter_map(|part| part.split(' ').next())
             .collect();
         assert_eq!(read_as, fields, "{kind:?}: {read}");
+        // Not over its exchange sent again on its timeout.
+        assert!(ui.until_the_air_is_quiet(30_000).await);
         ui.press_enter("field-exchange");
         assert!(
             ui.run_until(15_000, |ui| text_of(ui, "log-check") == "clean")
@@ -1803,6 +1819,7 @@ mod tests {
                 .unwrap_or_default()
                 .to_string();
             ui.type_into("field-exchange", &serial);
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.press_enter("field-exchange");
             ui.advance(8_000).await;
             assert!(!ui.has("field-tag-b4"), "nothing typed is a dupe");
@@ -2369,6 +2386,33 @@ mod tests {
         });
     }
 
+    /// A Dvorak's `?`, Shift on the dit key, keys the dit into Call while
+    /// the paddles are on the keys right of P by place, as they ship: the E
+    /// lands there, and a message says how to type the `?` of a partial
+    /// call instead, with no word of a keypad, which has none to tap.
+    #[test]
+    fn a_question_mark_keyed_by_place_says_how_to_type_it() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(paddled(cw_core::ContestKind::Wpx));
+            ui.click("btn-start-training");
+            let question = Key::Character("?".into());
+            let shift = Modifiers::SHIFT;
+            ui.press_key_held("field-call", question.clone(), Code::BracketLeft, shift);
+            ui.advance(20).await;
+            ui.release_key_held("field-call", question, Code::BracketLeft, shift);
+            ui.advance(3 * DIT_MS).await;
+            let call = ui.with_app(|ctx| ctx.entry.shown(EntryField::Call));
+            assert_eq!(call, "E");
+            let told = ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+            let told = told.unwrap_or_default();
+            assert!(
+                told.contains("To type ?, turn off Paddles on the keys right of P"),
+                "{told}"
+            );
+            assert!(!told.contains("keypad"), "{told}");
+        });
+    }
+
     /// A Space pressed by hand while the paddles wait out a word space, on
     /// the keyboard, the key bar or the keypad's ␣ Field, ends their word:
     /// the cursor moves once, as pressed, and the word space does not move
@@ -2625,6 +2669,27 @@ mod tests {
         });
     }
 
+    /// The app closed mid-run ends the run as End run does, and stores your
+    /// speed there and then: the window is gone before the app's settings
+    /// effect would have stored it.
+    #[test]
+    fn your_speed_is_stored_as_the_app_closes_mid_run() {
+        run(|| async {
+            let (mut ui, _recorder, _call) = first_caller().await;
+            ui.tap("more-wpm");
+            assert!(ui.has(r#"run-wpm-value">32<"#), "{}", ui.html());
+            let store = ui.store.clone();
+            // Read as the close is heard, before anything else of the app
+            // runs.
+            let stored = ui.with_app(|_| {
+                crate::page_closed::close_app();
+                store.load_settings().contest.my_wpm
+            });
+            assert_eq!(stored, 32);
+            assert_eq!(ui.screen(), "results");
+        });
+    }
+
     fn view(phase: ContestPhase, clock: Option<RunClock>) -> ContestView {
         ContestView {
             phase,
@@ -2804,6 +2869,7 @@ mod tests {
             let answer = recorder.starts()[0].transcript.others[0].text.clone();
             let call = answer.split_whitespace().nth(2).unwrap_or_default();
             ui.type_into("field-call", call);
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.press_enter("field-call");
             ui.advance(300).await;
             let tx = text_of(&ui, "run-line run-tx");
@@ -2854,6 +2920,7 @@ mod tests {
             );
             assert!(ui.has(">Exchange · NR NAME ST</label>"), "{}", ui.html());
             ui.type_into("field-call", call);
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.press_enter("field-call");
             ui.advance(300).await;
             let tx = text_of(&ui, "run-line run-tx");

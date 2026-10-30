@@ -6,16 +6,19 @@
 //! row, as long as the share copied (groups whole, or characters right), in
 //! the colour of where it stands against your aim, with a notch at the aim
 //! and a paler stretch past the bar to the top of where it likely is. A
-//! summary above says how far your aim reaches, and how your copy runs
-//! across the range; a line under it, how the next one is drawn.
+//! summary above says how far your aim reaches, never past the longest or
+//! fastest you have been sent, and how your copy runs across the range; a
+//! line under it, how the next one is drawn. Before any session of the set
+//! they say there is none to read, rather than the model's first guess.
 
 use cw_core::{
-    CharSetMode, SessionResult, SpeedForecast, SpeedPath, TrainingSettings, adapts_speed,
-    group_length_forecast, speed_forecast, speed_history,
+    CharSetMode, EstimateReading, SessionResult, SpeedForecast, SpeedPath, TrainingSettings,
+    adapts_speed, group_length_forecast, span_history, speed_forecast, speed_history,
 };
 use dioxus::prelude::*;
 
 use crate::ui::help;
+use crate::ui::settings_charset::mode_label;
 use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds};
 use crate::ui::widgets::{CardHead, IconName, control_id};
 
@@ -112,22 +115,49 @@ fn summary_row(label: String, text: String) -> Element {
 
 /// The longest length of `rows` copied whole `aim` of the time or more,
 /// as the summary says it: by [`meets`], so that it never says "not yet"
-/// of a row drawn at the aim.
-fn length_reach(lengths: &[(usize, f64)], aim: f64) -> String {
+/// of a row drawn at the aim; and never past `longest_sent`, the longest
+/// group the history holds, past which the model only guesses.
+fn length_reach(lengths: &[(usize, f64)], aim: f64, longest_sent: usize) -> String {
     let (Some((shortest, _)), Some((longest, _))) = (lengths.first(), lengths.last()) else {
         return String::new();
     };
     let reach = lengths
         .iter()
-        .take_while(|(_, whole)| meets(*whole, aim))
+        .take_while(|(length, whole)| *length <= longest_sent && meets(*whole, aim))
         .last()
         .map(|(length, _)| *length);
     match reach {
         Some(length) if length == *longest => {
             format!("every length in your range, up to {longest} characters")
         }
+        Some(length) if length == longest_sent => {
+            format!("up to {length} characters, the longest sent yet")
+        }
         Some(length) => format!("up to {length} characters"),
+        None if *shortest > longest_sent => {
+            format!("nothing as long as {shortest} characters sent yet")
+        }
         None => format!("not yet at {shortest} characters"),
+    }
+}
+
+/// A Sampling card for a character set with no session to read yet: its
+/// head, and what it will show. Nothing is drawn from the model's first
+/// guess alone.
+fn no_history_card(
+    icon: IconName,
+    title: &'static str,
+    help: Element,
+    mode: CharSetMode,
+    shows: &str,
+) -> Element {
+    rsx! {
+        div { class: "card stack-sm",
+            CardHead { icon, title, help }
+            p { class: "muted hint",
+                "No {mode_label(mode)} sessions to read yet. Once you have copied one, this shows {shows}."
+            }
+        }
     }
 }
 
@@ -140,6 +170,18 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]
         return rsx! {};
     };
     let aim = settings.curriculum.aim.groups_whole();
+    let Some(sent) = span_history(settings, sessions)
+        .last()
+        .map(|point| point.sent)
+    else {
+        return no_history_card(
+            IconName::Signal,
+            "Group length",
+            help::group_length(aim),
+            settings.curriculum.char_set_mode,
+            "how often you copy each length whole, and how likely each is to come next",
+        );
+    };
     let curriculum = &settings.curriculum;
     let note = if !curriculum.adaptive_group_size {
         "Adaptive group size is off, so every length is as likely as the next.".to_string()
@@ -157,6 +199,7 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]
             .map(|row| (row.length, row.whole))
             .collect::<Vec<_>>(),
         aim,
+        sent.1 as usize,
     );
     let across = if rows.len() > 1 {
         format!(
@@ -208,14 +251,21 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]
 }
 
 /// How far your aim reaches in speed, against the range: "about 22 WPM",
-/// "about 15 WPM, under your range".
-fn speed_reach(copy: f64, low: f64, high: f64) -> String {
-    if copy < low - 0.5 {
-        format!("about {copy:.0} WPM, under your range")
-    } else if copy > high + 0.5 {
-        format!("about {copy:.0} WPM, over your range")
-    } else {
-        format!("about {copy:.0} WPM")
+/// "about 15 WPM, under your range"; past the fastest or slowest you have
+/// been sent, only that: "over 20 WPM, the fastest sent yet".
+fn speed_reach(copy: EstimateReading, low: f64, high: f64) -> String {
+    match copy {
+        EstimateReading::About(copy) if copy.mean < low - 0.5 => {
+            format!("about {:.0} WPM, under your range", copy.mean)
+        }
+        EstimateReading::About(copy) if copy.mean > high + 0.5 => {
+            format!("about {:.0} WPM, over your range", copy.mean)
+        }
+        EstimateReading::About(copy) => format!("about {:.0} WPM", copy.mean),
+        EstimateReading::Over(fastest) => format!("over {fastest:.0} WPM, the fastest sent yet"),
+        EstimateReading::Under(slowest) => {
+            format!("under {slowest:.0} WPM, the slowest sent yet")
+        }
     }
 }
 
@@ -228,6 +278,19 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> El
         return rsx! {};
     };
     let aim = settings.curriculum.aim.chars_right();
+    // The speed your aim is reached at, as the Overview's copy speed says.
+    let Some(reach) = speed_history(settings, sessions)
+        .last()
+        .map(|point| speed_reach(point.reading(), first.wpm, last.wpm))
+    else {
+        return no_history_card(
+            IconName::Gauge,
+            "Speed",
+            help::speed(aim),
+            settings.curriculum.char_set_mode,
+            "how much you copy right at each speed, and how likely each is to come next",
+        );
+    };
     let playback = &settings.playback;
     let contest = settings.curriculum.char_set_mode == CharSetMode::Contest;
     let mut note = if contest && adapts_speed(settings) {
@@ -249,10 +312,6 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> El
             " With Farnsworth spacing, a speed counts the spacing too, as the score does.",
         );
     }
-    // The speed your aim is reached at, as the Overview's copy speed says.
-    let reach = speed_history(settings, sessions)
-        .last()
-        .map(|point| speed_reach(point.estimate.mean, first.wpm, last.wpm));
     let across = if rows.len() > 1 {
         format!(
             "{} right at {:.0} WPM, {} at {:.0}",
@@ -278,9 +337,7 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> El
                 help: help::speed(aim),
             }
             div { class: "err-summary",
-                if let Some(reach) = reach {
-                    {summary_row(format!("Your aim · {} right", pct(aim)), reach)}
-                }
+                {summary_row(format!("Your aim · {} right", pct(aim)), reach)}
                 {summary_row("Across your range".to_string(), across)}
             }
             {legend(aim)}
@@ -356,20 +413,44 @@ mod tests {
     #[test]
     fn the_summary_says_how_far_the_aim_reaches() {
         let lengths = [(2, 0.9), (3, 0.75), (4, 0.6)];
-        assert_eq!(length_reach(&lengths, 0.7), "up to 3 characters");
+        assert_eq!(length_reach(&lengths, 0.7, 4), "up to 3 characters");
         assert_eq!(
-            length_reach(&lengths, 0.5),
+            length_reach(&lengths, 0.5, 4),
             "every length in your range, up to 4 characters"
         );
-        assert_eq!(length_reach(&lengths, 0.95), "not yet at 2 characters");
-        assert_eq!(speed_reach(21.6, 18.0, 25.0), "about 22 WPM");
+        assert_eq!(length_reach(&lengths, 0.95, 4), "not yet at 2 characters");
+        let about = |mean| EstimateReading::About(cw_core::Estimate { mean, sd: 1.0 });
+        assert_eq!(speed_reach(about(21.6), 18.0, 25.0), "about 22 WPM");
         assert_eq!(
-            speed_reach(15.2, 18.0, 25.0),
+            speed_reach(about(15.2), 18.0, 25.0),
             "about 15 WPM, under your range"
         );
         assert_eq!(
-            speed_reach(27.0, 18.0, 25.0),
+            speed_reach(about(27.0), 18.0, 25.0),
             "about 27 WPM, over your range"
+        );
+    }
+
+    /// The summary never reaches past the longest group or the fastest
+    /// speed the history holds: past them the model only guesses.
+    #[test]
+    fn the_summary_never_reaches_past_what_was_sent() {
+        let lengths = [(2, 0.97), (3, 0.95), (4, 0.9), (5, 0.8)];
+        assert_eq!(
+            length_reach(&lengths, 0.7, 3),
+            "up to 3 characters, the longest sent yet"
+        );
+        assert_eq!(
+            length_reach(&lengths[2..], 0.7, 3),
+            "nothing as long as 4 characters sent yet"
+        );
+        assert_eq!(
+            speed_reach(EstimateReading::Over(20.0), 15.0, 30.0),
+            "over 20 WPM, the fastest sent yet"
+        );
+        assert_eq!(
+            speed_reach(EstimateReading::Under(15.0), 15.0, 30.0),
+            "under 15 WPM, the slowest sent yet"
         );
     }
 
@@ -381,14 +462,17 @@ mod tests {
         let aim = 0.94;
         assert_eq!(standing(0.937, aim), "solid");
         assert_eq!(
-            length_reach(&[(2, 0.937)], aim),
+            length_reach(&[(2, 0.937)], aim, 2),
             "every length in your range, up to 2 characters"
         );
         assert_eq!(
-            length_reach(&[(2, 0.96), (3, 0.937), (4, 0.934)], aim),
+            length_reach(&[(2, 0.96), (3, 0.937), (4, 0.934)], aim, 4),
             "up to 3 characters"
         );
         assert_eq!(standing(0.934, aim), "building", "it reads 93%");
-        assert_eq!(length_reach(&[(2, 0.934)], aim), "not yet at 2 characters");
+        assert_eq!(
+            length_reach(&[(2, 0.934)], aim, 2),
+            "not yet at 2 characters"
+        );
     }
 }

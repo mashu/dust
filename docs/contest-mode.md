@@ -1,154 +1,27 @@
 # Contest mode
 
-Status: being built phase by phase (§14). Phase 0, history that lasts, has
-landed: Contest exists as a mode, runs written by later
-builds are read and kept, and History names every session's mode. Phase 1's
-cw-core foundations are in: the WPX rules row, contest calls and their
-parsing, exchanges and cut numbers, ESM, the run clock, callers' serials,
-checks, both scores, the run's log layout, and the contest settings. So is
-its engine: single callers, turns and `plan_turn`, the run machine and what
-a run stores, with operator tests and a soak. The app runs it from start to
-results (`src/contest_runtime.rs`) on the run screen of §7
-(`src/ui/contest.rs`, its keys in `src/ui/contest_keys.rs`), with the
-keypad, pause, the hidden-page pause and the sound failure pause, and shows
-the contest results (`src/ui/contest_results.rs`), also from History. So do
-the settings in Contest (the Character set card's contest, Your station in
-`src/ui/settings_station.rs`, and the controls a contest hides), the Home
-hero, the stats pills and notes, the privacy texts and the backup merge. Slices 1b, 1c and 1d have landed too: your own message
-played dry, around the receiver at a fixed monitor level (5.3); Simple QSO,
-with its names and reports (`contest/data/`) and `myName`; and the
-contester's keys with their buttons on the key bar. Slice 2a has landed
-too: `contestStyle` and pile-ups (`contest/place.rs`, the callers' fades in
-`contest/turn.rs`), with collisions, best-match partials, missed exchanges,
-calling twice, dupes, and F4, F6, F8 and F12. Contest is in the mode
-picker from slice 2a on, ahead of the rest of phase 2, so it can be tried
-while Sprint and the learner aids are built (§14). Fixes from an
-end-to-end test of the web build in a phone-sized browser followed: one
-press of Start or Listen after a refusal, each screen opening at its top,
-Discard's second question safe from a double tap, the cursor kept by
-Discard, Keep it and the theme button, and the run fitting a 360×640
-screen (§2, §7). Fixes from an audit of pile-ups followed: going on to
-another caller mid-QSO is a transition of its own (§4.4, §9.1), a caller
-that only answered your partial is no QSO (§4.7), and callers' timeouts
-overlap, planned into the turn on the air so that none cuts it (§4.3).
-Slice 2b has landed: the NA Sprint, with `myState`, US and Canadian
-places (`contest/data/places.rs`), the Sprint serial fit and the
-deterministic parser (§3, §8, §11.2, §11.6, §11.7). Fixes from a second
-audit of pile-ups followed: callers' patience follows MorseRunner's for a
-partial, for being keyed over and for coming back from waiting out
-another QSO, and a correction after your exchange carries the station's
-own (§4.3); Enter and the screen follow what of the turn has reached you,
-and a check shows once your TU is out (§4.2, §4.4, §4.8); the band makes
-room only for the callers sounding at once (§5.6); and a QSO logged for a
-station you left is no NIL of the one you work (§9.1). Slice 2c has
-landed: Hear a QSO, three QSOs of the chosen contest worked by the perfect
-operator, on Listen and on the Character set card (§2, `hear_qsos` in
-`contest/bot.rs`); the First QSO, Club and Contester presets (§8,
-`settings/contest_preset.rs`); and QRS, a caller slowing down after a few
-incomplete tries (§4.3). With them, two fixes from browser tests: what
-Start keeps from Home's hero is stored as the run starts (§2), and the TU
-that logs after a TU without logging asks no caller to call again (§4.6,
-§9.1). Slice 3a has landed, the first part of phase 3: CQ WW and ARRL DX
-(§3), with each country's name, CQ zone and continent from cty.dat in the
-call table and North America's zones by hand (`contest/data/zones.rs`,
-§11.3), the ARRL DX side and Labrador (`contest/data/places.rs`, §11.2),
-the counted power shares (`contest/data/power.rs`, §11.5), points by
-distance and the multipliers of both sides (`contest/score.rs`), and
-`myZone`, `myPower` and LB in `myState` on Your station (§2, §8). Fixes
-from a third audit of pile-ups followed: B4 sends a dupe its call again
-when it never heard it (§4.7); after Esc the callers answer what they
-heard as garbage, at once, and what reached you of a caller you keyed
-over stays heard (§5.2); the station you work, still waiting for your
-exchange, falls silent and stays rather than leave (§4.3); Enter calls CQ
-in place of any call the fields still hold for a station that has gone,
-or clears it once someone calls, and the hint says so (§4.4, §7); and the results read each QSO at the speed its live row
-showed, while a correction's exchange is a copy only once it begins to
-reach you (§9.1). Slice 3b has landed, the rest of phase 3: Field Day (§3),
-with the 85 ARRL and RAC sections (`contest/data/sections.rs`, §11.4),
-the class, section and power shares counted by `scripts/contest-data.py`
-into `contest/data/counted.rs` (§11.5), the section a call tells by itself
-(`call_section`, `contest/data/places.rs`), a caller's class and section
-(`contest/data/fd.rs`), a score of QSO points with nothing to multiply
-them, and `myClass` and `mySection` on Your station, which Home asks for
-as it asks for a state (§2, §8). Every contest of the card has shipped;
-two checks stay open, Yukon's section code and the FCC licence counts
-(§14). Slice 4a has landed, the first part of phase 4: `contestHabits`,
-easy, real or rough, on the Band card in Contest mode and written by the
-presets (§8); real habits sending numbers as MorseRunner's callers do,
-checked against its `Station.pas` (§11.6); and rough habits adding
-careless callers and on-frequency QRM (`contest/qrm.rs`, §4.3, §5.6).
-Slice 4b has landed, the rest of phase 4: `contestShowCopy` on the Session
-shape card in Contest mode (§8); with it on, each station's text in the RX
-line a moment after its send ends (§7), each copy kept as it stood when its
-text showed, the showing a send of its own, and the run marked
-`contest:<kind>:a` and stored `assisted` (§9.1), counted in every stat and
-listed greyed, never placed, on the board (§10); and the Runs card, every
-run of a contest on Stats → Scores under the Contest pill (§10). With them,
-two fixes from a browser test on a 360×640 phone: Pause keeps its place in
-the row while paused, inert, so a double tap on it never ends the run, and
-Resume brings the run screen back to its top (§2, §7). A fix from a third
-browser test followed: Enter on the call of a caller that gave up before
-you worked it, typed late, no longer sends it to nobody while the rest of
-the pile-up waits on that QSO in silence, but clears the fields, or calls
-CQ while nobody calls, as it does for the station you work once it has
-gone, and so does Enter on a partial or a slip of it once that has gone
-out to nobody and nobody calls; a caller that gives up on your partial
-is said to have gone, as one is on its timeouts (§4.4, §7). A review of
-group training against the main branch followed, as Contest must leave
-group training as it was: Callsigns mode and the band's traffic draw
-KG4 with two letters again, which only a contest's callers leave out
-(§11.1, §11.2), and between two groups the training screen's header says
-"Next group…" beside a plain dot while the box waits, not "Your turn".
-A browser test of group training on a 360×640 phone followed, which found
-the keypad's last row ending 16 px under the screen's foot, on the main
-branch too: the run's rule for phones under 760 px tall is a session's as
-well now, its groups drawn closer with its cards, and a long group
-answered keeps to its slot (§7). Feedback from a contester running
-pile-ups at 235 QSOs an hour on the published app followed, decided with
-the user on 2026-10-22 (§15.2): Space in the Exchange field goes back to
-Call, as MorseRunner's and N1MM's space bar does, but where it separates
-the items of a longer exchange (§4.5); your sending has a volume of its
-own, from off to the loudest, on the Tone and volume card (§5.3, §8); your
-speed is a setting of its own, kept from run to run as − and + leave it,
-the callers' speeds staying the Speed card's (§6.6, §8); and how often
-your TU signs with your call in a pile-up is yours to choose (§3, §8).
-Phase 5's adaptive caller speed followed, brought forward at the user's
-asking and decided with the user on 2026-10-22 (§15.2): each new caller
-comes at a speed drawn from your copy speed in contests, within the Speed
-card's ranges, faster as you copy calls and numbers clean and slower as
-you miss them, by the Bayesian belief group training's adaptive speed
-uses, started from the Contest copy-speed series and learning within the
-run; a switch of its own on the Speed card, on as it ships (§6.6, §8,
-§10). Slice 5a has landed, phase 5's sound: without full break-in, as
-MorseRunner ships it, the receiver is muted while you send, after its
-AGC, on both players, and nothing a caller sends across your message
-reaches you, for Enter, the copies or Show copy (§5.3); "Full break-in
-(QSK)" on the Tone and volume card in Contest mode hears the band through
-your message, as runs did before (§8); flutter, three callers in ten
-fluttering at 3 to 33 Hz under the Band card's flutter in Contest mode,
-which the Contester preset turns on (§5.5, §8); and a continuation spliced
-on where your message reaches the start of its next character that the
-player can still take over at, each player starting it at that moment, so
-no character goes out twice (§5.2; risk 2 of §16 narrowed to a lead
-underestimated). Slice 5b has landed, the rest of phase 5's learning
-items: the guided setup in Contest mode is a run's, its button shown there,
-walking the run screen part by part where it is drawn and leaving the run
-through Discard, its Next never starting a run, whose callers would be
-sound nobody asked for (§2); and the paddles' field space, a word space of
-quiet after a letter pressing Space by the Space key's own rule, so a call
-and its exchange keyed on the paddles land in their own fields (§4.5).
-A fix to Esc followed (2026-10-29): Esc stops only your own station, as
-MorseRunner's does, so the callers still sending, a single caller's reply
-among them, and QRM go on from where they were, where Esc used to silence
-them for a reply timeout (§5.2). A second review made it stop nothing
-once your message is out: the turn plays on, and a reply yet to begin
-comes on time, where Esc dropped it till its caller's timeout (§5.2).
+Status: built. Every phase of §14 has landed, 0 to 5. Contest is a mode on
+the Character set card with all six contests (§3), run with one caller at
+a time or a pile-up (§4); your own sending, the receiver muted while you
+send, flutter and QRM (§5); the run screen, its keys and the keypad (§4.5,
+§7); Hear a QSO, the presets and a guided tour of the run (§2, §8);
+callers whose speed follows your copy (§6.6); and the results, History,
+the board and the Runs card (§9, §10). Three checks stay open: the NA
+Sprint's multipliers against NCJ's current rules (§3), Yukon's section code
+(§11.4) and the FCC licence counts (§11.2). What might come next is under
+Later in §14.
 
-This is the plan for contest and pile-up training in Dust. References are
-`file:line` in this repository unless they name MorseRunner CE ("MRCE",
-the `w7sst/MorseRunner` sources) or Morse Walker. Calls in examples are
-placeholders. You are DL1ABC in DX-side examples and K1ABC in North
-American ones.
+The text began as the plan and keeps its shape. Where the build differs
+from the plan, or changed after it, an "As built" note says so in place,
+with the slice or the date it landed (§14), and a decision taken with the
+user is in §15.2; of two notes on one point, the later one holds.
+
+This is the plan for contest and pile-up training in Dust. References name
+a file in this repository and the function, type or constant in it, so they
+hold as the code moves, unless they name MorseRunner CE ("MRCE", the
+`w7sst/MorseRunner` sources, by file and line) or Morse Walker. Calls in
+examples are placeholders. You are DL1ABC in DX-side examples and K1ABC in
+North American ones.
 
 ## 1. Summary
 
@@ -203,13 +76,14 @@ contest types". The Character set card is where Dust already chooses what
 is practised, so Contest goes there.
 
 **The picker.** `CharSetMode` gains `Contest`
-(`crates/cw-core/src/settings/mod.rs:116-144`). `CHAR_SET_MODES` gains
-`(CharSetMode::Contest, "Contest")` (`src/ui/settings_charset.rs:51-60`).
+(`crates/cw-core/src/settings/mod.rs`). `CHAR_SET_MODES` gains
+`(CharSetMode::Contest, "Contest")` (`src/ui/settings_charset.rs`).
 `.segmented` wraps; the picker's `.charset-modes` sits the six segments
 three and three at 600 px and below, so Contest is never alone on a row.
 
 **The card in Contest mode.** The title stays "Character set", so its Reset
-still means what it says; the note (`settings_charset.rs:123-142`) reads
+still means what it says; the note (`Charset::note`, `settings_charset.rs`)
+reads
 "Contest · CQ WPX". As built (2026-10-29), its Reset in Contest mode puts
 the contest, the run style and your call in TU back and stays in Contest
 (it used to drop to Mixed), and leaves an unlock order of your own and the
@@ -218,7 +92,8 @@ puts that card back, Your station's call and exchange among them. The body
 shows:
 
 - one pill per contest, once its phase ships (a control that does nothing
-  is removed, `src/app.rs:1606-1635`);
+  is removed, as `the_settings_screen_only_offers_what_a_contest_has` in
+  `src/app.rs` checks);
 - "You send" and "You copy", and the QSO as a dialogue with You and They
   labels, rendered with your call (or `<your call>`);
 - "Callsign tier (1–6)", the stored `callsignLevel` shared with Callsigns,
@@ -230,15 +105,15 @@ shows:
   after the QSO, above the tier, so what a preset sets shows right under
   it.
 
-The alphabet controls are not drawn: the `if` blocks at
-`settings_charset.rs:171-275` gain a Contest arm.
+The alphabet controls are not drawn: the `if` blocks of `CharsetCard`
+(`settings_charset.rs`) gain a Contest arm.
 
 **Your station.** A new card under it, in Contest mode only, with its own
 reset: your callsign and only the fields the chosen contest sends. Under the
 call it shows what was read ("Germany · Europe · CQ zone 14 · you are DX")
 or a plain error ("needs a digit", "unknown prefix"), and "No licence yet?
 Make up a call from your country's prefix, a digit and two or three
-letters. Stored on this device only." Phase 1 had only the country key and
+letters. Dust never sends it off this device." Phase 1 had only the country key and
 the WPX prefix to read ("Reads as DL · WPX prefix DL1"). As built (3a), the
 line names the country the call is at home in, as cty.dat names it
 (`home_country`, which places the prefixes of Alaska and Canada the call
@@ -270,7 +145,8 @@ the W/VE side, for your state. With no call yet, the line says what a run
 is missing, in `missing()`'s words ("Add your callsign to start a
 contest").
 
-**Home** (`src/ui/home.rs:128-216`) keeps its frame; its subtitle reads
+**Home** (`Home` and `contest_hero`, `src/ui/home.rs`) keeps its frame; its
+subtitle reads
 "Call CQ and work the stations that answer — or just listen." The hero's
 eyebrow reads "Contest", the level chip "CQ WPX", and field chips (`CALL`
 `NR`) replace the pool chips, with "You send 5NN + serial, as DL1ABC".
@@ -301,7 +177,8 @@ the hero holds a field, Start and Listen keep the cursor in it and keep
 what was typed there before they act, so a call typed after a refusal
 starts the run on one press: leaving the box on the press would
 keep the call then and redraw the hero, the button moved, under the finger
-before the click came (`StationDraft`, `src/ui/settings_station.rs`). As
+before the click came (the hero's `TextDraft`, `src/ui/widgets.rs`, which
+Home hands its station field, `src/ui/settings_station.rs`). As
 built (2c), the settings are stored as a session starts
 (`AppCtx::store_settings`, from `start_session`), so a call, name or state
 the press of Start kept is stored before the run, which stores no settings
@@ -312,10 +189,11 @@ sends what the QSO needs next"), and its own tips (`CONTEST_TIPS`: Enter, a
 partial call with `?`, and `?` for a missed number) in place of the
 groups'. The level tile shows the callsign tier, and `AutoLevelCard` is
 hidden, as for Words (`auto_level_progress` is `None` in Contest,
-`crates/cw-core/src/auto_level.rs:220-229`).
+`crates/cw-core/src/auto_level.rs`).
 
-**Listen** treats Contest like Callsigns (`src/ui/listen.rs:30-222`), as
-does the one fork in group generation (`sampling.rs:503-507`). Phase 2 adds
+**Listen** treats Contest like Callsigns (`ListenView`, `src/ui/listen.rs`),
+as does the one fork in group generation (`generate_group`,
+`crates/cw-core/src/sampling.rs`). Phase 2 adds
 "Hear a QSO". As built with adaptive callers' speed (2026-10-22), Listen's
 stream of groups comes in Contest mode at speeds drawn evenly from the
 Speed card's ranges, as it did before: the callers' switch is theirs alone
@@ -363,18 +241,20 @@ station is sent as K1ABC MIKE MA until you add yours"): `DL1ABC`, or
 and, for the section, `EMA` ("K1ABC 1D EMA")
 (`ContestSettings::stand_in`, beside `missing`, which it answers).
 
-**Navigation.** A run uses `Screen::Training` and `Screen::Results`
-(`src/state.rs:19-26`), with the hidden nav, the refused `go_to`
-(`state.rs:368-371`) and no settings saves mid-run. Four things change:
+**Navigation.** A run uses `Screen::Training` and `Screen::Results`, with
+the hidden nav, the refused `AppCtx::go_to` (both in `src/state.rs`) and
+no settings saves mid-run. Four things change:
 
-- Exit and the tour's Discard send a `SessionEvent` (`app.rs:184`,
-  `tour.rs:222`) that only a group `LiveSession` receives
-  (`session_runtime.rs:232-241`). Both go through new `finish_run(ctx)` and
-  `abort_run(ctx)`, which reach whichever machine is live.
+- Exit and the tour's Discard sent a `SessionEvent` that only a group
+  `LiveSession` receives. Both go through `finish_run(ctx)` and
+  `abort_run(ctx)` (`src/session_runtime.rs`), which reach whichever
+  machine is live: Exit from `App` (`src/app.rs`), Discard from
+  `Move::take_there` (`src/ui/tour.rs`).
 - Keep-awake follows "a run is live" (countdown or running) instead of the
-  screen (`keep_awake.rs:17-27`), so a paused run lets the screen sleep; as
+  screen (`use_keep_awake`, `keep_awake.rs`), so a paused run lets the
+  screen sleep; as
   built (2c), Hear a QSO playing holds it too.
-- The tour targets group inputs (`tour.rs:231-240`), so its button was
+- The tour targets group inputs (`STEPS`, `src/ui/tour.rs`), so its button was
   hidden in Contest mode until phase 5. As built (5b), Contest has a guide
   of its own (`CONTEST_STEPS`, `src/ui/tour.rs`), opened by the same
   button, shown in Contest now: Start contest, then each part of the run
@@ -465,7 +345,7 @@ kind replacing an earlier one (11.7).
   Walker's POTA mode (`mw/src/js/modes.js:85-100`).
 - **You send** `CQ CQ DE <my> <my> K`, then
   `<his> DE <my> UR 599 599 NAME <name> <name> BK`, then `TU <his name> 73 EE`.
-- **They send** `<my> DE <his> <his> K`, then
+- **They send** `<my> DE <his> K`, then
   `R TNX UR 579 579 NAME BOB BOB BK`, then `73 EE`, heard but not logged.
   Logged: RST 579, NAME BOB.
 - **Rules.** TU does not bring the next caller; you call CQ again. No contest
@@ -520,7 +400,7 @@ North American Sprint.
   it called; the choice of your call in TU is not the Sprint's
   (`ContestRules::tu_call_chosen`). A station with no place sends `DX`.
   The card's pill comes
-  first, as the card lists the contests (`ContestKind::shipped` keeps
+  first, as the card lists the contests (`ContestKind::ALL` keeps
   that order), and a line under "You send" states the simplifications.
   The dialogue's caller is `W7XYZ`, as the state it sends is Oregon.
   A QSO logged with `DX` counts a point and no multiplier. As built (4a),
@@ -545,10 +425,13 @@ North American Sprint.
   built, 4a). F12 sends `NR?`, as MRCE's does in every contest. A QSO's
   points and country go by the call logged, placed where it is at home
   (`home_country`, §11.2), its continent by its prefix (European Turkey is
-  in Europe): a call Dust cannot place is worth no points and no country,
-  and from a call of yours it cannot place every placed station is on
-  another continent. Your own country and continent are read the same way,
-  so NL7AB is Alaska's and VG3ABC Canada's. Your own country is a
+  in Europe): a call Dust cannot place is worth a point and no country,
+  as MRCE leaves a call its list cannot place at its default point
+  (`Log.pas:724`), and from a call of yours it cannot place every placed
+  station is on another continent. Two stations in one country score 0
+  even on two continents (TA1 and TA2), as in MRCE, whose list gives
+  Turkey one continent. Your own country and continent are read the same
+  way, so NL7AB is Alaska's and VG3ABC Canada's. Your own country is a
   multiplier too, as the contest has it. A call that does not say its zone
   (one Dust cannot place, or a Canadian call whose digit names no province,
   such as CH1 or VE0, until you give your province) needs `myZone` before a
@@ -657,8 +540,9 @@ settings so scores compare between people.
 
 `ContestMachine<S: CallSource>` sits in cw-core beside `SessionMachine` and
 follows its pattern: pure `apply(event, now) -> Vec<effect>`
-(`machine.rs:1-7, 247-271`), timers cancelled by forgetting their ids
-(`machine.rs:184-199`), and randomness from `SplitMix64` forks per caller,
+(`SessionMachine::apply`, `crates/cw-core/src/machine.rs`), timers
+cancelled by forgetting their ids (`SessionMachine::cancel_timers`), and
+randomness from `SplitMix64` forks per caller,
 so a seed and an event list give one run. Its state:
 
 - `phase`: `Countdown{left}`, `Running`, `Paused{why: You|Hidden|Sound}`,
@@ -668,7 +552,7 @@ so a seed and an event list give one run. Its state:
   your exchange (N), whether it corrected you, who you are working, and
   when each item was heard and asked for;
 - `callers`: call, place, true exchange, a voice drawn once
-  (`timing/station.rs:6-11`), pitch, level, fade offset, skill 1–3,
+  (`StationVoice`, `timing/station.rs`), pitch, level, fade offset, skill 1–3,
   patience, and MRCE's state (`DxOper.pas:17-88`): `NeedQso`, `NeedNr`,
   `NeedCall`, `NeedCallNr`, `NeedEnd`, `Done`, `Gone`;
 - the log, your next serial, your speed (as built after operator
@@ -682,6 +566,8 @@ pub enum ContestEvent {
     TurnStarted { id: u64, heard_from: MonoMs, output_from: MonoMs },
     TurnEnded { id: u64 },
     TurnHeldUp { id: u64 },     // its audio was held up: nothing in it is timed
+    // some of its sound went unheard, skipped by a browser fallen behind
+    TurnMissed { id: u64, from_sec: f64, until_sec: f64 },
     TurnCancelled { id: u64 },  // a stop or a newer send: always ignored
     TurnFailed { id: u64 },     // the sound failed after every retry
     TimerFired { id: u64 },
@@ -697,9 +583,10 @@ pub enum OpKey { Esm, Cq, Exchange, Tu, MyCall, HisCall, HisCallAndExchange,
 
 The machine needs the fields only at a key press. The runtime maps
 `Err(AudioError::Cancelled)` to `TurnCancelled` and any other error to
-`TurnFailed`, as `play()` tells the two apart (`session_runtime.rs:350-354`). The effects are
+`TurnFailed` (`play_turn`, `src/contest_runtime.rs`), as a group session's
+`play` tells the two apart (`src/session_runtime.rs`). The effects are
 `PlayTurn(Turn)`, `StopAudio`, `ReleaseAudio`, `StartTimer{id, ms}`,
-`ClearFields`, `Focus(Field)`, `Announce(text)`, `PersistAndShowResults`,
+`ClearFields`, `Focus(EntryField)`, `Announce(text)`, `PersistAndShowResults`,
 `ShowNothingKept` and `AbortToHome`. Every apply that emits `StopAudio` or
 `ReleaseAudio` also sets `air = Silent`.
 
@@ -715,6 +602,7 @@ The machine needs the fields only at a key press. The runtime maps
 | Turn(id) | TurnEnded{id} | all segments count; each caller waits as the turn planned it (4.3); the patience timer starts if anyone waits → Silent |
 | Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused, but not time the clock was read at since (6.3), so the run bar steps back by the retries; every caller in the turn sends again after Resume, as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout that never began, which waits afresh; timers forgotten; `ReleaseAudio` → Paused{Sound} |
 | any | TurnHeldUp{id} | the turn is marked untimed, on the air or not; no effects |
+| any | TurnMissed{id, from, until} | the turn is marked untimed; on the air, a caller's send any of which the browser skipped is no send heard, as one under your message (5.3, `Counted::Muted`), a call on its timeout spending its try; no effects |
 | any | TurnCancelled, or another id | ignored |
 | Silent | TimerFired (patience) | waiting callers call again (4.3); if the station you work has left, "K5XYZ has gone" is announced, by the call it put yours right with, or else the call you had for it, or "The station", and Enter starts afresh, as after a CQ, calling CQ in place of its call (4.4) → a turn of replies |
 | Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count. A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout, which waits afresh; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
@@ -833,7 +721,9 @@ contest; MRCE's sources are the reference for the numbers below.
 - **Calling twice.** 10% of pile-up callers send their call twice; single
   callers never do (`DxOper.pas:500-502`). As built, a caller that calls
   twice sends its call twice where the contest's answer has it once
-  (`K5XYZ K5XYZ`); Simple QSO's answer sends it twice already.
+  (`K5XYZ K5XYZ`), Simple QSO's too (`DL1ABC DE K5XYZ K5XYZ K`). Simple
+  QSO's answer used to send it twice for every caller, which had a learner
+  keying over the second (as built, 2026-10-30).
 - **Careless operators** (phase 4, habits `rough`), as MRCE's LIDs
   (`DxStn.pas:73`, `Station.pas:509-521`, `DxOper.pas:651-671, 879-886`).
   As built (4a): one caller in ten, in a contest whose callers send a
@@ -1061,7 +951,13 @@ it, and Enter on the call your TU without logging went to, its exchange
 not copied yet, would clear a QSO waiting to be logged. F3 keeps only
 the call it went to, so Enter or `.` on that call sends the TU alone and
 logs the QSO it closed, as MRCE's TU and log does while that call still
-counts as sent, and any other call starts afresh. Its call sent in
+counts as sent, and any other call starts afresh. An F3 the station you
+work never heard, still sending its exchange as it ended, closed nothing:
+it keeps Enter's QSO as it was, C and N with it, as MRCE's F3 always
+does, so Enter on the call sends the TU and logs, and the exchange the
+station sends again on its timeout is no repeat you asked for (as built,
+2026-10-30; Enter used to send the call and exchange again, and charge a
+repeat for the exchange that drew). Its call sent in
 answer to your partial, or to a piece of its call, is no correction: you
 asked for it. A station that corrects you again after you sent its call
 right never heard that call, sent over its correction in a pile-up: Enter's
@@ -1077,7 +973,8 @@ typed, alone. Where MRCE refuses an invalid exchange
 (`Main.pas:1210-1216`), Dust also sends nothing: the fault is your
 typing. When Enter does not log and V holds, focus moves to Exchange, as
 MRCE's `MustAdvance` (`Main.pas:1222-1223`); after logging it returns to
-Call. `esm(&qso, &fields, &rules, side) -> Esm { message, label, hint, focus, corrected }`
+Call. `esm(&qso, &fields, &rules, side) -> Esm { message, label, hint,
+hint_more, focus, clears, corrected }`
 is pure: the machine runs it on the key, the screen on its own field text.
 It takes your side because ARRL DX's exchange depends on it, as
 `parse_exchange` does. When rows combine, the label names each part:
@@ -1107,8 +1004,9 @@ key that sends nothing reads no other caller's call into it (9.1).
 | TU and log; log without sending | `.` `,` `+`; Shift/Ctrl/Alt+Enter | (ESM) | 1d |
 | Your call, B4, NIL, NR? (AGN in Simple QSO) | F4, F6, F8, F12 | `B4` on a dupe | 2 |
 
-- F11 stays fullscreen (`app.rs:140-147`), so Wipe is Alt+W (Ctrl+W closes
-  a tab), and `[` `]` stay the paddles (`paddle.rs:113-125`). Web
+- F11 stays fullscreen (`toggle_fullscreen`, `app.rs`), so Wipe is Alt+W
+  (Ctrl+W closes a tab), and `[` `]` stay the paddles (`bracket_for_key`,
+  `paddle.rs`). Web
   fullscreen takes Esc, so the run calls `navigator.keyboard.lock(['Escape'])`
   where it exists, and Alt+S always stops. Insert is the screen readers'
   modifier key, so `;` is the documented key.
@@ -1163,7 +1061,8 @@ key that sends nothing reads no other caller's call into it (9.1).
   switched off those keys type, and their `+` is the run's. Enter held with Shift, Ctrl or Alt
   is no Enter in the fields; the listener hears it as log without sending.
   With the Command key, which the listener passes by, it is Enter still.
-- Paddles key into the focused field (`paddle.rs:287-299`) and never
+- Paddles key into the focused field (`PaddleKeys::deliver`, `paddle.rs`)
+  and never
   transmit; phase 5 adds a field space after a word gap. As built, the
   keyer ends a word once six dits of quiet follow a letter's last element,
   a dit short of a word space so one sent on time always ends it, as it
@@ -1235,7 +1134,8 @@ station sends again with the same voice and fresh fading.
 - After your exchange: the station you work sends its exchange again.
 
 Each repeat you ask for adds one send to the items it re-sends, and Dust's
-repeat factor, `0.5^(sends − 1)` (`score.rs:111-112`), halves their points,
+repeat factor, `0.5^(sends − 1)` (`repeat_factor`,
+`crates/cw-core/src/score.rs`), halves their points,
 as group repeats already score (RufzXP's F6 penalty); its air time also
 lowers the rate. A free local replay would teach the wrong reflex. An
 exchange the station you work sends again costs its send whatever key drew
@@ -1344,8 +1244,12 @@ station, and is lost then. The checks follow MRCE's `Log.pas:1030-1100`:
 
 `QsoCheck` holds the errors found, a NIL alone or a busted call and field
 errors together, and whether the QSO is a dupe, which is no error: a dupe
-copied right is clean. Raw drops a call already in the log as typed, as a
-logger marks a dupe; verified counts each clean, non-dupe station once.
+copied right is clean. A dupe is only that: a station already logged clean
+and logged again with something wrong counts once, by what is wrong, as its
+row reads, never as a dupe beside it (MRCE marks a dupe by the call as
+typed, `Log.pas:733-738`, so a busted call is never one). Raw drops a call
+already in the log as typed, as a logger marks a dupe; verified counts each
+clean, non-dupe station once.
 
 Logged QSOs cannot be edited, as in MRCE.
 
@@ -1354,8 +1258,9 @@ Logged QSOs cannot be edited, as in MRCE.
 ### 5.1 A turn is one send
 
 The players hold one send; starting another releases it
-(`mixer/mod.rs:111-117`, `web/mod.rs:233-240`), and desktop UI timers fire
-too late for a 0.1–0.6 s reply gap (`paddle.rs:94-96`). So each of your
+(`Mixer::start_at`, `src/audio/mixer/mod.rs`, the mixer both play), and
+desktop UI timers fire too late for a 0.1–0.6 s reply gap (`sleep_keyer`,
+`src/ui/paddle.rs`). So each of your
 actions is one send, a turn, holding your message and every reply:
 
 ```
@@ -1366,16 +1271,17 @@ time → |== you: K5XYZ 5NN TT7 ==|.. 0.1–0.6 s ..|== K5XYZ: TU 5NN 214 ==|
 Your message is fixed when you key, so every reply can be decided then. A
 pure `plan_turn` builds the plan. `wanted` is your message, with
 `duration_sec` stretched to the last reply's end; both players play to
-`wanted`'s length (native `SendVoice` ends there plus its tail,
-`mixer/send.rs:185-201`). `others` are the replies, delayed and never cut,
-so `plan_transmission`, which cuts at `wanted`'s end (`plan.rs:58-72`), is
+`wanted`'s length, or a tone's fall past it
+(`PlannedTransmission::sound_end_sec`), plus a tail (`SendVoice::new`,
+`mixer/send.rs`). `others` are the replies, delayed and never cut,
+so `plan_transmission`, which cuts at `wanted`'s end (`timing/plan.rs`), is
 not used. A turn of callers only has a `wanted` with no tones. Only
 patience, the countdown, the resume timer and the run end use UI timers,
 all seconds long, and the heard timer, which only brings Enter, the
 screen and the log's checks up to what the turn has played (4.2), so it
 may fire late. The app gains `start_planned` beside `start_send`
-(`audio/mod.rs:81-90`) and `Lease::send_planned` beside `Lease::send`
-(`player.rs:289-314`), keeping leases, stall detection and retries (§12);
+(`src/audio/mod.rs`) and `Lease::send_planned` beside `Lease::send`
+(`src/player.rs`), keeping leases, stall detection and retries (§12);
 as built (5a), both take the moment a continuation is to start
 (`Turn::starts_at`), which every player honours (5.2), and the stall budget
 waits that moment out. What the turn says goes to the player as
@@ -1524,8 +1430,9 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   QSO's ends and voices with it, so a NIL after is never charged to the
   station you work for want of them.
 - **Stale sends.** A stopped or replaced send returns `Cancelled`
-  (`player.rs:325-349`): `TurnCancelled`, ignored. Arming cancels the send,
-  not the lease (`audio/epoch.rs:6-9, 21-27`; `player.rs:236-238`). Each
+  (`Lease::send_planned`, `src/player.rs`): `TurnCancelled`, ignored.
+  Arming cancels the send, not the lease (`Epoch::arm`,
+  `src/audio/epoch.rs`; `Player::stop_sending`, `src/player.rs`). Each
   turn's send is asked for as the turn goes on the air
   (`Lease::ask_to_send`), not when its task first runs: that ends every
   send asked for before it, so an older turn waiting out a retry gives up
@@ -1533,49 +1440,58 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   runs still stops it.
 - **A failure.** After every retry fails, `TurnFailed` with the current id
   pauses the run ("Sound stopped — Resume to carry on"). The retries are not
-  run time: each attempt waits the turn plus 2 s (`wait.rs:18, 95-96`;
-  `SEND_ATTEMPTS` 3, `player.rs:28`). So the limit does not end the run
+  run time: each attempt waits the turn plus 2 s (`STALL_GRACE_MS` and
+  `next_wait_step`, `src/audio/wait.rs`; `SEND_ATTEMPTS` 3,
+  `src/player.rs`). So the limit does not end the run
   while the turn on the air may be retrying, once an attempt after the
   first has started or the one playing is past the turn plus 2 s: its end,
   a key or End run still end it, its failure pauses it with the retries
   given back, and the run end waits till its last attempt would have
   failed.
 - **Heard time.** `send_planned` tells `on_news` after each attempt starts,
-  with no `Player` borrow held, and when a send was held up on its way
-  (`SendNews`, `player.rs`). The runtime dispatches
-  `TurnStarted{id, heard_from, output_from}` (`TurnHeldUp{id}` for the
-  latter): the start plus the player's lead and
-  latency estimate (web `schedule_lead_sec` and `heard_latency`,
-  `wait.rs:124-132`, `web/mod.rs:122`; native `latency_frames`,
-  `audio/native.rs:272-280`), and, as built (5a), for a continuation the
-  wait for the moment asked, so `heard_from` is the splice the machine
+  with no `Player` borrow held, when some of a send went unheard, and when
+  a send was held up on its way (`SendNews`, `player.rs`). The runtime
+  dispatches `TurnStarted{id, heard_from, output_from}` (`TurnMissed` and
+  `TurnHeldUp{id}` for the others, 4.2): the start plus the player's lead
+  and latency estimate (`SendTiming`, `src/audio/wait.rs`: in the browser,
+  how far past its clock the send went into the mixer, the receiver's
+  look-ahead among it, and `heard_latency`, `src/audio/web/mod.rs`;
+  natively, the look-ahead and the latency the mixer last heard from the
+  device, `latency_frames`, `src/audio/native.rs`), and, as built (5a),
+  for a continuation the wait for the moment asked, so `heard_from` is the
+  splice the machine
   planned wherever the player could honour it; that of a turn started at
   once, on its first try, is how the machine learns the lead a splice
   waits out. A
   caller's segment counts as heard once it has reached the ear, unless the
   receiver was muted for it (5.3); your own count from the start, which is
-  lenient. Each player's send says it as
-  `PlaybackSignal::heard_after_sec`: the browser's lead and believed
-  latency, read as the send is scheduled; natively, the latency the mixer's
-  last callback found; nothing for the silent player and the recorder.
+  lenient. Each player's send says it as `PlaybackSignal::timing`, whose
+  `SendTiming::heard_after_sec` is its lead and believed latency, read as
+  the send starts: in the browser, the latency it reports; natively, the
+  latency the mixer's last callback found; for the silent player only the
+  wait for a continuation's moment, and for the recorder that and a
+  latency a test sets.
 
 ### 5.3 Your own transmission
 
 You hear your messages from phase 1, at the side-tone centre
-(`settings/ranges.rs:175-178`) and your run speed (6.6), with no Farnsworth
+(`TrainingSettings::side_tone_center`, `settings/ranges.rs`) and your run
+speed (6.6), with no Farnsworth
 spacing and no fist variation.
 
 - **Slice 1a** played it as `wanted` through the receiver at `VOLUME_MAX`.
   At the hardest noise it was only a few dB over the floor (2 dB SNR at
-  full level, `band/calibration.rs:35-36`), and the AGC ducked a weak
+  full level, `NOISE_SNR_LOUD_DB`, `band/calibration.rs`), and the AGC
+  ducked a weak
   reply's first 0.3 s: an interim.
 - **Slice 1b**, as built, plays it dry, as a rig's sidetone is played.
   `plan_turn` marks the plan `dry_wanted` (`PlannedTransmission`,
-  `timing/plan.rs:36-45`) and plans your tones at `MONITOR_LEVEL`, half of
-  full scale (`contest/turn.rs:16-33`), whatever the voice's volume, which
-  could reach only 0.3 (`plan_morse_playback_at`). That is about 3 dB under
-  the paddle's sidetone at the default volume floor (0.7,
-  `player.rs:228-233`), 4.4 dB over the loudest caller before the AGC,
+  `timing/plan.rs`) and plans your tones at `MONITOR_LEVEL`
+  (`contest/turn.rs`), then half of full scale, whatever the voice's
+  volume, which could reach only 0.3 (`plan_morse_playback_at`). That was
+  about 3 dB under the paddle's sidetone at the default volume floor (0.7,
+  as the sidetone was played then), 4.4 dB over the loudest caller before
+  the AGC,
   about 11 dB over the hardest noise through the default filter (the
   loudest caller is 7 dB over it), and under the limiter's knee (0.7), so
   alone it is never bent and the band's crests on it are caught, not
@@ -1586,16 +1502,24 @@ spacing and no fist variation.
   louder level would only bend more of it. Every turn's `wanted` is dry, a
   turn of callers alone included (it has no tones); `plan_transmission`
   never marks one, so group sessions and the band preview play as before.
-  - The web player schedules it into `chain.floor_in`, around the filter,
-    the fading and the AGC but through the limiter, as the paddle's
-    sidetone goes: `ScheduledSend::schedule` takes `dry_into` beside
-    `into` and gives your message a gain of its own, which a stop ramps
-    down with the other (`web/send.rs:12-81`, `web/mod.rs:246-256`).
-  - Natively one `SendVoice` holds your message apart from the stations
-    it filters, unfaded, and gives both each sample (`SendSample { heard,
-    dry }`, `mixer/send.rs:119-149`); `Mixer::render` adds `dry` after
-    `heard * gain`, before the limiter, so the AGC never hears it
-    (`mixer/mod.rs:187-191`). A stop releases both.
+  - One `SendVoice` holds your message apart from the stations it
+    filters, unfaded, and gives both each sample (`SendSample { heard,
+    dry, keyed }`, `mixer/send.rs`); `Mixer::render`
+    (`src/audio/mixer/mod.rs`) adds `dry` past the receiver, after its
+    AGC, its audio stage and its gate, at the volume alone, so the AGC
+    never hears it, and the output stage's limiter catches the two
+    together. A stop releases both.
+  - The browser plays that same mixer (as built, 2026-10-28): rendered
+    ahead of the browser's clock, half a second ahead and a tenth of a
+    second at a time, and streamed into a graph of a few nodes, the volume
+    and the limiter (`MorsePlayer`, `src/audio/web/mod.rs`; `MixerStream`,
+    `src/audio/web/stream.rs`; `ReceiverStream`, `src/audio/stream.rs`).
+    So your message comes in past the receiver there as natively, and a
+    change, a send started or stopped among them, takes back what was
+    rendered past its moment and renders it again from there. The
+    browser's player used to be a Web Audio graph of its own, which
+    scheduled your message into a gain of its own around the filter, the
+    fading and the AGC but through the limiter, beside the receiver's.
   - The callers keep their path through the filter, QSB-free, and the AGC.
     The send's length and `PlaybackWait` still follow the stretched
     `wanted`, and the background's reservation counts only the most of
@@ -1611,21 +1535,24 @@ spacing and no fist variation.
   self-monitor level is set (`MonLevel`, -60 to 0 dB, saved as
   `SelfMonVolume`, `Ini.pas:282, 461, 556`), to off at -60 dB.
   `plan_turn` plans your tones at `ContestSettings::sending_level()`, so
-  both players play it as they played the monitor's level, the native
-  mixer's dry sample and the web player's dry gain into `floor_in`, and
-  the recorder keeps it with each plan: nothing in the players changed.
+  both players play it as they played the monitor's level, as the mixer's
+  dry sample, and the recorder keeps it with each plan: nothing in the
+  players changed.
   Off, `wanted` has no tones of yours and lasts as long as ever, so the
   send, `PlaybackWait`, the turn's segments, the air line and the heard
-  timer keep their time. It starts at -9 dB. By the figures above the
-  loudest stands about 6 dB over an average caller before the AGC (4.4 dB
-  over the loudest caller, and the U-shaped strength's middle, 0.85 of the
-  volume range's top, is 1.4 dB under that), and the AGC ducks that caller
-  3.5 to 5 dB more (`band/agc.rs`), so a caller is heard about 10 dB under
-  it; at -9 dB your message is level with an average caller as you hear
-  it, a decibel over, as a rig's sidetone set to the receiver's audio is,
-  and still some 16 dB over the default band's noise through the default
-  filter (2 dB over the hardest noise, which the loudest caller clears by
-  7 dB before the AGC). Hear a QSO plays your message at it too.
+  timer keep their time. As built since full volume was made as loud as
+  the receiver plays the strongest station clean (2026-10-24),
+  `MONITOR_LEVEL` is the limiter's knee, 0.7 of full scale, about where
+  that station crests, and your message is played past the receiver's AF
+  gain, at the volume alone; the AGC holds every caller over its
+  threshold within a few decibels of it, a caller drawn anywhere in the
+  default strength range about 2 dB under it. Your sending starts at
+  -3 dB (`MY_SENDING_DEFAULT_DB`, `settings/contest.rs`), a decibel or so
+  under such a caller, about level, as a rig's sidetone set to the
+  receiver's audio is: through the default receiver at full volume, the
+  caller at 0.57 of full scale and your message at 0.50. It started at
+  -9 dB, level with an average caller when your loudest stood about 10 dB
+  over one as heard. Hear a QSO plays your message at it too.
 - **The paddles' sidetone** does not follow it. In a run the paddles key
   letters into the fields and never transmit (§4.5), so their sidetone is
   the sound of typing into the log, not your sending; it plays at a level
@@ -1702,24 +1629,27 @@ spacing and no fist variation.
     was before 5a.
 
 The turn plays from a copy of the run settings with `qsb_enabled = false`:
-QSB is attached per send (`Qsb::of`, `audio/native.rs:244`) and `BandKey`
-has no QSB field (`band/key.rs:19-49`), so the band never rebuilds. Callers
+QSB is attached per send (`Qsb::of`, in each player's
+`MorseBackend::start`) and `BandKey` has no QSB field (`band/key.rs`), so
+the band never rebuilds. Callers
 fade on their own from phase 2 (5.5), in their tones' envelopes, so the
 send still carries no QSB.
 
 ### 5.4 Pile-ups against the filter
 
 `resolve_pileup` keeps one wanted station loudest and nearest the centre
-(`timing/pileup.rs:142-147, 338`). A contest has no wanted station, so
-phase 2 adds `place_contest_callers`:
+(`timing/pileup.rs`, and its test
+`the_station_you_want_is_always_the_strongest`). A contest has no wanted
+station, so phase 2 adds `place_contest_caller`:
 
 - **Pitch.** Single: the centre ±50 Hz. Pile-up: within ±`pileupSpreadHz`,
-  at least 60 Hz apart (`pileup.rs:82`), inside the filter's −15 dB reach
-  (`pileup.rs:158-174`).
+  at least 60 Hz apart (`PILEUP_CALLER_SEPARATION_HZ`, `pileup.rs`),
+  inside the filter's −15 dB reach (`PILEUP_SKIRT_DB`).
 - **Strength.** U-shaped across the volume range, as MRCE draws it
   (`DxStn.pas:101`), never below `volume_min`. The band's guard keeps
   background 6 dB under `volume_min` only within the side-tone range ±150 Hz
-  (`band/activity.rs:110-119, 356-357`), so callers placed wider or faded
+  (`GUARD_KEYED_DB` and the guard's edges, `band/activity.rs`), so callers
+  placed wider or faded
   can meet band traffic at their level, as on a real band.
 - **Capacity** is the reach width ÷ 60 Hz + 1, about six on a 300 Hz filter;
   the rest wait. The Band card says "Your filter fits 6 callers".
@@ -1738,9 +1668,9 @@ again keeps its strength and is placed afresh.
 ### 5.5 Per-caller QSB (phase 2)
 
 The envelope curves carry the gain: `build_envelope_curve` bakes
-`target_gain` in (`plan.rs:121-124`); the native player reads `target_gain`
-only for a curve with fewer than two points (`mixer/send.rs:64-67`), and
-the browser plays that same mixer.
+`target_gain` in (`timing/envelope.rs`); a player reads `target_gain`
+only for a curve with fewer than two points (`ToneEvent::envelope_at`,
+`timing/plan.rs`), and both play the one mixer.
 
 Each caller gets the band's `Qsb` model at its own time offset, following
 the Band card's QSB switch. `plan_turn` bakes the fade into each tone's
@@ -1755,7 +1685,8 @@ caller's point at the segment's start (its start point, plus the turn's
 key time, plus the segment's start), and `plan_turn` reads only that, as
 the runtime plays from settings with the switch off. A segment of yours
 is never faded, whatever it carries. The QSB control runs
-0.03–1.5 Hz (`settings/mod.rs:47-48`) with components up to 2.3× that
+0.03–1.5 Hz (`QSB_RATE_MIN_HZ`, `QSB_RATE_MAX_HZ`, `settings/mod.rs`) with
+components up to 2.3× that
 (`band/qsb.rs`), so a fade held per tone would step audibly. No player
 changes: training's pile-ups fade the same way in the player, each station
 on a path of its own (`fade_from_sec`, drawn as a caller's is).
@@ -1783,12 +1714,14 @@ native mixer, rendered ahead of its clock.
 
 ### 5.6 QRM and the background
 
-The band runs as now (`band/mod.rs:9-30`); its traffic already sends contest
-phrases, more as `stationsMax` rises (`activity.rs:194-195, 1281-1305`), and
-at one station it is empty (`activity.rs:43-50`). While callers sound, the
-background gives up slots counted from the most of `plan.others` sounding
-at once (`PlannedTransmission::others_at_once`; `mixer/mod.rs:162-166`;
-web `Reservation`), so your message takes none. As built, a turn plans
+The band runs as now (the module notes of `band/mod.rs`); its traffic
+already sends contest phrases, more as `stationsMax` rises (`CONTEST_SHARE`,
+`contest_runner` and `contest_caller`, `band/activity.rs`), and at one
+station it is empty (the module notes of `band/activity.rs`). While
+callers sound, the background gives up slots counted from the most of
+`plan.others` sounding at once (`PlannedTransmission::others_at_once`,
+which `SendVoice::callers_now` hands the band in `Mixer::render`, the
+mixer both players play), so your message takes none. As built, a turn plans
 each call a caller sends on its timeout as one more of `others`, so
 `others.len()` counted every call planned into it; the count at once is
 for the whole send, not over time, so the band comes back only once the
@@ -1848,12 +1781,15 @@ always has.
 
 ### 5.7 Native, web and silent
 
-The silent player completes a turn at its planned length; the app's tests
-use the fake recorder (`src/testing.rs:131-133`). As built (5a), both start
+Both real players play the one mixer (5.3). The silent player completes a
+turn at its planned length; the app's tests
+use the fake recorder (`Recorder`, `src/audio/mod.rs`, which `Harness` in
+`src/testing.rs` holds). As built (5a), both start
 a continuation at its moment too: the silent player waits it out, and the
 recorder keeps how long after its start the send was to be heard
 (`Started::heard_in`) and plays from then. On a hidden page the web
-clock parks and a send waits (`wait.rs:88-107`); the run pauses first.
+clock parks and a send waits (`next_wait_step`, `wait.rs`); the run pauses
+first.
 
 ### 5.8 Later
 
@@ -1885,8 +1821,9 @@ out by itself.
 
 ### 6.3 The clock
 
-`RunClock` (cw-core) holds `started`, `paused_ms` and `paused_since` in
-`MonoMs` (`session.rs:54-67`), never wall time, and the latest time it was
+`RunClock` (`contest/clock.rs`) holds `started`, `paused_ms` and
+`paused_since` in `MonoMs` (`session.rs`), never wall time, and the latest
+time it was
 read, paused or resumed at. A pause stamped in the past (the heartbeat's)
 begins no earlier than that, so it never counts a stretch of time twice nor
 takes back run time a QSO was stamped with; a stale reading shows the
@@ -1896,14 +1833,16 @@ the run's end) counts; checking the limit on any other event is a look
 send's retries as run time, nor can the run end, a stale send's news or a
 forgotten timer end the run while the send may be retrying (5.2). Pausing
 twice or resuming a running clock changes nothing. The machine has no
-tick; the run bar redraws every 250 ms from `mono_ms()`, kept apart from
-the view as `TrainingProgress` is (`training.rs:19-45`). It always shows
+tick; the run bar redraws every 250 ms from `mono_ms()` (`use_ticks`,
+`src/ui/contest.rs`), kept apart from the view as `TrainingProgress` is
+(`src/ui/training.rs`). It always shows
 elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
 
 ### 6.4 Pause, hidden page, locked phone
 
 - **Pause** (button or Alt+P) stops the turn, forgets every timer, holds the
-  clock and releases the audio (`player.rs:111-117`), so the band falls
+  clock and releases the audio (`Player::release`, `src/player.rs`), so the
+  band falls
   silent and the screen may sleep. Callers and the open QSO wait; the fields
   lock, so a pause gives no free thinking time, and a copy typed before it
   and sent after it is timed in run time, the pause left out (9.1). A send
@@ -1911,17 +1850,19 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   timeout, as one heard whole, so a pause is no free `?`; one cut before
   it began goes again a moment after Resume (4.2).
 - **Resume** claims a new lease inside the tap, as Start does
-  (`session_runtime.rs:204`), so the player opens, or after a sound failure
+  (`resume_run`, `src/contest_runtime.rs`), so the player opens, or after a
+  sound failure
   is rebuilt, within the browser's gesture: a player that failed every
   attempt is thrown away, so that claim opens a fresh one. Every contest
   key and button first calls `Lease::wake()`, which resumes a suspended
-  context and opens a missing player (`player.rs:142-148`).
+  context and opens a missing player (`src/player.rs`).
 - **A hidden page or a locked phone** pauses the run, because `mono_ms`
-  keeps running while hidden (`src/time.rs:29-50`). Three signals feed it:
+  keeps running while hidden (`mono_ms`, `src/time.rs`). Three signals
+  feed it, the first two through `use_page_hidden` (`src/page_hidden.rs`):
   - a `visibilitychange` listener that talks back through `dioxus.send` and
-    a `recv` loop, as `file_pick.rs:76, 113-114`, removed at run end;
+    a `recv` loop (`listen_visibility`), removed at run end;
   - on desktop, where wry never hides a minimised window, a
-    `use_wry_event_handler` (as `paddle.rs:422`) checking
+    `use_wry_event_handler` (`listen_minimised`) checking
     `window.is_minimized()` on Resized and Focused;
   - a heartbeat: the run bar's ticker stamps `last_tick`; before any event,
     a gap over 2 s first dispatches `Pause{Hidden, at: last_tick}`, so a
@@ -1946,9 +1887,12 @@ flight, which Dust's "a logged QSO is final" rule covers.
   clean" beside it; a dupe copied right is clean.
 - **Rate:** QSOs per hour over the last 5 minutes of run time, as MRCE's
   `ShowRate` (`Log.pas:1133-1147`), shown after the first minute; Simple QSO
-  shows minutes per QSO.
+  shows minutes per QSO. MRCE shows a rate from the start; Dust's first
+  minute has none, and so a stored run under a minute keeps no rate, nor
+  the pace told by it, in History, on the Runs card and on its results
+  (`Rates::of`), where one QSO ten seconds in would read 360 an hour.
 - **Speed.** Callers' speeds are drawn from the Speed card's ranges:
-  evenly, through `resolve_station` (`timing/station.rs:33-47`), or, as
+  evenly, through `resolve_station` (`timing/station.rs`), or, as
   built with adaptive callers' speed (2026-10-22), from your copy speed
   within them while the callers adapt (below). As built after
   operator feedback (2026-10-22), you send at your speed, "Your speed" on
@@ -2064,14 +2008,14 @@ flight, which Dust's "a logged QSO is final" rule covers.
 
 The run screen is `TrainingRoute` → `div.stack.train`, with the same cards,
 keypad and action row in one column (`.shell`, max 760 px,
-`styles.css:328-333`). It reads "a bit different" because of what is in it:
+`assets/styles.css`). It reads "a bit different" because of what is in it:
 a running clock where "n / total" was, two labelled fields where the answer
 box was, an air line and message buttons, and a log where the previous
-group was. `ProgressHeader` (`widgets.rs:341-368`) gains `figure` and `pct`
+group was. `ProgressHeader` (`widgets.rs`) gains `figure` and `pct`
 in place of `current/total`.
 
 **Desktop, running.** No keypad without a touch screen
-(`training.rs:393-397`).
+(`Keypad`, `training.rs`).
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -2115,7 +2059,8 @@ in place of `current/total`.
   correction to put right, "They corrected you: fix the call, then
   Enter", and ". Space goes back to it" after it on a wider screen where
   Space would go back, `Esm::hint_for`, §4.5), one line, as
-  group training's (`training.rs:566-585`), and in its type. The hints are
+  group training's (`TrainingView`, `training.rs`), and in its type. The
+  hints are
   short enough for a phone's line ("Copy their number, then TU & log").
   Before the first CQ it says the seconds to it ("Your first CQ goes out in
   3 s"), as a phone shows the log's place, where the countdown stands, only
@@ -2155,14 +2100,14 @@ in place of `current/total`.
   change rows.
 - **The log** is newest first, six rows tall. A row shows `…` until its
   station is done, then a word ("clean", "busted call, was K5ABC"), since
-  icons are `aria-hidden` (`widgets.rs:277`). `?×1` counts asked repeats.
+  icons are `aria-hidden` (`Icon`, `widgets.rs`). `?×1` counts asked repeats.
 
 **Phone, running** (keypad always shown). From header to keypad it fits one
-screen (`styles.css:2606-2657`); below 760 px height the keys shrink and
+screen (`assets/styles.css`); below 760 px height the keys shrink and
 the run's cards, and the lines in them, draw closer, so a 360×640 screen
 holds it down to the keypad's last row, Enter included. Every line is a
 fixed one-line slot with an ellipsis (as `.train-hint`,
-`styles.css:1259-1267`), so the keypad never moves between turns.
+`assets/styles.css`), so the keypad never moves between turns.
 
 As built, after a browser test of group training, the rule is written for
 `.train`, which a session of groups and a run share, so a session draws
@@ -2174,7 +2119,8 @@ at 656 px of 640, and ends at 631. The run's values are as they were. A
 long group answered keeps to its slot there as a short one does: what was
 sent, which the top row spells out already, is cut short beside its mark,
 and the two rows of its comparison stay a row each, laid on one set of
-columns (`.comparison`, `widgets.rs:302`), so a copied character stays
+columns (`.comparison`, `CharacterComparison`, `widgets.rs`), so a copied
+character stays
 under the one sent there however many were typed past the end. The
 columns narrow to fit, 11 px for a group of 20 at 360 px, and stop at
 10 px, which still holds a letter inside its box: past that, from 22
@@ -2233,17 +2179,19 @@ leaves what Enter then does to a wider screen ("Copy their number, name
 and state", and on the desktop ", then TU & log" after it, `Esm::hint_more`).
 The desktop log's exchange column holds a Sprint's serial, name and state.
 
-The keypad takes its rows as props, not the constants at
-`training.rs:353-357`: the character
+The keypad takes its rows as props, not the constants `PAD_ROWS` and
+`PAD_LAST` (`training.rs`): the character
 rows stay as in group training, only `,` and `.` leave row four, and the
 last row is `␣ Field` (Space's rule, §4.5: Call to Exchange, and back
 to Call from Exchange but where it separates an item) and the ESM
 key, whose label and `aria-label` name what it sends, cut short before its
-`↵` when long. Fields keep `inputmode="none"` (`training.rs:205`); a tapped
+`↵` when long. Fields keep `inputmode="none"` (`ANSWER_INPUT_MODE`,
+`training.rs`); a tapped
 field takes focus and the paddles.
 
 **Typing never loses keys.** A controlled input redrawn while typed in drops
-the key typed in between (`training.rs:47-60`). Each field is an
+the key typed in between (as `AnswerBox`, `training.rs`, says). Each field
+is an
 `AnswerBox`-style component over `ContestEntry` (§12), redrawn only for
 keypad or paddle letters, Wipe and clearing. The hint, the Enter label and
 "Reads as" are sibling components reading a per-key signal. Upper case comes
@@ -2268,7 +2216,8 @@ used to end the run there, End run having slid into Pause's place. Resume
 stays the one thing to press, in the paused card; Pause's place holds no
 second Resume, so a double tap leaves the run paused.
 
-**Results** (a contest branch of `ResultsView`, `src/ui/results.rs:59-167`;
+**Results** (`ContestResults`, `src/ui/contest_results.rs`, the contest
+branch of `ResultsView`, `src/ui/results.rs`;
 the same view opens read-only from a History row, in the list's place, with
 History at its top and Back at its foot, and no Run again):
 
@@ -2338,13 +2287,15 @@ at speeds drawn from its ranges; as built with adaptive callers' speed,
 
 ## 8. Settings
 
-Settings stay flat camelCase sections (`settings/mod.rs:551-564`). The user
+Settings stay flat camelCase sections (`TrainingSettings`,
+`SettingsSection`, `settings/mod.rs`). The user
 asked that settings be shared, so the design reuses as many as it can.
 
 **Shared unchanged:** keying envelope; tone and volume (the pitch centre is
 the filter centre and your pitch; the volume range is the callers'); band
 conditions; character sampling, which steers the callers' calls
-(`sampling.rs:187-195`); the countdown and keyer trio; extra word space and
+(`generate_contest_call`, `crates/cw-core/src/sampling.rs`); the countdown
+and keyer trio; extra word space and
 fist variation.
 
 **Reinterpreted.**
@@ -2353,11 +2304,13 @@ fist variation.
 |---|---|
 | Character and effective speed ranges | the callers' speeds, drawn within them from your copy speed while the callers adapt (`contestAdaptSpeed`, on as it ships), evenly otherwise; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
 | `callsignLevel` | the callers' call shapes, shared with Callsigns mode |
-| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept, and one the pile-up opened goes back to one station on leaving it, for Single or another character set (as built, 2026-10-29) |
+| `stationsMin/Max` (`BandSettings`, `settings/mod.rs`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept, and one the pile-up opened goes back to one station on leaving it, for Single or another character set (as built, 2026-10-29). The Band conditions reset, which puts the range back to one station, opens it again while Pile-up stays chosen |
 | `pileupSpreadHz` | Pile-up only: how far either side of the centre callers land; hidden for Single, where it does nothing |
-| Session shape's first field | "Minutes per run" in place of "Groups per session" (`settings.rs:288-295`) |
+| Session shape's first field | "Minutes per run" in place of "Groups per session" (`SessionShapeCard`, `src/ui/settings.rs`) |
 
-**Hidden in Contest mode** (`app.rs:1606-1635`): Experience presets; the
+**Hidden in Contest mode**
+(`the_settings_screen_only_offers_what_a_contest_has`,
+`src/app.rs`): Experience presets; the
 group fields (groups per session, group size, adaptive size, Aim, sends,
 answer timeout, pause after a group, lock typing); Pile-up level, which
 needs a wanted station; Adapt speed to me, group training's switch, in
@@ -2388,8 +2341,9 @@ the presets as they were built before that, kept for the record.
 Each writes shared fields (speed ranges, tier, stations, QSB, QRN) and
 the contest's run style and Caller habits (as built, 4a), and flutter (as
 built, 5a), and reads
-"Custom" once any is edited, as Experience does (`experience.rs:83,
-98-110`, `settings.rs:135-177`). No level is stored.
+"Custom" once any is edited, as Experience does (`Experience::of`,
+`settings/experience.rs`; `ExperiencePicker`, `src/ui/settings.rs`). No
+level is stored.
 
 As built (2c), `ContestPreset` (`settings/contest_preset.rs`) applies
 through the calls the screens make, as `Experience` does, and the card is
@@ -2444,13 +2398,13 @@ the preset.
 
 **New fields.** One flattened struct, `ContestSettings`
 (`settings/contest.rs`), joins `TrainingSettings`, `SettingsSave` and its
-`From` (`settings/save.rs:17-31, 61-96`). A new `SettingsSection::Station`
-joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
-(`settings/reset.rs:11-100`).
+`From` (`settings/save.rs`). A new `SettingsSection::Station` joins
+`SettingsSection::ALL` (`settings/mod.rs`) and `reset_section`
+(`settings/reset.rs`).
 
 | Serde name | Type | Default | Clamp | Section | Phase |
 |---|---|---|---|---|---|
-| `contestKind` | `sprint` `arrlDx` `wpx` `cqww` `fieldDay` `simpleQso` | `wpx` | unknown → `wpx`, forgiving as `FilterShape` (`settings/mod.rs:101-114`) | Character set | 1 |
+| `contestKind` | `sprint` `arrlDx` `wpx` `cqww` `fieldDay` `simpleQso` | `wpx` | unknown → `wpx`, forgiving as `FilterShape`'s `Deserialize` (`settings/mod.rs`) | Character set | 1 |
 | `contestMinutes` | u32 | 10 | 0..=60 (0 = open, ends at 60) | Session shape | 1 |
 | `myCall` | String | `""` | upper case; `A–Z 0–9 /`; no leading, trailing or doubled `/`; ≤ 12 | Station | 1 |
 | `myName` | String | `""` | `A–Z`, ≤ 10 | Station | 1c |
@@ -2584,16 +2538,17 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   "callsign"` plus `"contestActive": true`, a key that exists only on disk
   and that `From<SettingsSave>` reads back as Contest. An older build opens
   in Callsigns at the same tier instead of failing the strict parse into
-  Mixed (`settings/save.rs:44-57`, `persist/mod.rs:183-207`). Its next save
+  Mixed (`TrainingSettings`'s `Serialize`, `settings/save.rs`;
+  `recover_settings`, `persist/mod.rs`). Its next save
   drops Your station: settings, which a backup holds, not training data.
   Nothing writes `"contest"` as the mode; a save edited by hand that names
   it opens in Contest, and `start_session` starts a run from it.
 - **Clamping and tests.** `clamp()` settles the strings in one pass
-  (`clamp.rs:15-115`); every new number is an integer. `wild()` and
-  `wildly_different()` (`settings/mod.rs:826, 1382-1441`) set every new
-  field, for the clamp tests and for
+  (`TrainingSettings::clamp`, `clamp.rs`); every new number is an integer.
+  `wild()` and `wildly_different()` (the tests of `settings/mod.rs`) set
+  every new field, for the clamp tests and for
   `every_setting_belongs_to_exactly_one_section` respectively. Nothing joins
-  `PROGRESS`.
+  `LEFT_BY_RESETS`, what no card's reset touches.
 - **Starting** needs a `myCall` that `parse_callsign` reads and valid
   contest fields: from 1c, a `myName` where the contest sends one ("Add
   your name to start a Simple QSO"). Your station shows the name field
@@ -2656,7 +2611,7 @@ contest practice from every stat, because every stat reads
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", from = "StoredSession")]
 pub struct SessionResult {
-    // ...every field as today (session.rs:589-618)...
+    // ...every field as today...
     /// Contest is written "callsign", so a build that knows no contests
     /// still reads the session.
     #[serde(serialize_with = "mode_on_disk")]
@@ -2676,9 +2631,10 @@ impl ContestLog { pub fn run(&self, groups: usize) -> Option<ContestRun>; }
 **Reading.** `Deserialize` goes through a private mirror, `StoredSession`,
 whose `From` sets `char_set_mode = Contest` when a log is present or the
 fingerprint starts with `contest:`, so every read path (`parse_sessions`,
-`persist/mod.rs:160-175`; `backup.rs:88-95`) gets it. `serde_json` becomes a
+`persist/mod.rs`; `read_backup`, `persist/backup.rs`) gets it. `serde_json`
+becomes a
 cw-core dependency. `GroupSession::result` maps Contest to Callsign, with a
-`debug_assert`, so no group session is recorded as Contest.
+`debug_assert_ne!`, so no group session is recorded as Contest.
 
 **`run()`** parses a strict `ContestRun` (no container default, no catch-all)
 only when `v` is exactly 1, the kind, style and field names are known to
@@ -2721,7 +2677,9 @@ pub struct QsoRecord {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub k: String,      // "" logged, "nil", or "lost"
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub c: String,      // the station's country key, for multipliers
+    pub c: String,      // the station's country key, as drawn
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lp: Vec<String>, // where the call logged placed its station when logged: [country, continent], "" for none
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub l: Vec<String>, // the exchange you logged, a token a field: a NIL's, or where no group holds it
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2737,8 +2695,12 @@ pub struct QsoRecord {
 
 Your callsign and exchange are not stored in a run: no score needs them.
 Checks, dupes, points, multipliers and rates are worked out on read, as
-`score` is. `a` is kept because the groups' `sends` count only the repeats
-charged to the copy, and the results show the `?×n` the run showed. `v`
+`score` is, each QSO's call placed where `lp` says it was placed when it
+was logged, kept as the facts about you are, because the call tables
+change; a run from a build before `lp` is placed by the tables of the
+build that reads it. `a` is kept because the groups' `sends` count only
+the repeats charged to the copy, and the results show the `?×n` the run
+showed. `v`
 rises only for a change an older reader would misread; a key that later
 phases add with a default does not raise it.
 
@@ -2754,7 +2716,10 @@ exactly as it was while the run went on.
   has begun to reach you: logged before that, each field group is a miss
   (received empty, 1 send), as a guess is no copy, so logging early neither
   raises accuracy nor shrinks the groups a run is ranked over; `l` and `s`
-  hold what you logged and what was sent, for the check. As built (third
+  hold what you logged and what was sent, for the check. A field group
+  keeps its token as keyed (`exchange::keyed_token`), so where that is not
+  what you typed (`T15` for a typed 15, `1T5` for 105), `l` holds what you
+  logged beside it, and the results list that (2026-10-30). As built (third
   pile-up audit), of a call put right with the exchange after it
   (`DE K5XYZ 5NN 214`), the exchange has begun once its first character
   has, not once the `DE` has, and so its speed and a repeat of it count
@@ -2861,7 +2826,8 @@ exactly as it was while the run went on.
   by length; a repeat drawn after the field read complete changes nothing.
   A send on a caller's timeout restarts neither: waiting costs time, not
   sends. `Fields` carries both stamps; the 100 ms a character floor
-  applies (`session.rs:26, 177`). Both ends are in run time, so a pause
+  applies (`MIN_RESPONSE_MS_PER_CHAR`, `crates/cw-core/src/score.rs`). Both
+  ends are in run time, so a pause
   between the edit and the key neither shortens nor lengthens a copy. As
   built (5a), without full break-in a send that went out under your
   message, the receiver muted, was never heard (§5.3): it ends no copy's
@@ -2877,11 +2843,12 @@ exactly as it was while the run went on.
   that owns no groups, a station logged again, shows no speed in either:
   its copy, and the speed that is credited at, are the earlier QSO's. The
   session's are their mean, as `GroupSession::result` does
-  (`session.rs:478-491`), never `my_wpm`. A call's and a number's
+  (`session.rs`), never `my_wpm`. A call's and a number's
   speeds are what the copy-speed belief learns them at, live as their QSO
   is final and from the history after (§6.6). `digits_level` comes from the
   settings, `level` is the callsign tier, `score` is `points()`, and the
-  tally and accuracy are worked out as for groups (`session.rs:458-521`).
+  tally and accuracy are worked out as for groups (`GroupSession::result`,
+  `session.rs`).
 - **Show copy** (as built, 4b). A station's text shows a second after its
   send ends (`SHOWN_AFTER_MS`), not the moment it ends: a learner types
   what it hears a beat behind it, and a copy cut off at the end of the send
@@ -2928,12 +2895,12 @@ exactly as it was while the run went on.
 
 | Build | Reads a run as | On its next save | Its stats |
 |---|---|---|---|
-| Before phase 0 | a Callsign session | drops the log; groups and the mark stay (`desktop.rs:215-228`) | Callsign copy speed, Callsigns adaptive speed (`sampling.rs:93`, `speed.rs:289-310`, blind to `sends`) and the Callsign board include runs; auto level untouched |
+| Before phase 0 | a Callsign session | drops the log, as it writes back only what it knows; groups and the mark stay | Callsign copy speed, Callsigns adaptive speed (`SpeedBelief::history` and `speed_groups`, `speed.rs`, blind to `sends`) and the Callsign board include runs; auto level untouched |
 | Phase 0 | a contest run by its mark, with no log view | keeps the log as written | Contest pill and labels |
 | Phase 1 and later | a run, scored when `run()` reads it | keeps the log as written | full |
 
 Writing `"contest"` would make every older build drop the session in
-`parse_sessions` (`persist/mod.rs:163-170`) and erase it on its next save.
+`parse_sessions` (`persist/mod.rs`) and erase it on its next save.
 After an upgrade, a stripped run is recognised by its mark: it leaves the
 Callsign series and board ("log not kept by an older version"), so the
 Callsign speed estimate and board places can shift; the release notes and
@@ -2943,20 +2910,23 @@ fewer old builds meet a run.
 ### 9.3 Backups and merge
 
 The layout stays `{dustBackup: 1, savedAt, settings, sessions}`
-(`backup.rs:14-59`). Contest data rides inside sessions and settings.
+(`Backup`, `persist/backup.rs`). Contest data rides inside sessions and
+settings.
 
-From phase 1, `merge_sessions` (`backup.rs:114-132`) still matches on
+From phase 1, `merge_sessions` (`persist/backup.rs`) still matches on
 `timestamp` and `date`, and a restored copy with a contest log replaces a
 present one without. It returns `(merged, added, filled)`; the restore
-message (`state.rs:319-326`) says "Restored 12 sessions and filled in 3,
+message (`AppCtx::restore_backup`, `src/state.rs`) says "Restored 12
+sessions and filled in 3,
 with your settings from 19 Oct", or "Filled in 3 sessions and restored your
 settings" when nothing was added.
 
 ### 9.4 Size budget
 
-Web history is held to 3,000,000 characters (`persist/web.rs:25`), filled
-newest first (`persist/mod.rs:231-248`); every store keeps at most 500
-sessions (`persist/mod.rs:30`). Measured on sample sessions (compact JSON,
+Web history is held to 3,000,000 characters (`HISTORY_BUDGET`,
+`persist/web.rs`), filled newest first (`store_newest_that_fit`,
+`persist/mod.rs`); every store keeps at most 500 sessions (`MAX_SESSIONS`).
+Measured on sample sessions (compact JSON,
 speeds to 0.1 WPM):
 
 | Session | Characters |
@@ -2973,14 +2943,15 @@ costs 1.6 group sessions at 70/h and 2.9 at 150/h, and in a browser a heavy
 contest user keeps fewer than 500 sessions. The squeeze notice
 (`HistorySaved::Squeezed`) gains "Long contest runs take more room" when
 the history held a run with its log (`Squeezed { kept, runs }`), and
-"The newest 500 sessions are kept" (`src/ui/privacy.rs:24`) becomes "Up to
+"The newest 500 sessions are kept" (`PrivacyCard`, `src/ui/privacy.rs`)
+becomes "Up to
 500 sessions are kept; in a browser, as many of the newest as fit". Groups
 cannot shrink: older builds require `received`, `correct` and
-`timeToCompleteMs` (`session.rs:544-568`).
+`timeToCompleteMs` (`GroupResult`, `SessionTiming`, `session.rs`).
 
 ### 9.5 Privacy
 
-`PrivacyCard` (`src/ui/privacy.rs:12-24`) and `docs/privacy.html` gain:
+`PrivacyCard` (`src/ui/privacy.rs`) and `docs/privacy.html` gain:
 
 > In Contest mode, Dust keeps your callsign and the exchange you send (name,
 > state or province, CQ zone, class, section, power) in its settings on this
@@ -2995,34 +2966,35 @@ The policy's Settings and Practice history lists gain the same items.
 ## 10. Stats integration
 
 The rule: no setting hides past training (commit ba8822d; "Every session
-scored on this device, whatever it practised", `src/ui/stats.rs:305`;
-`docs/platforms.md:296-300`).
+scored on this device, whatever it practised", `StatsView`,
+`src/ui/stats.rs`; `docs/platforms.md`, under Where your progress lives).
 
 A run is a `SessionResult`, so every stat that counts sessions counts it.
 Where a stat narrows by mode, Contest gets a pill and stays under All;
 `char_set_mode` is `Contest` in memory, so the existing filters keep runs
-out of the Callsign series (`belief.rs:134-145`, `stats.rs:420-429`,
-`board.rs:57-59, 106-117`).
+out of the Callsign series (cw-core's `sessions_in_order`, `belief.rs`;
+`practised_modes`, `stats.rs`; `BoardOf::Mode`, `board.rs`).
 
 | Stat | Contest runs |
 |---|---|
-| Calendar, streak, accuracy | Count; character accuracy covers calls and fields, lost copies included. A day's best reads "Best points" (`heatmap.rs:231`). |
+| Calendar, streak, accuracy | Count; character accuracy covers calls and fields, lost copies included. A day's best reads "Best points" (`src/ui/heatmap.rs`). |
 | Letters (`stats.rs`, `character_diagnostics`) | Accuracy counts every keyed character. Recognition times count a run's calls and exchange tokens by the rule every mode has (docs/recognition.md): each character from its sound going to the output to its key in the field, for a call or token heard once, whole and alone in a turn that played on time, typed as sent, with Show copy off. Nothing stands in for an untimed one. |
 | Mistakes, sampler beliefs | Count, on keyed tokens: K5XYC for K5XYZ is Z→C, `1T5` for `1N5` is N→T. |
-| Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. As built with adaptive callers' speed, its chances are the next caller's as the run would draw it (`speed_forecast`, by `adaptive_speed_path`, which reads the callers' switch in Contest): leaning on your copy speed while they adapt, and even across the range while not. Adapting, its line reads "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed.", as the chances are the belief the run starts from (`SpeedBelief::from_history`), and it adds "Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster." when more than half the chance sits on the range's top speed, or the same of its bottom ("…below this range, so most come at its bottom: … lets them go slower."). With the switch on and one speed set it reads "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed."; either then "Right is the share of characters you copy at that speed." |
-| Copy span, group-length forecast | Not contest measures, as for Callsigns (`ui/stats.rs:211-245`). |
-| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` was `None` in Contest until adaptive caller speed came, and the card read "Callers' speeds are drawn evenly from your range; − and + move only your own" (as built after operator feedback; it said − / + shifted them during a run), its chip "Not adaptive". As built with adaptive callers' speed (2026-10-22), the series is what each run's callers start from (§6.6), each call and number counted whole, a character lost off its end a miss (`whole_evidence`), and `adaptive_speed_path` reports them: in Contest it follows the callers' switch, `contestAdaptSpeed`, not group training's (`adaptive_speed_on`). While they adapt the card's chip reads "Adapting · Balanced", as the aim steers them, and its line "Each new caller's speed is drawn from your copy speed, within your range: faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed."; with the switch on and one speed set the chip reads "One speed set", as nothing adapts but the switch is not off (group training's card reads so too with its switch on and one speed), and the line "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, the chip reads "Adaptive callers off" and the line "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed." A run whose callers adapted is a run like any other in the series, its copies what it copied. |
-| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. A run whose callers adapted to your copy is placed as any run is: points per group already weigh the speed each copy was sent at (§10, below), so faster callers copied clean earn more, and a run is not marked for how its callers' speeds were drawn. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form: as built (4b), a whole run with Show copy on is listed after the places on every board that holds it, its place a dashed `—` read as "Not placed", its figures greyed and "· assisted" after them, with a line saying why (`assisted_runs`); it marks nothing on the timeline. As built (4b), the Contest pill shows once the history holds a run, placed or not, with a chip for every contest it holds runs of (`board_modes`, `run_kinds`; the first with a run on the board is chosen until another is), as the Runs card is under it: a board of runs alone offers All modes and Contest. |
-| History (`ui/stats_detail.rs:362-371`) | Every row names its mode (phase 0); a contest row opens its results; a stripped run says "log not kept by an older version". As built (4b), an assisted run says "assisted" after its contest, by its log or its mark, and its results say "Assisted: Show copy was on. The run counts in every stat, and is never placed on the board." |
-| Auto level | Untouched: the contest finish never calls `complete_session` (`auto_level.rs:285-308`). |
+| Sampling snapshot (`sampling_rows`, `stats.rs`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. As built with adaptive callers' speed, its chances are the next caller's as the run would draw it (`speed_forecast`, by `adaptive_speed_path`, which reads the callers' switch in Contest): leaning on your copy speed while they adapt, and even across the range while not. Adapting, its line reads "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed.", as the chances are the belief the run starts from (`SpeedBelief::from_history`), and it adds "Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster." when more than half the chance sits on the range's top speed, or the same of its bottom ("…below this range, so most come at its bottom: … lets them go slower."). With the switch on and one speed set it reads "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed."; either then "Right is the share of characters you copy at that speed." |
+| Copy span, group-length forecast | Not contest measures, as for Callsigns (`SpanCard`, `ui/stats.rs`). |
+| Copy speed (`SpeedBelief::history`, `speed.rs`; `CopySpeedCard`, `ui/stats.rs`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` was `None` in Contest until adaptive caller speed came, and the card read "Callers' speeds are drawn evenly from your range; − and + move only your own" (as built after operator feedback; it said − / + shifted them during a run), its chip "Not adaptive". As built with adaptive callers' speed (2026-10-22), the series is what each run's callers start from (§6.6), each call and number counted whole, a character lost off its end a miss (`whole_evidence`), and `adaptive_speed_path` reports them: in Contest it follows the callers' switch, `contestAdaptSpeed`, not group training's (`adaptive_speed_on`). While they adapt the card's chip reads "Adapting · Balanced", as the aim steers them, and its line "Each new caller's speed is drawn from your copy speed, within your range: faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed."; with the switch on and one speed set the chip reads "One speed set", as nothing adapts but the switch is not off (group training's card reads so too with its switch on and one speed), and the line "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, the chip reads "Adaptive callers off" and the line "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed." A run whose callers adapted is a run like any other in the series, its copies what it copied. |
+| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. A run whose callers adapted to your copy is placed as any run is: points per group already weigh the speed each copy was sent at (§10, below), so faster callers copied clean earn more, and a run is not marked for how its callers' speeds were drawn. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, runs are rated as any session is, as if every group were five characters at the share of characters missed, so short fields cost a run nothing there; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form: as built (4b), a whole run with Show copy on is listed after the places on every board that holds it, its place a dashed `—` read as "Not placed", its figures greyed and "· assisted" after them, with a line saying why (`assisted_runs`); it marks nothing on the timeline. As built (4b), the Contest pill shows once the history holds a run, placed or not, with a chip for every contest it holds runs of (`board_modes`, `run_kinds`; the first with a run on the board is chosen until another is), as the Runs card is under it: a board of runs alone offers All modes and Contest. |
+| History (`HistoryTab`, `ui/stats_detail.rs`) | Every row names its mode (phase 0); a contest row opens its results; a stripped run says "log not kept by an older version". As built (4b), an assisted run says "assisted" after its contest, by its log or its mark, and its results say "Assisted: Show copy was on. The run counts in every stat, and is never placed on the board." |
+| Auto level | Untouched: the contest finish never calls `complete_session` (`crates/cw-core/src/auto_level.rs`). |
 | Runs card (phase 4) | Every run per kind: date, length, QSOs, rate, both scores, error share, best verified per kind and length. As built (4b), on Stats → Scores under the Contest pill, for the contest its chip chooses, below the board (`src/ui/scores/runs.rs`, `contest_runs`): newest first, each row dated as the board dates it, day and time ("Mon 5 Oct 2026 · 14:13"), so runs of one day tell apart, then "10 min" or how far a run ended early went ("03:12 of 10 min"), clean and logged QSOs, the rate (a Simple QSO's minutes a QSO), the share of QSOs logged with an error and its Points, and at its end the verified contest score over the raw one (a Simple QSO's Points; a run of a scored contest whose log does not read, "—" over its Points, so the column holds scores alone). The best verified run of each length (the limit it was set to), Show copy off and above zero, is marked Best, the first to reach it holding it; a contest without a score marks none. An assisted run is marked "assisted" and is never Best. A run whose log this build cannot read, or an older one dropped, is listed with History's words and opens nothing; any other row opens the run's results in the tab's place, with Scores at its top and Back at its foot, as a History row opens them in its list's place. History's words for a log, and its QSOs and rate, are History's own (`log_parts`). The card lists the newest 40 runs, and the best of each length wherever it falls, with "Show n more" for the rest, as History pages its sessions. Each part of a row is kept whole, so at 360 px a row takes three lines and nothing scrolls sideways. |
 
 **Two scores, two jobs.**
 
 - **Dust points** measure copying: 10 × characters × speed × errors × time ×
-  repeats, weighted by the alphabet's entropy (`score.rs:116-142`). From
-  phase 1 they read "Points" where today they read "Score" (`results.rs:133`,
-  `heatmap.rs:231`) or a bare number (`stats_detail.rs:370`, now "496 pts").
+  repeats, weighted by the alphabet's entropy (`group_points`,
+  `crates/cw-core/src/score.rs`). From phase 1 they read "Points" where
+  they used to read "Score" (`src/ui/results.rs`, `src/ui/heatmap.rs`) or a bare
+  number (`HistoryRow`, `stats_detail.rs`, now "496 pts").
 - **The contest score** measures operating. `contest_score()` works it out
   from the log: Raw, every logged non-dupe QSO's points × the multipliers
   as typed; Verified, clean QSOs only, as MRCE's (`Log.pas:650-680`); rates
@@ -3042,7 +3014,8 @@ the main board.
 ## 11. Data and generators
 
 Never a call. Only counts and shares derived from real data are kept
-(`callsign.rs:19-20`, `scripts/callsign-prefixes.py:14-15`). No
+(the module notes of `callsign.rs`, and the header of
+`scripts/callsign-prefixes.py`). No
 call-history file ships, and no real name is tied to a call. Tables are Rust
 files written by scripts, each naming its source and year.
 
@@ -3050,7 +3023,8 @@ files written by scripts, each naming its source and year.
 
 - **The source.** `Sampler` implements `CallSource` (§12) with the
   `most_wanted` choice among 6 candidates that Callsigns mode uses
-  (`sampling.rs:384-406`), so calls lean to your weak characters, at the
+  (`most_wanted`, `crates/cw-core/src/sampling.rs`), so calls lean to your
+  weak characters, at the
   shared `callsignLevel`. As built (3b), a mix of countries (Field Day's)
   is settled once per caller, before the candidates (`for_one_call` in
   `wanted_call`), so the lean picks among calls of one side and leaves the
@@ -3066,7 +3040,8 @@ files written by scripts, each naming its source and year.
   other country, who send DX (§3, §11.5).
   A station abroad is in its host's country. A contest spec
   (`CallSpec::contest`) uses contest shares for portables (4%) and abroad
-  calls (3%) in place of the tiers' 25% and 12% (`callsign.rs:44-47`), and
+  calls (3%) in place of the tiers' 25% and 12% (`CONTEST_PORTABLE_SHARE`,
+  `CONTEST_ABROAD_SHARE`, `PORTABLE_SHARE`, `ABROAD_SHARE`, `callsign.rs`), and
   never draws Guantanamo Bay's KG4 with two letters (§11.2). With the
   default spec, which Callsigns mode and the band's traffic use, it draws
   exactly as `generate_callsign` always has, KG4 with two letters among its
@@ -3075,8 +3050,8 @@ files written by scripts, each naming its source and year.
   every spec, so Callsigns mode never sent those calls (a few in 20,000 at
   tiers 3–6) and a seeded stream shifted after the first; it is the contest
   spec's alone now.
-- **Parsing.** `parse_callsign` (`callsign.rs:376-377`), with `CallsignParts`
-  (`:358`) and `parse_base` (`:393`), loses `#[cfg(test)]`; `parse_base`
+- **Parsing.** `parse_callsign`, with `CallsignParts` and `parse_base`
+  (`callsign.rs`), loses `#[cfg(test)]`; `parse_base`
   stays a private helper. When both sides of a slash read as a call (hosts
   such as `VP2M`, `VK9X`, `3D2R` do), the shorter is the host or marker, as
   `ExtractPrefix` takes it, and at equal lengths the side with the longer
@@ -3087,8 +3062,15 @@ files written by scripts, each naming its source and year.
   the table has not seen still places a prefix only one country has (`KG3`
   is K); a prefix the table lacks, or a shared one with such a digit, is
   `None` (`C31`, `NL7`, `VP8`), never a country that only shares a letter.
+  VP2 goes by the letter after its digit, as cty.dat and MRCE's `DXCC.LIST`
+  have it: VP2E Anguilla, VP2M Montserrat, VP2V the British Virgin Islands
+  (whose facts are kept by hand, as the table has too few of its calls),
+  any other letter `None`; a contest spec starts a VP2 call's suffix with
+  its country's letter. The default spec keeps the letters it always drew
+  (the golden list pins `VP2WYP` at a seed), so a practice VP2 call can be
+  `None`, and keeps the country of the entry it was drawn from.
   The generator labels each call with the country `country_of` reads off it,
-  so the two agree. `wpx_prefix` reads its WPX prefix: up to the last digit
+  so the two agree, but for such a practice call. `wpx_prefix` reads its WPX prefix: up to the last digit
   (`9A1AA` → `9A1`); a digit marker replaces the digit (`W1XYZ/4` → `W4`);
   a host is the prefix, with 0 added if it has no digit (`PA/N8XYZ` →
   `PA0`), cut as MRCE's `ExtractPrefix` cuts one, to its last digit but
@@ -3108,7 +3090,8 @@ files written by scripts, each naming its source and year.
   `places.rs` says so in its header; a script counting the ULS file can
   replace them.
 - **Canada by digit, for every prefix** (VA, VB, VC, VE, VG, CF–CK, XJ–XO;
-  the table holds VE, VA, VC, CK and VB, `prefixes.rs:203-209`): 1 NS, 2 QC, 3 ON, 4 MB, 5 SK, 6 AB, 7 BC, 8 NT,
+  the table holds VE, VA, VO, VC, VY, CK and VB, `PREFIXES` in
+  `callsign/prefixes.rs`): 1 NS, 2 QC, 3 ON, 4 MB, 5 SK, 6 AB, 7 BC, 8 NT,
   9 NB. VO1 NL; VO2 LB in ARRL DX, NL elsewhere; VY0 NU, VY1 YT, VY2 PE.
 - **As built (2b),** `contest/data/places.rs` holds the codes and names,
   and draws a caller's place from its call once, when its exchange is
@@ -3168,8 +3151,9 @@ files written by scripts, each naming its source and year.
   about 1% (north of 50°); NU 2 about 90%, 1 about 10% (west of 102°W);
   YT, NT 1.
 - **Elsewhere,** cty.dat's entity zone and continent, plus its CQ overrides
-  such as `R8(17)`, which `callsign-prefixes.py:71-78` reads and throws away
-  today; VK6 and VK8 are 29, other VK 30, entered by hand because that
+  such as `R8(17)`, which `scripts/callsign-prefixes.py` threw away before
+  phase 3 and keeps now, on a prefix and its digit (`ZONE_PREFIX`); VK6 and
+  VK8 are 29, other VK 30, entered by hand because that
   cty.dat has ITU overrides for them but no CQ ones. Asiatic Russia and China are
   simplified, and `myZone` overrides.
 
@@ -3268,7 +3252,8 @@ digit above.
   baby-name data (public domain), weighted to births 1935–1975 and folded
   to the forms operators send (ROBERT → BOB); short lists per region written
   for Dust elsewhere. A name is kept per caller, never tied to a call. The
-  16 names at `band/activity.rs:1152-1155` move here. As built
+  16 names the band's traffic sent from `band/activity.rs` moved here, and
+  the band draws its names from here too (`draw_name`). As built
   (`contest/data/names.rs`), the network refused the SSA download, so the
   North American list is written by hand from common short given names of
   those years, each weighted by Dust's estimate of the births that go by
@@ -3429,7 +3414,7 @@ number, name and state").
 
 ### 11.8 Sources and licences
 
-The repository is GPL-3.0-or-later (`Cargo.toml:9`).
+The repository is GPL-3.0-or-later (the `license` in `Cargo.toml`).
 
 | Data | Source | Status |
 |---|---|---|
@@ -3464,7 +3449,7 @@ card.
 pub trait CallSource {
     fn next_call(&mut self, s: &TrainingSettings, spec: CallSpec,
                  avoid: &dyn Fn(&str) -> bool) -> GeneratedCall;
-    fn learn(&mut self, answered: Answered<'_>);        // session.rs:97-102
+    fn learn(&mut self, answered: Answered<'_>);        // as GroupSource::learn
     // As built, adaptive callers' speed (2026-10-22): calls and numbers
     // teach the copy speed, and a newcomer's speed may be the source's.
     fn learn_speed(&mut self, _answered: Answered<'_>) {}
@@ -3475,15 +3460,18 @@ pub struct Turn { pub id: u64, pub at_run_ms: u64,
                   pub starts_at: Option<MonoMs> /* a continuation's splice (5a, 5.2) */,
                   pub segments: Vec<Segment> }
 #[derive(Clone, Debug, PartialEq)]
-pub struct Segment { pub who: Sender /* You | Caller(u32) */, pub text: String,
+pub struct Segment { pub who: Sender /* You | Caller(u32) | Qrm */, pub text: String,
                      pub voice: StationVoice, pub start_sec: f64, pub end_sec: f64,
-                     pub fade: Option<Fade> /* from phase 2, flutter in it from 5a (5.5) */ }
+                     pub fade: Option<Fade> /* from phase 2, flutter in it from 5a (5.5) */,
+                     pub skip_sec: f64 /* how far into its text it goes on (5.2) */ }
 pub struct Fields { pub call: String, pub exch: String,
-                    pub call_edited: MonoMs, pub exch_complete: Option<MonoMs> }
+                    pub call_edited: MonoMs, pub exch_complete: Option<MonoMs>,
+                    pub earlier: Vec<(EntryField, MonoMs, String)> /* each edit's before (4b) */,
+                    pub call_keys: KeyLog, pub exch_keys: KeyLog /* each character's key */ }
 pub struct ContestView {
     pub phase: ContestPhase, pub clock: Option<RunClock> /* None in the countdown */,
     pub limit_ms: u64, pub my_wpm: f64,
-    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up, a gone station's calls, the calls heard of stations gone, the call sent fitting only one
+    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up, a gone station's calls, the calls heard of stations gone, the call sent fitting only one, the station your message missed (told once a run)
     pub air: Option<AirView>,  // heard from, your text and where each character ends, segment spans
     pub shown: Vec<ShownText>, // with Show copy on (4b): each station's text and when it shows
     pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked
@@ -3499,15 +3487,18 @@ the run bar reads the clock and the rate off it as it ticks, and the air
 line what is still to go of your message.
 
 Effects carry `Turn`, which derives `PartialEq` (as `StationVoice` does,
-`station.rs:12`), so machine tests compare effects as the group tests do
-(`machine.rs:622-628`). The runtime calls `plan_turn(&turn, &settings)`,
+`timing/station.rs`), so machine tests compare effects as the group tests
+do (the tests of `crates/cw-core/src/machine.rs`). The runtime calls
+`plan_turn(&turn, &settings)`,
 then `lease.send_planned(asked, &plan, &transcript, &settings, turn.starts_at,
-on_start)` with `on_start: impl FnMut(f64)` taking lead plus latency in
-seconds, a continuation's wait for its moment among it (as built, 5a), and
-`asked` from `lease.ask_to_send()` as the turn goes on the air (5.2). The
+news)` (`play_turn`, `src/contest_runtime.rs`), with `news` told each
+`SendNews` (5.2): every attempt's start, its lead plus latency and a
+continuation's wait for its moment among it (as built, 5a), what of it went
+unheard, and whether it was held up; and `asked` from `lease.ask_to_send()`
+as the turn goes on the air (5.2). The
 view holds no caller truth until a row's check resolves, but for what Show
 copy shows, each text with the moment it may show, and is published only
-when it changes (`session_runtime.rs:297-303`).
+when it changes (`apply`, `src/contest_runtime.rs`).
 
 `ContestEntry`, in `AppCtx` beside `answer: AnswerOutbox`, holds `call`
 and `exch` with their edit stamps (one `CopyValue<Fields>`, stamped by
@@ -3520,7 +3511,8 @@ through one entry point, `press_key`, which calls `paddle.finish_letter()`
 `AnswerOutbox::use_entry` lends it), `lease.wake()` and
 `entry.snapshot()`, then dispatches `Key`. `run_effects` handles
 `ClearFields` and `Focus` through `ctx.entry` and the focus script
-(`widgets.rs:67`, shared with the group boxes); `Announce` sets
+(`focus_end_script`, `widgets.rs`, beside the group boxes' `focus_script`);
+`Announce` sets
 `ctx.announced` once nothing is on the air, held until then; the one
 polite region that speaks it sits in the app's frame, so what the run
 says as it ends is still said on the results. One `use_fields`
@@ -3551,8 +3543,8 @@ paddles' word. `app.session` holds `Live::{Groups, Contest}`, each boxed;
 `contest.rs` (new), `contest_preset.rs` (new, 2c), `save.rs`, `reset.rs`,
 `clamp.rs` (`Contest`, `ALL` of 6,
 `draws_characters`, `sends_callsigns`, `ContestSettings`, `contestActive` on
-disk, `Station`, `wild`); `settings/curriculum.rs` (Contest → `LevelAxis::Callsign`,
-`:49-56`); `session.rs` (`StoredSession`, `mode_on_disk`, `recorded_mode`,
+disk, `mode_on_disk`, `Station`, `wild`); `settings/curriculum.rs` (Contest
+→ `LevelAxis::Callsign`); `session.rs` (`StoredSession`, `recorded_mode`,
 `contest`, a test constructor, `MonoMs::plus_sec`); `callsign.rs` (`generate_call`, `CallSpec`, public
 `parse_callsign`, `wpx_prefix`, `country_of`); `sampling.rs`, `pool.rs`,
 `auto_level.rs` (Contest arms; `impl CallSource for Sampler`, and, as built
@@ -3577,8 +3569,8 @@ Hear a QSO, 2c); `src/ui/scores/runs.rs` (the Runs card, as built 4b);
 `scripts/contest-data.py` (counted shares).
 
 **Changed in the app:** `src/session_runtime.rs` (`Live::{Groups, Contest}`,
-`start_session` routing at `:180`, `finish_run`, `abort_run`);
-`src/state.rs` (`contest: Signal<Option<ContestView>>`, `ContestEntry`,
+`start_session` routing, `finish_run`, `abort_run`);
+`src/state.rs` (`contest: Signal<Option<ContestView>>`, `entry: ContestEntry`,
 `session_running`, the restore message); `src/routes.rs` (Training and
 Results branches); `src/app.rs`, `src/ui/tour.rs` (Exit and Discard,
 contest keys, tour button; the contest guide, 5b); `src/ui/paddle.rs` (a
@@ -3586,8 +3578,10 @@ word space keyed to a screen of fields, 5b); `src/keep_awake.rs`;
 `src/player.rs`, `src/audio/mod.rs` (`send_planned`, `start_planned`,
 `Lease::wake`, a recorder that keeps each start's plan and `Qsb`);
 `src/audio/mixer/*`, `src/audio/web/*` (the dry path; the gate and a send
-started at a given time, 5a), `src/audio/shape.rs` (the gate's ramp and
-the browser's gate schedule, `GateSchedule`, 5a), `src/audio/silent.rs`,
+started at a given time, 5a; as built, 2026-10-28, the browser plays the
+mixer, rendered ahead of its clock, `src/audio/stream.rs`),
+`src/audio/shape.rs` (the gate's ramp, `GATE_RAMP_SEC`, 5a; the browser's
+own gate schedule went with its own player), `src/audio/silent.rs`,
 `src/audio/wait.rs` (a send waiting for its moment is not stalling, 5a);
 `src/ui/training.rs`, `widgets.rs` (`Keypad` rows as props,
 `ProgressHeader { figure, pct }`); `settings_charset.rs`, `settings.rs`,
@@ -4085,9 +4079,12 @@ continuation's message, a second key taking over from the first
 continuation at its own start included, asked for a millisecond past it;
 one taking over half a word space after your last character leaves that
 element sample for sample as one send has it, the receiver back in that
-word space and muted again from the takeover; the browser's gate schedule, a send on top going on from where
-the gate stands without a step, a takeover of a takeover a millisecond
-either side of its start, and a stop part way down a ramp; a send asked for
+word space and muted again from the takeover; the browser plays that very
+mixer, through a stream rendered ahead of its clock, whose tests
+(`src/audio/stream.rs`) have a change made mid-stretch play as if made
+there and a stall keep the time of a send waiting through it (its own gate
+schedule, which had tests of its own, went with its own player); a send
+asked for
 once the moment has passed starts at once, with nothing playing it waits
 what it was asked, and stopped before its time neither it nor the send it
 was to take over from is heard. The recorder keeps when a continuation was
@@ -4167,14 +4164,16 @@ slice, commits go cw-core leaves, machine and soak, settings, player and
 runtime, then screens.
 
 **Phase 0: history that lasts.** `CharSetMode::Contest`, not selectable,
-with arms that behave as Callsign (`settings_charset.rs:123-142` has an
-exhaustive match); the `StoredSession` mirror, `mode_on_disk`, the mark and
+with arms that behave as Callsign (`Charset::note`, `settings_charset.rs`,
+has an exhaustive match); the `StoredSession` mirror, `mode_on_disk`, the
+mark and
 the opaque `contest` value; `GroupSession::result` mapping Contest to
 Callsign; settings that name Contest read as Callsigns until phase 1
 writes `contestActive`; a mode label on every History row; and a
-`SessionResult` test constructor the app can reach (cw-core's `empty_for_test`,
-`session.rs:667-687`, is `#[cfg(test)]`), so the two app literals that
-name every field (`render_tests.rs:155`, `persist/mod.rs:256`) stop doing so. The user sees each
+`SessionResult` test constructor the app can reach (cw-core's
+`empty_for_test`, `session.rs`, was `#[cfg(test)]`; it is public now), so
+the two app literals that named every field, in `render_tests.rs` and
+`persist/mod.rs`, stop doing so. The user sees each
 session's mode, and no newer history loses anything on this build. It
 ships a release before phase 1.
 
@@ -4208,7 +4207,7 @@ ships a release before phase 1.
 **Phase 2: pile-ups and Sprint,** the first release.
 
 - **2a Pile-ups.** `contestStyle`; arrivals from the stations range;
-  `place_contest_callers`; per-caller QSB; best-match partials; collisions
+  `place_contest_caller`; per-caller QSB; best-match partials; collisions
   carried through continuations; NR?/AGN; calling twice; dupes, B4 and NIL;
   F4, F6, F8, F12; "2 calling"; the Band card labels. Landed, with the
   contest soak run in both styles, each on seeds of its own (2,000 of
@@ -4335,8 +4334,10 @@ copy-speed series; the paddles' field space.
   scheduling no test reaches, a stop cutting a send a continuation was to
   take over from among them; nor how long a real device's lead is, against
   the one the machine measures; the native mixer's are tested sample by
-  sample, and the browser's gate schedule as numbers (`GateSchedule`), not
-  as played.
+  sample, and the browser's gate schedule as numbers, not as played.
+  Since the browser plays the same mixer (as built, 2026-10-28), its gate
+  is the mixer's, tested sample by sample with it, and only its context
+  clock and scheduling are left to the ear.
 - The contest tour and the paddles' field space landed as slice 5b: the
   guide in Contest mode, its button shown there, Start contest, the run
   screen's parts one at a time on desktop and touch, and Discard through
@@ -4412,7 +4413,8 @@ keying with the paddles, a contest level, and more contests.
 | A caller sending across your message, muted (5a) | unheard, the whole send: no copy, repeat, speed, Enter or Show copy, RX counting it from your message's end; its cost to its caller spent | its tail after your message counted | nothing you cannot hear may count as heard, and a call heard in part is no call heard |
 | A CQ, TU or NIL keyed over a pile-up caller (2026-10-29, second Esc review) | heard from a fragment only by a caller that stops sending before your message ends; one still sending as it ends hears none of it and calls again on its timeout, but for a station putting its call right, which takes your TU; so the station you work, sending its exchange through your TU, is not done and sends it again on its timeout | every caller keyed over taking it from a fragment and answering once done | MRCE's station takes note of your message only when it is not sending as your message ends (`DxStn.pas:240-253`), with that one exception for TU (`DxStn.pas:277-289`); a station transmitting through the whole of your message heard no fragment of it |
 | A single caller you key over (2026-10-29, after the round-4 review) | goes on with what it is sending and hears your message only as a pile-up caller does: a CQ, TU or NIL from a fragment if it stops before your message ends, nothing otherwise, so a `?` keyed over it is lost and it calls or sends again on its timeout | stopping to hear the whole of your message, kinder to a learner | MRCE's single caller is a station like any other, transmitting and so deaf while it sends (`DxStn.pas:240-253`); the `?` key asks once it has finished, and waiting for a station to finish is the habit a run should teach; one rule for single and pile-up runs |
-| QRM sending across your message, muted, going on past an Esc (2026-10-29, second Esc review) | unheard, as a caller's: Show copy shows none of it, the rest sounding after the Esc | its whole message shown once the rest ended | the receiver was muted for its start, so what Show copy shows was never heard whole; QRM follows the callers' rule, heard in part is not heard |
+| Telling you a station missed your message (2026-10-30, final review) | the first time in a run that the station a message was for never hears it, still sending, the hint says "Let K5XYZ finish: it did not hear you" till the next key, and a screen reader is told; the station a message is for is the one you work, one its call or the Call field names, or a single caller, named by the call you had for it, else "the station"; what to do comes first, and the whole line keeps to a phone's 47 characters for a call of up to 15, a longer name leaving only "Let … finish" there; Enter does as ever. The tour's TX and RX step says a station still sending cannot hear you. Simple QSO's caller signs once (`DL1ABC DE K5XYZ K`), as MRCE's single callers do, and a pile-up caller that calls twice signs twice | nothing said, the caller sending again the only cue, and Simple QSO's answer sending every call twice; said every time; "K5XYZ was still sending and did not hear you" first, too long for a phone's line unnamed, which cut what to do | a learner keying over a caller went round and round with it, and the run ended with nothing kept: the rule is MRCE's, and once is enough to learn it, where every time would nag in a pile-up keyed over on purpose; the doubled call had the learner keying over the second |
+| QRM sending across your message, muted, going on past an Esc (2026-10-29, second Esc review) | unheard, as a caller's: Show copy shows none of it, the rest sounding after the Esc; so is QRM a browser fallen behind its audio skipped some of, as a caller's send is (2026-10-30) | its whole message shown once the rest ended | the receiver was muted for its start, so what Show copy shows was never heard whole; QRM follows the callers' rule, heard in part is not heard |
 | Flutter (5a) | a switch of its own on the Band card in Contest mode, three callers in ten at 3–33 Hz, half to three quarters deep, over the fading or alone; Contester turns it on | MorseRunner's: a quicker fading in place of a station's, full depth, only with QSB on | the switch does what it says, and no caller is fluttered out of hearing |
 | A continuation (5a) | a timed splice: the turn on the air plays out the character sounding, and any the player has begun, the next starts at the start of the next character, ridden over by then; with none left, half a word space after your message, the next message a word space after it | the next started at once from the character sounding, sent again whole; or started in the past, mid-character | no character twice and no gap; both players start a send at a moment ahead well, and your message is silent where they meet, so nothing clicks |
 | How soon a continuation can take over (5a) | the player's lead, as the last turn started at once found it, and a send's release, after the key | the moment your message is at as it reaches the ear | a player plays ahead of the ear, so a character starting inside its lead has begun already, and taking over there sent its start twice; a lead measured on every turn keeps up with the device |
@@ -4524,7 +4526,7 @@ ending on a bare `TU` where a run station sends `TU` and its call:
    starts at once. *Mitigation:* the lead is measured afresh on every turn
    started at once (§5.2); listen on each player.
 3. **Latency estimates** may be wrong. *Mitigation:* capped at 0.5 s
-   (`wait.rs:114`); measure on low-end phones.
+   (`MAX_HEARD_LATENCY_SEC`, `wait.rs`); measure on low-end phones.
 4. **Hidden-page detection.** *Mitigation:* three signals; test a locked
    Android phone, an iPhone and a minimised Windows window.
 5. **Browser keys.** F1, F5 and F12 may be refused. *Mitigation:* a document
@@ -4540,7 +4542,8 @@ ending on a bare `TU` where a run station sends `TU` and its call:
    reading shown before logging, and Invalid sends nothing.
 10. **Two scores** may confuse. *Mitigation:* they never share a word, and
     the results explain them in one sentence.
-11. **One station means an empty band** (`activity.rs:43-50`).
+11. **One station means an empty band** (the module notes of
+    `band/activity.rs`).
     *Mitigation:* "Band activity" says so.
 12. **Sampler drift** to characters a Koch learner has not unlocked.
     *Mitigation:* as Callsigns mode does today; the snapshot shows it.

@@ -1,11 +1,14 @@
+use std::borrow::Cow;
+
 use cw_core::{
-    AccuracyPoint, CharSetMode, Estimate, EstimatePoint, SessionResult, TrainingSettings,
-    accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, level_up_line,
-    mastered_count, practised_modes, span_history, speed_history,
+    AccuracyPoint, CharSetMode, EstimatePoint, EstimateReading, SessionResult, TrainingSettings,
+    accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, best_accuracy,
+    level_up_line, mastered_count, overall_accuracy, practised_modes, span_history, speed_history,
 };
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
+use crate::time::as_shown;
 use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
@@ -91,11 +94,16 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: Option<f64>) -> Optio
 
 /// How many sessions a trend card draws.
 const TREND_SESSIONS_SHOWN: usize = 30;
+/// How many times the spreads of the first and the last estimate together a
+/// move has to be to be one: less is the estimate firming up, or chance.
+const TREND_SPREADS: f64 = 2.0;
 
-/// How an estimate moved over `count` sessions, given to `decimals` places.
-/// A change too small to show at that many places is steady.
-fn trend_words(change: f64, count: usize, decimals: usize) -> String {
-    let steady = 0.5 / 10_f64.powi(decimals as i32);
+/// How an estimate moved over `count` sessions, by `change`, its first and
+/// last estimates' spreads together being `noise`, given to `decimals`
+/// places. A change within [`TREND_SPREADS`] of the noise, or too small to
+/// show at that many places, is steady.
+fn trend_words(change: f64, noise: f64, count: usize, decimals: usize) -> String {
+    let steady = (0.5 / 10_f64.powi(decimals as i32)).max(TREND_SPREADS * noise);
     if count == 1 {
         "after 1 session".to_string()
     } else if change.abs() < steady {
@@ -104,6 +112,21 @@ fn trend_words(change: f64, count: usize, decimals: usize) -> String {
         format!("up {change:.decimals$} over {count} sessions")
     } else {
         format!("down {:.decimals$} over {count} sessions", -change)
+    }
+}
+
+/// An estimate as a card's note gives it, to `decimals` places: "6.4 ± 1.6
+/// chars", or past what was sent, only that: "over 3 chars".
+fn reading_words(point: &EstimatePoint, unit: &str, decimals: usize) -> String {
+    match point.reading() {
+        EstimateReading::About(estimate) => {
+            format!(
+                "{:.decimals$} ± {:.decimals$} {unit}",
+                estimate.mean, estimate.sd
+            )
+        }
+        EstimateReading::Over(most) => format!("over {most:.0} {unit}"),
+        EstimateReading::Under(least) => format!("under {least:.0} {unit}"),
     }
 }
 
@@ -123,8 +146,8 @@ pub(crate) fn shown_mode(
 }
 
 /// An estimate over the last sessions, with its uncertainty, and whether the
-/// feature it belongs to is steering by it. Nothing before the first session
-/// it can be read from.
+/// feature it belongs to is steering by it, each point kept within what was
+/// sent up to then. Nothing before the first session it can be read from.
 #[component]
 fn TrendCard(
     /// The estimate after each session, oldest first.
@@ -157,20 +180,24 @@ fn TrendCard(
     note: Option<String>,
 ) -> Element {
     let shown = &points[points.len().saturating_sub(TREND_SESSIONS_SHOWN)..];
-    let estimates: Vec<Estimate> = shown.iter().map(|point| point.estimate).collect();
-    let (Some(first), Some(last), Some(chart)) =
-        (estimates.first(), estimates.last(), trend_chart(&estimates))
+    let bands: Vec<(f64, f64, f64)> = shown.iter().map(EstimatePoint::within_sent).collect();
+    let (Some(first), Some(last), Some(chart)) = (shown.first(), shown.last(), trend_chart(&bands))
     else {
         return rsx! {};
     };
-    let trend = trend_words(last.mean - first.mean, estimates.len(), decimals);
+    let trend = trend_words(
+        last.within_sent().1 - first.within_sent().1,
+        first.estimate.sd.hypot(last.estimate.sd),
+        shown.len(),
+        decimals,
+    );
     let chip = steering.map_or_else(|| off.to_string(), |aim| format!("Adapting · {aim}"));
     rsx! {
         div { class: "card chart-card",
             CardHead {
                 icon,
                 title,
-                note: format!("{:.decimals$} ± {:.decimals$} {unit} · {trend}", last.mean, last.sd),
+                note: format!("{} · {trend}", reading_words(last, unit, decimals)),
                 help,
             }
             if modes.len() > 1 {
@@ -346,6 +373,17 @@ pub fn StatsView(
     // itself so it keeps matching what the trainer will actually draw. Each
     // tab works out its own figures when it is shown, and only then: a tab
     // that is not open costs nothing.
+    //
+    // History lists the sessions as they are stored, and picks one out by
+    // its stamp to delete it; every other tab shows them as the clock reads
+    // them, any stamped ahead of it settled after the latest that is not.
+    let sessions = match tab() {
+        StatsTab::History => sessions,
+        _ => match as_shown(&sessions) {
+            Cow::Owned(shown) => shown,
+            Cow::Borrowed(_) => sessions,
+        },
+    };
     rsx! {
         div { class: "stack",
             header { class: "page-head",
@@ -378,15 +416,15 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
     // adaptive feature steers and sessions are judged otherwise.
     let threshold = level_up_line(&settings);
     let chart = accuracy_chart(&sessions);
-    let avg = if sessions.is_empty() {
-        0.0
-    } else {
-        sessions.iter().map(|s| s.accuracy).sum::<f64>() / sessions.len() as f64 * 100.0
+    // Over every character sent, and the best of the sessions long enough
+    // to go on the board: a group or two copied right is no best.
+    let pct = |accuracy: Option<f64>| {
+        accuracy.map_or("—".to_string(), |accuracy| {
+            format!("{}%", (accuracy * 100.0).round())
+        })
     };
-    let best = sessions
-        .iter()
-        .map(|s| s.accuracy * 100.0)
-        .fold(0.0_f64, f64::max);
+    let avg = pct(overall_accuracy(&sessions));
+    let best = pct(best_accuracy(&sessions));
     let mastered = mastered_count(&sessions);
     let geometry = chart_geometry(&chart, threshold);
     let latest = chart.last().map(|p| p.accuracy_pct).unwrap_or(0.0);
@@ -403,11 +441,11 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                 div { class: "grid-3",
                     div { class: "kpi emerald",
                         div { class: "tiny", "Average" }
-                        div { class: "value", "{avg.round()}%" }
+                        div { class: "value", "{avg}" }
                     }
                     div { class: "kpi indigo",
                         div { class: "tiny", "Best" }
-                        div { class: "value", "{best.round()}%" }
+                        div { class: "value", "{best}" }
                     }
                     div { class: "kpi blue",
                         div { class: "tiny", "Mastered" }
@@ -483,9 +521,9 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
 
 #[cfg(test)]
 mod tests {
-    use super::{chart_floor, chart_geometry, trend_words};
+    use super::{chart_floor, chart_geometry, reading_words, trend_words};
     use crate::ui::chart::{CHART_H, CHART_W};
-    use cw_core::AccuracyPoint;
+    use cw_core::{AccuracyPoint, Estimate, EstimatePoint};
 
     fn points(pcts: &[f64]) -> Vec<AccuracyPoint> {
         pcts.iter()
@@ -575,12 +613,46 @@ mod tests {
     /// show as nothing is steady.
     #[test]
     fn a_trend_says_which_way_and_how_far() {
-        assert_eq!(trend_words(3.0, 1, 1), "after 1 session");
-        assert_eq!(trend_words(0.04, 8, 1), "steady over 8 sessions");
-        assert_eq!(trend_words(0.36, 8, 1), "up 0.4 over 8 sessions");
-        assert_eq!(trend_words(-1.24, 8, 1), "down 1.2 over 8 sessions");
-        assert_eq!(trend_words(0.4, 8, 0), "steady over 8 sessions");
-        assert_eq!(trend_words(2.6, 8, 0), "up 3 over 8 sessions");
-        assert_eq!(trend_words(-5.0, 30, 0), "down 5 over 30 sessions");
+        assert_eq!(trend_words(3.0, 0.0, 1, 1), "after 1 session");
+        assert_eq!(trend_words(0.04, 0.0, 8, 1), "steady over 8 sessions");
+        assert_eq!(trend_words(0.36, 0.0, 8, 1), "up 0.4 over 8 sessions");
+        assert_eq!(trend_words(-1.24, 0.0, 8, 1), "down 1.2 over 8 sessions");
+        assert_eq!(trend_words(0.4, 0.0, 8, 0), "steady over 8 sessions");
+        assert_eq!(trend_words(2.6, 0.0, 8, 0), "up 3 over 8 sessions");
+        assert_eq!(trend_words(-5.0, 0.0, 30, 0), "down 5 over 30 sessions");
+    }
+
+    /// A move the first and last estimates' spreads could make is steady:
+    /// an estimate firming up, or wandering, is not you getting faster.
+    #[test]
+    fn a_move_within_the_spreads_is_steady() {
+        // 25.9 ± 7.5 to 29.9 ± 7.3: four up, with eleven of spread.
+        let noise = 7.5_f64.hypot(7.3);
+        assert_eq!(trend_words(4.0, noise, 30, 0), "steady over 30 sessions");
+        assert_eq!(trend_words(4.0, 1.0, 30, 0), "up 4 over 30 sessions");
+        assert_eq!(trend_words(-2.6, 1.0, 30, 0), "down 3 over 30 sessions");
+        assert_eq!(trend_words(-1.9, 1.0, 30, 0), "steady over 30 sessions");
+    }
+
+    /// An estimate past what was sent says only that it is past it.
+    #[test]
+    fn an_estimate_past_what_was_sent_says_only_that() {
+        let point = |mean: f64, sent: (f64, f64)| EstimatePoint {
+            timestamp: 1,
+            estimate: Estimate { mean, sd: 1.6 },
+            sent,
+        };
+        assert_eq!(
+            reading_words(&point(6.44, (2.0, 8.0)), "chars", 1),
+            "6.4 ± 1.6 chars"
+        );
+        assert_eq!(
+            reading_words(&point(6.44, (2.0, 3.0)), "chars", 1),
+            "over 3 chars"
+        );
+        assert_eq!(
+            reading_words(&point(14.2, (19.9, 20.1)), "WPM", 0),
+            "under 20 WPM"
+        );
     }
 }

@@ -1,4 +1,10 @@
 //! `localStorage`: the browser store.
+//!
+//! A browser keeps it, its room and its Web Locks for the whole origin, and
+//! a GitHub Pages project site shares its origin with every other one of the
+//! account (docs/platforms.md). So every name kept or locked here starts
+//! with `dust_`, and only names of Dust's own are ever taken away: by exact
+//! name, or by a prefix of its own ([`keep_aside`], [`take_marks`]).
 
 use std::cell::{Cell, RefCell};
 
@@ -7,15 +13,20 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    Aside, BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, keep_aside,
-    newest, read_history, read_settings_from, saved_now, store_newest_that_fit,
+    Aside, BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Kept, OpenSession,
+    SETTINGS_HELD, SetAside, Store, newest, over_stored, read_history, read_settings_from,
+    saved_now, set_aside_from, store_newest_that_fit,
 };
 
 const THEME_KEY: &str = "dust_theme";
 const TUTORIAL_KEY: &str = "dust_tutorial_done";
+const TOLD_OF_PADDLE_KEYS_KEY: &str = "dust_told_of_paddle_keys";
 const SETTINGS_KEY: &str = "dust_settings";
+const UNREADABLE_SETTINGS_KEY: &str = "dust_settings_unreadable";
 const SESSIONS_KEY: &str = "dust_sessions";
 const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
+/// The sessions deleted by hand ([`Deleted`]).
+const DELETED_KEY: &str = "dust_deleted";
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
 const LAST_BACKUP_KEY: &str = "dust_last_backup";
 /// The sessions and runs marked open ([`Store::mark_open`]): each page's
@@ -27,7 +38,9 @@ const OPEN_PREFIX: &str = "dust_open_session_";
 
 /// How much of the site's storage the history may take, in characters.
 /// Browsers give a site about five million; the rest is left for the
-/// settings, the counters and the room a write needs.
+/// settings, the counters and the room a write needs. Other sites on the
+/// origin may have taken some of it, and then a write that does not fit
+/// keeps fewer of the newest sessions ([`store_newest_that_fit`]).
 const HISTORY_BUDGET: usize = 3_000_000;
 
 #[derive(Default)]
@@ -36,6 +49,10 @@ pub struct WebStore {
     /// last time it was read, so it is not to be written over until a read
     /// says otherwise.
     history_held: Cell<bool>,
+    /// The same, of the settings.
+    settings_held: Cell<bool>,
+    /// What reads set aside, not yet told of ([`Store::take_set_aside`]).
+    set_aside: RefCell<Vec<SetAside>>,
     /// The browser has been asked to keep the store, this visit.
     asked_to_keep: Cell<bool>,
     /// This page's mark, while its session is marked open: what writes it,
@@ -47,7 +64,7 @@ fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
 }
 
-/// `localStorage`, as what is set aside is kept in it ([`keep_aside`]).
+/// `localStorage`, as what is set aside is kept in it ([`set_aside_from`]).
 struct Shelf<'a>(&'a web_sys::Storage);
 
 impl Aside for Shelf<'_> {
@@ -210,6 +227,17 @@ async fn ask_for_persistence() {
     }
 }
 
+impl WebStore {
+    /// Note `what` to tell of, if it was set aside now, and say whether it
+    /// is kept aside, now or before.
+    fn noted(&self, kept: Kept, what: SetAside) -> bool {
+        if kept == Kept::Now {
+            self.set_aside.borrow_mut().push(what);
+        }
+        kept != Kept::Not
+    }
+}
+
 impl Store for WebStore {
     fn load_theme(&self) -> String {
         storage()
@@ -235,12 +263,51 @@ impl Store for WebStore {
         }
     }
 
+    /// A browser that keeps nothing tells it once a visit.
+    fn told_of_paddle_keys(&self) -> bool {
+        storage().is_some_and(|store| {
+            store
+                .get_item(TOLD_OF_PADDLE_KEYS_KEY)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+    }
+
+    fn mark_told_of_paddle_keys(&self) {
+        if let Some(store) = storage() {
+            let _ = store.set_item(TOLD_OF_PADDLE_KEYS_KEY, "told");
+        }
+    }
+
+    /// Settings that do not read at all are set aside before the defaults
+    /// the app goes on with are written over them; until they are, nothing
+    /// is.
     fn read_settings(&self) -> Option<TrainingSettings> {
-        let raw = storage()?.get_item(SETTINGS_KEY).ok().flatten()?;
-        read_settings_from(&raw)
+        self.settings_held.set(false);
+        let store = storage()?;
+        let raw = store.get_item(SETTINGS_KEY).ok().flatten()?;
+        let settings = read_settings_from(&raw);
+        if settings.is_none() {
+            let kept = set_aside_from(
+                &Shelf(&store),
+                SETTINGS_KEY,
+                &raw,
+                UNREADABLE_SETTINGS_KEY,
+                &raw,
+                None,
+            );
+            if !self.noted(kept, SetAside::Settings { kept: None }) {
+                self.settings_held.set(true);
+            }
+        }
+        settings
     }
 
     fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
+        if self.settings_held.get() {
+            return Err(SETTINGS_HELD.into());
+        }
         let store = storage().ok_or("this browser has no storage for them")?;
         let raw = serde_json::to_string(settings).map_err(|err| err.to_string())?;
         store
@@ -255,27 +322,66 @@ impl Store for WebStore {
         let store = storage()?;
         let raw = store.get_item(SESSIONS_KEY).ok().flatten()?;
         // Copies set aside go beside any set aside before, each under a key
-        // of its own, as far as the room goes.
+        // of its own, as far as the room goes, and where it does not, into
+        // the room of what they are set aside from.
         let aside = Shelf(&store);
         let Some(read) = read_history(&raw) else {
             // Keep the unreadable copy where the next save cannot reach it —
             // and only once it is safely there take it out of the way. A copy
-            // that would not fit is no copy, and the original stays put.
-            if keep_aside(&aside, UNREADABLE_SESSIONS_KEY, &raw) {
-                let _ = store.remove_item(SESSIONS_KEY);
-            } else {
+            // that would not go even so is no copy, and the original stays
+            // put.
+            let kept = set_aside_from(
+                &aside,
+                SESSIONS_KEY,
+                &raw,
+                UNREADABLE_SESSIONS_KEY,
+                &raw,
+                None,
+            );
+            if !self.noted(kept, SetAside::History { kept: None }) {
                 self.history_held.set(true);
             }
             return None;
         };
         // The sessions that do not read are set aside before the next save
         // leaves them out; where they cannot be, nothing is saved over them.
-        if let Some(unread) = read.unread_json()
-            && !keep_aside(&aside, UNREADABLE_SESSIONS_KEY, &unread)
-        {
-            self.history_held.set(true);
+        if let Some(unread) = read.unread_json() {
+            let kept = match serde_json::to_string(&read.sessions) {
+                Ok(rest) => set_aside_from(
+                    &aside,
+                    SESSIONS_KEY,
+                    &raw,
+                    UNREADABLE_SESSIONS_KEY,
+                    &unread,
+                    Some(&rest),
+                ),
+                Err(_) => Kept::Not,
+            };
+            let count = read.unread.len();
+            if !self.noted(kept, SetAside::Sessions { count, kept: None }) {
+                self.history_held.set(true);
+            }
         }
         Some(read.sessions)
+    }
+
+    fn take_set_aside(&self) -> Vec<SetAside> {
+        std::mem::take(&mut self.set_aside.borrow_mut())
+    }
+
+    /// None, where they cannot be read: a deletion forgotten costs a
+    /// session deleted coming back, never one kept going.
+    fn read_deleted(&self) -> Vec<Deleted> {
+        storage()
+            .and_then(|store| store.get_item(DELETED_KEY).ok().flatten())
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_deleted(&self, deleted: &[Deleted]) {
+        if let (Some(store), Ok(raw)) = (storage(), serde_json::to_string(deleted)) {
+            let _ = store.set_item(DELETED_KEY, &raw);
+        }
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
@@ -301,9 +407,17 @@ impl Store for WebStore {
         let Some(store) = storage() else {
             return;
         };
-        if let Ok(raw) = serde_json::to_string(&counters) {
-            let _ = store.set_item(&counters_key(key), &raw);
-        }
+        let key = counters_key(key);
+        let Ok(written) = serde_json::to_value(counters) else {
+            return;
+        };
+        // Over what it held, so what a later build added to it stays.
+        let stored = store
+            .get_item(&key)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        let _ = store.set_item(&key, &over_stored(written, stored).to_string());
     }
 
     fn clear_auto_counters(&self, keys: &[CountersKey]) {
@@ -390,7 +504,10 @@ impl Store for WebStore {
     fn take_cut_off(&self) -> CutOffTaking {
         Box::pin(async {
             let marks = take_marks().await;
-            CutOff::newest(marks.iter().map(|mark| CutOff::read(mark.as_bytes())))
+            marks
+                .iter()
+                .map(|mark| CutOff::read(mark.as_bytes()))
+                .collect()
         })
     }
 }
