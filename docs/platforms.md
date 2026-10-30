@@ -492,7 +492,7 @@ rather than take a tab still running for one cut off.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
-`dust_last_backup`, `dust_open_session_*`, `dust_deleted`) and
+`dust_asked_about_lock`, `dust_last_backup`, `dust_open_session_*`, `dust_deleted`) and
 file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
 that field. A settings file from before the AGC threshold went comes back

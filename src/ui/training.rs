@@ -655,6 +655,9 @@ pub fn TrainingView(
     let input_locked = (locked && is_active) || awaiting_play;
     let live = is_active && !input_locked;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
+    // A group of more than one character typed only once it has been sent
+    // cannot be timed: the hint says so as it is sent.
+    let untimed_while_locked = sent_now.chars().count() > 1;
     // The paddles key into the box while the keyboard can, along with the
     // send when typing is not locked while it plays: a letter timed from its
     // first contact, though it goes in only once its letter space has run
@@ -722,6 +725,8 @@ pub fn TrainingView(
             CountdownTo::Next => "Get ready — the next group is coming.",
             CountdownTo::Again => "Get ready — the group is coming again.",
         }
+    } else if playing && locked && untimed_while_locked {
+        "Listen — typing locked, so not timed."
     } else if playing && locked {
         "Listen — the box opens when it ends."
     } else if playing {

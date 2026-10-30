@@ -385,6 +385,8 @@ impl ContestRun {
             group_timings: timings,
             // A call or a number is as long as it is.
             length_floor: None,
+            // A run's fields are never locked while a caller sends.
+            typing_locked: false,
         };
         result.score = result.points();
         result

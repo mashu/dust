@@ -10,7 +10,8 @@ use crate::morse::LCWO_SEQUENCE;
 use crate::numeric::median;
 use crate::pool::compute_char_pool;
 use crate::recognition::{
-    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Recognition, RecognitionBands, recognise,
+    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Recognition, RecognitionBands, first_key_late_ms,
+    recognise, typed_along,
 };
 use crate::sampling::{
     CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
@@ -18,7 +19,7 @@ use crate::sampling::{
     compute_raw_sampling_weights, config_from_settings, draw_chances, generate_callsign_group,
     generate_contest_call, generate_word_group, group_size_bounds,
 };
-use crate::session::SessionResult;
+use crate::session::{SessionResult, Untimed};
 use crate::settings::{CharSetMode, TrainingSettings};
 use crate::span::{LengthForecast, SpanBelief};
 use crate::speed::{SpeedBelief, SpeedForecast, SpeedPath, forecast_speeds, station_shares};
@@ -473,6 +474,62 @@ pub fn session_recognition(session: &SessionResult) -> Option<SessionRecognition
         median_ms: median(&times)?,
         timed: times.len(),
     })
+}
+
+/// What a session kept of why its characters went untimed, group by group:
+/// what the results say, rather than guess, when little of it was timed
+/// (docs/recognition.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SessionUntimed {
+    /// Groups answered, and the characters sent in them.
+    pub groups: usize,
+    pub chars: usize,
+    /// Characters the rule timed.
+    pub timed: usize,
+    /// Groups whose first send the audio held up on its way, or that went
+    /// out again from the start, heard in part: when their characters
+    /// reached you is not known.
+    pub held_up: usize,
+    /// Groups of more than one character, the box open, whose first key
+    /// came too late for them to have been typed along ([`typed_along`]).
+    pub typed_after: usize,
+    /// How long after each of those had ended its first key came: the
+    /// median, in milliseconds.
+    pub first_key_late_ms: Option<f64>,
+    /// Groups of more than one character heard again before they were
+    /// answered, with no key to time before the next send began.
+    pub keyed_in_repeat: usize,
+}
+
+/// `session`'s [`SessionUntimed`].
+pub fn session_untimed(session: &SessionResult) -> SessionUntimed {
+    let mut late = Vec::new();
+    let mut untimed = SessionUntimed {
+        groups: session.groups.len(),
+        chars: session.groups.iter().map(|g| g.sent.chars().count()).sum(),
+        timed: timed_chars(session).count(),
+        ..SessionUntimed::default()
+    };
+    for (group, timing) in session.groups.iter().zip(&session.group_timings) {
+        let longer = group.sent.chars().count() > 1;
+        if matches!(timing.untimed, Some(Untimed::HeldUp | Untimed::SentAgain)) {
+            untimed.held_up += 1;
+        }
+        match &timing.char_times {
+            Some(times) if longer && times.box_open && !typed_along(times) => {
+                if let Some(ms) = first_key_late_ms(times) {
+                    untimed.typed_after += 1;
+                    late.push(ms as f64);
+                }
+            }
+            None if longer && timing.untimed.is_none() && timing.sends > 1 => {
+                untimed.keyed_in_repeat += 1;
+            }
+            _ => {}
+        }
+    }
+    untimed.first_key_late_ms = median(&late);
+    untimed
 }
 
 /// How many characters of `sessions` are mastered: [`character_diagnostics`]
@@ -1277,6 +1334,67 @@ mod tests {
         assert_eq!(k.recognition_tries, 41);
         // The latest forty: 300 twenty-one times, 900 nineteen.
         assert_eq!(k.recognition_ms, Some(300.0));
+    }
+
+    /// A session that timed little says what it kept of why: groups the
+    /// audio held up or sent again, groups typed after they were sent and
+    /// how late their first key came, and groups keyed only once heard
+    /// again.
+    #[test]
+    fn a_session_says_why_its_groups_went_untimed() {
+        let mut session = plain(
+            "2026-09-01",
+            1,
+            &[
+                ("KM", "KM"),
+                ("KM", "KM"),
+                ("KMR", "KMR"),
+                ("RS", "RS"),
+                ("RS", "RS"),
+                ("K", "K"),
+            ],
+        );
+        let after = |first: u32| CharTimes {
+            ends: vec![300, 700],
+            keys: vec![Some(first), Some(first + 200)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        };
+        let timings = &mut session.group_timings;
+        // Typed 400 and 800 ms after the group ended, and along with it.
+        timings[0].char_times = Some(after(1_100));
+        timings[1].char_times = Some(after(1_500));
+        timings[2].char_times = Some(CharTimes {
+            ends: vec![300, 700, 1_000],
+            keys: vec![Some(550), Some(900), Some(1_250)],
+            ..after(0)
+        });
+        timings[3].untimed = Some(Untimed::HeldUp);
+        timings[4].sends = 2;
+        timings[5].untimed = Some(Untimed::SentAgain);
+        let untimed = session_untimed(&session);
+        assert_eq!(
+            untimed,
+            SessionUntimed {
+                groups: 6,
+                chars: 12,
+                timed: 3,
+                held_up: 2,
+                typed_after: 2,
+                first_key_late_ms: Some(600.0),
+                keyed_in_repeat: 1,
+            }
+        );
+        // A pause is no fault of the audio's.
+        session.group_timings[3].untimed = Some(Untimed::Paused);
+        assert_eq!(session_untimed(&session).held_up, 1);
+        // With nothing kept, nothing to say.
+        let plain = session_untimed(&plain("2026-09-02", 2, &[("KM", "KM")]));
+        assert_eq!(
+            (plain.timed, plain.typed_after, plain.first_key_late_ms),
+            (0, 0, None)
+        );
     }
 
     /// Overview's count of mastered characters is the Letters card's.

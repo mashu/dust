@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::alignment::{CopyTally, LetterAccuracy};
@@ -107,11 +107,55 @@ struct Sounding {
     origin: MonoMs,
     char_ends_ms: Vec<u32>,
     latency_ms: u32,
-    /// It can be timed from: it played on time, and was not tried again.
-    trusted: bool,
+    /// Why it cannot be timed from, if it cannot: it was held up, tried
+    /// again, or paused with its answer open. None while it played on time
+    /// and once.
+    untimed: Option<Untimed>,
     /// When a later send of the group began to go out: a key from then on
     /// came after hearing it twice.
     resent: Option<MonoMs>,
+}
+
+impl Sounding {
+    /// It cannot be timed from, for `why`, unless it was found so already:
+    /// the first reason found is the one kept.
+    fn distrust(&mut self, why: Untimed) {
+        self.untimed.get_or_insert(why);
+    }
+}
+
+/// Why a group's characters went untimed, as it is kept with the group:
+/// its first send could not be timed from. What the results say, rather
+/// than guess, when a session timed little.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Untimed {
+    /// The audio held it up on its way, so its characters went out later
+    /// than planned.
+    HeldUp,
+    /// It went out again from the start, heard in part already: as when
+    /// some of it went unheard, or the attempt failed.
+    SentAgain,
+    /// The session was paused with its answer open: keys either side of a
+    /// pause cannot be timed against one send.
+    Paused,
+}
+
+/// A group's [`Untimed`] as a save holds it, read so that a reason this
+/// build does not know reads as none: never as a session lost.
+fn lenient_untimed<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Untimed>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Read {
+        Known(Untimed),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Read::deserialize(deserializer)? {
+        Read::Known(why) => Some(why),
+        Read::Other(_) => None,
+    })
 }
 
 /// An answer complete, and what had been heard of its group by then.
@@ -270,8 +314,8 @@ impl Group {
     /// its end before it — never quicker than a person types — how many
     /// times the group was heard by then, and what its characters'
     /// recognition is read from ([`CharTimes`]), where its first send can be
-    /// timed. `box_open` is whether the box took keys while the group was
-    /// sent.
+    /// timed, or why it cannot. `box_open` is whether the box took keys
+    /// while the group was sent.
     fn timing(&self, box_open: bool) -> SessionTiming {
         let chars = self.sent.chars().count().max(1) as f64;
         let (measured, sends) = self.answer.map_or((0, 1), |answer| {
@@ -291,7 +335,7 @@ impl Group {
             char_times: self
                 .sounding
                 .as_ref()
-                .filter(|sounding| sounding.trusted)
+                .filter(|sounding| sounding.untimed.is_none())
                 .map(|sounding| {
                     CharTimes::of(
                         sounding.origin.0,
@@ -303,6 +347,7 @@ impl Group {
                     )
                 })
                 .filter(CharTimes::can_be_timed),
+            untimed: self.sounding.as_ref().and_then(|sounding| sounding.untimed),
         }
     }
 }
@@ -595,7 +640,7 @@ impl GroupSession {
         if group.answer.is_some() {
             group.paused_complete = true;
         } else if let Some(sounding) = &mut group.sounding {
-            sounding.trusted = false;
+            sounding.distrust(Untimed::Paused);
         }
     }
 
@@ -638,11 +683,11 @@ impl GroupSession {
                     origin: start.output_at,
                     char_ends_ms: start.char_ends_ms.clone(),
                     latency_ms: start.latency_ms,
-                    trusted: true,
+                    untimed: None,
                     resent: None,
                 });
             }
-            (Some(sounding), 0) => sounding.trusted = false,
+            (Some(sounding), 0) => sounding.distrust(Untimed::SentAgain),
             (Some(sounding), _) => {
                 // Sent again from where the station copied is heard again,
                 // not from the callers starting ahead of it.
@@ -693,7 +738,7 @@ impl GroupSession {
             && group.plays_done == 0
             && let Some(sounding) = &mut group.sounding
         {
-            sounding.trusted = false;
+            sounding.distrust(Untimed::HeldUp);
         }
     }
 
@@ -719,7 +764,7 @@ impl GroupSession {
                 && input != group.input
                 && let Some(sounding) = &mut group.sounding
             {
-                sounding.trusted = false;
+                sounding.distrust(Untimed::Paused);
             }
             group.input = input;
             let length = group.input.chars().count();
@@ -773,8 +818,8 @@ impl GroupSession {
         }
         let accuracy = tally.accuracy();
         let sent: Vec<&str> = scored.iter().map(|g| g.sent.as_str()).collect();
-        let box_open = !self.settings.playback.lock_input_during_group_playback;
-        let timings: Vec<SessionTiming> = scored.iter().map(|g| g.timing(box_open)).collect();
+        let typing_locked = self.settings.playback.lock_input_during_group_playback;
+        let timings: Vec<SessionTiming> = scored.iter().map(|g| g.timing(!typing_locked)).collect();
         let groups: Vec<GroupResult> = scored
             .iter()
             .map(|group| GroupResult {
@@ -825,6 +870,7 @@ impl GroupSession {
             contest: None,
             unread: UnreadKeys::default(),
             length_floor: length_floor(&self.settings).map(|floor| floor as u32),
+            typing_locked,
         };
         result.score = result.points();
         result
@@ -890,6 +936,16 @@ pub struct SessionTiming {
         deserialize_with = "lenient_char_times"
     )]
     pub char_times: Option<CharTimes>,
+    /// Why its characters could not be timed, its first send not to be
+    /// timed from ([`Untimed`]). None where it could be, and for older
+    /// saves: written only where there is one, which healthy audio never
+    /// gives.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_untimed"
+    )]
+    pub untimed: Option<Untimed>,
 }
 
 impl Default for SessionTiming {
@@ -902,6 +958,7 @@ impl Default for SessionTiming {
             effective_wpm: None,
             sends: 1,
             char_times: None,
+            untimed: None,
         }
     }
 }
@@ -965,6 +1022,11 @@ pub struct SessionResult {
     /// no miss of the characters lost ([`Self::letter_accuracy`]). None
     /// where the length did not adapt, and on older saves.
     pub length_floor: Option<u32>,
+    /// Typing was locked while each group was sent, as the session's own
+    /// settings had it: no group longer than one character could be timed.
+    /// What the results say of it, whatever the settings say by then.
+    /// False on older saves, which did not say.
+    pub typing_locked: bool,
     /// What the stored session held that this build does not read.
     pub unread: UnreadKeys,
 }
@@ -1027,6 +1089,8 @@ struct SessionOnDisk<'a> {
     contest: Option<&'a ContestLog>,
     #[serde(skip_serializing_if = "Option::is_none")]
     length_floor: Option<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    typing_locked: bool,
     #[serde(flatten)]
     unread: &'a Map<String, Value>,
 }
@@ -1079,6 +1143,7 @@ impl Serialize for SessionResult {
             alphabet_fingerprint: &self.alphabet_fingerprint,
             contest: self.contest.as_ref(),
             length_floor: self.length_floor,
+            typing_locked: self.typing_locked,
             unread: &self.unread.session,
         }
         .serialize(serializer)
@@ -1118,6 +1183,8 @@ struct StoredSession {
     contest: Option<ContestLog>,
     #[serde(default)]
     length_floor: Option<u32>,
+    #[serde(default)]
+    typing_locked: bool,
     #[serde(flatten)]
     unread: Map<String, Value>,
 }
@@ -1189,6 +1256,7 @@ impl From<StoredSession> for SessionResult {
                 timings: unread_timings,
             },
             length_floor: stored.length_floor,
+            typing_locked: stored.typing_locked,
         }
     }
 }
@@ -1267,6 +1335,7 @@ impl SessionResult {
             contest: None,
             unread: UnreadKeys::default(),
             length_floor: None,
+            typing_locked: false,
         }
     }
 }
@@ -1612,7 +1681,8 @@ mod tests {
 
     /// A first send tried again was heard in part already, and one held up
     /// on its way would time every character from the wrong moment: neither
-    /// is timed. A key after a later send began came after hearing it twice.
+    /// is timed, and the group keeps why, the first reason found. A key
+    /// after a later send began came after hearing it twice.
     #[test]
     fn only_a_first_send_on_time_and_once_is_timed() {
         let session = |retried: bool, on_time: bool| {
@@ -1630,11 +1700,13 @@ mod tests {
             session.end_playback(0, MonoMs(1_350));
             session.set_input(0, "K", &keyed(&[Some(1_700)]));
             session.confirm(0, MonoMs(2_000));
-            result(&session).group_timings[0].char_times.is_some()
+            let timing = &result(&session).group_timings[0];
+            (timing.char_times.is_some(), timing.untimed)
         };
-        assert!(session(false, true));
-        assert!(!session(true, true));
-        assert!(!session(false, false));
+        assert_eq!(session(false, true), (true, None));
+        assert_eq!(session(true, true), (false, Some(Untimed::SentAgain)));
+        assert_eq!(session(false, false), (false, Some(Untimed::HeldUp)));
+        assert_eq!(session(true, false), (false, Some(Untimed::SentAgain)));
 
         let mut open = TrainingSettings::default();
         open.playback.lock_input_during_group_playback = false;
@@ -1654,6 +1726,106 @@ mod tests {
             Some(vec![Some(500), None])
         );
         assert_eq!(timing.sends, 2);
+        assert_eq!(timing.untimed, None, "sent again as asked: no fault");
+    }
+
+    /// A session records whether typing was locked while its groups were
+    /// sent, as its own settings had it: with the lock on, a group of more
+    /// than one character keeps nothing to time, and one of one character
+    /// still does.
+    #[test]
+    fn a_session_records_whether_typing_was_locked_as_it_ran() {
+        let run = |locked: bool| {
+            let mut settings = TrainingSettings::default();
+            settings.playback.lock_input_during_group_playback = locked;
+            let mut session = GroupSession::new(SessionId::new(1), 2, settings);
+            for (index, sent) in ["KM", "R"].into_iter().enumerate() {
+                let from = 1_000 + 3_000 * index as u64;
+                let ends: Vec<u32> = (1..=sent.len() as u32).map(|at| at * 300).collect();
+                session.set_group(index, sent.into(), 1);
+                session.begin_group(index, MonoMs(from - 20));
+                session.start_playback(index, &send_start(from, 20.0, &ends));
+                let keys: Vec<Option<u64>> = ends
+                    .iter()
+                    .map(|end| Some(from + u64::from(*end) + 250))
+                    .collect();
+                session.set_input(index, sent, &keyed(&keys));
+                session.note_play_finished(index);
+                session.end_playback(index, MonoMs(from + 700));
+                session.confirm(index, MonoMs(from + 1_000));
+            }
+            result(&session)
+        };
+        let locked = run(true);
+        assert!(locked.typing_locked);
+        let kept: Vec<bool> = locked
+            .group_timings
+            .iter()
+            .map(|timing| timing.char_times.is_some())
+            .collect();
+        assert_eq!(kept, [false, true]);
+        assert!(
+            locked.group_timings.iter().all(|t| t.untimed.is_none()),
+            "the lock is the session's, no fault of a send"
+        );
+        let open = run(false);
+        assert!(!open.typing_locked);
+        assert!(open.group_timings.iter().all(|t| t.char_times.is_some()));
+    }
+
+    /// Whether typing was locked, and why a group went untimed, are kept
+    /// under the keys a save names, and written only where they say
+    /// something. A save without them reads as unlocked and nothing to say,
+    /// and a reason this build does not know reads as none, never as a
+    /// session lost.
+    #[test]
+    fn the_lock_and_why_a_group_went_untimed_round_trip() {
+        let mut written = SessionResult::empty_for_test();
+        written.groups = vec![GroupResult::default(); 2];
+        written.group_timings = vec![
+            SessionTiming {
+                untimed: Some(Untimed::HeldUp),
+                ..SessionTiming::default()
+            },
+            SessionTiming::default(),
+        ];
+        written.typing_locked = true;
+        let json = serde_json::to_value(&written).unwrap();
+        assert_eq!(json["typingLocked"], true);
+        assert_eq!(json["groupTimings"][0]["untimed"], "heldUp");
+        assert!(json["groupTimings"][1].get("untimed").is_none());
+        let read: SessionResult = serde_json::from_value(json).unwrap();
+        assert_eq!(read, written);
+        assert_eq!(read.unread, UnreadKeys::default());
+        for (why, key) in [
+            (Untimed::SentAgain, "sentAgain"),
+            (Untimed::Paused, "paused"),
+        ] {
+            assert_eq!(serde_json::to_value(why).unwrap(), key);
+        }
+
+        let mut plain = written.clone();
+        plain.typing_locked = false;
+        plain.group_timings[0].untimed = None;
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("typingLocked").is_none(), "{json}");
+        assert!(json["groupTimings"][0].get("untimed").is_none(), "{json}");
+        let read: SessionResult = serde_json::from_value(json).unwrap();
+        assert!(!read.typing_locked);
+        assert_eq!(read.group_timings[0].untimed, None);
+
+        for odd in [
+            serde_json::json!("lateNews"),
+            serde_json::json!(7),
+            serde_json::json!({ "heldUp": 1 }),
+            serde_json::Value::Null,
+        ] {
+            let mut later = serde_json::to_value(&written).unwrap();
+            later["groupTimings"][0]["untimed"] = odd.clone();
+            let read: SessionResult = serde_json::from_value(later).expect("still loads");
+            assert_eq!(read.group_timings[0].untimed, None, "{odd}");
+            assert_eq!(read.groups.len(), 2);
+        }
     }
 
     /// In a pile-up the callers can start before the station copied: a key

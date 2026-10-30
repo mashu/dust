@@ -89,9 +89,10 @@ pub use pool::{
     compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
 };
 pub use recognition::{
-    CharTimes, KEEPING_UP_MS, KeyLog, Keys, REACTION_MIN_MS, RECOGNITION_BAND_MAX_MS,
-    RECOGNITION_BAND_MIN_MS, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW,
-    Recognition, RecognitionBand, RecognitionBands, RecognitionEdge, answer_chars, recognise,
+    ALONG_FLOOR_MS, CharTimes, KEEPING_UP_MS, KeyLog, Keys, REACTION_MIN_MS,
+    RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES,
+    RECOGNITION_WINDOW, Recognition, RecognitionBand, RecognitionBands, RecognitionEdge,
+    answer_chars, first_key_late_ms, recognise, typed_along,
 };
 pub use rng::{Rng, SplitMix64};
 pub use sampling::{
@@ -101,7 +102,7 @@ pub use sampling::{
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
     Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, MonoMs, SendStart,
-    SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys,
+    SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys, Untimed,
     answer_length_matches, settle_clock_ahead,
 };
 pub use settings::{
@@ -127,9 +128,10 @@ pub use stats::{
     CharacterDiagnostic, ConfusionEntry, EARLIER_TRIES, GROUP_START_BIGRAM_TOKEN,
     HARD_PAIR_MIN_TRIES, HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS,
     MasteryStatus, MistakeStats, RECENT_TRIES, SamplingRow, SessionHistoryRow, SessionRecognition,
-    accuracy_chart, best_accuracy, character_diagnostics, group_length_forecast, mastered_count,
-    mistake_stats, overall_accuracy, practised_modes, sampling_rows, session_history,
-    session_recognition, span_history, speed_forecast, speed_history,
+    SessionUntimed, accuracy_chart, best_accuracy, character_diagnostics, group_length_forecast,
+    mastered_count, mistake_stats, overall_accuracy, practised_modes, sampling_rows,
+    session_history, session_recognition, session_untimed, span_history, speed_forecast,
+    speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

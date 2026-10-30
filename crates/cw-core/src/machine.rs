@@ -759,7 +759,7 @@ mod tests {
 
     use super::*;
     use crate::alignment::CopyTally;
-    use crate::session::{CountdownTo, SessionResult};
+    use crate::session::{CountdownTo, SessionResult, Untimed};
 
     /// Hands out the groups it is given, then "KM" for ever, and remembers
     /// what it was taught.
@@ -944,7 +944,8 @@ mod tests {
 
     /// A group partly sent when the session is paused is stopped, nothing
     /// runs while it is held, and it goes out again from the start once it
-    /// is resumed, after the count down; what was typed into it is kept.
+    /// is resumed, after the count down; what was typed into it is kept,
+    /// and once answered, the group says the pause is why it is not timed.
     #[test]
     fn a_paused_group_is_sent_again_after_the_count_down() {
         let mut ask = settings(2, false, 10.0);
@@ -954,6 +955,18 @@ mod tests {
         let effects = fire(&mut m, &effects, 1_000);
         let _ = fire(&mut m, &effects, 2_000);
         assert_eq!(m.phase(), SessionPhase::Playing { index: 0 });
+        let start = SendStart {
+            char_wpm: 20.0,
+            effective_wpm: 18.0,
+            output_at: MonoMs(2_010),
+            char_ends_ms: vec![300, 700],
+            first_char_ms: 0,
+            latency_ms: 0,
+        };
+        let _ = m.apply(
+            SessionEvent::PlaybackStarted { index: 0, start },
+            MonoMs(2_000),
+        );
         let _ = m.apply(typed(0, "K"), MonoMs(2_500));
 
         let effects = m.apply(SessionEvent::Pause, MonoMs(2_600));
@@ -990,6 +1003,18 @@ mod tests {
         assert_eq!(m.session().group_start(0), Some(MonoMs(62_000)));
         assert_eq!(m.session().group(0).map(|g| g.input()), Some("K"));
         assert!(m.apply(SessionEvent::Resume, MonoMs(62_100)).is_empty());
+
+        let _ = play_out(&mut m, 0, MonoMs(62_500));
+        let _ = m.apply(typed(0, "KM"), MonoMs(62_700));
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(62_800));
+        let timing = &m
+            .session()
+            .result(63_000, "2026-10-30".into())
+            .group_timings[0];
+        assert_eq!(
+            (timing.char_times.clone(), timing.untimed),
+            (None, Some(Untimed::Paused))
+        );
     }
 
     /// A group heard in full when the session is paused is not sent again:
@@ -2002,11 +2027,13 @@ mod tests {
 
     /// A first send held up on its way cannot be timed, whether it was
     /// heard out or the group was answered and the send stopped before the
-    /// news came; its speed is kept all the same.
+    /// news came, and the group says so; its speed is kept all the same.
     #[test]
     fn a_send_held_up_on_its_way_is_not_timed() {
         for answered_first in [false, true] {
-            let mut m = start_with(settings(1, false, 10.0), script(&["K"], 1));
+            // Two groups, so the session is still under way when the news
+            // comes.
+            let mut m = start_with(settings(2, false, 10.0), script(&["K", "M"], 1));
             let start = SendStart {
                 char_wpm: 22.0,
                 effective_wpm: 22.0,
@@ -2037,8 +2064,8 @@ mod tests {
             }
             let timing = &m.session().result(1_300, "2026-09-01".into()).group_timings[0];
             assert_eq!(
-                (timing.char_wpm, timing.char_times.clone()),
-                (Some(22.0), None),
+                (timing.char_wpm, timing.char_times.clone(), timing.untimed),
+                (Some(22.0), None, Some(Untimed::HeldUp)),
                 "answered first: {answered_first}"
             );
         }
@@ -2112,6 +2139,11 @@ mod tests {
             "from the send heard whole"
         );
         assert_eq!(timing.char_times, None, "sent twice: not timed");
+        assert_eq!(
+            timing.untimed,
+            Some(Untimed::HeldUp),
+            "held up before it was sent again: the first reason found"
+        );
 
         // Held up alone, heard whole: answered as ever.
         let _ = fire(&mut m, &next, 4_000);
@@ -2163,6 +2195,15 @@ mod tests {
         let _ = fire(&mut m, &gap, 6_500);
         let _ = play_out(&mut m, 0, MonoMs(7_000));
         assert_eq!(m.phase(), SessionPhase::AwaitingAnswer { index: 0 });
+        // Its first send was heard again from the start: not timed, and
+        // the group says why.
+        let _ = m.apply(typed(0, "KM"), MonoMs(7_200));
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(7_300));
+        let timing = &m.session().result(7_400, "2026-10-30".into()).group_timings[0];
+        assert_eq!(
+            (timing.char_times.clone(), timing.untimed),
+            (None, Some(Untimed::SentAgain))
+        );
     }
 
     /// Only what the send that ends missed sends the group again: an

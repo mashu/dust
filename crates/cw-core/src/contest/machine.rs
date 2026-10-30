@@ -4839,6 +4839,7 @@ fn group(
             effective_wpm: Some(tenth(voice.effective_wpm)),
             sends,
             char_times,
+            untimed: None,
         },
         heard_in,
     }

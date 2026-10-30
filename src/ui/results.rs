@@ -109,23 +109,65 @@ mod tests {
     }
 }
 
-/// Why nothing of the session was timed, when nothing was, and what would
-/// have it timed (docs/recognition.md).
-fn untimed_hint(result: &SessionResult, typing_locked: bool) -> Option<String> {
-    if result.groups.is_empty() || cw_core::session_recognition(result).is_some() {
+/// Why little of the session was timed, when under about a third of its
+/// characters were, as far as what it kept says, and what would have them
+/// timed (docs/recognition.md); and whether the lock it ran with is why.
+/// `lock_on` is whether the settings still lock typing while a group is
+/// sent.
+fn untimed_hint(result: &SessionResult, lock_on: bool) -> Option<(String, bool)> {
+    let untimed = cw_core::session_untimed(result);
+    if untimed.chars == 0 || untimed.timed * 3 >= untimed.chars {
         return None;
     }
+    let lead = match untimed.timed {
+        0 => "Nothing was timed".to_string(),
+        1 => format!("Only 1 of {} characters was timed", untimed.chars),
+        timed => format!("Only {timed} of {} characters were timed", untimed.chars),
+    };
     let longer = result
         .groups
         .iter()
         .any(|group| group.sent.chars().count() > 1);
-    Some(if typing_locked && longer {
-        "Nothing was timed: Lock typing while sending is on, so each group was typed only after it had been sent, which shows how well you remember it rather than how fast you recognise it. To time each character, turn it off under Settings → Session shape and key each one as you hear it.".to_string()
+    if result.typing_locked && longer {
+        let now = if lock_on {
+            "To time each character, turn it off and key each one as you hear it."
+        } else {
+            "It is off now: key each character as you hear it."
+        };
+        return Some((
+            format!(
+                "{lead}: Lock typing while sending was on, so each group was typed only after it had been sent, which shows how well you remember it rather than how fast you recognise it. {now}"
+            ),
+            true,
+        ));
+    }
+    let groups = untimed.groups;
+    // In every group, or in so many of them.
+    let in_groups = |some: usize| match some {
+        all if all == groups => "in every group".to_string(),
+        some => format!("in {some} of {groups} groups"),
+    };
+    let text = if untimed.held_up * 2 > groups {
+        format!(
+            "{lead}: the sound was held up on its way {}, so when their characters reached you is not known. That is the audio, not your typing.",
+            in_groups(untimed.held_up)
+        )
+    } else if let Some(late) = untimed.first_key_late_ms {
+        format!(
+            "{lead}: {}, your first key came about {:.1} s after the group had ended. A group is timed only when you key its first character while the group is still sounding, or, for a short group, within half a second of that character.",
+            in_groups(untimed.typed_after),
+            late / 1_000.0
+        )
+    } else if untimed.keyed_in_repeat > 0 {
+        format!(
+            "{lead}: keys during a repeat are not timed, as by then you had heard the group once. Key each character as you hear it the first time it is sent."
+        )
     } else {
         format!(
-            "Nothing was timed: key each character as you hear it. A character is timed when its key comes at least {REACTION_MIN_MS} ms after its sound, and a group only when you start keying it before it ends."
+            "{lead}: key each character as you hear it. A character is timed when its key comes at least {REACTION_MIN_MS} ms after its sound, and a group only when you key its first character while the group is still sounding, or, for a short group, within half a second of that character."
         )
-    })
+    };
+    Some((text, false))
 }
 
 #[component]
@@ -135,9 +177,11 @@ pub fn ResultsView(
     #[props(default)]
     place: Option<(usize, usize)>,
     auto_message: Option<String>,
-    /// Typing is locked while a group is sent, as the settings stand.
+    /// Turn off Lock typing while sending: offered while the settings still
+    /// have it on, when the session ran with it and it is why nothing was
+    /// timed.
     #[props(default)]
-    typing_locked: bool,
+    on_unlock: Option<EventHandler<()>>,
     on_again: EventHandler<()>,
     on_home: EventHandler<()>,
 ) -> Element {
@@ -164,7 +208,7 @@ pub fn ResultsView(
         ),
         None => ("—".to_string(), "none timed".to_string()),
     };
-    let untimed = untimed_hint(&result, typing_locked);
+    let untimed = untimed_hint(&result, on_unlock.is_some());
     // About the copy, not the level: whether the level moves is the
     // learner's own rule, and the banner below says so when it does.
     let verdict = if result.accuracy >= 0.95 {
@@ -221,9 +265,20 @@ pub fn ResultsView(
                     div { class: "value", "{result.score.round()}" }
                 }
             }
-            if let Some(hint) = untimed {
-                p { id: "untimed-hint", class: "muted", style: "margin: 0; font-size: 0.85rem;",
-                    "{hint}"
+            if let Some((hint, locked)) = untimed {
+                div { class: "stack-sm",
+                    p { id: "untimed-hint", class: "muted", style: "margin: 0; font-size: 0.85rem;",
+                        "{hint}"
+                    }
+                    if let Some(on_unlock) = on_unlock.filter(|_| locked) {
+                        button {
+                            id: control_id("btn", "turn off lock typing"),
+                            class: "btn btn-secondary btn-sm",
+                            style: "align-self: flex-start;",
+                            onclick: move |_| on_unlock.call(()),
+                            "Turn off Lock typing"
+                        }
+                    }
                 }
             }
             div { class: "card",

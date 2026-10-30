@@ -198,6 +198,19 @@ impl StationAsk {
     }
 }
 
+/// Whether `settings` lock typing while a group is sent, with groups the
+/// lock keeps from being timed: longer than one character. A contest run's
+/// fields are never locked.
+pub(crate) fn lock_keeps_groups_untimed(settings: &TrainingSettings) -> bool {
+    let mode = settings.curriculum.char_set_mode;
+    let longer = match mode {
+        CharSetMode::Contest => return false,
+        CharSetMode::Callsign | CharSetMode::Words => true,
+        _ => settings.curriculum.max_group_size > 1,
+    };
+    settings.playback.lock_input_during_group_playback && longer
+}
+
 /// What the hero shows in Contest mode, and nothing in any other.
 fn contest_hero(settings: &TrainingSettings) -> Option<ContestHero> {
     (settings.curriculum.char_set_mode == CharSetMode::Contest).then(|| ContestHero::of(settings))
@@ -275,6 +288,14 @@ pub fn Home(
     /// none your call tells.
     #[props(default)]
     on_section: EventHandler<String>,
+    /// Lock typing while sending is on, keeping groups from being timed,
+    /// and you have not been asked yet whether to keep it: it was the
+    /// default before Dust 0.16, and a save from then still has it.
+    #[props(default)]
+    ask_about_lock: bool,
+    /// Your answer: true to turn it off and type along, false to keep it.
+    #[props(default)]
+    on_lock_answer: EventHandler<bool>,
 ) -> Element {
     let level = level_reading(&settings);
     let contest = contest_hero(&settings);
@@ -387,6 +408,31 @@ pub fn Home(
                         div { style: "font-weight: 700;", "This build has no audio" }
                         p { class: "muted", style: "margin: 0.15rem 0 0;",
                             "It is the one for bringing up a new phone toolchain. Sessions still run and score at the right pace; they just play nothing."
+                        }
+                    }
+                }
+            }
+            if ask_about_lock {
+                div { id: "lock-ask", class: "notice",
+                    Icon { name: IconName::Timer }
+                    div {
+                        div { style: "font-weight: 700;", "Lock typing while sending is on" }
+                        p { class: "muted", style: "margin: 0.15rem 0 0;",
+                            "It was the default before Dust 0.16. While it is on, a group longer than one character is typed only after it has been sent, so none of its characters is timed."
+                        }
+                        div { class: "row", style: "margin-top: 0.6rem;",
+                            button {
+                                id: control_id("btn", "type along"),
+                                class: "btn btn-primary btn-sm",
+                                onclick: move |_| on_lock_answer.call(true),
+                                "Type along — turn it off"
+                            }
+                            button {
+                                id: control_id("btn", "keep it on"),
+                                class: "btn btn-secondary btn-sm",
+                                onclick: move |_| on_lock_answer.call(false),
+                                "Keep it on"
+                            }
                         }
                     }
                 }
@@ -620,7 +666,7 @@ pub fn Home(
 
 #[cfg(test)]
 mod tests {
-    use super::{ContestHero, LevelReading, StationAsk, level_reading};
+    use super::{ContestHero, LevelReading, StationAsk, level_reading, lock_keeps_groups_untimed};
     use crate::ui::widgets::range_label;
     use cw_core::{CharSetMode, RunStyle, TrainingSettings};
 
@@ -662,6 +708,32 @@ mod tests {
                 value: "2".to_string(),
             }
         );
+    }
+
+    /// The lock keeps a group from being timed only where groups are
+    /// longer than one character, and a contest's fields never lock.
+    #[test]
+    fn the_lock_keeps_only_longer_groups_untimed() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.lock_input_during_group_playback = true;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.min_group_size = 1;
+        settings.curriculum.max_group_size = 1;
+        assert!(!lock_keeps_groups_untimed(&settings), "one character");
+        settings.curriculum.max_group_size = 2;
+        assert!(lock_keeps_groups_untimed(&settings));
+        settings.curriculum.max_group_size = 1;
+        for (mode, untimed) in [
+            (CharSetMode::Callsign, true),
+            (CharSetMode::Words, true),
+            (CharSetMode::Contest, false),
+        ] {
+            settings.curriculum.char_set_mode = mode;
+            assert_eq!(lock_keeps_groups_untimed(&settings), untimed, "{mode:?}");
+        }
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.playback.lock_input_during_group_playback = false;
+        assert!(!lock_keeps_groups_untimed(&settings), "off");
     }
 
     /// The hero says what a run copies and sends, and asks for your call
