@@ -81,6 +81,9 @@ pub enum SessionEvent {
     /// so it holds where it is rather than send groups to no one and close
     /// their answers empty.
     Pause,
+    /// You asked the session to hold, with the system's Back: it holds as
+    /// for [`Self::Pause`], and says it was you.
+    Hold,
     /// Carry on from a pause: a group partly sent goes out again from the
     /// start, after the count down the settings ask for; one sent in full is
     /// waited on again, with a fresh answer window.
@@ -311,6 +314,7 @@ impl<S: GroupSource> SessionMachine<S> {
             | SessionEvent::PlaybackStopped { .. }
             | SessionEvent::Input { .. }
             | SessionEvent::Pause
+            | SessionEvent::Hold
             | SessionEvent::Resume
             | SessionEvent::Abort => None,
         }
@@ -361,6 +365,7 @@ impl<S: GroupSource> SessionMachine<S> {
             SessionEvent::Confirm if self.confirm_too_soon(now) => Vec::new(),
             SessionEvent::Confirm => self.confirm_current(now),
             SessionEvent::Pause => self.pause(PauseWhy::Hidden, now),
+            SessionEvent::Hold => self.pause(PauseWhy::You, now),
             SessionEvent::Resume => self.resume(now),
             SessionEvent::TimerFired { id } => self.timer_fired(id, now),
             SessionEvent::FinishNow => self.finish_now(now),

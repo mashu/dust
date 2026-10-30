@@ -622,6 +622,9 @@ pub fn TrainingView(
     /// out of sight.
     #[props(default)]
     sound_stopped: bool,
+    /// It is on hold because the learner pressed the system's Back.
+    #[props(default)]
+    held: bool,
     /// The speed adaptive speed chose for the current group, if it chose.
     #[props(default)]
     speed: Option<ChosenSpeed>,
@@ -709,6 +712,8 @@ pub fn TrainingView(
     // as it changes.
     let hint = if paused && sound_stopped {
         "Sound stopped — Resume to carry on."
+    } else if paused && held {
+        "Paused — Back again ends it, kept."
     } else if paused {
         "Paused while the page was out of sight."
     } else if countdown.is_some() {

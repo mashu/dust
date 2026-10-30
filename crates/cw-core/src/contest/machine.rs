@@ -61,7 +61,8 @@ use crate::timing::{SEND_RELEASE_SEC, StationVoice};
 /// Why a run, or a session of groups, is paused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PauseWhy {
-    /// You paused it. A session of groups has no Pause of its own.
+    /// You paused it: a run with its Pause or the system's Back, a session
+    /// of groups, which has no Pause of its own, with Back.
     You,
     /// The page was hidden or the phone locked. It never resumes by itself.
     Hidden,

@@ -360,6 +360,7 @@ fn TrainingRoute() -> Element {
                 countdown_to: view.countdown_to,
                 paused: view.paused,
                 sound_stopped: view.sound_stopped,
+                held: view.held,
                 speed: view.speed,
                 answer: ctx.answer,
                 on_change,

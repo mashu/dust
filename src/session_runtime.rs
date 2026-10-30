@@ -477,6 +477,32 @@ pub fn finish_run(ctx: AppCtx) {
     }
 }
 
+/// Hold whatever has the training screen, as the system's Back does first:
+/// a run pauses as its Pause pauses it, a session of groups as it does out
+/// of sight. Whether this held it: one already paused, or over, is the
+/// caller's to end.
+#[cfg(any(test, feature = "web", target_os = "android"))]
+pub fn hold_run(ctx: AppCtx) -> bool {
+    let held = |ctx: AppCtx| match ctx.app().session.borrow().as_ref() {
+        Some(Live::Contest(_)) => ctx
+            .contest
+            .peek()
+            .as_ref()
+            .is_some_and(|run| matches!(run.phase, cw_core::ContestPhase::Paused { .. })),
+        Some(Live::Groups(live)) => live.machine.session().paused(),
+        None => false,
+    };
+    if held(ctx) {
+        return false;
+    }
+    if contest_live(ctx) {
+        crate::contest_runtime::pause_run(ctx, cw_core::PauseWhy::You);
+    } else {
+        send_event(ctx, SessionEvent::Hold);
+    }
+    held(ctx)
+}
+
 /// Leave whatever has the training screen without keeping it: Discard, the
 /// guided setup moving on.
 pub fn abort_run(ctx: AppCtx) {

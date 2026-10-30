@@ -327,6 +327,8 @@ pub struct SessionView {
     /// It is on hold because its sound stopped, not because the page went
     /// out of sight.
     pub sound_stopped: bool,
+    /// It is on hold because you asked it to, with the system's Back.
+    pub held: bool,
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
     pub repeat_done: u32,
@@ -461,6 +463,13 @@ impl GroupSession {
                 self.phase,
                 SessionPhase::Paused {
                     why: PauseWhy::Sound,
+                    ..
+                }
+            ),
+            held: matches!(
+                self.phase,
+                SessionPhase::Paused {
+                    why: PauseWhy::You,
                     ..
                 }
             ),

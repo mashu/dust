@@ -7,10 +7,11 @@
 //! one to go back through, and leaves it to Android only when there is none.
 //! So while the app is away from Home, on another screen or in a session,
 //! the page keeps one entry of the app's own on its history. Back takes it
-//! off, and the app does what the screen's own way back does: a session or
-//! a run ends as Exit ends it, keeping what it has, and any other screen
-//! goes Home. Home keeps no entry, so Back there leaves the app as it always
-//! has. Going Home by the app's own buttons takes the entry off again, or
+//! off, and the app does what the screen's own way back does: any other
+//! screen goes Home, and a session or a run under way pauses, as it would
+//! with the app put behind, and Back again ends it as Exit ends it, keeping
+//! what it has. Home keeps no entry, so Back there leaves the app as it
+//! always has. Going Home by the app's own buttons takes the entry off again, or
 //! Back would then have to be pressed twice to leave.
 //!
 //! Android 16 never hands Back to an app built for it, as Dust is: the
@@ -22,7 +23,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 
-use crate::session_runtime::finish_run;
+use crate::session_runtime::{finish_run, hold_run};
 use crate::state::{AppCtx, Screen};
 
 /// What the page's history is asked to do.
@@ -96,12 +97,19 @@ pub fn use_system_back(ctx: AppCtx) {
     });
 }
 
-/// Back on the screen up: what that screen's own way back does.
+/// Back on the screen up: what that screen's own way back does. A session
+/// or run is held the first time, as Android before 12 never did, and
+/// later ones put the app behind: Back to step away for a moment ends
+/// nothing.
 fn answer_back(ctx: AppCtx) {
     let screen = *ctx.screen.peek();
     match screen {
         Screen::Home => {}
-        Screen::Training => finish_run(ctx),
+        Screen::Training => {
+            if !hold_run(ctx) {
+                finish_run(ctx);
+            }
+        }
         Screen::Settings | Screen::Stats | Screen::Listen | Screen::Results => {
             ctx.go_to(Screen::Home);
         }
@@ -314,10 +322,11 @@ mod tests {
         });
     }
 
-    /// Back in a session ends it as Exit does, keeping what was answered,
+    /// Back in a session pauses it, as putting the app behind does, and
+    /// says so; Back again ends it as Exit does, keeping what was answered,
     /// and Back on its results goes Home: no session is lost to Back.
     #[test]
-    fn back_in_a_session_ends_it_as_exit_does() {
+    fn back_in_a_session_pauses_it_and_again_ends_it_as_exit_does() {
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.num_groups = 3;
@@ -327,6 +336,11 @@ mod tests {
             let sent = recorder.texts().first().cloned().expect("a group was sent");
             ui.type_into("group-input-0", &sent);
             assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            assert!(ui.with_app(|_| press_back()));
+            ui.advance(100).await;
+            assert_eq!(ui.screen(), "training", "held, not ended");
+            assert!(ui.has("Back again ends it"), "{}", ui.html());
+            assert_eq!(entries(), 1, "an entry for the next Back");
             assert!(ui.with_app(|_| press_back()));
             assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
             assert_eq!(ui.store.load_sessions().len(), 1, "kept");
@@ -366,14 +380,26 @@ mod tests {
         assert_eq!(step_script(Step::Back), "history.back();");
     }
 
-    /// Back in a contest run ends it as Exit does too.
+    /// Back in a contest run pauses it as its Pause does, and Back again
+    /// ends it as Exit does.
     #[test]
-    fn back_in_a_contest_run_ends_it_as_exit_does() {
+    fn back_in_a_contest_run_pauses_it_and_again_ends_it_as_exit_does() {
         run(|| async {
             let (mut ui, _recorder) = Ui::app_with_settings(contest_settings());
             ui.click("btn-start-training");
             ui.advance(1_000).await;
             assert!(ui.with_app(|ctx| ctx.contest.peek().is_some()));
+            assert!(ui.with_app(|_| press_back()));
+            ui.advance(100).await;
+            assert_eq!(ui.screen(), "training", "held, not ended");
+            assert!(ui.with_app(
+                |ctx| ctx.contest.peek().as_ref().is_some_and(|run| matches!(
+                    run.phase,
+                    cw_core::ContestPhase::Paused {
+                        why: cw_core::PauseWhy::You
+                    }
+                ))
+            ));
             assert!(ui.with_app(|_| press_back()));
             assert!(ui.run_until(2_000, |ui| ui.screen() == "results").await);
             assert!(ui.with_app(|ctx| ctx.contest.peek().is_none()));

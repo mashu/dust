@@ -80,9 +80,9 @@ out the gap is heard. No answer closes empty for it, and the time away is
 not answering time. The same holds on iOS.
 
 Back goes back through the app's screens: from Stats, Settings, Listen or
-a session's results to Practice, and out of a session or a contest run the
-way Exit leaves it, keeping what was answered. At Practice it leaves the
-app. The app moves between its screens by itself, so while it is away from
+a session's results to Practice. In a session or a contest run it pauses
+first, as putting the app behind does, and Back again leaves the way Exit
+leaves it, keeping what was answered. At Practice it leaves the app. The app moves between its screens by itself, so while it is away from
 Practice it keeps one entry of its own on the webview's history, which
 wry's activity goes back through before it hands Back to Android
 ([`src/system_back.rs`](../src/system_back.rs)). Without it Back left the
