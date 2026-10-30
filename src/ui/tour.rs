@@ -1831,6 +1831,31 @@ mod tests {
         });
     }
 
+    /// Show me on the unlock order chooses MorseMania in place of an order
+    /// of the learner's own, and that does not cost it: Your own brings it
+    /// back.
+    #[test]
+    fn show_me_keeps_an_unlock_order_of_ones_own() {
+        run(|| async {
+            let mut settings = needs_everything();
+            settings.curriculum.char_set_mode = CharSetMode::Koch;
+            settings.type_sequence("ZQXJKMRSU");
+            let (mut ui, _recorder) = opened_at(settings, "Unlock order");
+            ui.click("tour-show-me");
+            let budget = 3 * u64::from(POINT_MS + SHOWN_MS);
+            assert!(
+                ui.run_until(budget, |ui| moves_made(ui) == 1).await,
+                "{}",
+                ui.html()
+            );
+            assert!(ui.input_tag("pill-morsemania").contains("active"));
+
+            ui.click("pill-your-own");
+            let stored = ui.stored_settings().await.curriculum.custom_sequence;
+            assert_eq!(stored.iter().collect::<String>(), "ZQXJKMRSU");
+        });
+    }
+
     #[test]
     fn a_switch_is_pointed_at_by_its_knob() {
         let css = pointer_css(&[

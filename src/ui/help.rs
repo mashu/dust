@@ -407,7 +407,7 @@ pub fn character_set() -> Element {
             dt { "Contest" }
             dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange. A caller that is sending cannot hear you, one caller or a pile-up, as on the air: wait for it to finish before you send, and ask with ? (F7) if you missed it." }
             dt { "Unlock order" }
-            dd { "The order new characters come in: LCWO, MorseMania, CW Academy, alphabetical, or your own." }
+            dd { "The order new characters come in: LCWO, MorseMania, CW Academy, alphabetical, or your own, typed in the box. An order of your own is kept while you try a preset: Your own brings it back." }
             dt { "Level" }
             dd { "How many characters are in play. Auto level moves it for you." }
             dt { "Practice window" }

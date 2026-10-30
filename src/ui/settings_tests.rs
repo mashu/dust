@@ -817,16 +817,20 @@ fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
         let stored = ui.stored_settings().await;
         assert_eq!(stored.curriculum.word_list, ["PARIS", "CODEX", "73"]);
 
-        // Emptying the box goes back to the starter words.
+        // Emptying the box goes back to the starter words, as a message
+        // says, which offers Undo.
         ui.commit("field-word-list", "  \n");
-        assert_eq!(word_report(&ui), "Back to the starter words.");
+        assert!(ui.has("Back to the starter words"), "{}", ui.html());
+        assert!(ui.shows("toast-undo"));
+        assert_eq!(word_report(&ui), "");
         assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
     });
 }
 
 /// A text file loads as the words, and says what it came to; Starter words
-/// puts the starter list back.
+/// puts the starter list back, and Undo the words again: the box shows
+/// them, and the line under it counts them.
 #[test]
 fn a_text_file_loads_as_the_words() {
     run(|| async {
@@ -842,8 +846,19 @@ fn a_text_file_loads_as_the_words() {
         );
 
         ui.click("btn-starter-words");
-        assert_eq!(word_report(&ui), "Back to the starter words.");
+        assert!(ui.has("Back to the starter words"), "{}", ui.html());
+        assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
+
+        ui.click("toast-undo");
+        assert!(!ui.shows("toast-undo"));
+        assert_eq!(value_of(&ui, "field-word-list"), "CQ\nDE\nTEST");
+        assert_eq!(word_report(&ui), "3 words");
+        assert!(ui.has("Your own words, sent whole · 3 words"));
+        assert_eq!(
+            ui.stored_settings().await.curriculum.word_list,
+            ["CQ", "DE", "TEST"]
+        );
     });
 }
 
@@ -1393,6 +1408,33 @@ fn the_character_sets_reset_leaves_an_order_of_ones_own() {
         let stored = ui.stored_settings().await;
         assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Mixed);
         assert_eq!(stored.curriculum.word_list, ["PARIS"]);
+    });
+}
+
+/// A preset tried in place of an unlock order of the learner's own does
+/// not cost it: Your own brings it back, whichever presets were tried, and
+/// it is stored aside meanwhile.
+#[test]
+fn a_preset_tried_keeps_an_unlock_order_of_ones_own() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.commit("field-sequence-order", "ZQXJKMRSU");
+        ui.click("pill-morsemania");
+        assert_eq!(
+            value_of(&ui, "field-sequence-order"),
+            "KMRSUAPTLOWINJEF0YVG5Q9ZH38B?427C16DX/=+"
+        );
+        ui.click("pill-lcwo");
+        let stored = ui.stored_settings().await.curriculum.kept_sequence;
+        assert_eq!(stored.iter().collect::<String>(), "ZQXJKMRSU");
+
+        ui.click("pill-your-own");
+        assert!(ui.input_tag("pill-your-own").contains("active"));
+        assert_eq!(value_of(&ui, "field-sequence-order"), "ZQXJKMRSU");
+        assert!(ui.has("Unlocked in your own order"));
+        let stored = ui.stored_settings().await.curriculum.custom_sequence;
+        assert_eq!(stored.iter().collect::<String>(), "ZQXJKMRSU");
     });
 }
 
