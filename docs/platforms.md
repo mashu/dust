@@ -154,7 +154,9 @@ Pass `--target` explicitly: without it `dx` builds for the host architecture,
 which on an x86_64 machine means an emulator APK that a phone will not run.
 
 That APK is the debug build type, signed with your own debug key, so it
-installs only where Dust is not installed yet.
+installs only where Dust is not installed yet. The native library is
+linked for 16 KB memory pages, which Play requires of an app targeting
+Android 15 or later, whatever the NDK (`.cargo/config.toml`).
 
 On Debian the `google-android-*-installer` packages in contrib fetch Google's
 SDK bits; the official `commandlinetools` zip plus `sdkmanager` gives tighter

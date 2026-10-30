@@ -168,6 +168,7 @@ jobs:
           # shellcheck disable=SC1091
           source scripts/android-gradle-hook.sh
           check_android_apk_version "$PWD" "$apk"
+          check_android_page_size "$apk"
           if [[ "$PROFILE" != "debug" ]]; then
             # shellcheck disable=SC1091
             source scripts/android-release-signing.sh
