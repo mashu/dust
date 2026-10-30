@@ -39,6 +39,19 @@ const REOPEN_AFTER: Duration = Duration::from_secs(1);
 /// that loop from taking a core and the log with it.
 const ERROR_BACKOFF: Duration = Duration::from_millis(20);
 
+/// Whether the stream opens again on the device and config it last opened
+/// on, rather than probing for them afresh. On Android the device is the
+/// system's default route, which oboe follows by itself, and finding its
+/// config asks Java about every rate, channel count and format it might
+/// take, a call each, on the thread that answers taps: most of what waking
+/// the output cost a tap. On a computer the stream closed while asleep may
+/// wake to another default, which only a probe finds.
+const KEEP_PROBED: bool = cfg!(target_os = "android");
+
+/// Where the default output and the config it plays best at are found:
+/// [`default_output`], unless a test counts how often it is asked.
+type Probe = fn() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String>;
+
 pub struct MorsePlayer {
     state: PlayerState,
     /// Band and Morse, mixed. The UI swaps bands and sends in under its lock;
@@ -69,6 +82,14 @@ pub struct MorsePlayer {
     /// The device the mixer last heard the speaker's latency from: one the
     /// stream reopens on with another name has it heard afresh.
     latency_device: Option<String>,
+    /// How the default output is found.
+    probe: Probe,
+    /// Whether the device and config the stream last opened on are kept
+    /// for it to open on again ([`KEEP_PROBED`]).
+    keeps_probed: bool,
+    /// The device and config the stream last opened on, while they are
+    /// kept: let go of once a stream on them broke, or would not open.
+    probed: Option<(cpal::Device, cpal::SupportedStreamConfig)>,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -157,11 +178,17 @@ impl MorsePlayer {
     /// refuses to open gets another chance on first use; no device at all is
     /// an error.
     pub fn new() -> Result<Self, String> {
+        Self::probing(default_output, KEEP_PROBED)
+    }
+
+    /// The same, finding the default output by `probe`, and keeping what
+    /// it opened on for the next open if `keeps_probed`.
+    fn probing(probe: Probe, keeps_probed: bool) -> Result<Self, String> {
         #[cfg(target_os = "ios")]
         claim_audio_session();
         #[cfg(all(target_os = "android", not(test)))]
         claim_volume_keys();
-        let (device, supported) = default_output()?;
+        let (device, supported) = probe()?;
         let mixer = Mixer::new(supported.sample_rate().0);
         let mut player = Self {
             state: PlayerState::new(),
@@ -175,9 +202,13 @@ impl MorsePlayer {
             heard_at: None,
             gains: Gains::UNITY,
             latency_device: None,
+            probe,
+            keeps_probed,
+            probed: None,
         };
-        if let Err(err) = player.open(&device, &supported) {
-            eprintln!("audio output: {err}");
+        match player.open(&device, &supported) {
+            Ok(()) => player.keep_probed(device, supported),
+            Err(err) => eprintln!("audio output: {err}"),
         }
         Ok(player)
     }
@@ -212,7 +243,10 @@ impl MorsePlayer {
             // Whatever was playing on it went with it: a send waiting on it
             // has been told, and the band is rebuilt on the next apply. On
             // iOS the session an interruption took is claimed again first.
+            // The route it played on may have gone with it, so the default
+            // output is probed for again.
             self.stream = None;
+            self.probed = None;
             #[cfg(target_os = "ios")]
             claim_audio_session();
             let rate = self.mixer().sample_rate();
@@ -222,8 +256,21 @@ impl MorsePlayer {
         if self.stream.is_some() {
             return Ok(());
         }
-        let (device, supported) = default_output().inspect_err(|_| self.note_refusal())?;
-        self.open(&device, &supported)
+        let (device, supported) = match self.probed.take() {
+            Some(probed) => probed,
+            None => (self.probe)().inspect_err(|_| self.note_refusal())?,
+        };
+        self.open(&device, &supported)?;
+        self.keep_probed(device, supported);
+        Ok(())
+    }
+
+    /// Keep what the stream opened on, `device` at `supported`, for it to
+    /// open on again, where that is done ([`KEEP_PROBED`]).
+    fn keep_probed(&mut self, device: cpal::Device, supported: cpal::SupportedStreamConfig) {
+        if self.keeps_probed {
+            self.probed = Some((device, supported));
+        }
     }
 
     /// Let the stream go if the system's default output has changed since it
@@ -248,6 +295,7 @@ impl MorsePlayer {
         let opened = self.stream.as_ref().and_then(|open| open.device.as_deref());
         if moved_off_default(opened, default.as_deref()) {
             self.stream = None;
+            self.probed = None;
         }
     }
 
@@ -297,8 +345,11 @@ impl MorsePlayer {
         Ok(())
     }
 
+    /// The device refused to open, or could not be found: the next try
+    /// probes for the default output afresh.
     fn note_refusal(&mut self) {
         self.refused_at = Some(Instant::now());
+        self.probed = None;
     }
 }
 
@@ -659,7 +710,12 @@ mod device_tests {
     /// that will not open fails the test rather than passing it untried;
     /// on a machine with nothing at all the test says so and stops.
     fn player() -> Option<MorsePlayer> {
-        match MorsePlayer::new() {
+        opened(MorsePlayer::new())
+    }
+
+    /// The player `made`, as [`player`] takes it.
+    fn opened(made: Result<MorsePlayer, String>) -> Option<MorsePlayer> {
+        match made {
             Ok(player) => Some(player),
             Err(error) if std::env::var_os("CI").is_some() => {
                 panic!("CI gives ALSA a null output, yet the player would not open: {error}")
@@ -753,6 +809,66 @@ mod device_tests {
         assert!(player.stream.is_some(), "the sidetone opened it");
         assert!(called(&player, 300), "woken, it plays");
         player.shutdown();
+    }
+
+    thread_local! {
+        /// How many times [`counted_probe`] has been asked on this thread.
+        static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// [`default_output`], counted.
+    fn counted_probe() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
+        PROBES.set(PROBES.get() + 1);
+        default_output()
+    }
+
+    /// Where what it opened on is kept, as on Android, the output wakes
+    /// from sleep on it again and again without probing for it; a stream
+    /// that broke, or a device that refused, has it probed for afresh, once.
+    /// Where it is not, every wake probes, so a new default is found.
+    #[test]
+    fn a_kept_output_wakes_without_probing_until_it_breaks() {
+        PROBES.set(0);
+        let Some(mut player) = opened(MorsePlayer::probing(counted_probe, true)) else {
+            return;
+        };
+        let wake = |player: &mut MorsePlayer| {
+            player.sleep();
+            assert!(player.stream.is_none(), "asleep, it is closed");
+            player.ensure_output().expect("the output wakes");
+            assert!(player.stream.is_some(), "woken, it is open");
+        };
+        assert_eq!(PROBES.get(), 1, "probed as it opened");
+        for _ in 0..3 {
+            wake(&mut player);
+        }
+        assert_eq!(PROBES.get(), 1, "woken on what it opened on");
+        player
+            .stream
+            .as_ref()
+            .expect("open")
+            .failed
+            .store(true, Ordering::Release);
+        player.ensure_output().expect("opened again");
+        assert_eq!(PROBES.get(), 2, "a broken stream has the output probed");
+        wake(&mut player);
+        assert_eq!(PROBES.get(), 2);
+        player.note_refusal();
+        wake(&mut player);
+        assert_eq!(PROBES.get(), 3, "a refusal has the output probed");
+        wake(&mut player);
+        assert_eq!(PROBES.get(), 3);
+        player.shutdown();
+
+        PROBES.set(0);
+        let Some(mut probing) = opened(MorsePlayer::probing(counted_probe, false)) else {
+            return;
+        };
+        for _ in 0..3 {
+            wake(&mut probing);
+        }
+        assert_eq!(PROBES.get(), 4, "each wake probed");
+        probing.shutdown();
     }
 
     #[test]
