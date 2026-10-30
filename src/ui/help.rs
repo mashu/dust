@@ -325,7 +325,7 @@ pub fn board(ranking: Ranking) -> Element {
         dl { class: "help-terms",
             dt { "Points a group" }
             dd {
-                "A session's score is what its groups earn: more for copy at speed, and more for a longer group. Points a group are what it earned for every {RATED_GROUP_CHARS} characters sent, so neither a long session nor long groups beat short ones for the same copy. A session goes on with {BOARD_MIN_GROUPS} groups or more."
+                "A session's score is what its groups earn: more for copy at speed and for a longer group, and a miss costs its whole group. Points a group are what a session would earn in groups of {RATED_GROUP_CHARS} characters, at its speed and the share of characters it missed, so for the same copy a long session is no better than a short one, and groups of any length rate alike. A session goes on with {BOARD_MIN_GROUPS} groups or more."
             }
             dt { "Contest runs" }
             dd {

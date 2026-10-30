@@ -1661,8 +1661,8 @@ fn a_contest_run_is_placed_among_runs_of_its_contest() {
 fn results_say_where_the_session_stands_on_the_board() {
     fn long() -> SessionResult {
         let mut result = session("2026-09-03", 0.9);
-        result.groups = (0..5).flat_map(|_| result.groups.clone()).collect();
-        // Twenty characters sent: 60 points for every five.
+        result.groups = vec![result.groups[0].clone(); 10];
+        // Twenty characters sent, copied clean: 60 points for every five.
         result.score = 240.0;
         result
     }

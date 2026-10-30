@@ -8,12 +8,15 @@
 //! long enough for that mean to say something: [`BOARD_MIN_GROUPS`] groups or
 //! more, as RufzXP counts only a whole run.
 //!
-//! A group earns more the longer it is, so on the board a group is
-//! [`RATED_GROUP_CHARS`] characters: a session is rated by what it earned
-//! for every five it sent. Groups of two and groups of eight, a Koch session
-//! and a callsign one, a run's short serials and its calls, are ranked by
-//! their copy, not their length, and a group of five rates as it earns. A
-//! miss still costs its whole group, as in RufzXP.
+//! A group earns more the longer it is, and a miss, which costs its whole
+//! group as in RufzXP, costs a long group more than a short one. So on the
+//! board every group is [`RATED_GROUP_CHARS`] characters: a session is
+//! rated by what five of its characters earned before its misses cut them,
+//! cut then as a group of five is on average at the share of characters it
+//! missed. Groups of two and groups of eight, a Koch session and a callsign
+//! one, a run's short serials and its calls, are ranked by their copy, not
+//! their length, at any accuracy; and a group of five copied clean rates as
+//! it earns.
 //!
 //! How a learner is copying these days is the median of their last few
 //! sessions' ([`FORM_SESSIONS`]): one bad day does not drag it down the way it
@@ -40,7 +43,7 @@
 
 use crate::contest::{ContestKind, StoredLog};
 use crate::numeric::median;
-use crate::score::count_valid_letters;
+use crate::score::{count_errors, count_valid_letters, error_factor, expected_error_factor};
 use crate::session::SessionResult;
 use crate::settings::CharSetMode;
 
@@ -55,8 +58,8 @@ pub const BOARD_RUN_MIN_S: u64 = 300;
 pub const FORM_SESSIONS: usize = 10;
 
 /// The characters a group counts as on the board: points grow with a
-/// group's length, so a session is rated by what it earned for every this
-/// many characters sent, whatever the length of its groups.
+/// group's length, and a miss costs a longer group more, so a session is
+/// rated as if its groups were this long, whatever the length of its own.
 pub const RATED_GROUP_CHARS: u32 = 5;
 
 /// One session's place on the board, and what it was.
@@ -102,22 +105,47 @@ pub fn per_group(session: &SessionResult) -> Option<f64> {
 /// session that was `assisted` or not: for a contest run, a whole run with
 /// Show copy on or off as `assisted` says.
 fn earned(session: &SessionResult, assisted: bool) -> Option<f64> {
-    let groups = session.groups.len();
-    let chars: u32 = session
-        .groups
-        .iter()
-        .map(|group| count_valid_letters(&group.sent))
-        .sum();
     (session.score.is_finite()
         && session.score > 0.0
-        && chars > 0
-        && groups >= BOARD_MIN_GROUPS
+        && session.groups.len() >= BOARD_MIN_GROUPS
         && if session.char_set_mode == CharSetMode::Contest {
             a_whole_run(session, assisted)
         } else {
             !assisted
         })
-    .then(|| session.score * f64::from(RATED_GROUP_CHARS) / f64::from(chars))
+    .then(|| in_groups_of_five(session))
+    .flatten()
+}
+
+/// What `session` would earn a group were its groups [`RATED_GROUP_CHARS`]
+/// characters, copied as it copied: what five of its characters earned
+/// before its misses cut them, cut then as a group of five is on average at
+/// the share of characters it missed. None when it sent no character that
+/// scores.
+///
+/// Its score over its characters, each counted for what its group's misses
+/// left of it, is what a character earned before the cut, at the speeds and
+/// answer times it earned at. So groups of any length copied as well, a
+/// miss as likely in every character, rate alike: a long group earns no
+/// more for its length, nor loses more for a miss.
+fn in_groups_of_five(session: &SessionResult) -> Option<f64> {
+    let (mut chars, mut missed, mut kept) = (0u32, 0u32, 0.0);
+    for group in &session.groups {
+        let sent = count_valid_letters(&group.sent);
+        let errors = count_errors(&group.sent, &group.received);
+        chars += sent;
+        missed += errors;
+        kept += f64::from(sent) * error_factor(errors);
+    }
+    (chars > 0).then(|| {
+        let miss_rate = f64::from(missed) / f64::from(chars);
+        let rated = session.score / kept
+            * f64::from(RATED_GROUP_CHARS)
+            * expected_error_factor(RATED_GROUP_CHARS, miss_rate);
+        // To a hundredth, as the score it is worked from: the score's own
+        // rounding is no better copy, and sets no new best.
+        (rated * 100.0).round() / 100.0
+    })
 }
 
 /// Whether a contest run says something of a whole run: its log reads, it
@@ -564,19 +592,25 @@ mod tests {
         assert_eq!(board[0].rating, 70.0);
     }
 
-    /// `groups` groups of `length` characters, copied right, drawn evenly
-    /// from the same eight letters and sent alike, kept at `timestamp` and
-    /// scored as it is stored.
-    fn copied(timestamp: u64, groups: usize, length: usize) -> SessionResult {
+    /// `count` groups of `length` characters, drawn evenly from the same
+    /// eight letters and sent alike, `missed` of them, spread evenly, with
+    /// one character copied wrong; kept at `timestamp` and scored as it is
+    /// stored.
+    fn copied(timestamp: u64, count: usize, length: usize, missed: usize) -> SessionResult {
         let letters: Vec<char> = "KMRSUAPT".chars().collect();
         let mut drawn = letters.iter().cycle();
-        let groups: Vec<GroupResult> = (0..groups)
-            .map(|_| {
-                let text: String = drawn.by_ref().take(length).collect();
+        let groups: Vec<GroupResult> = (0..count)
+            .map(|n| {
+                let sent: String = drawn.by_ref().take(length).collect();
+                let received = if (n + 1) * missed / count > n * missed / count {
+                    format!("E{}", &sent[1..])
+                } else {
+                    sent.clone()
+                };
                 GroupResult {
-                    sent: text.clone(),
-                    received: text,
-                    correct: true,
+                    correct: received == sent,
+                    sent,
+                    received,
                 }
             })
             .collect();
@@ -590,30 +624,48 @@ mod tests {
         session
     }
 
-    /// The same copy rates the same whatever the length of its groups: a
-    /// group earns more the longer it is, so groups of two, five and eight,
-    /// eighty characters copied right in each session, would rank by their
-    /// length a group. Rated by each five characters sent, none sets a new
-    /// best over the one before it, and a group of five rates as it earns.
+    /// The same copy rates the same whatever the length of its groups. A
+    /// group earns more the longer it is, and a miss, costing its whole
+    /// group, costs a longer group more: eighty characters sent in groups
+    /// of two, five and eight would rank longer groups higher by what they
+    /// earned a group copied clean, and with one character in eight missed,
+    /// shorter groups higher by what they earned a character. Rated as
+    /// groups of five at the share they missed, they agree either way, and
+    /// none sets a new best over those before it; a group of five copied
+    /// clean rates as it earns.
     #[test]
     fn the_length_of_its_groups_does_not_rank_a_session() {
-        let sessions = [copied(1, 40, 2), copied(2, 16, 5), copied(3, 10, 8)];
-        assert!(sessions[2].score / 10.0 > 3.0 * sessions[0].score / 40.0);
-        let rated: Vec<f64> = sessions.iter().filter_map(per_group).collect();
-        assert_eq!(rated.len(), 3);
-        for rating in &rated {
-            assert!((rating - rated[0]).abs() < 1e-6, "{rated:?}");
+        let clean = [
+            copied(1, 40, 2, 0),
+            copied(2, 16, 5, 0),
+            copied(3, 10, 8, 0),
+        ];
+        assert!(clean[2].score / 10.0 > 3.0 * clean[0].score / 40.0);
+        let missed = [
+            copied(1, 10, 8, 10),
+            copied(2, 16, 5, 10),
+            copied(3, 40, 2, 10),
+        ];
+        assert!(missed[2].score > 2.0 * missed[0].score);
+        for sessions in [clean.clone(), missed] {
+            let rated: Vec<f64> = sessions.iter().filter_map(per_group).collect();
+            assert_eq!(rated.len(), 3);
+            for rating in &rated {
+                assert!((rating / rated[0] - 1.0).abs() < 1e-3, "{rated:?}");
+            }
+            assert_eq!(board_place(&sessions, 3), Some((3, 3)), "{rated:?}");
+            let timeline = score_timeline(&sessions, BoardOf::All, Ranking::PerGroup);
+            assert_eq!(
+                timeline
+                    .iter()
+                    .map(|point| point.set_record)
+                    .collect::<Vec<_>>(),
+                [true, false, false],
+                "{rated:?}"
+            );
         }
-        assert!((rated[1] - sessions[1].score / 16.0).abs() < 1e-9);
-        assert_eq!(board_place(&sessions, 3), Some((3, 3)));
-        let timeline = score_timeline(&sessions, BoardOf::All, Ranking::PerGroup);
-        assert_eq!(
-            timeline
-                .iter()
-                .map(|point| point.set_record)
-                .collect::<Vec<_>>(),
-            [true, false, false]
-        );
+        let five = per_group(&clean[1]).expect("on the board");
+        assert!((five - clean[1].score / 16.0).abs() <= 0.005, "{five}");
     }
 
     /// Too few groups say too little: a lucky handful is not a place.
