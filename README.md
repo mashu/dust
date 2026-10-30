@@ -44,6 +44,10 @@ draw the same run again:
 DUST_TEST_SEED=1234567 cargo test -p dust --features desktop name_of_the_test
 ```
 
+The tests of the page's key scripts run them in [Node](https://nodejs.org).
+Without Node on the path they say so and pass; CI has it, and fails them
+without it.
+
 ## Release
 
 Push a tag `v` + the version in `Cargo.toml`, e.g. `git tag v1.2.3 && git push

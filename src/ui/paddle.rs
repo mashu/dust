@@ -276,7 +276,7 @@ fn paddle_for_press(key: &str, code: &str, held: Held, reading: Reading) -> Opti
 /// from the keyboard, so which wins is the learner's to say: by place the
 /// paddle works on any layout, and a `+` those keys type is the paddle's;
 /// not by place, they type, and only a `[` or `]` keys a paddle.
-fn bracket_for_key(key: &str, code: &str, by_place: bool) -> Option<char> {
+pub(super) fn bracket_for_key(key: &str, code: &str, by_place: bool) -> Option<char> {
     match (key, code) {
         ("[", _) => Some('['),
         ("]", _) => Some(']'),
@@ -1352,3 +1352,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod page_tests;
