@@ -567,7 +567,7 @@ pub fn band() -> Element {
             dt { "RF gain" }
             dd { "Turns down everything reaching the receiver, ahead of the AGC: the noise, the static and every station alike. With the AGC on, strong stations stay nearly as loud while the hiss and the weak ones drop, which is how operators quiet a noisy band; with it off, the whole band gets quieter. The volume does not make it up, as on a rig." }
             dt { "AGC" }
-            dd { "Evens out strong and weak stations, as a rig's AGC does: a station clear of the noise comes out within a few dB of the others, while one down in the noise keeps its own level. It does not make a weak station more readable: the hiss under it comes up with it, and the hiss ducks under a strong station and comes back between overs. Off, every station keeps its own level." }
+            dd { "Evens out strong and weak stations, as a rig's AGC does: a station clear of the noise comes out within a few dB of the others, while one down in the noise keeps its own level. It does not make a weak station more readable: the hiss under it comes up with it, and the hiss ducks under a strong station and comes back between overs. Off, every station keeps its own level, and full volume is lower in a pile-up, so callers keyed together do not distort." }
             dt { "AGC decay" }
             dd { "How fast the gain comes back once a signal has gone. Fast is back by the next word; Slow holds through an over and comes back over a second or so, so a weak station straight after a strong one starts quiet." }
             dt { "Live preview" }
