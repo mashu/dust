@@ -2023,6 +2023,65 @@ mod tests {
         }
     }
 
+    /// However long the history, a session start reads its newest
+    /// [`FADE_HORIZON`] sessions and not one before them. Each of their
+    /// groups, its length adapted, is aligned once for the characters and
+    /// once for the speed, and no older one is aligned at all; and the
+    /// prior, the span's with the rest, is exactly the one those sessions
+    /// build on their own, though every session before them copied each
+    /// group whole and they copied none.
+    #[test]
+    fn a_session_start_reads_the_newest_sessions_and_no_more() {
+        use crate::alignment::HELD_ALIGNMENTS;
+        let older = 50;
+        let whole = [("KMRS", "KMRS"), ("KM", "KM")].repeat(3);
+        let missed = [("KMRS", "KMR"), ("KM", "KX")].repeat(3);
+        let history: Vec<SessionResult> = (0..FADE_HORIZON + older)
+            .map(|at| {
+                let copies = if at < older { &whole } else { &missed };
+                SessionResult {
+                    timestamp: at as u64 + 1,
+                    groups: copies
+                        .iter()
+                        .map(|(sent, received)| GroupResult {
+                            sent: (*sent).to_string(),
+                            received: (*received).to_string(),
+                            correct: sent == received,
+                        })
+                        .collect(),
+                    length_floor: Some(2),
+                    ..SessionResult::empty_for_test()
+                }
+            })
+            .collect();
+        let newest = &history[older..];
+        let groups = FADE_HORIZON * missed.len();
+        let settings = length_settings(true);
+        let aligned = |read: &dyn Fn()| {
+            HELD_ALIGNMENTS.set(0);
+            read();
+            HELD_ALIGNMENTS.get()
+        };
+        assert_eq!(
+            aligned(&|| {
+                CharSamplingState::for_session(&history);
+            }),
+            groups,
+            "the characters'"
+        );
+        assert_eq!(
+            aligned(&|| {
+                SamplerPrior::from_history(&history, &settings);
+            }),
+            2 * groups,
+            "the characters' and the speed's"
+        );
+        assert_eq!(
+            SamplerPrior::from_history(&history, &settings),
+            SamplerPrior::from_history(newest, &settings)
+        );
+    }
+
     /// A learner for both beliefs at once. Each character is recognised with
     /// a chance that falls as the speed rises, and the group is held to its
     /// end with a chance that falls as it grows longer; a group not held is
