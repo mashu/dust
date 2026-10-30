@@ -658,7 +658,14 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
                     index,
                     start: start.clone(),
                 },
-                SendNews::Missed { .. } => SessionEvent::PlaybackMissed { index },
+                SendNews::Missed {
+                    from_sec,
+                    until_sec,
+                } => SessionEvent::PlaybackMissed {
+                    index,
+                    from_sec,
+                    until_sec,
+                },
                 SendNews::HeldUp => SessionEvent::PlaybackHeldUp { index },
             };
             dispatch(ctx, &lease, event);
@@ -1919,6 +1926,124 @@ mod tests {
             h.play_through(30_000).await;
             assert_eq!(h.screen(), Screen::Results);
             assert_eq!(h.texts().len(), 2, "heard whole the second time");
+        });
+    }
+
+    /// A group its stream skipped part of goes out again with no count
+    /// down, whatever the settings ask for, and with the lock off its box
+    /// stays open throughout: what was typed along the lost send is kept,
+    /// and the group is answered as soon as the rest is typed. Its first
+    /// send held up, it is untimed.
+    #[test]
+    fn a_group_heard_in_part_never_counts_down_nor_locks_the_box() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            settings.playback.countdown_sec = 3;
+            settings.playback.lock_input_during_group_playback = false;
+            let mut h = Harness::with_settings(settings);
+            // Over its first character, which starts as the send does.
+            h.recorder.skip_next.set(Some((0.02, 0.06)));
+            h.start_training();
+            let playing = |h: &Harness| h.phase() == Some(SessionPhase::Playing { index: 0 });
+            assert!(h.run_until(5_000, playing).await, "the first count down");
+            h.advance(40).await;
+            let sent = h.sent(0);
+            let first: String = sent.chars().take(1).collect();
+            h.type_answer(0, &first);
+            let (mut counted_down, mut locked) = (false, false);
+            assert!(
+                h.run_until(10_000, |h| {
+                    counted_down |= matches!(h.phase(), Some(SessionPhase::Countdown { .. }));
+                    locked |= h
+                        .ctx
+                        .runtime
+                        .peek()
+                        .as_ref()
+                        .is_some_and(|s| s.view().locked);
+                    h.texts().len() == 2
+                })
+                .await,
+                "sent again"
+            );
+            assert!(!counted_down, "counted down before it went out again");
+            assert!(!locked, "the box locked while it was sent again");
+            assert_eq!(h.texts(), vec![sent.clone(); 2], "the same group");
+            let typed = h
+                .ctx
+                .runtime
+                .peek()
+                .as_ref()
+                .and_then(|s| s.group(0).map(|g| g.input().to_string()));
+            assert_eq!(typed, Some(first), "what was typed is kept");
+            h.type_answer(0, &sent);
+            assert!(h.run_until(5_000, |h| h.screen() == Screen::Results).await);
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
+            assert_eq!(
+                result.group_timings[0].untimed,
+                Some(cw_core::Untimed::HeldUp)
+            );
+        });
+    }
+
+    /// A sliver of a send skipped, too short to lose any of its elements,
+    /// sends nothing again: the answer window opens after the one send.
+    /// Held up on its way all the same, the group is untimed.
+    #[test]
+    fn a_sliver_skipped_is_no_resend() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let mut h = Harness::with_settings(settings);
+            h.recorder.skip_next.set(Some((0.0, 0.0005)));
+            h.start_training();
+            assert!(h.run_until(5_000, |h| h.awaiting_answer() == Some(0)).await);
+            assert_eq!(h.texts().len(), 1, "sent once");
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.texts().len(), 1, "and only once");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
+            assert_eq!(
+                result.group_timings[0].untimed,
+                Some(cw_core::Untimed::HeldUp)
+            );
+        });
+    }
+
+    /// A stream that skips part of every send has the group sent again
+    /// twice, then waits for its answer all the same: a page that keeps
+    /// falling behind never keeps a group from being answered, nor its box
+    /// locked for ever.
+    #[test]
+    fn a_group_skipped_every_time_is_answered_after_two_more_sends() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let mut h = Harness::with_settings(settings);
+            h.recorder.skip_every.set(Some((0.02, 0.06)));
+            h.start_training();
+            let sent = h.sent(0);
+            assert!(
+                h.run_until(15_000, |h| h.awaiting_answer() == Some(0))
+                    .await,
+                "the answer window, after all"
+            );
+            assert_eq!(h.texts(), vec![sent; 3], "sent, then sent again twice");
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.texts().len(), 3, "and no more");
         });
     }
 
