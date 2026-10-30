@@ -30,6 +30,12 @@ jobs:
       - name: Check the Rust and dx pins agree
         run: scripts/check-pinned-versions.sh
 
+      # Android's event loop is tao 0.34.8 with tao 0.37.0's fix for a lost
+      # wake, patched in from vendor/tao. A copy without the fix, or one a
+      # dioxus upgrade has left unused, fails here rather than on a phone.
+      - name: Check tao is patched with its Android fix
+        run: scripts/check-tao-patch.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:

@@ -1,6 +1,8 @@
 [workspace]
 members = [".", "crates/cw-core"]
 default-members = ["crates/cw-core"]
+# Patched dependencies, not ours to build, test or lint.
+exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -122,6 +124,15 @@ redundant_clone = "deny"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+# tao 0.34.8 with tao 0.37.0's fix for Android's event loop, which lost a
+# wake when a lifecycle event came in with it and left the app's tasks
+# stopped until something else woke the loop. dioxus-desktop 0.7.10 asks
+# for tao ^0.34, so the fix cannot come by upgrading. Remove this, and
+# vendor/tao, once dioxus moves to tao 0.37 or later (docs/platforms.md,
+# Android).
+[patch.crates-io]
+tao = { path = "vendor/tao" }
 
 [features]
 default = []

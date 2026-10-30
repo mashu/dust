@@ -134,6 +134,7 @@ impl Player {
         self.stop_sending();
         let turn = self.next_turn();
         self.stir(true);
+        crate::stall_log::audio_held(true);
         match self.open(settings) {
             Ok(()) => Ok(Lease {
                 player: self.clone(),
@@ -142,6 +143,7 @@ impl Player {
             Err(err) => {
                 self.with_backend(|backend| backend.shutdown());
                 self.stir(false);
+                crate::stall_log::audio_held(false);
                 Err(err)
             }
         }
@@ -155,6 +157,7 @@ impl Player {
         self.next_turn();
         self.with_backend(|backend| backend.shutdown());
         self.stir(false);
+        crate::stall_log::audio_held(false);
     }
 
     /// Keep the output awake for the paddle's first squeeze, `ready`, as

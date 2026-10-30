@@ -150,6 +150,77 @@ If a toolchain bring-up ever blocks on oboe, `--features mobile-silent` builds
 the same app with a player that keeps a session's timing but makes no sound,
 and the practice screen says so.
 
+### tao, patched
+
+Every task the app has — a session's timers and heartbeat, each send, every
+render — runs when Dioxus is told to poll it, and on Android that word goes
+through tao's event loop: `EventLoopProxy::send_event` queues it and wakes
+the thread's looper. tao 0.34 took the queue only when `ALooper_pollAll`
+returned a wake. With a lifecycle event from the activity (a resume, a
+pause, a change of focus) ready at the same moment, the looper takes the
+wake itself and returns the lifecycle event instead, so the queued word
+waited, and Dioxus, which sends one per wake, sent no other. Nothing ran
+until a message from the page woke the loop some other way. That is the
+band playing on after the phone is unlocked, on a screen that answers
+nothing, and a tap on Stats that goes through only seconds later.
+
+tao 0.37.0 takes the queue on every return of the looper, as the NDK says
+to. Dioxus 0.7.10 asks for tao `^0.34`, so the fix cannot come by
+upgrading: `Cargo.toml` patches crates.io's tao with
+[`vendor/tao`](../vendor/tao), tao 0.34.8 as published (its own commit, so
+the change reads as a diff against it) with that one change to
+`run_return` in `src/platform_impl/android/mod.rs`, marked `Dust:`. Its
+`Cargo.toml` also turns its warnings off, which Cargo would otherwise show
+on every build of a path dependency. It is outside the workspace, so
+`cargo fmt`, Clippy and the tests leave it alone, and `codecov.yml` leaves
+it out of the coverage. The desktop builds use the same copy; nothing
+changed for them.
+
+CI runs [`scripts/check-tao-patch.sh`](../scripts/check-tao-patch.sh)
+first: it fails if the copy has lost the fix, if `Cargo.toml` no longer
+patches tao, or if `Cargo.lock` builds any tao but the copy.
+
+When Dioxus moves to tao 0.37 or later, Cargo warns that the patch was not
+used, `Cargo.lock` lists it under `[[patch.unused]]`, and that check fails.
+Then:
+
+1. Check the new tao's `run_return` drains `self.receiver` after the match
+   on what the looper returned, not only for `Poll::Wake` (0.37.0 does).
+2. Remove the `[patch.crates-io]` table and the `exclude` line from
+   `Cargo.toml`, and delete `vendor/tao`.
+3. Run `cargo update -p tao`: tao's entry in `Cargo.lock` gets its
+   crates.io `source` and `checksum` back.
+4. Delete `scripts/check-tao-patch.sh` and its step in
+   `.github/workflows/ci.yml`.
+
+A Dioxus that asks for a later 0.34, 0.35 or 0.36 leaves the patch unused
+in the same way. Those still lose the wake: vendor that release in place of
+this one, as published, and make the same change.
+
+As a backstop, a thread of the app's own wakes the event loop every quarter
+second whatever else does ([`src/main.rs`](../src/main.rs)), and each wake
+has tao take what is waiting. A wake lost some other way then holds the
+app's tasks back a quarter second at most, well inside the two seconds a
+session's heartbeat takes for time away. A wake with nothing waiting costs
+the loop one empty turn. It does not depend on the patch, and can stay
+when the patch goes.
+
+Should the app stand still anyway, with the audio held, it says so in the
+system log ([`src/stall_log.rs`](../src/stall_log.rs)). Every wait the
+app's tasks make goes through `sleep_ms`, which notes when the task is due
+again, and a claim of the audio is due at once. A thread looks every half
+second, and the first time it finds the app more than 1.5 seconds past due
+while a lease holds the audio, it writes one line for that stall:
+
+```text
+dust: stalled: a task due 2140 ms ago has not run, audio held
+```
+
+`adb logcat -s RustStdoutStderr` shows it. A long wait asked for, such as
+the stream's pause between groups, is not due until it is over, so none
+should ever appear: one is worth a report, with what was on the screen and
+what had just been tapped. The desktop and web builds have none of this.
+
 ### Building an APK
 
 ```bash

@@ -8,6 +8,7 @@ pub const POLL_MS: u32 = 16;
 
 pub async fn sleep_ms(ms: u32) {
     let ms = ms.max(1);
+    crate::stall_log::due_in(ms);
     #[cfg(target_arch = "wasm32")]
     {
         gloo_timers::future::TimeoutFuture::new(ms).await;
