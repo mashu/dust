@@ -684,7 +684,10 @@ fn stated_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>
     }
     let key = |at: usize| times.keys.get(at).copied().flatten();
     let reached = |at: usize| u64::from(times.ends[at]) + u64::from(times.latency_ms) + 100;
-    if n > 1 && !(times.box_open && key(0).is_some_and(|k| u64::from(k) <= reached(n - 1))) {
+    // The first key in by when the last character reached you, or by 400
+    // ms after the first ended, the delay and the slack on top.
+    let along_by = reached(n - 1).max(reached(0) + 400);
+    if n > 1 && !(times.box_open && key(0).is_some_and(|k| u64::from(k) <= along_by)) {
         return vec![None; n];
     }
     // Where the answer first differs from what was sent, if it is not as

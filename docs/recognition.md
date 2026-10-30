@@ -65,10 +65,22 @@ A send says it was held up as soon as that is known, whether it was heard
 out or stopped by an answer (`SendNews::HeldUp`). The web player reads that
 from its audio clock against the app's; the native player, which has no
 clock to report, from what each send has played against the wall clock at
-every callback. Keys after a group's second send began are `null`: it was
+every callback. A send held up is also said on standard error (`audio
+output: a send was held up on its way…`), which a desktop build started
+from a terminal shows: on the screen the group only goes untimed, and the
+results say why. Keys after a group's second send began are `null`: it was
 heard twice. A contest call or exchange token keeps the same record (see
 Contest, below). The record is read leniently: a shape this build does not
 know reads as untimed, never as a lost session.
+
+A group whose first send could not be timed from says why instead, under
+`untimed`: `"heldUp"` (the audio held it up on its way), `"sentAgain"`
+(tried again from the start, heard in part already) or `"paused"` (paused
+with its answer open). The first reason found is the one kept. It is
+written only where there is one, which healthy audio never gives, and read
+as leniently: a reason this build does not know reads as none. A session
+run with Lock typing while sending on says so, `"typingLocked": true`, so
+its results go by the setting it ran with, not by the one set since.
 
 Older builds ignore `charTimes`. `timeToCompleteMs` and `avgResponseMs` are
 still written for them, which need both.
@@ -88,11 +100,21 @@ was sent when all of these hold:
    or a letter read ahead from the word.
 3. **You were keeping up.** The key for the character before it was in by
    the time this one reached you (`end + latency + KEEPING_UP_MS`, 100 ms),
-   put right since or not: otherwise its time is the backlog. A group of more than one character is
-   timed only if typed along — its first key in by then for its last
-   character — and only with the box open: copied whole and typed after, it
-   says how fast you recall, not recognise. With the box shut, only a group
-   of one character can be timed.
+   put right since or not: otherwise its time is the backlog. A group of
+   more than one character is timed only if typed along (`typed_along`) —
+   its first key in by then for its last character, or, however short the
+   rest of the group, by `ALONG_FLOOR_MS` (400 ms) after its first
+   character ended, with the delay and the 100 ms after that — and only
+   with the box open: copied whole and typed after, it says how fast you
+   recall, not recognise. With the box shut, only a group of one character
+   can be timed.
+
+   The floor is for the first key alone. Behind `ET` at 25 WPM the `T` is
+   gone 288 ms after the `E`, sooner than most people key what they heard,
+   so without it such a group could hardly be timed at all. A first key has
+   no backlog behind it, so its time is its character's own, and one the
+   floor lets in is timed at 500 ms at most, with the delay. A later key
+   keeps the 100 ms: more would time the backlog.
 
 A time past `RECOGNITION_MAX_MS` (3 s) counts as 3 s, as slow as a time
 says, rather than leaving the slowest tries out.
@@ -106,7 +128,12 @@ says, rather than leaving the slowest tries out.
   time is only that of the tries it got right. A character never timed says
   so: no estimate stands in for it.
 - **Results**: the session's median over its timed characters, and how many
-  were timed, where "Avg time" was.
+  were timed, where "Avg time" was. When under about a third of its
+  characters were timed, it says why, as far as the session kept it
+  (`session_untimed`): Lock typing while sending on as it ran, with a
+  button to turn it off while it still is; the audio holding up most of
+  its groups; how long after each group had ended its first key came,
+  measured; or keys only once a group was sent again.
 
 The paddles key a training group's box as the keyboard types into it: along
 with the send when typing is not locked while it plays.

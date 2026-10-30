@@ -24,6 +24,17 @@ pub const REACTION_MIN_MS: u32 = 100;
 /// backlog. A group's first key, for its last character, the same.
 pub const KEEPING_UP_MS: u32 = 100;
 
+/// However short the rest of a group is, its first key may come this long
+/// after its first character ended, and the keeping-up slack after that,
+/// and the group still count as typed along: a believable reaction to its
+/// first character. Behind `ET` at 25 WPM the rest is gone in 288 ms,
+/// sooner than most people key what they heard. A first key has no backlog
+/// behind it, so its time is its character's own; one this lets in is
+/// timed at this and the slack at most, with the delay to the ear, as every
+/// time is. Only the first key: a later one's slack stays
+/// [`KEEPING_UP_MS`], or the backlog would be timed.
+pub const ALONG_FLOOR_MS: u32 = 400;
+
 /// The fewest timed tries of a character for its recognition time to be put
 /// in a band: fewer, and one slow key moves the median too far.
 pub const RECOGNITION_MIN_TRIES: u32 = 8;
@@ -293,9 +304,9 @@ pub(crate) fn lenient_char_times<'de, D: Deserializer<'de>>(
 /// 1. typed right, in its place ([`lined_up`]), and not as a correction;
 /// 2. typed no sooner than [`REACTION_MIN_MS`] after it sounded;
 /// 3. keeping up: the key before it in by [`KEEPING_UP_MS`] after it
-///    reached you, and a group of more than one character typed along, the
-///    box open and its first key in by then for its last character. A
-///    position's first key says so, put right since or not.
+///    reached you, and a group of more than one character typed along
+///    ([`typed_along`]). A position's first key says so, put right since
+///    or not.
 ///
 /// A gap past [`RECOGNITION_MAX_MS`] counts as that.
 pub fn recognise(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>> {
@@ -311,16 +322,8 @@ pub fn recognise(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u3
             .saturating_add(times.latency_ms)
             .saturating_add(KEEPING_UP_MS)
     };
-    if sent.len() > 1 {
-        let along = times.box_open
-            && keys
-                .first()
-                .copied()
-                .flatten()
-                .is_some_and(|first| first <= reached(sent.len() - 1));
-        if !along {
-            return out;
-        }
+    if sent.len() > 1 && !typed_along(times) {
+        return out;
     }
     for (at, time) in out.iter_mut().enumerate().take(lined_up(&sent, &typed)) {
         let Some(key) = keys.get(at).copied().flatten() else {
@@ -342,6 +345,40 @@ pub fn recognise(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u3
         }
     }
     out
+}
+
+/// Whether a group of more than one character was typed along, as
+/// [`recognise`] needs it to be before it times any of its characters: the
+/// box open as it was sent, and its first key in by the time its last
+/// character reached you, and the keeping-up slack; or, however short the
+/// rest of the group, by [`ALONG_FLOOR_MS`] after its first character
+/// ended, and the slack. Copied whole and typed after, it says how fast
+/// you recall, not recognise.
+pub fn typed_along(times: &CharTimes) -> bool {
+    let (Some(&first_end), Some(&last_end)) = (times.ends.first(), times.ends.last()) else {
+        return false;
+    };
+    let by = last_end
+        .max(first_end.saturating_add(ALONG_FLOOR_MS))
+        .saturating_add(times.latency_ms)
+        .saturating_add(KEEPING_UP_MS);
+    times.box_open
+        && times
+            .keys
+            .first()
+            .copied()
+            .flatten()
+            .is_some_and(|first| first <= by)
+}
+
+/// How long after a group had ended, its last character gone to the
+/// output and on to you, its first key came: what a group typed after it
+/// was sent says of when you started. Negative for a first key while it
+/// still sounded; none without one.
+pub fn first_key_late_ms(times: &CharTimes) -> Option<i64> {
+    let first = times.keys.first().copied().flatten()?;
+    let heard = i64::from(*times.ends.last()?) + i64::from(times.latency_ms);
+    Some(i64::from(first) - heard)
 }
 
 /// How many positions of `typed` line up with `sent`: all of them for an
@@ -714,6 +751,59 @@ mod tests {
             box_open: false,
         };
         assert_eq!(recognise("K", "K", &one), [Some(320)]);
+    }
+
+    /// However short the rest of a group, its first key may come up to
+    /// [`ALONG_FLOOR_MS`] after its first character ended, and the slack,
+    /// and the group still be typed along: `ET` at 25 WPM, its T gone 288
+    /// ms after E, sooner than a key for E could come. T is timed only if
+    /// E's key was in by the time T reached you, as ever.
+    #[test]
+    fn a_first_key_soon_after_its_own_end_is_typed_along_however_short_the_rest() {
+        let et = |keys: [u32; 2], latency_ms: u32| CharTimes {
+            ends: vec![48, 336],
+            keys: keys.map(Some).to_vec(),
+            corrected: Vec::new(),
+            latency_ms,
+            box_open: true,
+        };
+        assert_eq!(recognise("ET", "ET", &et([448, 700], 0)), [Some(400), None]);
+        // In by 48 + 400 + 100 ms, and no later.
+        assert_eq!(recognise("ET", "ET", &et([548, 800], 0))[0], Some(500));
+        assert_eq!(recognise("ET", "ET", &et([549, 800], 0)), [None, None]);
+        assert_eq!(recognise("ET", "ET", &et([600, 800], 0)), [None, None]);
+        // Typed along to the end: both timed.
+        assert_eq!(
+            recognise("ET", "ET", &et([400, 600], 0)),
+            [Some(352), Some(264)]
+        );
+        // A reported delay moves both deadlines.
+        assert_eq!(
+            recognise("ET", "ET", &et([588, 800], 40)),
+            [Some(540), None]
+        );
+        assert_eq!(recognise("ET", "ET", &et([589, 800], 40)), [None, None]);
+        assert_eq!(recognise("ET", "ET", &et([476, 700], 40))[1], Some(364));
+        // With the box shut, the floor lets nothing in.
+        let shut = CharTimes {
+            box_open: false,
+            ..et([448, 700], 0)
+        };
+        assert_eq!(recognise("ET", "ET", &shut), [None, None]);
+    }
+
+    /// How late a group's first key came after the group reached you: what
+    /// a group typed after it was sent says.
+    #[test]
+    fn a_first_key_says_how_long_after_its_group_it_came() {
+        let mut after = times(&[Some(1_400), Some(1_600), Some(1_800)], true);
+        assert_eq!(first_key_late_ms(&after), Some(400));
+        after.latency_ms = 40;
+        assert_eq!(first_key_late_ms(&after), Some(360));
+        let along = times(&[Some(550), Some(900), Some(1_250)], true);
+        assert_eq!(first_key_late_ms(&along), Some(-450));
+        let none = times(&[None, Some(1_600), Some(1_800)], true);
+        assert_eq!(first_key_late_ms(&none), None);
     }
 
     /// An answer shorter or longer than what was sent lines up only before

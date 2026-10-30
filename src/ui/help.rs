@@ -3,11 +3,11 @@
 //! and its help reads as one text.
 
 use cw_core::{
-    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, EARLIER_TRIES,
-    ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS,
-    MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RATED_GROUP_CHARS,
-    REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW,
-    Ranking, RecognitionBands,
+    ALONG_FLOOR_MS, BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS,
+    EARLIER_TRIES, ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES,
+    KEEPING_UP_MS, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH,
+    RATED_GROUP_CHARS, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES,
+    RECOGNITION_WINDOW, Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -73,6 +73,7 @@ pub fn letters(bands: RecognitionBands) -> Element {
     } = bands;
     let mastered = pct(MASTERED_MIN_ACCURACY);
     let building = pct(BUILDING_MIN_ACCURACY);
+    let along = ALONG_FLOOR_MS + KEEPING_UP_MS;
     rsx! {
         p {
             "Every character you have copied, over all your sessions. The bar is the share of the times it was sent that you copied it right, recent sessions counting more: a session ten sessions back counts half as much as your latest, so a weakness you put right long ago stops holding it back. The tries are every time it was sent."
@@ -93,7 +94,7 @@ pub fn letters(bands: RecognitionBands) -> Element {
             }
             dt { "Recognised in" }
             dd {
-                "How soon you key a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest {RECOGNITION_WINDOW} timed tries. The key is the keyboard's or the keypad's, or for the paddles the first contact of the letter. A try is timed when you key it right, in its place, at least {REACTION_MIN_MS} ms after it sounded, while keeping up: the one before it keyed by {KEEPING_UP_MS} ms after this one reached you. A character put right after a slip is not timed, but costs the ones around it nothing. A group of more than one character is timed only when you key along, starting before it ends; keys after a group is sent again are not. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Key each character the moment you hear it."
+                "How soon you key a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest {RECOGNITION_WINDOW} timed tries. The key is the keyboard's or the keypad's, or for the paddles the first contact of the letter. A try is timed when you key it right, in its place, at least {REACTION_MIN_MS} ms after it sounded, while keeping up: the one before it keyed by {KEEPING_UP_MS} ms after this one reached you. A character put right after a slip is not timed, but costs the ones around it nothing. A group of more than one character is timed only when you key along, its first character keyed while the group is still sounding, or, for a short group, by {along} ms after that character reached you; keys after a group is sent again are not. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Key each character the moment you hear it."
             }
             dt { "The bands" }
             dd {

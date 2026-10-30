@@ -843,8 +843,10 @@ impl Ui {
         store.save_settings(&settings);
         store.save_sessions(sessions);
         store.settings_saves.set(0);
-        // Past the first launch, which opens the guided setup by itself.
+        // Past the first launch, which opens the guided setup by itself,
+        // and past asking whether to keep the lock the test settings have.
         store.mark_tutorial_done();
+        store.mark_asked_about_lock();
         Self::launch(store)
     }
 
