@@ -916,8 +916,6 @@ mod tests {
         });
     }
 
-    /// Ending a run with one QSO in the log ends it there, keeping it. The
-    /// run screen's End run and the header's Exit both end it so.
     /// A run and Hear a QSO draw their callers from the prior the app keeps
     /// ([`AppCtx::sampler`]): built ahead of the tap that starts either,
     /// the tap replays no history, and built in it only once the history
@@ -956,6 +954,8 @@ mod tests {
         });
     }
 
+    /// Ending a run with one QSO in the log ends it there, keeping it. The
+    /// run screen's End run and the header's Exit both end it so.
     #[test]
     fn ending_with_one_qso_keeps_it_and_shows_the_results() {
         run(|| async {

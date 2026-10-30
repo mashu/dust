@@ -873,8 +873,6 @@ mod tests {
         }
     }
 
-    /// A whole session, answered correctly, ends on the results screen with the
-    /// session stored, and the store asked to keep what it holds.
     /// A session kept has the prior the next one starts from built once
     /// the results are up, so the tap on Again replays no history: only a
     /// first session with nothing built ahead of it does.
@@ -896,6 +894,8 @@ mod tests {
         });
     }
 
+    /// A whole session, answered correctly, ends on the results screen with the
+    /// session stored, and the store asked to keep what it holds.
     #[test]
     fn answering_every_group_finishes_the_session_and_stores_it() {
         run(|| async {
