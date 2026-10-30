@@ -1,148 +1,20 @@
 # Contest mode
 
-Status: being built phase by phase (§14). Phase 0, history that lasts, has
-landed: Contest exists as a mode, runs written by later
-builds are read and kept, and History names every session's mode. Phase 1's
-cw-core foundations are in: the WPX rules row, contest calls and their
-parsing, exchanges and cut numbers, ESM, the run clock, callers' serials,
-checks, both scores, the run's log layout, and the contest settings. So is
-its engine: single callers, turns and `plan_turn`, the run machine and what
-a run stores, with operator tests and a soak. The app runs it from start to
-results (`src/contest_runtime.rs`) on the run screen of §7
-(`src/ui/contest.rs`, its keys in `src/ui/contest_keys.rs`), with the
-keypad, pause, the hidden-page pause and the sound failure pause, and shows
-the contest results (`src/ui/contest_results.rs`), also from History. So do
-the settings in Contest (the Character set card's contest, Your station in
-`src/ui/settings_station.rs`, and the controls a contest hides), the Home
-hero, the stats pills and notes, the privacy texts and the backup merge. Slices 1b, 1c and 1d have landed too: your own message
-played dry, around the receiver at a fixed monitor level (5.3); Simple QSO,
-with its names and reports (`contest/data/`) and `myName`; and the
-contester's keys with their buttons on the key bar. Slice 2a has landed
-too: `contestStyle` and pile-ups (`contest/place.rs`, the callers' fades in
-`contest/turn.rs`), with collisions, best-match partials, missed exchanges,
-calling twice, dupes, and F4, F6, F8 and F12. Contest is in the mode
-picker from slice 2a on, ahead of the rest of phase 2, so it can be tried
-while Sprint and the learner aids are built (§14). Fixes from an
-end-to-end test of the web build in a phone-sized browser followed: one
-press of Start or Listen after a refusal, each screen opening at its top,
-Discard's second question safe from a double tap, the cursor kept by
-Discard, Keep it and the theme button, and the run fitting a 360×640
-screen (§2, §7). Fixes from an audit of pile-ups followed: going on to
-another caller mid-QSO is a transition of its own (§4.4, §9.1), a caller
-that only answered your partial is no QSO (§4.7), and callers' timeouts
-overlap, planned into the turn on the air so that none cuts it (§4.3).
-Slice 2b has landed: the NA Sprint, with `myState`, US and Canadian
-places (`contest/data/places.rs`), the Sprint serial fit and the
-deterministic parser (§3, §8, §11.2, §11.6, §11.7). Fixes from a second
-audit of pile-ups followed: callers' patience follows MorseRunner's for a
-partial, for being keyed over and for coming back from waiting out
-another QSO, and a correction after your exchange carries the station's
-own (§4.3); Enter and the screen follow what of the turn has reached you,
-and a check shows once your TU is out (§4.2, §4.4, §4.8); the band makes
-room only for the callers sounding at once (§5.6); and a QSO logged for a
-station you left is no NIL of the one you work (§9.1). Slice 2c has
-landed: Hear a QSO, three QSOs of the chosen contest worked by the perfect
-operator, on Listen and on the Character set card (§2, `hear_qsos` in
-`contest/bot.rs`); the First QSO, Club and Contester presets (§8,
-`settings/contest_preset.rs`); and QRS, a caller slowing down after a few
-incomplete tries (§4.3). With them, two fixes from browser tests: what
-Start keeps from Home's hero is stored as the run starts (§2), and the TU
-that logs after a TU without logging asks no caller to call again (§4.6,
-§9.1). Slice 3a has landed, the first part of phase 3: CQ WW and ARRL DX
-(§3), with each country's name, CQ zone and continent from cty.dat in the
-call table and North America's zones by hand (`contest/data/zones.rs`,
-§11.3), the ARRL DX side and Labrador (`contest/data/places.rs`, §11.2),
-the counted power shares (`contest/data/power.rs`, §11.5), points by
-distance and the multipliers of both sides (`contest/score.rs`), and
-`myZone`, `myPower` and LB in `myState` on Your station (§2, §8). Fixes
-from a third audit of pile-ups followed: B4 sends a dupe its call again
-when it never heard it (§4.7); after Esc the callers answer what they
-heard as garbage, at once, and what reached you of a caller you keyed
-over stays heard (§5.2); the station you work, still waiting for your
-exchange, falls silent and stays rather than leave (§4.3); Enter calls CQ
-in place of any call the fields still hold for a station that has gone,
-or clears it once someone calls, and the hint says so (§4.4, §7); and the results read each QSO at the speed its live row
-showed, while a correction's exchange is a copy only once it begins to
-reach you (§9.1). Slice 3b has landed, the rest of phase 3: Field Day (§3),
-with the 85 ARRL and RAC sections (`contest/data/sections.rs`, §11.4),
-the class, section and power shares counted by `scripts/contest-data.py`
-into `contest/data/counted.rs` (§11.5), the section a call tells by itself
-(`call_section`, `contest/data/places.rs`), a caller's class and section
-(`contest/data/fd.rs`), a score of QSO points with nothing to multiply
-them, and `myClass` and `mySection` on Your station, which Home asks for
-as it asks for a state (§2, §8). Every contest of the card has shipped;
-two checks stay open, Yukon's section code and the FCC licence counts
-(§14). Slice 4a has landed, the first part of phase 4: `contestHabits`,
-easy, real or rough, on the Band card in Contest mode and written by the
-presets (§8); real habits sending numbers as MorseRunner's callers do,
-checked against its `Station.pas` (§11.6); and rough habits adding
-careless callers and on-frequency QRM (`contest/qrm.rs`, §4.3, §5.6).
-Slice 4b has landed, the rest of phase 4: `contestShowCopy` on the Session
-shape card in Contest mode (§8); with it on, each station's text in the RX
-line a moment after its send ends (§7), each copy kept as it stood when its
-text showed, the showing a send of its own, and the run marked
-`contest:<kind>:a` and stored `assisted` (§9.1), counted in every stat and
-listed greyed, never placed, on the board (§10); and the Runs card, every
-run of a contest on Stats → Scores under the Contest pill (§10). With them,
-two fixes from a browser test on a 360×640 phone: Pause keeps its place in
-the row while paused, inert, so a double tap on it never ends the run, and
-Resume brings the run screen back to its top (§2, §7). A fix from a third
-browser test followed: Enter on the call of a caller that gave up before
-you worked it, typed late, no longer sends it to nobody while the rest of
-the pile-up waits on that QSO in silence, but clears the fields, or calls
-CQ while nobody calls, as it does for the station you work once it has
-gone, and so does Enter on a partial or a slip of it once that has gone
-out to nobody and nobody calls; a caller that gives up on your partial
-is said to have gone, as one is on its timeouts (§4.4, §7). A review of
-group training against the main branch followed, as Contest must leave
-group training as it was: Callsigns mode and the band's traffic draw
-KG4 with two letters again, which only a contest's callers leave out
-(§11.1, §11.2), and between two groups the training screen's header says
-"Next group…" beside a plain dot while the box waits, not "Your turn".
-A browser test of group training on a 360×640 phone followed, which found
-the keypad's last row ending 16 px under the screen's foot, on the main
-branch too: the run's rule for phones under 760 px tall is a session's as
-well now, its groups drawn closer with its cards, and a long group
-answered keeps to its slot (§7). Feedback from a contester running
-pile-ups at 235 QSOs an hour on the published app followed, decided with
-the user on 2026-10-22 (§15.2): Space in the Exchange field goes back to
-Call, as MorseRunner's and N1MM's space bar does, but where it separates
-the items of a longer exchange (§4.5); your sending has a volume of its
-own, from off to the loudest, on the Tone and volume card (§5.3, §8); your
-speed is a setting of its own, kept from run to run as − and + leave it,
-the callers' speeds staying the Speed card's (§6.6, §8); and how often
-your TU signs with your call in a pile-up is yours to choose (§3, §8).
-Phase 5's adaptive caller speed followed, brought forward at the user's
-asking and decided with the user on 2026-10-22 (§15.2): each new caller
-comes at a speed drawn from your copy speed in contests, within the Speed
-card's ranges, faster as you copy calls and numbers clean and slower as
-you miss them, by the Bayesian belief group training's adaptive speed
-uses, started from the Contest copy-speed series and learning within the
-run; a switch of its own on the Speed card, on as it ships (§6.6, §8,
-§10). Slice 5a has landed, phase 5's sound: without full break-in, as
-MorseRunner ships it, the receiver is muted while you send, after its
-AGC, on both players, and nothing a caller sends across your message
-reaches you, for Enter, the copies or Show copy (§5.3); "Full break-in
-(QSK)" on the Tone and volume card in Contest mode hears the band through
-your message, as runs did before (§8); flutter, three callers in ten
-fluttering at 3 to 33 Hz under the Band card's flutter in Contest mode,
-which the Contester preset turns on (§5.5, §8); and a continuation spliced
-on where your message reaches the start of its next character that the
-player can still take over at, each player starting it at that moment, so
-no character goes out twice (§5.2; risk 2 of §16 narrowed to a lead
-underestimated). Slice 5b has landed, the rest of phase 5's learning
-items: the guided setup in Contest mode is a run's, its button shown there,
-walking the run screen part by part where it is drawn and leaving the run
-through Discard, its Next never starting a run, whose callers would be
-sound nobody asked for (§2); and the paddles' field space, a word space of
-quiet after a letter pressing Space by the Space key's own rule, so a call
-and its exchange keyed on the paddles land in their own fields (§4.5).
-A fix to Esc followed (2026-10-29): Esc stops only your own station, as
-MorseRunner's does, so the callers still sending, a single caller's reply
-among them, and QRM go on from where they were, where Esc used to silence
-them for a reply timeout (§5.2). A second review made it stop nothing
-once your message is out: the turn plays on, and a reply yet to begin
-comes on time, where Esc dropped it till its caller's timeout (§5.2).
+Status: built. Every phase of §14 has landed, 0 to 5. Contest is a mode on
+the Character set card with all six contests (§3), run with one caller at
+a time or a pile-up (§4); your own sending, the receiver muted while you
+send, flutter and QRM (§5); the run screen, its keys and the keypad (§4.5,
+§7); Hear a QSO, the presets and a guided tour of the run (§2, §8);
+callers whose speed follows your copy (§6.6); and the results, History,
+the board and the Runs card (§9, §10). Three checks stay open: the NA
+Sprint's multipliers against NCJ's current rules (§3), Yukon's section code
+(§11.4) and the FCC licence counts (§11.2). What might come next is under
+Later in §14.
+
+The text began as the plan and keeps its shape. Where the build differs
+from the plan, or changed after it, an "As built" note says so in place,
+with the slice or the date it landed (§14), and a decision taken with the
+user is in §15.2; of two notes on one point, the later one holds.
 
 This is the plan for contest and pile-up training in Dust. References name
 a file in this repository and the function, type or constant in it, so they
