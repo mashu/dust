@@ -15,7 +15,7 @@ use crate::persist::auto_progress;
 use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen, SessionPick};
-use crate::time::{local_date_string, mono_ms, sleep_ms};
+use crate::time::{as_shown, local_date_string, mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
 use crate::ui::contest_results::NothingKept;
@@ -88,7 +88,9 @@ fn HomeRoute() -> Element {
             last_accuracy: sessions.last().map(|s| s.accuracy),
             session_count: sessions.len(),
             pool: compute_char_pool(&settings).into_iter().collect::<String>(),
-            sessions: sessions.clone(),
+            // The streak and the calendar go by the days sessions count
+            // towards, as the clock reads them.
+            sessions: as_shown(&sessions).into_owned(),
             today: local_date_string(),
             auto_progress: progress(),
             on_start,

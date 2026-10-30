@@ -1,3 +1,7 @@
+use std::borrow::Cow;
+
+use cw_core::{SessionResult, settle_clock_ahead};
+
 /// Fine-grained poll for playback/confirm waits. Keeps Morse→input latency low
 /// without spinning.
 pub const POLL_MS: u32 = 16;
@@ -94,6 +98,22 @@ pub fn reset_mono_clock() {
 
 pub fn local_date_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// `history` as the screens show it: a session stamped ahead of the clock,
+/// finished while it was set ahead, read as finished just after the latest
+/// that was not, on its day ([`settle_clock_ahead`]). Only for showing: the
+/// store, and whatever picks a session out of the history to change it, go
+/// by the stamps as stored, so a clock that is wrong now moves nothing for
+/// good. Borrowed as it is when nothing is stamped ahead.
+pub fn as_shown(history: &[SessionResult]) -> Cow<'_, [SessionResult]> {
+    let now = now_ms();
+    if history.iter().all(|session| session.timestamp <= now) {
+        return Cow::Borrowed(history);
+    }
+    let mut shown = history.to_vec();
+    settle_clock_ahead(&mut shown, now);
+    Cow::Owned(shown)
 }
 
 /// A seed nobody else has: fresh entropy from the platform.

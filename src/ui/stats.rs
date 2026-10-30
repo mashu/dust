@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use cw_core::{
     AccuracyPoint, CharSetMode, Estimate, EstimatePoint, SessionResult, TrainingSettings,
     accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, best_accuracy,
@@ -6,6 +8,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
+use crate::time::as_shown;
 use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
@@ -346,6 +349,17 @@ pub fn StatsView(
     // itself so it keeps matching what the trainer will actually draw. Each
     // tab works out its own figures when it is shown, and only then: a tab
     // that is not open costs nothing.
+    //
+    // History lists the sessions as they are stored, and picks one out by
+    // its stamp to delete it; every other tab shows them as the clock reads
+    // them, any stamped ahead of it settled after the latest that is not.
+    let sessions = match tab() {
+        StatsTab::History => sessions,
+        _ => match as_shown(&sessions) {
+            Cow::Owned(shown) => shown,
+            Cow::Borrowed(_) => sessions,
+        },
+    };
     rsx! {
         div { class: "stack",
             header { class: "page-head",

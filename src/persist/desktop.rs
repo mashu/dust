@@ -1058,6 +1058,50 @@ mod tests {
             .collect()
     }
 
+    /// A clock set behind the history moves nothing stored. Every session
+    /// finished since reads as stamped ahead of it; read, and stored again
+    /// merged as a store of the history merges it, each keeps the stamp and
+    /// the day it was stored with. They used to be settled onto the day of
+    /// the latest session the clock agreed with as they were read, and the
+    /// next save wrote that over them for good.
+    #[test]
+    fn a_clock_set_behind_moves_no_stored_session() {
+        let (dir, store) = store("behind");
+        let now = crate::time::now_ms();
+        let at = |days_on: i64, date: &str| SessionResult {
+            timestamp: now.saturating_add_signed(days_on * 86_400_000),
+            ..session(date)
+        };
+        // The clock was set a week back: the last week reads as ahead.
+        let stored = vec![
+            at(-10, "2026-10-20"),
+            at(-9, "2026-10-21"),
+            at(-8, "2026-10-22"),
+            at(1, "2026-10-31"),
+            at(3, "2026-11-02"),
+        ];
+        let stamped = |sessions: &[SessionResult]| -> Vec<(u64, String)> {
+            sessions
+                .iter()
+                .map(|session| (session.timestamp, session.date.clone()))
+                .collect()
+        };
+        assert_eq!(
+            store.save_sessions(&stored),
+            HistorySaved::Stored { kept: 5 }
+        );
+        let opened = store.load_sessions();
+        assert_eq!(stamped(&opened), stamped(&stored));
+        let held = store.read_sessions().expect("a history");
+        let merged = crate::persist::merge_history(&opened, &opened, &held);
+        assert_eq!(
+            store.save_sessions(&merged),
+            HistorySaved::Stored { kept: 5 }
+        );
+        let reopened = DesktopStore::at(dir.0.clone()).load_sessions();
+        assert_eq!(stamped(&reopened), stamped(&stored));
+    }
+
     /// Sessions that cannot be read are set aside before a save leaves them
     /// out, once however often the history is read before it, and the rest
     /// read as ever. They used to be dropped as they were read, and the
