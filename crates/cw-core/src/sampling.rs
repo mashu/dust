@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::CopyTally;
+use crate::auto_level::judged_copy;
 use crate::belief::{SESSION_FADE, sessions_faded};
 use crate::callsign::{CallSpec, GeneratedCall, generate_call};
 use crate::contest::{CallSource, Side};
@@ -103,6 +104,9 @@ pub struct Sampler {
     state: CharSamplingState,
     span: SpanBelief,
     speed: SpeedBelief,
+    /// While adaptive group size draws the lengths, the shortest it draws:
+    /// what a lost end is left out of each character's belief by.
+    length_floor: Option<usize>,
     rng: SplitMix64,
 }
 
@@ -115,6 +119,7 @@ impl Sampler {
             state: CharSamplingState::for_session(history),
             span: SpanBelief::for_session(history, settings),
             speed: SpeedBelief::for_session(history, settings),
+            length_floor: length_floor(settings),
             rng: SplitMix64::new(seed),
         }
     }
@@ -131,8 +136,16 @@ impl GroupSource for Sampler {
         (group, resolve_group_repeats(settings, &mut self.rng))
     }
 
+    /// Each character as the history will read it once the session is in
+    /// it ([`SessionResult::letter_accuracy`]): while the length adapts, a
+    /// lost end it answers for is no miss of the characters lost.
     fn learn(&mut self, answered: Answered<'_>) {
-        self.state.learn(answered.copied);
+        if self.length_floor.is_some() {
+            let judged = judged_copy(answered.sent, answered.received, self.length_floor);
+            self.state.learn(&judged);
+        } else {
+            self.state.learn(answered.copied);
+        }
         self.span.learn_copy(answered.copied);
         if let Some(copy) = played_speed(answered) {
             self.speed.learn(answered.sent, answered.received, copy);
@@ -281,6 +294,12 @@ pub(crate) fn adaptive_bounds(settings: &TrainingSettings) -> Option<(usize, usi
         && settings.curriculum.char_set_mode.draws_characters()
         && shortest < longest)
         .then_some((shortest, longest))
+}
+
+/// The shortest group adaptive group size draws, while it draws the
+/// lengths: a group longer than that answers for its own lost end.
+pub(crate) fn length_floor(settings: &TrainingSettings) -> Option<usize> {
+    adaptive_bounds(settings).map(|(shortest, _)| shortest)
 }
 
 #[derive(Clone, Debug)]
@@ -1498,6 +1517,26 @@ mod tests {
         answer(&mut sampler, "MMMMM", "XXXXX", None);
         let missed = sampler.state.beliefs[&'M'];
         assert_eq!(missed.beta, CHAR_SAMPLING_PRIOR_BETA + 5.0);
+    }
+
+    /// While adaptive group size draws the lengths, the end of a group lost
+    /// is the length's, and the sampler learns nothing against the
+    /// characters on it, as the history will read the session; what was
+    /// misheard still counts against its character.
+    #[test]
+    fn with_adaptive_length_a_lost_end_teaches_its_characters_nothing() {
+        let mut adaptive = Sampler::new(&[], &length_settings(true), 3);
+        answer(&mut adaptive, "KMRSU", "KXR", None);
+        let beliefs = &adaptive.state.beliefs;
+        assert_eq!(beliefs[&'M'].beta, CHAR_SAMPLING_PRIOR_BETA + 1.0);
+        assert!(!beliefs.contains_key(&'S') && !beliefs.contains_key(&'U'));
+
+        let mut fixed = Sampler::new(&[], &length_settings(false), 3);
+        answer(&mut fixed, "KMRSU", "KXR", None);
+        assert_eq!(
+            fixed.state.beliefs[&'U'].beta,
+            CHAR_SAMPLING_PRIOR_BETA + 1.0
+        );
     }
 
     #[test]

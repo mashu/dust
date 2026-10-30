@@ -8,9 +8,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::alignment::{CopyTally, LetterAccuracy};
+use crate::auto_level::judged_copy;
 use crate::contest::{CONTEST_MARK, ContestLog};
 use crate::level::LEVEL_MIN;
 use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
+use crate::sampling::length_floor;
 use crate::score::{
     GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
     compute_average_response_ms, copy_speed, session_points,
@@ -730,6 +732,7 @@ impl GroupSession {
             effective_wpm,
             alphabet_fingerprint: self.settings.alphabet_fingerprint(),
             contest: None,
+            length_floor: length_floor(&self.settings).map(|floor| floor as u32),
         };
         result.score = result.points();
         result
@@ -866,6 +869,12 @@ pub struct SessionResult {
     /// A contest run's log, as it was written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contest: Option<ContestLog>,
+    /// While adaptive group size drew the lengths, the shortest group it
+    /// drew: a longer group's lost end was the length's to answer for, and
+    /// no miss of the characters lost ([`Self::letter_accuracy`]). None
+    /// where the length did not adapt, and on older saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length_floor: Option<u32>,
 }
 
 /// A session as it is read: the keys this version knows, with what older
@@ -901,6 +910,8 @@ struct StoredSession {
     alphabet_fingerprint: String,
     #[serde(default)]
     contest: Option<ContestLog>,
+    #[serde(default)]
+    length_floor: Option<u32>,
 }
 
 impl From<StoredSession> for SessionResult {
@@ -929,6 +940,7 @@ impl From<StoredSession> for SessionResult {
             effective_wpm: stored.effective_wpm,
             alphabet_fingerprint: stored.alphabet_fingerprint,
             contest: stored.contest,
+            length_floor: stored.length_floor,
         }
     }
 }
@@ -967,14 +979,19 @@ impl SessionResult {
     }
 
     /// How each character sent was copied. Sessions saved before that was
-    /// recorded have it worked out again from their groups.
+    /// recorded have it worked out again from their groups, and so does one
+    /// whose lengths adaptive group size drew: the characters lost off the
+    /// end of a group it could still send shorter were the length's to
+    /// answer for, and are no miss of theirs ([`judged_copy`]). What every
+    /// character's belief, mastery and tally is read from.
     pub fn letter_accuracy(&self) -> Cow<'_, BTreeMap<char, LetterAccuracy>> {
-        if !self.tally.sent.is_empty() || self.groups.is_empty() {
+        let floor = self.length_floor.map(|floor| floor as usize);
+        if floor.is_none() && (!self.tally.sent.is_empty() || self.groups.is_empty()) {
             return Cow::Borrowed(&self.tally.sent);
         }
         let mut tally = CopyTally::default();
         for group in &self.groups {
-            tally.add(&group.sent, &group.received);
+            tally.merge(&judged_copy(&group.sent, &group.received, floor));
         }
         Cow::Owned(tally.sent)
     }
@@ -1000,6 +1017,7 @@ impl SessionResult {
             effective_wpm: 18.0,
             alphabet_fingerprint: String::new(),
             contest: None,
+            length_floor: None,
         }
     }
 }
@@ -1544,6 +1562,52 @@ mod tests {
         clean.tally.inserted.clear();
         let json = serde_json::to_value(&clean).unwrap();
         assert!(json.get("inserted").is_none());
+    }
+
+    /// With adaptive group size drawing the lengths, a group is sent long on
+    /// purpose, and the characters lost off its end are the length's: each
+    /// character's tally leaves them out, as auto level does, while what was
+    /// misheard still counts, and a group with nothing typed is its first
+    /// character missed. The session's own accuracy is scored as ever, and
+    /// the shortest length is saved with it, so the history reads it the
+    /// same way. With 2 to 8 characters, "KMR" for "KMRSU" used to count
+    /// S and U as misses, and every character came to look unmastered.
+    #[test]
+    fn a_lost_end_the_length_answers_for_is_no_miss_of_its_characters() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.adaptive_group_size = true;
+        settings.curriculum.min_group_size = 2;
+        settings.curriculum.max_group_size = 8;
+        let copies = [
+            ("KMRSU", "KMR", 400),
+            ("KMRSU", "KXRSU", 400),
+            ("KMRSU", "", 400),
+        ];
+        let adaptive = result(&answered(settings.clone(), &copies));
+        assert_eq!(adaptive.length_floor, Some(2));
+        assert!(
+            (adaptive.accuracy - 7.0 / 15.0).abs() < 1e-9,
+            "scored as ever"
+        );
+        let letters = adaptive.letter_accuracy();
+        let tally = |c: char| letters.get(&c).map(|l| (l.correct, l.total));
+        assert_eq!(tally('K'), Some((2, 3)), "the blank is its first missed");
+        assert_eq!(tally('M'), Some((1, 2)), "a mishearing still counts");
+        assert_eq!(tally('S'), Some((1, 1)), "the lost end does not");
+        assert_eq!(tally('U'), Some((1, 1)));
+
+        let back: SessionResult =
+            serde_json::from_value(serde_json::to_value(&adaptive).unwrap()).unwrap();
+        assert_eq!(back.letter_accuracy(), adaptive.letter_accuracy());
+
+        // With the length fixed, the lost end is every one a miss.
+        settings.curriculum.adaptive_group_size = false;
+        let fixed = result(&answered(settings, &copies));
+        assert_eq!(fixed.length_floor, None);
+        let json = serde_json::to_value(&fixed).unwrap();
+        assert!(json.get("lengthFloor").is_none(), "older builds read it");
+        assert_eq!(fixed.letter_accuracy().get(&'S').map(|l| l.total), Some(3));
     }
 
     /// Older saves carry fields this version no longer writes, and lack ones

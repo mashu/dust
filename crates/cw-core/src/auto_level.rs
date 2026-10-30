@@ -32,9 +32,9 @@
 use std::borrow::Cow;
 
 use crate::alignment::CopyTally;
-use crate::sampling::{adaptive_bounds, adaptive_speed_path};
+use crate::sampling::{adaptive_bounds, adaptive_speed_path, length_floor};
 use crate::score::copy_speed;
-use crate::session::{GroupSession, SessionResult};
+use crate::session::{GroupResult, GroupSession, SessionResult};
 use crate::settings::{
     ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, CharSetMode, LevelAxis, MixedAutoLevelAxis,
     TrainingSettings,
@@ -159,30 +159,56 @@ fn candidate_axes(
     chosen.into_iter().map(LevelAxis::from).collect()
 }
 
-/// What auto level judges a session's characters by: every one sent and
-/// every one typed that was not, as the session scored them, unless
-/// adaptive group size steers. Then a group's lost end is left out where the
-/// length answers for it, and what is judged is what the speed could have
-/// changed ([`speed_tally`]), the same characters adaptive speed learns
-/// from; a group with nothing typed counts as its first character missed.
-fn judged_tally<'a>(result: &'a SessionResult, settings: &TrainingSettings) -> Cow<'a, CopyTally> {
-    let Some((shortest, _)) = adaptive_bounds(settings) else {
-        return Cow::Borrowed(&result.tally);
+/// One group's characters as they are judged: every one sent and every one
+/// typed that was not, as the session scored them, unless adaptive group
+/// size drew its length, `length_floor` the shortest it draws. Then its
+/// lost end is left out where the length answers for it, and what is
+/// judged is what the speed could have changed ([`speed_tally`]), the same
+/// characters adaptive speed learns from; a group with nothing typed counts
+/// as its first character missed.
+///
+/// What auto level judges a session by, and what each character's own
+/// tally counts ([`SessionResult::letter_accuracy`]): a character lost off
+/// the end of a group sent long on purpose is the length's, not a miss of
+/// that character.
+pub(crate) fn judged_copy(sent: &str, received: &str, length_floor: Option<usize>) -> CopyTally {
+    let Some(floor) = length_floor else {
+        return CopyTally::of(sent, received);
     };
-    let mut tally = CopyTally::default();
-    for group in &result.groups {
-        if group.received.trim().is_empty() {
-            // Nothing typed reached nothing, which is no session to level up
-            // on, whatever answers for it: its first character missed.
-            if let Some(first) = group.sent.chars().next() {
-                let entry = tally.sent.entry(first.to_ascii_uppercase()).or_default();
-                entry.total += 1;
-            }
-        } else if let Some(reached) = speed_tally(&group.sent, &group.received, Some(shortest)) {
-            tally.merge(&reached);
+    if received.trim().is_empty() {
+        // Nothing typed reached nothing, which is no session to level up
+        // on, whatever answers for it: its first character missed.
+        let mut tally = CopyTally::default();
+        if let Some(first) = sent.chars().next() {
+            let entry = tally.sent.entry(first.to_ascii_uppercase()).or_default();
+            entry.total += 1;
         }
+        return tally;
     }
-    Cow::Owned(tally)
+    speed_tally(sent, received, Some(floor)).unwrap_or_default()
+}
+
+/// What auto level judges `groups` of a session by under `settings`
+/// ([`judged_copy`]).
+fn judged_groups<'a>(
+    groups: impl IntoIterator<Item = &'a GroupResult>,
+    settings: &TrainingSettings,
+) -> CopyTally {
+    let floor = length_floor(settings);
+    let mut tally = CopyTally::default();
+    for group in groups {
+        tally.merge(&judged_copy(&group.sent, &group.received, floor));
+    }
+    tally
+}
+
+/// What auto level judges a whole session by: as it was scored, unless
+/// adaptive group size steers ([`judged_copy`]).
+fn judged_tally<'a>(result: &'a SessionResult, settings: &TrainingSettings) -> Cow<'a, CopyTally> {
+    if adaptive_bounds(settings).is_none() {
+        return Cow::Borrowed(&result.tally);
+    }
+    Cow::Owned(judged_groups(&result.groups, settings))
 }
 
 /// The copy speed the middle of `result`'s groups were sent at, in WPM:

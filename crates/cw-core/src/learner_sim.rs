@@ -20,7 +20,7 @@ use crate::auto_level::{AutoLevelCounters, CountersKey, apply_auto_level, evalua
 use crate::machine::GroupSource;
 use crate::morse::LCWO_SEQUENCE;
 use crate::rng::{Rng, SplitMix64};
-use crate::sampling::Sampler;
+use crate::sampling::{Sampler, length_floor};
 use crate::score::copy_speed;
 use crate::session::{Answered, GroupResult, SessionResult, SessionTiming};
 use crate::settings::{Aim, CharSetMode, TrainingSettings};
@@ -213,6 +213,7 @@ pub(crate) fn levels(
             timestamp: session as u64 + 1,
             level: settings.curriculum.level,
             alphabet_fingerprint: settings.alphabet_fingerprint(),
+            length_floor: length_floor(&settings).map(|floor| floor as u32),
             ..SessionResult::empty_for_test()
         };
         let fixed = settings.playback.char_wpm_min;
