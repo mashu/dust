@@ -1,4 +1,10 @@
 //! `localStorage`: the browser store.
+//!
+//! A browser keeps it, its room and its Web Locks for the whole origin, and
+//! a GitHub Pages project site shares its origin with every other one of the
+//! account (docs/platforms.md). So every name kept or locked here starts
+//! with `dust_`, and only names of Dust's own are ever taken away: by exact
+//! name, or by a prefix of its own ([`keep_aside`], [`take_marks`]).
 
 use std::cell::{Cell, RefCell};
 
@@ -27,7 +33,9 @@ const OPEN_PREFIX: &str = "dust_open_session_";
 
 /// How much of the site's storage the history may take, in characters.
 /// Browsers give a site about five million; the rest is left for the
-/// settings, the counters and the room a write needs.
+/// settings, the counters and the room a write needs. Other sites on the
+/// origin may have taken some of it, and then a write that does not fit
+/// keeps fewer of the newest sessions ([`store_newest_that_fit`]).
 const HISTORY_BUDGET: usize = 3_000_000;
 
 #[derive(Default)]
