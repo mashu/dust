@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::refocus_run;
 use crate::keep_awake::use_keep_awake;
+use crate::page_closed::use_end_on_close;
 use crate::page_hidden::{APP_HIDDEN, use_page_hidden};
 use crate::routes::Route;
 use crate::session_runtime::finish_run;
@@ -120,6 +121,9 @@ pub fn App() -> Element {
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
     use_keep_awake(screen, ctx.runtime, ctx.contest, ctx.preview);
+    // A session or run is kept as the app is closed, where the platform
+    // says it is closing.
+    use_end_on_close(ctx);
     // Each screen opens at its top, wherever the one before it was scrolled
     // to: a run started from the foot of its results would otherwise begin
     // with its clock and its fields out of sight.
@@ -917,6 +921,32 @@ mod ui_tests {
             let (ui, _recorder) = Ui::launch(store.clone());
             assert_eq!(store.load_sessions().len(), 1);
             assert!(!ui.has("was cut off"));
+        });
+    }
+
+    /// A session going on as the app is closed — the window's close button,
+    /// the page left or reloaded — is ended there and then as Exit ends it,
+    /// and kept at once: the next launch has nothing cut off to tell of.
+    #[test]
+    fn closing_the_app_mid_session_keeps_it_at_once() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            ui.with_app(|_| crate::page_closed::close_app());
+            let store = ui.store.clone();
+            let kept = store.load_sessions();
+            assert_eq!(kept.len(), 1, "kept as the app closed");
+            assert_eq!(kept[0].groups.len(), 1);
+            assert_eq!(store.open(), None, "nothing left marked open");
+            drop(ui);
+
+            let (ui, _recorder) = Ui::launch(store.clone());
+            assert!(!ui.has("was cut off"));
+            assert_eq!(store.load_sessions().len(), 1);
         });
     }
 

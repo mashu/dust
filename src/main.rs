@@ -21,6 +21,7 @@ mod contest_runtime;
 mod keep_awake;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod linux_webview;
+mod page_closed;
 mod page_hidden;
 mod persist;
 mod playback;
