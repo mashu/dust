@@ -887,9 +887,9 @@ mod tests {
 
     /// One-character group 0, a box shut while sending, its sound reaching
     /// the ear `latency_ms` after it goes out, keyed 300 ms after the box
-    /// is seen open: its recognition time, and what was sent.
-    fn keyed_after_the_box_opens(latency_ms: u32) -> (u32, String) {
-        let mut took = (0, String::new());
+    /// is seen open: `check` is handed its recognition time, and what was
+    /// sent, while the test still runs, so that a failure says its seed.
+    fn keyed_after_the_box_opens(latency_ms: u32, check: impl FnOnce(u32, &str)) {
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.min_group_size = 1;
@@ -907,9 +907,8 @@ mod tests {
             let (group, timing) = (&result.groups[0], &result.group_timings[0]);
             let times = timing.char_times.as_ref().expect("its sound kept");
             let timed = cw_core::recognise(&group.sent, &group.received, times)[0].expect("timed");
-            took = (timed, sent);
+            check(timed, &sent);
         });
-        took
     }
 
     /// Typed along with the box open, each character of a group is timed
@@ -975,12 +974,13 @@ mod tests {
         // ended.
         let seen_late = 2 * crate::time::POLL_MS;
         for latency in [0, 200] {
-            let (took, sent) = keyed_after_the_box_opens(latency);
             let from = 300 + latency;
-            assert!(
-                (from..=from + seen_late).contains(&took),
-                "{took} ms for {sent}, {latency} ms to the ear"
-            );
+            keyed_after_the_box_opens(latency, |took, sent| {
+                assert!(
+                    (from..=from + seen_late).contains(&took),
+                    "{took} ms for {sent}, {latency} ms to the ear"
+                );
+            });
         }
     }
 

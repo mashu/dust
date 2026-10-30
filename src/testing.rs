@@ -520,8 +520,10 @@ impl Harness {
 
 /// Run a test body on a paused clock, every seed it draws pinned to one
 /// ([`crate::time::pin_seeds`]): a fresh one each run, unless the test pins
-/// its own, or `DUST_TEST_SEED` gives one. A test that fails says which
-/// seed it drew from, so that its run can be drawn again.
+/// its own, or `DUST_TEST_SEED` gives one. A test that fails in `body` says
+/// which seed it drew from, so that its run can be drawn again. Past `body`
+/// the seeds are let go and a failure cannot say them, so a test checks
+/// what it drew inside `body`.
 pub fn run<F: std::future::Future<Output = ()>>(body: impl FnOnce() -> F) {
     crate::time::reset_mono_clock();
     let _seeds = TestSeeds::pin(std::env::var(TEST_SEED).ok());
