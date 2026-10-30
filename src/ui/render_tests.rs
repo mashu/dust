@@ -690,8 +690,8 @@ fn settings_renders_every_card() {
         r#"aria-label="Character speed, min (WPM)""#,
         r#"aria-label="Character speed, max (WPM)""#,
         r#"aria-label="Decrease Group size, min (characters)""#,
-        r#"aria-label="Random character speed" aria-pressed="true""#,
-        r#"aria-label="Random sends per group" aria-pressed="false""#,
+        r#"aria-label="Random character speed""#,
+        r#"aria-label="Fixed sends per group""#,
         r#"aria-label="Help on Speed""#,
         r#"aria-label="Help on Band conditions""#,
         r#"role="group" aria-label="Key""#,
@@ -707,6 +707,22 @@ fn settings_renders_every_card() {
     }
     assert!(!html.contains(r#"aria-label="What does this mean?""#));
     assert_eq!(html.matches(r#"aria-label="Min (WPM)""#).count(), 0);
+    // Each Fixed/Random toggle is named by the word it shows, so that
+    // "click Fixed" finds it, and, as that word changes when it is
+    // pressed, says no pressed state besides.
+    let toggles: Vec<&str> = html.split(r#"id="link-"#).skip(1).collect();
+    assert!(toggles.len() > 4, "{html}");
+    for toggle in toggles {
+        let (tag, rest) = toggle.split_once('>').unwrap_or_default();
+        let shown = rest
+            .split("</button>")
+            .next()
+            .and_then(|inner| inner.rsplit('>').next())
+            .unwrap_or_default();
+        assert!(matches!(shown, "Fixed" | "Random"), "{toggle}");
+        assert!(tag.contains(&format!(r#"aria-label="{shown} "#)), "{tag}");
+        assert!(!tag.contains("aria-pressed"), "{tag}");
+    }
 }
 
 /// In Contest mode the Character set card shows the contest in place of an
