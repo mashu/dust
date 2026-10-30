@@ -304,9 +304,10 @@ fn sent_by_place(key: &str, code: &str, reading: Reading) -> Option<char> {
 
 /// What the paddles say the first time a key right of P keys one into a box
 /// while it types `typed`, a character Dust sends: a letter lands there in
-/// its place, and how to type it instead.
-fn by_place_hint(typed: char) -> String {
-    let keypad = if TOUCH_BUILD {
+/// its place, and how to type it instead, on the keypad too where a group's
+/// box has one, which holds every character a group can.
+fn by_place_hint(typed: char, group_box: bool) -> String {
+    let keypad = if TOUCH_BUILD && group_box {
         ", or tap it on the keypad"
     } else {
         ""
@@ -506,14 +507,17 @@ impl PaddleKeys {
     /// learner who meant it would otherwise find only a dit or a dah's letter
     /// in its place.
     fn tell_by_place(self, typed: char) {
-        let into_box = matches!(*self.answer.peek(), Some(AnswerBox { open: true, .. }));
+        let Some(answer) = *self.answer.peek() else {
+            return;
+        };
         let mut told = self.told_by_place;
-        if !into_box || *told.peek() {
+        if !answer.open || *told.peek() {
             return;
         }
         if let Some(toasts) = self.toasts {
             told.set(true);
-            toasts.show_long(by_place_hint(typed));
+            // A run's fields take a word space; a group's box has none.
+            toasts.show_long(by_place_hint(typed, answer.space.is_none()));
         }
     }
 
@@ -1349,7 +1353,17 @@ mod tests {
         ] {
             assert_eq!(sent_by_place(key, code, Reading::DEFAULT), None, "{key}");
         }
-        assert!(by_place_hint('+').contains("To type +, turn off Paddles on the keys right of P"));
+        assert!(
+            by_place_hint('+', true).contains("To type +, turn off Paddles on the keys right of P")
+        );
+        // The keypad is a phone's, and a run's has no + to tap.
+        assert_eq!(
+            by_place_hint('+', true).contains("keypad"),
+            TOUCH_BUILD,
+            "{}",
+            by_place_hint('+', true)
+        );
+        assert!(!by_place_hint('+', false).contains("keypad"));
     }
 
     /// The page's script reads a bracket key as the app does: by place,
