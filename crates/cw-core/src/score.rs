@@ -33,8 +33,8 @@ pub const POINTS_PER_CHAR: f64 = 10.0;
 const REFERENCE_ALPHABET: f64 = 26.0;
 /// The quickest a listener can be said to answer, per character: as fast
 /// as anyone types one. An answer this quick costs nothing, and none is kept
-/// as quicker: one finished while the group was still being sent, typed
-/// along, has no response time worth the name.
+/// as quicker: one finished while the group's first send was still going
+/// out, typed along, has no response time worth the name.
 pub const MIN_RESPONSE_MS_PER_CHAR: f64 = 100.0;
 /// What each tenfold of time a character beyond that costs, of the points.
 const TIME_COST_PER_DECADE: f64 = 0.25;
@@ -56,9 +56,10 @@ pub struct GroupCopy {
     pub errors: u32,
     /// The speed it was sent at, in words a minute ([`copy_speed`]).
     pub wpm: f64,
-    /// How long the answer took, a character, from the end of the send.
+    /// How long the answer took, a character, from the end of the latest
+    /// send heard to its end.
     pub ms_per_char: f64,
-    /// How many times it was sent before it was answered.
+    /// How many times it was heard before it was answered.
     pub sends: u32,
 }
 
@@ -110,8 +111,8 @@ pub fn time_factor(ms_per_char: f64) -> f64 {
     (1.0 - TIME_COST_PER_DECADE * (ms / MIN_RESPONSE_MS_PER_CHAR).log10()).max(SLOWEST_KEEPS)
 }
 
-/// What is left of a group sent `sends` times: half for each send after the
-/// first.
+/// What is left of a group heard `sends` times: half for each send after
+/// the first.
 pub fn repeat_factor(sends: u32) -> f64 {
     RESENT_KEEPS.powi(sends.max(1) as i32 - 1)
 }
