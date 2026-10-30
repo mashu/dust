@@ -205,7 +205,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev \
-            patchelf
+            patchelf \
+            dpkg-dev
 
       - name: Install NSIS
         if: matrix.platform == 'windows'
@@ -329,6 +330,15 @@ jobs:
           fi
 
           ls -lh artifacts
+
+      - name: Check the .deb declares the libraries it needs
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for deb in artifacts/*.deb; do
+            scripts/check-deb-depends.sh "$deb"
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

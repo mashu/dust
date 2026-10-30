@@ -311,7 +311,9 @@ it.
 
 `dx bundle --platform desktop --release` writes to
 `target/dx/dust/release/linux/` and friends. Desktop is the system webview
-(WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS). macOS builds
+(WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS). The Linux
+`.deb` names the packages it needs (WebKitGTK 4.1, GTK 3, ALSA and the
+rest), so `apt install ./dust-….deb` brings them in. macOS builds
 are unsigned (right-click → Open the first time). Windows needs WebView2,
 already present on typical Windows 10/11.
 
