@@ -102,13 +102,16 @@ impl Serialize for TrainingSettings {
 /// The legacy keys come first. A flattened section takes the keys it knows
 /// as it reads them, so `practiceWindow` and `charSetMode` are read here,
 /// as options, before the curriculum's own non-optional fields could see
-/// them. Whatever no section takes is left for `unread`, last.
+/// them; and so is `stationsOpenedByPileup`, before the contest section's.
+/// Whatever no section takes is left for `unread`, last.
 #[derive(Deserialize)]
 struct SettingsSave {
     #[serde(flatten)]
     window: WindowSave,
     #[serde(flatten)]
     char_set: CharSetSave,
+    #[serde(flatten)]
+    pileup: PileupSave,
     #[serde(flatten)]
     curriculum: CurriculumSettings,
     #[serde(flatten)]
@@ -125,6 +128,21 @@ struct SettingsSave {
     unread: Map<String, Value>,
 }
 
+/// Before the stations a pile-up opened were kept in mind, a save had no
+/// `stationsOpenedByPileup`. It is read here as whatever it holds, so that
+/// a save without it is told from one that says no.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct PileupSave {
+    #[serde(deserialize_with = "present")]
+    stations_opened_by_pileup: Option<Value>,
+}
+
+/// A value that is there, whatever it is: null too.
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 impl TrainingSettings {
     /// Every key a save is read by: each section's own, and every older
     /// name it still reads. A key outside them is one a later build wrote,
@@ -135,6 +153,7 @@ impl TrainingSettings {
             let mut keys = HashSet::new();
             names_of::<WindowSave>(&mut keys);
             names_of::<CharSetSave>(&mut keys);
+            names_of::<PileupSave>(&mut keys);
             names_of::<CurriculumSettings>(&mut keys);
             names_of::<PlaybackSettings>(&mut keys);
             names_of::<BandSettings>(&mut keys);
@@ -271,6 +290,11 @@ impl From<SettingsSave> for TrainingSettings {
             }
             (None, _, _) => PracticeWindow::All,
         };
+        match save.pileup.stations_opened_by_pileup {
+            // Anything but true reads as off, as the contest section reads it.
+            Some(flag) => settings.contest.stations_opened_by_pileup = flag == Value::Bool(true),
+            None => settings.upgrade_stations_opened_by_pileup(),
+        }
         settings
     }
 }
@@ -752,6 +776,7 @@ mod tests {
             "slidingWindowStart",
             "slidingWindowEnd",
             "customSet",
+            "stationsOpenedByPileup",
         ] {
             assert!(read.contains(older), "{older}");
         }
@@ -759,5 +784,57 @@ mod tests {
         for retired in RETIRED {
             assert!(!read.contains(retired), "{retired} is read after all");
         }
+    }
+
+    /// A save from before the stations a pile-up opened were kept in mind,
+    /// on Pile-up with the range a pile-up opens, is taken for one it
+    /// opened: kept open in Contest, so a single caller closes it again,
+    /// and one station again in any other mode. Such a save used to keep
+    /// one to three stations in every Koch session after.
+    #[test]
+    fn a_range_a_pileup_opened_before_it_was_kept_in_mind_is_put_back() {
+        let older = |mode: &str, contest: bool| {
+            load(serde_json::json!({
+                "charSetMode": mode, "contestActive": contest,
+                "contestStyle": "pileup", "stationsMin": 1, "stationsMax": 3,
+            }))
+        };
+        let mut run = older("callsign", true);
+        assert_eq!(run.curriculum.char_set_mode, CharSetMode::Contest);
+        assert!(run.contest.stations_opened_by_pileup);
+        assert_eq!((run.band.stations_min, run.band.stations_max), (1, 3));
+        run.set_contest_style(crate::contest::RunStyle::Single);
+        assert_eq!((run.band.stations_min, run.band.stations_max), (1, 1));
+
+        let koch = older("koch", false);
+        assert!(!koch.contest.stations_opened_by_pileup);
+        assert_eq!((koch.band.stations_min, koch.band.stations_max), (1, 1));
+        let written = serde_json::to_value(&koch).expect("settings write");
+        assert_eq!(load(written), koch, "once: the next save says so");
+
+        // A save that says, either way, is read as it says; one on a single
+        // caller, or with a range of its own, is left as it is.
+        let said = load(serde_json::json!({
+            "charSetMode": "koch", "contestStyle": "pileup",
+            "stationsMin": 1, "stationsMax": 3, "stationsOpenedByPileup": false,
+        }));
+        assert_eq!(
+            (
+                said.band.stations_max,
+                said.contest.stations_opened_by_pileup
+            ),
+            (3, false)
+        );
+        let single = load(serde_json::json!({
+            "charSetMode": "koch", "stationsMin": 1, "stationsMax": 3,
+        }));
+        assert_eq!(single.band.stations_max, 3);
+        let own = load(serde_json::json!({
+            "charSetMode": "koch", "contestStyle": "pileup", "stationsMin": 1, "stationsMax": 4,
+        }));
+        assert_eq!(
+            (own.band.stations_max, own.contest.stations_opened_by_pileup),
+            (4, false)
+        );
     }
 }
