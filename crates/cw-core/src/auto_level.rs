@@ -446,14 +446,8 @@ pub fn auto_level_progress(
     settings: &TrainingSettings,
     counters: AutoLevelCounters,
 ) -> Option<AutoLevelProgress> {
-    // Off, or a word list, which has no level to move, or a contest, whose
-    // runs never move one.
-    if !settings.auto_level.auto_adjust_level
-        || matches!(
-            settings.curriculum.char_set_mode,
-            CharSetMode::Words | CharSetMode::Contest
-        )
-    {
+    // Off, or no level to move: a word list, or a contest.
+    if !settings.auto_level.auto_adjust_level || !settings.curriculum.char_set_mode.levels() {
         return None;
     }
     let mixed = settings.curriculum.char_set_mode == CharSetMode::Mixed;

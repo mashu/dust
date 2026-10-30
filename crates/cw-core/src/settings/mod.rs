@@ -222,6 +222,12 @@ impl CharSetMode {
     pub fn sends_callsigns(self) -> bool {
         matches!(self, Self::Callsign | Self::Contest)
     }
+
+    /// Whether auto level can move a level here: not a word list, which has
+    /// no level to move, nor a contest, whose runs never move one.
+    pub fn levels(self) -> bool {
+        !matches!(self, Self::Words | Self::Contest)
+    }
 }
 
 /// How much of what is unlocked a session draws from: all of it, or only

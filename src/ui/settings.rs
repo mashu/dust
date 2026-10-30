@@ -105,6 +105,8 @@ pub fn SettingsView(
     // set a preset for.
     let contest =
         use_memo(move || settings.read().curriculum.char_set_mode == CharSetMode::Contest)();
+    // Nor has a word list a level for auto level to move.
+    let levels = use_memo(move || settings.read().curriculum.char_set_mode.levels())();
     rsx! {
         div { class: "stack",
             header { class: "page-head",
@@ -131,7 +133,7 @@ pub fn SettingsView(
             SpeedCard { settings }
             SessionShapeCard { settings }
             ToneCard { settings }
-            if !contest {
+            if levels {
                 AutoLevelSettingsCard { settings }
             }
             BandConditionsCard {
@@ -904,6 +906,14 @@ fn use_auto_level(settings: Signal<TrainingSettings>) -> Memo<AutoLevelSettings>
 fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
     let auto = use_auto_level(settings);
     let a = auto.read();
+    // In Callsigns the level is the callsign tier: the shape of the calls
+    // climbs, not the characters.
+    let callsigns = use_memo(move || settings.read().curriculum.char_set_mode.sends_callsigns());
+    let does = if callsigns() {
+        "Moves to a harder callsign tier after a run of good sessions."
+    } else {
+        "Unlocks a new character after a run of good sessions."
+    };
     rsx! {
         div { class: "card stack-sm",
             SectionHead {
@@ -916,7 +926,7 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
             }
             Switch {
                 title: "Adjust the level for me",
-                description: "Unlocks a new character after a run of good sessions.",
+                description: does,
                 checked: a.auto_adjust_level,
                 onchange: move |on| settings.write().auto_level.auto_adjust_level = on,
             }

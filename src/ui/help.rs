@@ -511,7 +511,7 @@ pub fn auto_level() -> Element {
     rsx! {
         dl { class: "help-terms",
             dt { "Adjust the level for me" }
-            dd { "Moves your level, how many characters are in play, by how your sessions go." }
+            dd { "Moves your level, how many characters are in play, by how your sessions go. In Callsigns it moves the callsign tier, the shape of the calls, instead." }
             dt { "Accuracy threshold" }
             dd { "The share of characters right that counts a session as good. It is also the line What comes up next marks." }
             dt { "With Adapt group size to me" }
@@ -523,9 +523,9 @@ pub fn auto_level() -> Element {
                 "The speed is moved to keep your characters right at your aim, so in the middle of your speed range a session counts neither way. Once it comes at the top or the bottom of the range, where the speed can go no further, it is judged on the groups sent there, as a session at that one speed is: up at the threshold or better, down below it. Under Farnsworth the range runs from your slowest Character and Effective speed to your fastest. Set the top to the speed you are training for: a new character comes in once you copy the threshold there."
             }
             dt { "Sessions above to level up" }
-            dd { "How many good sessions it takes to unlock a new character. Zero never levels up." }
+            dd { "How many good sessions it takes to unlock a new character, or a harder callsign tier. Zero never levels up." }
             dt { "Sessions below to level down" }
-            dd { "How many sessions under the threshold it takes to set the newest character aside. Zero never levels down." }
+            dd { "How many sessions under the threshold it takes to set the newest character aside, or go back a callsign tier. Zero never levels down." }
         }
     }
 }
