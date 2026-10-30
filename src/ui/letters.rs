@@ -25,9 +25,6 @@ use crate::ui::widgets::{CardHead, IconName, control_id};
 
 /// The share of the belief the likely range holds.
 const LIKELY: f64 = 0.8;
-/// How far recent accuracy has to move from earlier, in points, to be a
-/// trend rather than noise.
-const TREND_POINTS: f64 = 5.0;
 
 fn status_class(status: MasteryStatus) -> &'static str {
     match status {
@@ -47,8 +44,9 @@ fn status_word(status: MasteryStatus) -> &'static str {
     }
 }
 
-/// Which way a character is going: up or down by enough points, steady, or
-/// nothing to say yet.
+/// Which way a character is going: up or down by more than chance would
+/// move it ([`CharacterDiagnostic::moved_lately`]), steady, or nothing to
+/// say yet.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Trend {
     Up(f64),
@@ -58,15 +56,13 @@ enum Trend {
 }
 
 fn trend(letter: &CharacterDiagnostic) -> Trend {
-    match (letter.recent_pct, letter.earlier_pct) {
-        (Some(recent), Some(earlier)) if recent - earlier >= TREND_POINTS => {
-            Trend::Up(recent - earlier)
-        }
-        (Some(recent), Some(earlier)) if earlier - recent >= TREND_POINTS => {
-            Trend::Down(earlier - recent)
-        }
-        (Some(_), Some(_)) => Trend::Steady,
-        _ => Trend::Unknown,
+    if letter.recent_pct.is_none() || letter.earlier_pct.is_none() {
+        return Trend::Unknown;
+    }
+    match letter.moved_lately() {
+        Some(points) if points > 0.0 => Trend::Up(points),
+        Some(points) => Trend::Down(-points),
+        None => Trend::Steady,
     }
 }
 
@@ -356,6 +352,8 @@ mod tests {
             },
             recent_pct: None,
             earlier_pct: None,
+            recent_tries: 0,
+            earlier_tries: 0,
             recognition_ms: None,
             recognition_tries: 0,
         }
@@ -379,13 +377,14 @@ mod tests {
             letter_note(&p)
         );
         p = letter(27, 30);
-        p.recent_pct = Some(95.0);
-        p.earlier_pct = Some(80.0);
+        p.recent_pct = Some(100.0);
+        p.earlier_pct = Some(60.0);
+        (p.recent_tries, p.earlier_tries) = (20, 100);
         p.recognition_tries = 3;
         p.recognition_ms = Some(452.0);
         assert!(
             label(&p).ends_with(
-                "mastered, up 15 points lately, recognised in about 450 ms so far, 3 of 8 tries timed"
+                "mastered, up 40 points lately, recognised in about 450 ms so far, 3 of 8 tries timed"
             ),
             "{}",
             label(&p)
@@ -453,18 +452,26 @@ mod tests {
         );
     }
 
-    /// A trend needs five points to be one; less is steady, and without
-    /// both windows there is nothing to say.
+    /// A trend is a move further than chance would make over the tries
+    /// behind it: fifteen points over twenty recent tries is steady, forty
+    /// is not. Without both windows there is nothing to say.
     #[test]
-    fn a_trend_is_five_points_or_more() {
+    fn a_trend_is_a_move_past_chance() {
         let mut p = letter(27, 30);
         assert_eq!(trend(&p), Trend::Unknown);
-        p.recent_pct = Some(92.0);
-        p.earlier_pct = Some(90.0);
-        assert_eq!(trend(&p), Trend::Steady);
+        p.recent_pct = Some(95.0);
         p.earlier_pct = Some(80.0);
-        assert_eq!(trend(&p), Trend::Up(12.0));
-        p.earlier_pct = Some(99.0);
-        assert_eq!(trend(&p), Trend::Down(7.0));
+        (p.recent_tries, p.earlier_tries) = (20, 100);
+        assert_eq!(trend(&p), Trend::Steady);
+        p.earlier_pct = Some(60.0);
+        assert!(matches!(trend(&p), Trend::Up(up) if (up - 35.0).abs() < 1e-9));
+        p.recent_pct = Some(60.0);
+        p.earlier_pct = Some(95.0);
+        assert!(matches!(trend(&p), Trend::Down(down) if (down - 35.0).abs() < 1e-9));
+        // The same move over five times the tries is plain.
+        p.recent_pct = Some(95.0);
+        p.earlier_pct = Some(80.0);
+        (p.recent_tries, p.earlier_tries) = (100, 500);
+        assert!(matches!(trend(&p), Trend::Up(_)));
     }
 }

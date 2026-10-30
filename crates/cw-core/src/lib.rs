@@ -45,7 +45,7 @@ pub use auto_level::{
     AutoLevelChange, AutoLevelCounters, AutoLevelProgress, Completion, CountersKey, CountersUpdate,
     apply_auto_level, auto_level_progress, complete_session, evaluate_auto_level, level_up_line,
 };
-pub use belief::{Estimate, EstimatePoint};
+pub use belief::{Estimate, EstimatePoint, EstimateReading};
 pub use board::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, Ranking, RunEntry,
     TimelinePoint, assisted_runs, board_kinds, board_modes, board_place, contest_runs,
@@ -71,7 +71,7 @@ pub use contest::{
 };
 pub use endurance::{
     DROP_POINTS, ENDURANCE_MIN_SESSIONS, Endurance, EndurancePoint, GROUPS_A_STRETCH,
-    MINUTES_A_STRETCH, StretchUnit, endurance,
+    MINUTES_A_STRETCH, StretchUnit, WARM_UP_POINTS, endurance,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
@@ -122,12 +122,12 @@ pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};
 pub use stats::{
     AccuracyPoint, BUILDING_MIN_ACCURACY, BigramCell, BigramHeatmap, CharTally,
-    CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_MIN_TRIES,
-    HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MasteryStatus,
-    MistakeStats, RECENT_TRIES, SamplingRow, SessionHistoryRow, SessionRecognition, accuracy_chart,
-    character_diagnostics, group_length_forecast, mastered_count, mistake_stats, practised_modes,
-    sampling_rows, session_history, session_recognition, span_history, speed_forecast,
-    speed_history,
+    CharacterDiagnostic, ConfusionEntry, EARLIER_TRIES, GROUP_START_BIGRAM_TOKEN,
+    HARD_PAIR_MIN_TRIES, HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS,
+    MasteryStatus, MistakeStats, RECENT_TRIES, SamplingRow, SessionHistoryRow, SessionRecognition,
+    accuracy_chart, character_diagnostics, group_length_forecast, mastered_count, mistake_stats,
+    practised_modes, sampling_rows, session_history, session_recognition, span_history,
+    speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

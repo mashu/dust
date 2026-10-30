@@ -3,10 +3,10 @@
 //! and its help reads as one text.
 
 use cw_core::{
-    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
-    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS, MASTERED_MIN_ACCURACY,
-    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS,
-    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, EARLIER_TRIES,
+    ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS,
+    MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES,
+    RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -86,9 +86,9 @@ pub fn letters(bands: RecognitionBands) -> Element {
             dt { "Few tries" }
             dd { "Grey, dashed: sent fewer than {MASTERED_MIN_ATTEMPTS} times, too few to call." }
             {likely_and_notch(format!("The Mastered line, {mastered}."))}
-            dt { "↑ 8 lately" }
+            dt { "↑ 30 lately" }
             dd {
-                "Your last {RECENT_TRIES} tries of it against the ones before, in points: up in green, down in copper, shown from 5 points either way."
+                "Your last {RECENT_TRIES} tries of it against the {EARLIER_TRIES} or so before them, in points: up in green, down in copper, shown only when the move is more than chance would make over that many tries."
             }
             dt { "Recognised in" }
             dd {
@@ -126,7 +126,9 @@ pub fn speed(aim: f64) -> Element {
             dd { "Copper: more than 10 points under it." }
             {likely_and_notch(format!("Your aim, {aim}."))}
             dt { "Your aim · about 21 WPM" }
-            dd { "The speed at which you copy your aim: Copy speed on the Overview." }
+            dd {
+                "The speed at which you copy your aim: Copy speed on the Overview. Over the fastest you have been sent, it says only that: nothing yet shows how much faster you could go."
+            }
             dt { "Chance next" }
             dd {
                 "How likely the next group is to come at about that speed. With Adapt speed to me the trainer leans towards where you copy your aim; without it, every speed in the range is as likely."
@@ -153,7 +155,9 @@ pub fn group_length(aim: f64) -> Element {
             dd { "Copper: more than 10 points under it." }
             {likely_and_notch(format!("Your aim, {aim}."))}
             dt { "Your aim · up to 4 characters" }
-            dd { "The longest length you copy whole as often as your aim asks." }
+            dd {
+                "The longest length you copy whole as often as your aim asks, never past the longest group you have been sent."
+            }
             dt { "Chance next" }
             dd {
                 "How likely the next group is to be that long. With Adapt group size to me the trainer leans towards the lengths you copy as your aim asks; without it, every length is as likely."
@@ -174,9 +178,11 @@ pub fn endurance() -> Element {
             dt { "The dashed line" }
             dd { "Your start's level, carried across the rest, to hold each stretch against." }
             dt { "A copper bar" }
-            dd { "{DROP_POINTS:.0} points or more under your start: where you begin to tire." }
+            dd {
+                "{DROP_POINTS:.0} points or more under your start, and further than chance would put it over the sessions read: where you begin to tire. A few sessions can show only a big drop; more show a smaller one."
+            }
             dt { "Steady through · Fades after" }
-            dd { "How far into a session you stay within {DROP_POINTS:.0} points of your start." }
+            dd { "How far into a session you go before the first copper bar." }
         }
     }
 }
@@ -200,12 +206,12 @@ pub fn confusions() -> Element {
 pub fn hardest_pairs() -> Element {
     rsx! {
         p {
-            "A pair is two characters one after the other: the one you heard first, then the one that went wrong. These are the pairs where the second goes wrong clearly more often after the first than it does anywhere else: the pair trips you, not the letter."
+            "A pair is two characters one after the other: the one you heard first, then the one that went wrong. These are the pairs where the second goes wrong clearly more often after the first than it does overall: the pair trips you, not the letter."
         }
         dl { class: "help-terms",
             dt { "Listed" }
             dd {
-                "Once a pair has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong at least 10 points and half again more often than its second character does overall."
+                "Once a pair has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong at least 10 points and half again more often than its second character does overall, by more than chance would make it. With many pairs heard a few always go wrong more often by luck, so the more pairs you have heard, the clearer a pair has to be."
             }
             dt { "The bar" }
             dd { "How often the second character went wrong after the first; the mark on it, how often it goes wrong overall." }
@@ -217,7 +223,7 @@ pub fn hardest_pairs() -> Element {
 pub fn bigram() -> Element {
     rsx! {
         p {
-            "Each square is a pair: the character at the start of its row, followed by the one at the head of its column. Its colour is how often the second went wrong after the first: the deeper, the more often. An empty square was never heard; ▸ is the start of a group."
+            "Each square is a pair: the character at the start of its row, followed by the one at the head of its column. Its colour is how often the second went wrong after the first: the deeper, the more often. A pair heard only a few times is drawn near how often its second character goes wrong overall. An empty square was never heard; ▸ is the start of a group."
         }
         dl { class: "help-terms",
             dt { "A square" }
@@ -257,6 +263,14 @@ pub fn copy_span() -> Element {
         dl { class: "help-terms",
             dt { "± and the band" }
             dd { "How sure the model is: the shaded band is one spread either side of its best guess." }
+            dt { "Over 3 chars" }
+            dd {
+                "You copy the longest groups you have been sent whole more often than not, so all that can be said is that your span is longer. Longer groups would show how much."
+            }
+            dt { "Up · down · steady" }
+            dd {
+                "How it moved over the sessions drawn: steady unless the move is more than twice the spreads of the first and the last together."
+            }
             dt { "Adapting" }
             dd { "Adapt group size to me is on, and steering the length of your groups by it now." }
         }
@@ -273,6 +287,14 @@ pub fn copy_speed(aim: f64) -> Element {
         dl { class: "help-terms",
             dt { "± and the band" }
             dd { "How sure the model is: the shaded band is one spread either side of its best guess." }
+            dt { "Over 20 WPM" }
+            dd {
+                "You copy {aim} right even at the fastest you have been sent, so all that can be said is that your copy speed is higher. Faster sends would show how much."
+            }
+            dt { "Up · down · steady" }
+            dd {
+                "How it moved over the sessions drawn: steady unless the move is more than twice the spreads of the first and the last together."
+            }
             dt { "Adapting" }
             dd { "Adapt speed to me is on, and steering the speed of your groups by it now." }
         }

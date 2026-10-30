@@ -123,7 +123,9 @@ points), and $w \in \{0.04, 0.08, 0.12, 0.2, 0.35\}$: 755 cells, kept exactly
 as log weights.
 
 - **Prior:** $\ln V \sim \mathcal N(\ln m, 0.4^2)$, $m$ the middle of the
-  speeds the settings allow (on a log scale), and $w$ uniform.
+  speeds the settings allow (on a log scale), and $w$ uniform. The history
+  Stats shows starts from the middle of what its first session sent
+  instead, so a change to the settings does not redraw the past.
 - **History weights $\omega_i$:** as for the span, earlier evidence fades by
   $0.5^{1/10}$ a session.
 - **Which sessions count:** only sessions in the same character-set mode. A
@@ -409,9 +411,13 @@ Reproduce with `cargo test -p cw-core --release auto_level_simulation --
 - **Stats → Overview:** "Copy speed": the speed at the aim's share of
   characters, ± one standard deviation, over the last 30 sessions, and a chip
   saying whether adaptive speed is steering. With more than one character
-  set in the history, a pill for each shows its own.
+  set in the history, a pill for each shows its own. Past the fastest or
+  slowest speed sent it says only "over" or "under" that speed, and it
+  calls a move up or down only past twice the first and last spreads
+  together.
 - **Stats → Sampling:** "Speed, WPM": round speeds across the range, each with
   its chance of coming next and the share of characters copied right at it.
+  Before any session of the set it says there is none to read.
 
 ## Tests
 
