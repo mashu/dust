@@ -149,19 +149,22 @@ impl<N: Clone> ReceiverStream<N> {
         &self.mixer
     }
 
-    /// Render stretches until the next starts at `until` or later, each
-    /// handed to `play` with the moment it starts: from the margin past
-    /// `taken` at the earliest, the soonest a stretch can still start on
-    /// time, should the clock have taken all that was rendered, as it has
-    /// all before `taken` ([`Self::catch_up_to`]). A stretch `play` will
-    /// not take is not rendered either.
-    pub fn render_until<E>(
+    /// Render stretches until the stream runs `lead` past what the clock
+    /// has taken, `taken`, each handed to `play` with the moment it starts:
+    /// from the margin past `taken` at the earliest, the soonest a stretch
+    /// can still start on time, should the clock have taken all that was
+    /// rendered, as it has all before `taken` ([`Self::catch_up_to`]). The
+    /// lead is counted from `taken`, not from the clock, so a browser's
+    /// base latency does not eat into it. A stretch `play` will not take is
+    /// not rendered either.
+    pub fn render_ahead<E>(
         &mut self,
         taken: f64,
-        until: f64,
+        lead: f64,
         mut play: impl FnMut(f64, &[f32]) -> Result<N, E>,
     ) -> Result<(), E> {
         self.catch_up_to(taken);
+        let until = taken + lead;
         while !self.idle && self.time(self.next) < until {
             // What has finished goes before the copy is taken, so no copy
             // carries it.
@@ -245,11 +248,23 @@ impl<N: Clone> ReceiverStream<N> {
     /// should the clock step on by less before the stream is next topped
     /// up, what is rendered from the change still starts on time, and a
     /// send made there is heard whole. Catching up takes time, so a caller
-    /// reads the clock again after it before scheduling anything.
-    pub fn catch_up_to(&mut self, taken: f64) {
-        if self.next < self.sample_at(taken) {
+    /// reads the clock again after it before scheduling anything. Whether
+    /// the stream had fallen behind: it has nothing to play from where it
+    /// picked up until it is rendered on from there.
+    ///
+    /// Counted against `taken`, not the browser's clock itself: the browser
+    /// has not yet rendered what lies between the two, but renders a device
+    /// buffer, its base latency long, in one go whenever its audio thread
+    /// wakes. A stretch less than a buffer ahead of the clock when it is
+    /// read can reach the browser, once rendered, after the buffer it falls
+    /// in, and then plays late, from its first sample, over the one after
+    /// it.
+    pub fn catch_up_to(&mut self, taken: f64) -> bool {
+        let behind = self.next < self.sample_at(taken);
+        if behind {
             self.catch_up(self.sample_at(taken + self.margin));
         }
+        behind
     }
 
     /// Watch a send's sound, from `starts` to `ends` on the clock, for the
@@ -424,6 +439,16 @@ mod tests {
             }
         }
 
+        /// Where what it plays ends, in samples.
+        fn plays_to(&self) -> usize {
+            self.stretches
+                .iter()
+                .filter(|(_, _, plays)| *plays > 0)
+                .map(|(at, _, plays)| at + plays)
+                .max()
+                .unwrap_or(0)
+        }
+
         /// Everything played, from the start, to `samples` long.
         fn heard(&self, samples: usize) -> Vec<f32> {
             let mut out = vec![0.0f32; samples];
@@ -451,10 +476,10 @@ mod tests {
         let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 0.3, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 0.3, |starts, samples| browser.play(starts, samples))
             .expect("played");
         stream
-            .render_until(1.5, 2.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(1.5, 0.5, |starts, samples| browser.play(starts, samples))
             .expect("played");
         let total = 2 * SR as usize;
         let heard = browser.heard(total);
@@ -481,11 +506,11 @@ mod tests {
         let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 0.3, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 0.3, |starts, samples| browser.play(starts, samples))
             .expect("played");
         stream.catch_up_to(1.5);
         stream
-            .render_until(1.6, 2.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(1.6, 0.4, |starts, samples| browser.play(starts, samples))
             .expect("played");
         let total = 2 * SR as usize;
         let heard = browser.heard(total);
@@ -532,12 +557,12 @@ mod tests {
         let after = stream.watch(1.6, 1.9);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 0.3, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 0.3, |starts, samples| browser.play(starts, samples))
             .expect("played");
         assert!(!test.is_set(), "all of it heard so far");
         stream.catch_up_to(1.5);
         stream
-            .render_until(1.5, 2.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(1.5, 0.5, |starts, samples| browser.play(starts, samples))
             .expect("played");
         // From where the stream fell behind to where it picked up, or its
         // end before then.
@@ -547,6 +572,69 @@ mod tests {
         assert!((until - ends).abs() < 1e-4, "to {ends}: {until}");
         assert!(!before.is_set(), "heard out before the stall");
         assert!(!after.is_set(), "starts after the stall");
+    }
+
+    /// Caught up after a stall, the stream is topped up at once, as a
+    /// send's watch does when it finds it fallen behind: it plays on from
+    /// where it picked up, what the mixer plays there, and the send is told
+    /// it lost the stall alone. Left to the next tick, a tenth of a second
+    /// on, the stream played nothing until then and fell behind again, and
+    /// the send was told it lost that tenth as well.
+    #[test]
+    fn a_stream_topped_up_once_caught_up_loses_only_the_stall() {
+        let settings = settings();
+        let lookahead = Mixer::new(SR).lookahead_sec();
+        let sound = plan(&settings, "TEST").sound_end_sec();
+        let mut expected = vec![0.0f32; at(1.2)];
+        mixer(&settings).render(&mut expected, 0);
+        for at_once in [true, false] {
+            let mut stream = ReceiverStream::new(mixer(&settings), 0.0, MARGIN);
+            let test = stream.watch(lookahead, lookahead + sound);
+            let mut browser = Browser::default();
+            stream
+                .render_ahead(0.0, 0.3, |starts, samples| browser.play(starts, samples))
+                .expect("played");
+            // The page busy until 0.6 on the clock, and the send's watch
+            // the first to look.
+            assert!(stream.catch_up_to(0.6), "{at_once}: fallen behind");
+            if at_once {
+                stream
+                    .render_ahead(0.6, 0.5, |starts, samples| browser.play(starts, samples))
+                    .expect("played");
+            }
+            // The next tick.
+            assert_eq!(
+                stream.catch_up_to(0.7),
+                !at_once,
+                "{at_once}: fallen behind again"
+            );
+            stream
+                .render_ahead(0.7, 0.5, |starts, samples| browser.play(starts, samples))
+                .expect("played");
+            let picked_up = if at_once { 0.6 } else { 0.7 } + MARGIN;
+            let (from, until) = test.span().expect("TEST went unheard");
+            assert!(
+                (from - 0.3).abs() < 1e-9,
+                "{at_once}: from the stall: {from}"
+            );
+            assert!(
+                (until - picked_up).abs() < 1e-9,
+                "{at_once}: to where it picked up, {picked_up}: {until}"
+            );
+            let heard = browser.heard(at(1.2));
+            assert!(
+                heard[at(0.3)..at(picked_up)].iter().all(|s| *s == 0.0),
+                "{at_once}: the stall was played"
+            );
+            let first_off = heard[at(picked_up)..]
+                .iter()
+                .zip(&expected[at(picked_up)..])
+                .position(|(a, b)| a != b);
+            assert_eq!(
+                first_off, None,
+                "{at_once}: the stream parts from the mixer"
+            );
+        }
     }
 
     /// A stall longer than the stream makes up leaves nothing in flight to
@@ -569,7 +657,7 @@ mod tests {
         let test = stream.watch(lookahead, lookahead + sound);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 0.5, |starts, samples| browser.play(starts, samples))
             .expect("played");
         stream.catch_up_to(4.0);
         // All of it, from the stall to its end.
@@ -578,7 +666,7 @@ mod tests {
         let ends = lookahead + sound;
         assert!((until - ends).abs() < 1e-4, "to its end, {ends}: {until}");
         stream
-            .render_until(4.0, 6.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(4.0, 2.0, |starts, samples| browser.play(starts, samples))
             .expect("played");
         let heard = browser.heard(at(6.0));
         assert!(loudest(&heard[..at(0.5)]) > 0.1, "heard before the stall");
@@ -635,11 +723,11 @@ mod tests {
             let waited = stream.watch(heard_at, heard_at + dit);
             let mut browser = Browser::default();
             stream
-                .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+                .render_ahead(0.0, 0.5, |starts, samples| browser.play(starts, samples))
                 .expect("played");
             stream.catch_up_to(4.0);
             stream
-                .render_until(4.0, 6.0, |starts, samples| browser.play(starts, samples))
+                .render_ahead(4.0, 2.0, |starts, samples| browser.play(starts, samples))
                 .expect("played");
             assert!(!waited.is_set(), "{heard_at}: heard whole, on time");
             let heard = browser.heard(at(6.0));
@@ -660,7 +748,7 @@ mod tests {
         let mut stream = ReceiverStream::new(Mixer::new(SR), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 0.5, |starts, samples| browser.play(starts, samples))
             .expect("played");
         stream.catch_up_to(4.0);
         let (made, _) = stream.change_at(8.0, |mixer, swept| {
@@ -669,7 +757,7 @@ mod tests {
         assert_eq!(made, 8.0);
         let fresh = stream.watch(made + lookahead, made + lookahead + dit);
         stream
-            .render_until(8.0, 9.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(8.0, 1.0, |starts, samples| browser.play(starts, samples))
             .expect("played");
         assert!(!fresh.is_set(), "made after the stall");
         let heard = browser.heard(at(9.0));
@@ -716,11 +804,11 @@ mod tests {
             let reply = stream.watch(reply_at, reply_at + dit);
             let mut browser = Browser::default();
             stream
-                .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+                .render_ahead(0.0, 0.5, |starts, samples| browser.play(starts, samples))
                 .expect("played");
             stream.catch_up_to(resumes);
             stream
-                .render_until(resumes, 5.0, |starts, samples| {
+                .render_ahead(resumes, 5.0 - resumes, |starts, samples| {
                     browser.play(starts, samples)
                 })
                 .expect("played");
@@ -779,7 +867,7 @@ mod tests {
         let mut stream = ReceiverStream::new(mixer(settings), 0.0, MARGIN);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 0.5, |starts, samples| browser.play(starts, samples))
             .expect("played");
         let (made, taken_back) = stream.change_at(taken + MARGIN, |mixer, swept| {
             mixer.start(send(settings, "TEST", taken + MARGIN), swept);
@@ -789,7 +877,7 @@ mod tests {
         let sound = plan(settings, "TEST").sound_end_sec();
         let sent = stream.watch(made + lookahead, made + lookahead + sound);
         stream
-            .render_until(taken + step, taken + step + 0.5, |starts, samples| {
+            .render_ahead(taken + step, 0.5, |starts, samples| {
                 browser.play(starts, samples)
             })
             .expect("played");
@@ -830,7 +918,12 @@ mod tests {
     /// A step past the margin is a hold-up: the clock has taken where the
     /// send was made, and where its sound starts, before any of it was
     /// handed over. The stream picks up the margin past the clock, and the
-    /// send is told what of it went unheard: from its start to there.
+    /// send is told what of it went unheard: from its start to there. So it
+    /// is though the browser's own clock may still be short of the send,
+    /// what it has taken being its base latency past that clock: handed
+    /// over less than a device buffer ahead of it, the send could not be
+    /// sure to start on time, and played late it would be heard over what
+    /// follows.
     #[test]
     fn a_clock_step_past_a_send_is_made_loses_its_start() {
         let settings = settings();
@@ -851,6 +944,36 @@ mod tests {
         );
     }
 
+    /// A change is rendered its lead past what the browser has taken, not
+    /// past the browser's clock. Made the margin past what was taken, a
+    /// change counted its lead from the clock lost the browser's base
+    /// latency from it, on a browser that reports a long one: the page
+    /// busy for less than the lead, the stream ran dry and fell behind.
+    #[test]
+    fn a_change_is_rendered_its_lead_past_what_the_browser_has_taken() {
+        let settings = settings();
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0, MARGIN);
+        let mut browser = Browser::default();
+        stream
+            .render_ahead(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        // The clock at 0.2, and a base latency of 80 ms past it.
+        let taken = 0.2 + 0.08;
+        let (made, taken_back) = stream.change_at(taken + MARGIN, |mixer, swept| {
+            mixer.start(send(&settings, "TEST", taken + MARGIN), swept);
+        });
+        browser.take_back(taken_back);
+        let lead = 0.2;
+        stream
+            .render_ahead(taken, lead, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        let plays_to = browser.plays_to() as f64 / f64::from(SR);
+        assert!(
+            plays_to >= taken + lead,
+            "made at {made}, rendered to {plays_to}: short of {lead} past {taken}"
+        );
+    }
+
     /// A change made mid-stretch, the queue a good way ahead of it, plays
     /// exactly as the mixer would have played with the change made at that
     /// sample in the first place: the stretch it falls in played again to
@@ -866,7 +989,7 @@ mod tests {
         let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 1.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 1.0, |starts, samples| browser.play(starts, samples))
             .expect("played");
         let (made, taken) = stream.change_at(at, changed);
         let cut = (at * f64::from(SR)).round() as usize;
@@ -877,7 +1000,7 @@ mod tests {
         );
         browser.take_back(taken);
         stream
-            .render_until(0.0, 2.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 2.0, |starts, samples| browser.play(starts, samples))
             .expect("played");
         let total = 2 * SR as usize;
         let heard = browser.heard(total);
@@ -904,7 +1027,7 @@ mod tests {
         let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 0.5, |starts, samples| browser.play(starts, samples))
             .expect("played");
         let (made, taken) = stream.change_at(0.2, |mixer, _| mixer.stop());
         assert_eq!(made, 0.2);
@@ -932,7 +1055,7 @@ mod tests {
         assert!(stream.mixer().is_quiet());
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 1.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 1.0, |starts, samples| browser.play(starts, samples))
             .expect("played");
         assert!(stream.is_idle());
         assert_eq!(browser.stretches.len(), 1, "one stretch of silence");
@@ -941,7 +1064,7 @@ mod tests {
         });
         assert_eq!(made, 3.0);
         stream
-            .render_until(3.0, 3.5, |starts, samples| browser.play(starts, samples))
+            .render_ahead(3.0, 0.5, |starts, samples| browser.play(starts, samples))
             .expect("played");
         assert_eq!(browser.stretches[1].0, 3 * SR as usize, "from the change");
         assert!(
@@ -961,7 +1084,7 @@ mod tests {
         let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
-            .render_until(0.0, 1.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(0.0, 1.0, |starts, samples| browser.play(starts, samples))
             .expect("played");
         assert!(!stream.is_idle());
         stream.change_at(1.0, |mixer, swept| {
@@ -969,7 +1092,7 @@ mod tests {
             mixer.set_band(None, swept);
         });
         stream
-            .render_until(1.0, 2.0, |starts, samples| browser.play(starts, samples))
+            .render_ahead(1.0, 1.0, |starts, samples| browser.play(starts, samples))
             .expect("played");
         assert!(stream.is_idle(), "the band faded, the send released");
     }
