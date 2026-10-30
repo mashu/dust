@@ -1852,6 +1852,39 @@ mod tests {
         assert_eq!(pileup, before);
     }
 
+    /// Band conditions put back during a pile-up keep it one: the stations
+    /// range goes back to the single station it ships with, and the pile-up
+    /// still chosen opens it again, as picking it did. Undo puts the range
+    /// back as it was.
+    #[test]
+    fn a_band_reset_leaves_a_pileup_with_callers_to_pile_up() {
+        let mut pileup = TrainingSettings::default();
+        pileup.set_char_set_mode(CharSetMode::Contest);
+        pileup.set_contest_style(crate::contest::RunStyle::Pileup);
+        pileup.band.qsb_depth = 0.9;
+        pileup.set_range_max(RangeSetting::Stations, 5.0);
+        let before = pileup.clone();
+        pileup.reset_section(SettingsSection::BandConditions);
+        assert_eq!(
+            pileup.contest.contest_style,
+            crate::contest::RunStyle::Pileup
+        );
+        assert_eq!(
+            (pileup.band.stations_min, pileup.band.stations_max),
+            (STATIONS_MIN, 3)
+        );
+        assert!(pileup.contest.stations_opened_by_pileup);
+        pileup.restore_section(SettingsSection::BandConditions, &before);
+        assert_eq!(pileup, before);
+
+        // A single caller keeps its one station.
+        let mut single = TrainingSettings::default();
+        single.set_char_set_mode(CharSetMode::Contest);
+        single.reset_section(SettingsSection::BandConditions);
+        assert_eq!(single.band.stations_max, STATIONS_MIN);
+        assert!(!single.contest.stations_opened_by_pileup);
+    }
+
     /// And a reset stays inside its own card: changing everything, then
     /// resetting one section, must leave the other sections changed.
     #[test]

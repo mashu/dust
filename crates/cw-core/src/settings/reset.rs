@@ -17,6 +17,12 @@ impl TrainingSettings {
     pub fn reset_section(&mut self, which: SettingsSection) {
         let to = self.reset_to();
         self.put_section(which, &to);
+        if which == SettingsSection::BandConditions {
+            // The run style is on the Character set card and stays: a
+            // pile-up still chosen opens the one station the reset put back,
+            // as picking it did. Undo puts the range back as it was.
+            self.fit_stations_to_pileup();
+        }
     }
 
     /// Put one card back as it was in `before`, where a reset of it left
