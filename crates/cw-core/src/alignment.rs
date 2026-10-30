@@ -14,7 +14,7 @@ pub struct AlignmentPair {
 /// Pair what was sent with what was received, character by character, at
 /// the fewest edits: a match, a wrong character, one dropped, or one added.
 pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
-    let (s, r) = (upper(sent), upper(received));
+    let (s, r) = upper(sent, received);
     // A clean copy is the common case, and needs no table.
     if s == r {
         return s.iter().map(|&c| pair(Some(c), Some(c))).collect();
@@ -31,7 +31,7 @@ pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
 /// three dropped inside and the last one wrong. At least one character is
 /// always held.
 pub(crate) fn align_holding(sent: &str, received: &str) -> (Vec<AlignmentPair>, usize) {
-    let (s, r) = (upper(sent), upper(received));
+    let (s, r) = upper(sent, received);
     let table = Edits::new(&s, &r);
     let fewest = table.at(s.len(), r.len());
     let lost = (0..s.len())
@@ -44,12 +44,35 @@ pub(crate) fn align_holding(sent: &str, received: &str) -> (Vec<AlignmentPair>, 
 /// The fewest edits — a wrong character, one dropped, or one added — that
 /// turn `sent` into `received`: how far a call you sent is from a station's.
 pub(crate) fn edit_distance(sent: &str, received: &str) -> u32 {
-    let (s, r) = (upper(sent), upper(received));
+    let (s, r) = upper(sent, received);
     Edits::new(&s, &r).at(s.len(), r.len())
 }
 
-fn upper(text: &str) -> Vec<char> {
-    text.chars().map(|c| c.to_ascii_uppercase()).collect()
+/// The most of a group that is aligned: far longer than anything Dust
+/// sends, so only a history made by hand ever reaches it.
+const SENT_MAX: usize = 256;
+
+/// The most cells an alignment's table may take, 16 MB: a group against a
+/// long paste fits many times over, but a history made by hand, with a
+/// group of a hundred thousand characters each way, would otherwise ask
+/// for some 40 GB each time a stat read it.
+const TABLE_MAX: usize = 4_000_000;
+
+/// What was sent and what was received, upper case, each cut to what an
+/// alignment's table can hold: the answer keeps as much as fits beside the
+/// group.
+fn upper(sent: &str, received: &str) -> (Vec<char>, Vec<char>) {
+    let s: Vec<char> = sent
+        .chars()
+        .take(SENT_MAX)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    let r = received
+        .chars()
+        .take(TABLE_MAX / (s.len() + 1) - 1)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    (s, r)
 }
 
 fn pair(sent_char: Option<char>, received_char: Option<char>) -> AlignmentPair {
@@ -229,6 +252,35 @@ mod tests {
         assert_eq!(edit_distance("K5ZYX", "K5XYZ"), 2);
         assert_eq!(edit_distance("", "K5XYZ"), 5);
         assert_eq!(edit_distance("k5xyz", "K5XYZ"), 0, "case is no edit");
+    }
+
+    /// A group and an answer far longer than anything sent, as only a
+    /// history made by hand holds, are aligned only as far as a table of
+    /// bounded size reaches, not into one the size of their product.
+    #[test]
+    fn a_group_made_by_hand_far_too_long_is_aligned_only_so_far() {
+        let sent = "K".repeat(100_000);
+        let received = "M".repeat(100_000);
+        let kept = TABLE_MAX / (SENT_MAX + 1) - 1;
+        let alignment = align_group(&sent, &received);
+        let count = |sent_side: bool| {
+            alignment
+                .iter()
+                .filter(|pair| {
+                    if sent_side {
+                        pair.sent_char.is_some()
+                    } else {
+                        pair.received_char.is_some()
+                    }
+                })
+                .count()
+        };
+        assert_eq!(count(true), SENT_MAX);
+        assert_eq!(count(false), kept);
+        assert!(alignment.iter().all(|pair| !pair.matched));
+        assert_eq!(edit_distance(&sent, &received), kept as u32);
+        let (held, lost) = align_holding(&sent, &received);
+        assert!(held.len() + lost <= SENT_MAX + kept);
     }
 
     #[test]
