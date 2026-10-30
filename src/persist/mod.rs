@@ -14,6 +14,7 @@ pub mod backup;
 mod desktop;
 #[cfg(test)]
 pub mod memory;
+pub mod record;
 #[cfg(feature = "web")]
 mod web;
 
@@ -355,17 +356,17 @@ fn newest(sessions: &[SessionResult]) -> &[SessionResult] {
 /// a bad write would replace years of history with itself. So too with the
 /// sessions that do not parse, which the next save would leave out.
 ///
-/// Every session is scored again as it is read, from what is stored of it, so
-/// the history is on one scale however the score has been worked out over the
-/// versions: sessions saved before speed counted read as they would score
-/// today. Its stamps and days are read as they were stored, whatever the
-/// clock says now: one that is wrong now would otherwise move them for good
-/// at the next save. The screens settle a session stamped ahead of the
-/// clock for themselves ([`crate::time::as_shown`]).
+/// Each session is read as a record is ([`record::read_record`]): scored
+/// again, from what is stored of it, so the history is on one scale however
+/// the score has been worked out over the versions, and its stamps and days
+/// read as they were stored, whatever the clock says now: one that is wrong
+/// now would otherwise move them for good at the next save. The screens
+/// settle a session stamped ahead of the clock for themselves
+/// ([`crate::time::as_shown`]).
 fn read_history(raw: &str) -> Option<ReadHistory> {
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
-    let (mut sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {
+    let (sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {
         Ok(sessions) => (sessions, Vec::new()),
         Err(_) => {
             let (mut sessions, mut unread) = (Vec::new(), Vec::new());
@@ -378,9 +379,7 @@ fn read_history(raw: &str) -> Option<ReadHistory> {
             (sessions, unread)
         }
     };
-    for session in &mut sessions {
-        session.score = session.points();
-    }
+    let sessions = sessions.into_iter().map(record::scored).collect();
     Some(ReadHistory { sessions, unread })
 }
 
@@ -1365,7 +1364,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(super) fn session(date: &str) -> SessionResult {
+    pub(crate) fn session(date: &str) -> SessionResult {
         SessionResult {
             date: date.to_string(),
             timestamp: 1,

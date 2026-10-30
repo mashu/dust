@@ -18,6 +18,7 @@ compile_error!(
 mod app;
 mod audio;
 mod contest_runtime;
+mod history;
 mod keep_awake;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod linux_webview;
