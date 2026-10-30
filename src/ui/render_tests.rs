@@ -123,6 +123,7 @@ fn TrainingScreen(
     on_stop: EventHandler<()>,
     #[props(default)] keyer_mode: KeyerMode,
     countdown: Option<u32>,
+    #[props(default)] again: bool,
 ) -> Element {
     let answer = use_hook(AnswerOutbox::new);
     let open = focused_box_open(current, focused, &confirmed);
@@ -148,6 +149,7 @@ fn TrainingScreen(
                     locked,
                     repeat_total,
                     repeat_done,
+                    again,
                     countdown,
                     answer,
                     on_change,
@@ -2294,6 +2296,72 @@ fn a_count_down_shows_where_the_last_group_will() {
     assert!(tag.contains("answer locked"), "{tag}");
     assert!(tag.contains("Get ready…"), "{tag}");
     assert!(input_open_tag(&html, "key-next").contains("disabled"));
+}
+
+/// A group sent again, some of a send of it unheard, says so in its one
+/// line, and nothing else changes: no count down, the box open as it is
+/// while a group is sent with the lock off. A count down says what it
+/// counts down to all the same.
+#[test]
+fn a_group_sent_again_says_so_with_no_count_down() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec![String::new(), String::new()],
+                confirmed: vec![false, false],
+                focused: 0,
+                playing: true,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 0,
+                again: true,
+                on_change: move |_: TypedAnswer| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(
+        html.contains(">Part of it did not play — once more.<"),
+        "{html}"
+    );
+    assert!(!html.contains("countdown"), "{html}");
+    assert!(!html.contains("Starting in"), "{html}");
+    let tag = input_open_tag(&html, "group-input-0");
+    assert!(tag.contains("Type the group"), "{tag}");
+    assert!(!tag.contains("answer locked"), "{tag}");
+
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec![String::new(), String::new()],
+                confirmed: vec![false, false],
+                focused: 0,
+                playing: false,
+                locked: true,
+                repeat_total: 1,
+                repeat_done: 0,
+                countdown: Some(2),
+                again: true,
+                on_change: move |_: TypedAnswer| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(
+        html.contains(">Get ready — the first group is coming.<"),
+        "{html}"
+    );
+    assert!(!html.contains("once more"), "{html}");
 }
 
 fn input_open_tag(html: &str, id: &str) -> String {

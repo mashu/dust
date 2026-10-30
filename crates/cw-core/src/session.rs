@@ -98,6 +98,26 @@ impl SendStart {
     pub fn heard_at(&self) -> MonoMs {
         self.output_at.plus(u64::from(self.latency_ms))
     }
+
+    /// Whether a skip of its sound from `from_sec` to `until_sec` after its
+    /// first sample lost any of its characters: at least half a dit of the
+    /// stretch from its first character's start to its last one's end. A
+    /// skip in the quiet before or after them, or a sliver of an onset,
+    /// loses no element. A send that does not say where its characters
+    /// end, or at what speed, loses them to any skip.
+    pub fn loses_characters(&self, from_sec: f64, until_sec: f64) -> bool {
+        let Some(last) = self.char_ends_ms.iter().max() else {
+            return true;
+        };
+        let chars_from = f64::from(self.first_char_ms) / 1_000.0;
+        let chars_until = f64::from(*last) / 1_000.0;
+        let lost = until_sec.min(chars_until) - from_sec.max(chars_from);
+        if self.char_wpm > 0.0 {
+            lost >= crate::timing::dot_seconds(self.char_wpm) / 2.0
+        } else {
+            lost > 0.0
+        }
+    }
 }
 
 /// How a group's first send went to the output: what its characters are
@@ -173,8 +193,9 @@ struct Completed {
 /// Where a session is. Every phase that is about a group names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
-    /// Counting down to the first group, `remaining` seconds to go. Nothing
-    /// is sent and nothing can be typed yet.
+    /// Counting down to the first group, or after Resume to the group the
+    /// session goes on with, `remaining` seconds to go. Nothing is sent and
+    /// nothing can be typed meanwhile.
     Countdown {
         remaining: u32,
     },
@@ -254,6 +275,12 @@ pub struct Group {
     /// it was timed, unless it is changed after the pause: keys either
     /// side of a pause cannot be timed against one send.
     paused_complete: bool,
+    /// How many times it has been sent again for a send some of whose
+    /// characters went unheard.
+    sent_again: u32,
+    /// It is being sent again for that, until a send of it is heard to its
+    /// end, it is answered, or the session is paused.
+    again: bool,
 }
 
 impl Group {
@@ -274,6 +301,8 @@ impl Group {
             heard: 0,
             sending: None,
             paused_complete: false,
+            sent_again: 0,
+            again: false,
         }
     }
 
@@ -377,6 +406,9 @@ pub struct SessionView {
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
     pub repeat_done: u32,
+    /// The current group is being sent again, some of a send of it having
+    /// gone unheard.
+    pub again: bool,
     /// The speed the session chose for the current group, when it chooses
     /// one: adaptive speed does.
     pub speed: Option<ChosenSpeed>,
@@ -464,8 +496,9 @@ impl GroupSession {
     }
 
     /// Whether typing into `index` is refused: while its group is being sent,
-    /// if the settings lock the box for that, and before anything has been
-    /// sent at all.
+    /// sent again included, if the settings lock the box for that; while the
+    /// session counts down, before the first group or after Resume; and
+    /// while it is paused.
     pub fn input_locked(&self, index: usize) -> bool {
         let sending = self.settings.playback.lock_input_during_group_playback && self.playing();
         (sending || self.countdown().is_some() || self.paused()) && index == self.current_group
@@ -476,7 +509,8 @@ impl GroupSession {
         matches!(self.phase, SessionPhase::Paused { .. })
     }
 
-    /// Seconds left before the first group, while the session counts down.
+    /// Seconds left before the next group is sent, while the session counts
+    /// down: before the first group, or after Resume.
     pub fn countdown(&self) -> Option<u32> {
         match self.phase {
             SessionPhase::Countdown { remaining } => Some(remaining),
@@ -520,6 +554,7 @@ impl GroupSession {
             ),
             repeat_total: current.map_or(1, |g| g.repeats.max(1)),
             repeat_done: current.map_or(0, |g| g.plays_done),
+            again: current.is_some_and(|g| g.again),
             speed: self.chosen_speed(self.current_group),
         }
     }
@@ -557,6 +592,18 @@ impl GroupSession {
         self.groups.get(index).map_or(1, |g| g.repeats.max(1))
     }
 
+    /// Sends of `index` heard to their end since it last began from the
+    /// start.
+    pub(crate) fn plays_done(&self, index: usize) -> u32 {
+        self.groups.get(index).map_or(0, |g| g.plays_done)
+    }
+
+    /// How many times `index` has been sent again for a send some of whose
+    /// characters went unheard.
+    pub(crate) fn sent_again(&self, index: usize) -> u32 {
+        self.groups.get(index).map_or(0, |g| g.sent_again)
+    }
+
     /// The character and effective speeds `index` was sent at, as its
     /// sends said; before any did, the settings' slowest.
     pub(crate) fn sent_wpm(&self, index: usize) -> (f64, f64) {
@@ -588,6 +635,8 @@ impl GroupSession {
             group.sent = text;
             group.input.clear();
             group.repeats = repeats.max(1);
+            group.sent_again = 0;
+            group.again = false;
         }
     }
 
@@ -698,31 +747,45 @@ impl GroupSession {
         }
     }
 
-    /// Count one finished send of `index`: heard, to its end.
+    /// Count one finished send of `index`: heard, to its end, which ends
+    /// any sending of it again for a send unheard.
     pub(crate) fn note_play_finished(&mut self, index: usize) {
         if let Some(group) = self.groups.get_mut(index) {
             group.plays_done = group.plays_done.saturating_add(1);
             group.heard = group.heard.saturating_add(1);
             group.sending = None;
+            group.again = false;
+        }
+    }
+
+    /// `index` is sent again, some of the characters of the send that just
+    /// ended having gone unheard.
+    pub(crate) fn note_sent_again(&mut self, index: usize) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.sent_again = group.sent_again.saturating_add(1);
+            group.again = true;
         }
     }
 
     /// The send of `index` going out was cut short at `at` by a pause, and
     /// goes out again from the start: heard in part, it counts as heard
-    /// once its first character had sounded.
+    /// once its first character had sounded. A group being sent again for
+    /// some of it unheard is now sent again for the pause, as any is.
     pub(crate) fn cut_send(&mut self, index: usize, at: MonoMs) {
-        if let Some(group) = self.groups.get_mut(index)
-            && let Some(heard) = group.sending.take()
-        {
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        group.again = false;
+        if let Some(heard) = group.sending.take() {
             group.heard = group.heard.saturating_add(u32::from(heard <= at));
         }
     }
 
-    /// Some of the send of `index` going out went unheard, the browser
-    /// fallen behind its audio clock: it counts as no hearing, however it
-    /// ends. Where in it the skip fell is not said, so neither is whether
-    /// its first character was heard, and a sound that failed is no choice
-    /// of the learner's: it costs only the time of sending it again.
+    /// Some of the characters of the send of `index` going out went unheard,
+    /// the browser fallen behind its audio clock: it counts as no hearing,
+    /// however it ends. Whether its first character was heard before the
+    /// skip is not weighed, and a sound that failed is no choice of the
+    /// learner's: it costs only the time of sending it again.
     pub(crate) fn drop_send(&mut self, index: usize) {
         if let Some(group) = self.groups.get_mut(index) {
             group.sending = None;
@@ -799,6 +862,7 @@ impl GroupSession {
             return None;
         }
         group.answer = group.answer.or_else(|| Some(group.completed(now)));
+        group.again = false;
         self.focused_group = (index + 1).min(last);
         group.tally = Some(CopyTally::of(&group.sent, &group.input));
         group.answered()
@@ -1853,6 +1917,46 @@ mod tests {
         assert_eq!(
             timing.char_times.as_ref().map(|times| times.keys.clone()),
             Some(vec![Some(500), Some(1_700), None])
+        );
+    }
+
+    /// A skip loses a send's characters once it takes half a dit or more of
+    /// the stretch from its first character's start to its last one's end:
+    /// 30 ms at 20 WPM. Less, or only the quiet either side, loses none. A
+    /// send that does not say where its characters end, or at what speed,
+    /// loses them to any skip.
+    #[test]
+    fn a_skip_loses_characters_from_half_a_dit_of_them() {
+        let send = SendStart {
+            first_char_ms: 200,
+            ..send_start(0, 20.0, &[500, 900])
+        };
+        assert!(send.loses_characters(0.30, 0.331), "just over half a dit");
+        assert!(!send.loses_characters(0.30, 0.329), "just under");
+        assert!(send.loses_characters(0.17, 0.231), "over the first onset");
+        assert!(!send.loses_characters(0.0, 0.229), "mostly before it");
+        assert!(send.loses_characters(0.869, 2.0), "over the last end");
+        assert!(!send.loses_characters(0.871, 2.0), "mostly after it");
+        assert!(
+            !send.loses_characters(0.0, 0.2),
+            "before the first character"
+        );
+        assert!(!send.loses_characters(0.9, 1.5), "after the last");
+        assert!(send.loses_characters(0.0, 5.0), "all of it");
+
+        let unsaid = send_start(0, 20.0, &[]);
+        assert!(
+            unsaid.loses_characters(5.0, 5.001),
+            "no character ends said"
+        );
+        let speedless = SendStart {
+            char_wpm: 0.0,
+            ..send
+        };
+        assert!(speedless.loses_characters(0.30, 0.3005), "no speed said");
+        assert!(
+            !speedless.loses_characters(0.0, 0.2),
+            "nor any character skipped"
         );
     }
 
