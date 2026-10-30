@@ -145,7 +145,8 @@ pub fn session_points(copies: &[GroupCopy], effective_alphabet_size: f64) -> f64
     (score * 100.0).round() / 100.0
 }
 
-fn count_valid_letters(text: &str) -> u32 {
+/// The characters of `text` that are scored: what a group's points are for.
+pub(crate) fn count_valid_letters(text: &str) -> u32 {
     text.chars()
         .filter(|ch| is_scored_char(ch.to_ascii_uppercase()))
         .count() as u32

@@ -444,7 +444,11 @@ level you have reached stays where it is.
 ranked by what they earned a group, with gold, silver and bronze for the top
 three and the personal best on its own card. A session's score is its groups'
 points added up, so a longer session scores more for the same copy; points a
-group compares a 15-group session with a 50-group one fairly. It is the mean,
+group compares a 15-group session with a 50-group one fairly. A longer group
+earns more too, so a group counts as five characters: points a group are what
+a session earned for every five characters sent, and groups of two compare
+with groups of eight, and a Koch session with a callsign one, by their copy.
+It is the mean,
 so every miss counts, and only sessions of 10 groups or more go on the board,
 since a handful of lucky groups says little. Beside the best is your form:
 the median of your last 10 sessions, which one bad day hardly moves. A chart

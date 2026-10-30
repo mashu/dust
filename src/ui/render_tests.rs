@@ -1660,7 +1660,8 @@ fn results_say_where_the_session_stands_on_the_board() {
     fn long() -> SessionResult {
         let mut result = session("2026-09-03", 0.9);
         result.groups = (0..5).flat_map(|_| result.groups.clone()).collect();
-        result.score = 600.0;
+        // Twenty characters sent: 60 points for every five.
+        result.score = 240.0;
         result
     }
     let best = render(|| {
@@ -2478,7 +2479,7 @@ mod interactions {
             },
         );
         assert!(ui.shows("pill-all-modes") && ui.shows("pill-contest"));
-        assert!(ui.has("A WPX run earns about 30% less a group"));
+        assert!(ui.has("Runs are rated here as any session is"));
         assert!(!ui.shows("kind-cq-wpx"), "no contest chosen yet");
         ui.click("pill-contest");
         assert!(
@@ -2486,7 +2487,7 @@ mod interactions {
             "{}",
             ui.html()
         );
-        assert!(!ui.has("A WPX run earns about 30% less a group"));
+        assert!(!ui.has("Runs are rated here as any session is"));
         assert!(ui.has("Ranked by verified contest score, of what was logged clean, among runs set to 10 minutes."));
         assert!(ui.has("The board takes runs of 5 minutes or more that hold 10 groups or more"));
         assert!(ui.has(" verified points</span>"), "{}", ui.html());

@@ -8,6 +8,13 @@
 //! long enough for that mean to say something: [`BOARD_MIN_GROUPS`] groups or
 //! more, as RufzXP counts only a whole run.
 //!
+//! A group earns more the longer it is, so on the board a group is
+//! [`RATED_GROUP_CHARS`] characters: a session is rated by what it earned
+//! for every five it sent. Groups of two and groups of eight, a Koch session
+//! and a callsign one, a run's short serials and its calls, are ranked by
+//! their copy, not their length, and a group of five rates as it earns. A
+//! miss still costs its whole group, as in RufzXP.
+//!
 //! How a learner is copying these days is the median of their last few
 //! sessions' ([`FORM_SESSIONS`]): one bad day does not drag it down the way it
 //! would an average.
@@ -33,6 +40,7 @@
 
 use crate::contest::{ContestKind, StoredLog};
 use crate::numeric::median;
+use crate::score::count_valid_letters;
 use crate::session::SessionResult;
 use crate::settings::CharSetMode;
 
@@ -46,6 +54,11 @@ pub const BOARD_RUN_MIN_S: u64 = 300;
 /// How many of the latest sessions the form is the median of.
 pub const FORM_SESSIONS: usize = 10;
 
+/// The characters a group counts as on the board: points grow with a
+/// group's length, so a session is rated by what it earned for every this
+/// many characters sent, whatever the length of its groups.
+pub const RATED_GROUP_CHARS: u32 = 5;
+
 /// One session's place on the board, and what it was.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoardEntry {
@@ -54,8 +67,9 @@ pub struct BoardEntry {
     pub place: usize,
     /// Where the session sits in the history it was read from.
     pub index: usize,
-    /// What it is ranked by ([`Ranking`]): what it earned a group, or a
-    /// run's verified score or clean QSOs an hour.
+    /// What it is ranked by ([`Ranking`]): what it earned a group of
+    /// [`RATED_GROUP_CHARS`] characters, or a run's verified score or
+    /// clean QSOs an hour.
     pub rating: f64,
     /// What it earned in all.
     pub score: f64,
@@ -75,9 +89,9 @@ pub struct BoardEntry {
     pub limit_s: Option<u32>,
 }
 
-/// What a session earned a group, if it can go on the board: a score that
-/// could be read and earned something, over enough groups, and for a
-/// contest run, a whole run.
+/// What a session earned a group of [`RATED_GROUP_CHARS`] characters, if
+/// it can go on the board: a score that could be read and earned
+/// something, over enough groups, and for a contest run, a whole run.
 pub fn per_group(session: &SessionResult) -> Option<f64> {
     earned(session, false)
 }
@@ -87,15 +101,21 @@ pub fn per_group(session: &SessionResult) -> Option<f64> {
 /// Show copy on or off as `assisted` says.
 fn earned(session: &SessionResult, assisted: bool) -> Option<f64> {
     let groups = session.groups.len();
+    let chars: u32 = session
+        .groups
+        .iter()
+        .map(|group| count_valid_letters(&group.sent))
+        .sum();
     (session.score.is_finite()
         && session.score > 0.0
+        && chars > 0
         && groups >= BOARD_MIN_GROUPS
         && if session.char_set_mode == CharSetMode::Contest {
             a_whole_run(session, assisted)
         } else {
             !assisted
         })
-    .then(|| session.score / groups as f64)
+    .then(|| session.score * f64::from(RATED_GROUP_CHARS) / f64::from(chars))
 }
 
 /// Whether a contest run says something of a whole run: its log reads, it
@@ -119,7 +139,8 @@ fn a_whole_run(session: &SessionResult, assisted: bool) -> bool {
 /// What a board ranks the sessions it holds by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Ranking {
-    /// What a session earned a group: the one measure every mode shares.
+    /// What a session earned a group of [`RATED_GROUP_CHARS`] characters:
+    /// the one measure every mode, and every length of group, shares.
     #[default]
     PerGroup,
     /// A run's verified contest score, among the runs set to this length,
@@ -492,15 +513,24 @@ mod tests {
     use crate::contest::bot::Runtime;
     use crate::contest::bot::script::{ScriptCalls, run_settings};
     use crate::contest::{ContestEvent, OpKey, Sender};
-    use crate::session::GroupResult;
+    use crate::session::{GroupResult, SessionTiming};
 
-    /// A session of `groups` groups that earned `score` in all.
+    /// A group of five characters, copied right.
+    fn five() -> GroupResult {
+        GroupResult {
+            sent: "KMRSU".into(),
+            received: "KMRSU".into(),
+            correct: true,
+        }
+    }
+
+    /// A session of `groups` groups of five that earned `score` in all.
     fn session(timestamp: u64, score: f64, groups: usize, mode: CharSetMode) -> SessionResult {
         SessionResult {
             timestamp,
             score,
             char_set_mode: mode,
-            groups: vec![GroupResult::default(); groups],
+            groups: vec![five(); groups],
             date: format!("2026-10-{:02}", 1 + timestamp % 28),
             ..SessionResult::empty_for_test()
         }
@@ -531,6 +561,58 @@ mod tests {
         let board = score_board(&[long, short], BoardOf::All, Ranking::PerGroup);
         assert_eq!(board[0].timestamp, 2);
         assert_eq!(board[0].rating, 70.0);
+    }
+
+    /// `groups` groups of `length` characters, copied right, drawn evenly
+    /// from the same eight letters and sent alike, kept at `timestamp` and
+    /// scored as it is stored.
+    fn copied(timestamp: u64, groups: usize, length: usize) -> SessionResult {
+        let letters: Vec<char> = "KMRSUAPT".chars().collect();
+        let mut drawn = letters.iter().cycle();
+        let groups: Vec<GroupResult> = (0..groups)
+            .map(|_| {
+                let text: String = drawn.by_ref().take(length).collect();
+                GroupResult {
+                    sent: text.clone(),
+                    received: text,
+                    correct: true,
+                }
+            })
+            .collect();
+        let mut session = SessionResult {
+            timestamp,
+            group_timings: vec![SessionTiming::default(); groups.len()],
+            groups,
+            ..SessionResult::empty_for_test()
+        };
+        session.score = session.points();
+        session
+    }
+
+    /// The same copy rates the same whatever the length of its groups: a
+    /// group earns more the longer it is, so groups of two, five and eight,
+    /// eighty characters copied right in each session, would rank by their
+    /// length a group. Rated by each five characters sent, none sets a new
+    /// best over the one before it, and a group of five rates as it earns.
+    #[test]
+    fn the_length_of_its_groups_does_not_rank_a_session() {
+        let sessions = [copied(1, 40, 2), copied(2, 16, 5), copied(3, 10, 8)];
+        assert!(sessions[2].score / 10.0 > 3.0 * sessions[0].score / 40.0);
+        let rated: Vec<f64> = sessions.iter().filter_map(per_group).collect();
+        assert_eq!(rated.len(), 3);
+        for rating in &rated {
+            assert!((rating - rated[0]).abs() < 1e-6, "{rated:?}");
+        }
+        assert!((rated[1] - sessions[1].score / 16.0).abs() < 1e-9);
+        assert_eq!(board_place(&sessions, 3), Some((3, 3)));
+        let timeline = score_timeline(&sessions, BoardOf::All, Ranking::PerGroup);
+        assert_eq!(
+            timeline
+                .iter()
+                .map(|point| point.set_record)
+                .collect::<Vec<_>>(),
+            [true, false, false]
+        );
     }
 
     /// Too few groups say too little: a lucky handful is not a place.

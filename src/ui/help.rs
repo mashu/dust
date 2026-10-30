@@ -5,8 +5,8 @@
 use cw_core::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
     FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS, MASTERED_MIN_ACCURACY,
-    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS,
-    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
+    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RATED_GROUP_CHARS, REACTION_MIN_MS, RECENT_TRIES,
+    RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -325,7 +325,7 @@ pub fn board(ranking: Ranking) -> Element {
         dl { class: "help-terms",
             dt { "Points a group" }
             dd {
-                "A session's score is what its groups earn, more for copy at speed. Ranked by what it earned a group, a long session is no better than a short one for the same copy. A session goes on with {BOARD_MIN_GROUPS} groups or more."
+                "A session's score is what its groups earn: more for copy at speed, and more for a longer group. Points a group are what it earned for every {RATED_GROUP_CHARS} characters sent, so neither a long session nor long groups beat short ones for the same copy. A session goes on with {BOARD_MIN_GROUPS} groups or more."
             }
             dt { "Contest runs" }
             dd {
