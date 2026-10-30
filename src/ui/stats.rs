@@ -1,7 +1,7 @@
 use cw_core::{
     AccuracyPoint, CharSetMode, Estimate, EstimatePoint, SessionResult, TrainingSettings,
-    accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, level_up_line,
-    mastered_count, practised_modes, span_history, speed_history,
+    accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, best_accuracy,
+    level_up_line, mastered_count, overall_accuracy, practised_modes, span_history, speed_history,
 };
 use dioxus::prelude::*;
 
@@ -378,15 +378,15 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
     // adaptive feature steers and sessions are judged otherwise.
     let threshold = level_up_line(&settings);
     let chart = accuracy_chart(&sessions);
-    let avg = if sessions.is_empty() {
-        0.0
-    } else {
-        sessions.iter().map(|s| s.accuracy).sum::<f64>() / sessions.len() as f64 * 100.0
+    // Over every character sent, and the best of the sessions long enough
+    // to go on the board: a group or two copied right is no best.
+    let pct = |accuracy: Option<f64>| {
+        accuracy.map_or("—".to_string(), |accuracy| {
+            format!("{}%", (accuracy * 100.0).round())
+        })
     };
-    let best = sessions
-        .iter()
-        .map(|s| s.accuracy * 100.0)
-        .fold(0.0_f64, f64::max);
+    let avg = pct(overall_accuracy(&sessions));
+    let best = pct(best_accuracy(&sessions));
     let mastered = mastered_count(&sessions);
     let geometry = chart_geometry(&chart, threshold);
     let latest = chart.last().map(|p| p.accuracy_pct).unwrap_or(0.0);
@@ -403,11 +403,11 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                 div { class: "grid-3",
                     div { class: "kpi emerald",
                         div { class: "tiny", "Average" }
-                        div { class: "value", "{avg.round()}%" }
+                        div { class: "value", "{avg}" }
                     }
                     div { class: "kpi indigo",
                         div { class: "tiny", "Best" }
-                        div { class: "value", "{best.round()}%" }
+                        div { class: "value", "{best}" }
                     }
                     div { class: "kpi blue",
                         div { class: "tiny", "Mastered" }

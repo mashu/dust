@@ -125,9 +125,9 @@ pub use stats::{
     CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_MIN_TRIES,
     HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MasteryStatus,
     MistakeStats, RECENT_TRIES, SamplingRow, SessionHistoryRow, SessionRecognition, accuracy_chart,
-    character_diagnostics, group_length_forecast, mastered_count, mistake_stats, practised_modes,
-    sampling_rows, session_history, session_recognition, span_history, speed_forecast,
-    speed_history,
+    best_accuracy, character_diagnostics, group_length_forecast, mastered_count, mistake_stats,
+    overall_accuracy, practised_modes, sampling_rows, session_history, session_recognition,
+    span_history, speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

@@ -461,6 +461,8 @@ fn stats_count_sessions_from_every_character_set() {
     assert!(html.contains("2 sessions ·"));
     // Average of 90% and 70%.
     assert!(html.contains("80%"));
+    // Neither session is long enough to be a best.
+    assert!(html.contains(r#"<div class="tiny">Best</div><div class="value">—</div>"#));
 }
 
 #[test]

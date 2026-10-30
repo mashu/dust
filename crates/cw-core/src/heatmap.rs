@@ -24,11 +24,14 @@ pub struct HeatmapDay {
     pub chars: u32,
     pub sessions: u32,
     pub group_count: u32,
+    /// Accuracy times the characters sent at it, so the day's accuracy is
+    /// that of its copy, character by character: a session of two groups
+    /// moves it as much as two groups do.
     pub accuracy_sum: f64,
-    /// Sessions whose accuracy could be read, which is what the average is
-    /// over. A session with a broken accuracy still practised that day, but
-    /// it says nothing about how well.
-    pub accuracy_sessions: u32,
+    /// The characters the accuracy is summed over: those of sessions whose
+    /// accuracy could be read. A session with a broken accuracy still
+    /// practised that day, but it says nothing about how well.
+    pub accuracy_chars: u32,
     /// Character and spacing speed, each times the characters sent at it, so
     /// the day's speed is what most of its copy was sent at.
     pub char_wpm_sum: f64,
@@ -48,7 +51,7 @@ impl HeatmapDay {
             sessions: 0,
             group_count: 0,
             accuracy_sum: 0.0,
-            accuracy_sessions: 0,
+            accuracy_chars: 0,
             char_wpm_sum: 0.0,
             effective_wpm_sum: 0.0,
             speed_chars: 0,
@@ -56,12 +59,9 @@ impl HeatmapDay {
         }
     }
 
+    /// The day's accuracy over every character it sent.
     pub fn avg_accuracy(&self) -> Option<f64> {
-        if self.accuracy_sessions == 0 {
-            None
-        } else {
-            Some(self.accuracy_sum / f64::from(self.accuracy_sessions))
-        }
+        (self.accuracy_chars > 0).then(|| self.accuracy_sum / f64::from(self.accuracy_chars))
     }
 
     /// The character speed most of the day's copy was sent at.
@@ -151,8 +151,8 @@ pub fn aggregate_heatmap(sessions: &[SessionResult]) -> BTreeMap<String, Heatmap
             .group_count
             .saturating_add(u32::try_from(session.groups.len()).unwrap_or(u32::MAX));
         if session.accuracy.is_finite() && (0.0..=1.0).contains(&session.accuracy) {
-            entry.accuracy_sum += session.accuracy;
-            entry.accuracy_sessions += 1;
+            entry.accuracy_sum += session.accuracy * f64::from(session.total_chars);
+            entry.accuracy_chars = entry.accuracy_chars.saturating_add(session.total_chars);
         }
         if readable_wpm(session.char_wpm) && readable_wpm(session.effective_wpm) {
             let chars = f64::from(session.total_chars);
@@ -303,7 +303,28 @@ mod tests {
         let day = days.get("2026-07-17").expect("day");
         assert_eq!(day.chars, 16);
         assert_eq!(day.sessions, 2);
-        assert!((day.avg_accuracy().unwrap_or(0.0) - 0.9).abs() < 1e-9);
+        // Eight of ten and six of six: fourteen of sixteen characters.
+        assert!((day.avg_accuracy().unwrap_or(0.0) - 0.875).abs() < 1e-9);
+    }
+
+    /// A day's accuracy is that of its copy, character by character: a
+    /// session of one group missed is one group of the day's copy, not
+    /// half of it.
+    #[test]
+    fn a_day_weighs_each_session_by_what_it_sent() {
+        let sessions = [
+            session("2026-07-17", 2, 0.0),
+            session("2026-07-17", 100, 0.96),
+        ];
+        let day = aggregate_heatmap(&sessions)
+            .remove("2026-07-17")
+            .expect("day");
+        let accuracy = day.avg_accuracy().expect("an accuracy");
+        assert!((accuracy - 96.0 / 102.0).abs() < 1e-9, "{accuracy}");
+        let grid =
+            build_heatmap(&sessions, "2026-07-17", 1, HeatmapColorMode::Accuracy).expect("grid");
+        let shade = grid.cell("2026-07-17").and_then(|cell| cell.intensity);
+        assert!(shade.is_some_and(|shade| shade > 0.9), "{shade:?}");
     }
 
     /// A day's speed is what most of its copy was sent at, and its score is

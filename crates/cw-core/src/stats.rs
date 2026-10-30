@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::alignment::align_group;
 use crate::belief::{EstimatePoint, sessions_faded};
+use crate::board::BOARD_MIN_GROUPS;
 use crate::contest::{ContestKind, StoredLog};
 use crate::morse::LCWO_SEQUENCE;
 use crate::numeric::median;
@@ -343,6 +344,40 @@ pub fn accuracy_chart(sessions: &[SessionResult]) -> Vec<AccuracyPoint> {
             timestamp: s.timestamp,
         })
         .collect()
+}
+
+/// Whether a session's accuracy can be read: a session with a broken one
+/// still practised, but says nothing about how well.
+fn readable_accuracy(session: &SessionResult) -> bool {
+    session.accuracy.is_finite() && (0.0..=1.0).contains(&session.accuracy)
+}
+
+/// The accuracy of every character `sessions` sent: each session weighs as
+/// much as the characters it sent, so one of a group or two moves it no
+/// more than those groups do. None where no accuracy can be read.
+pub fn overall_accuracy(sessions: &[SessionResult]) -> Option<f64> {
+    let (right, sent) = sessions
+        .iter()
+        .filter(|session| readable_accuracy(session))
+        .fold((0.0, 0_u64), |(right, sent), session| {
+            let chars = session.total_chars;
+            (
+                right + session.accuracy * f64::from(chars),
+                sent + u64::from(chars),
+            )
+        });
+    (sent > 0).then(|| right / sent as f64)
+}
+
+/// The best accuracy of a session long enough to say something: one of
+/// [`BOARD_MIN_GROUPS`] groups or more, as the score board takes. A group
+/// or two copied right, in a session ended early, is no best.
+pub fn best_accuracy(sessions: &[SessionResult]) -> Option<f64> {
+    sessions
+        .iter()
+        .filter(|session| session.groups.len() >= BOARD_MIN_GROUPS && readable_accuracy(session))
+        .map(|session| session.accuracy)
+        .reduce(f64::max)
 }
 
 /// Each character of `session` the rule times (docs/recognition.md), with
@@ -1173,6 +1208,37 @@ mod tests {
         assert_eq!(chart[0].date, "2026-09-01");
         assert_eq!(chart[0].accuracy_pct, 50.0);
         assert!(accuracy_chart(&[]).is_empty());
+    }
+
+    /// A session of `groups` groups, `chars` characters in all, copied at
+    /// `accuracy`.
+    fn sized(groups: usize, chars: u32, accuracy: f64) -> SessionResult {
+        SessionResult {
+            groups: vec![GroupResult::default(); groups],
+            total_chars: chars,
+            accuracy,
+            ..SessionResult::empty_for_test()
+        }
+    }
+
+    /// The Overview's accuracy is that of every character sent, so a
+    /// session of one group missed is one group of it, not half; and its
+    /// best is a session long enough to be on the board, so one group
+    /// copied right in a session ended early is never the best.
+    #[test]
+    fn a_session_counts_for_its_size_in_the_overview() {
+        let short = sized(1, 2, 0.0);
+        let long = sized(50, 100, 0.96);
+        let average = overall_accuracy(&[short, long.clone()]).expect("an average");
+        assert!((average - 96.0 / 102.0).abs() < 1e-9, "{average}");
+        let lucky = sized(1, 2, 1.0);
+        assert_eq!(best_accuracy(&[lucky.clone(), long.clone()]), Some(0.96));
+        assert_eq!(best_accuracy(std::slice::from_ref(&lucky)), None);
+        assert_eq!(overall_accuracy(&[]), None);
+        // A broken accuracy is left out of both.
+        let broken = sized(20, 40, f64::NAN);
+        assert_eq!(overall_accuracy(std::slice::from_ref(&broken)), None);
+        assert_eq!(best_accuracy(&[broken, long]), Some(0.96));
     }
 
     #[test]
