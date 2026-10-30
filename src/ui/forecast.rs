@@ -12,14 +12,15 @@
 //! they say there is none to read, rather than the model's first guess.
 
 use cw_core::{
-    CharSetMode, EstimateReading, SessionResult, SpeedForecast, SpeedPath, TrainingSettings,
-    adapts_speed, group_length_forecast, span_history, speed_forecast, speed_history,
+    CharSetMode, EstimateReading, SpeedForecast, SpeedPath, TrainingSettings, adapts_speed,
+    group_length_forecast, speed_forecast,
 };
 use dioxus::prelude::*;
 
+use crate::ui::figures::{History, without_band};
 use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds};
+use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds, span_history_of, speed_history_of};
 use crate::ui::widgets::{CardHead, IconName, control_id};
 
 /// How far either side of the best guess the likely range runs, in its
@@ -164,13 +165,17 @@ fn no_history_card(
 /// The group lengths the next session can send: how often a group that
 /// long is copied whole against your aim, and how likely each is next.
 /// Nothing for callsigns, which are as long as they are.
-pub fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
-    let rows = group_length_forecast(settings, sessions);
+pub fn group_length_card(settings: &TrainingSettings, sessions: &History) -> Element {
+    let rows = sessions.figure(
+        "group length forecast",
+        without_band(settings),
+        |sessions| group_length_forecast(settings, sessions),
+    );
     let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
         return rsx! {};
     };
     let aim = settings.curriculum.aim.groups_whole();
-    let Some(sent) = span_history(settings, sessions)
+    let Some(sent) = span_history_of(sessions, settings)
         .last()
         .map(|point| point.sent)
     else {
@@ -272,14 +277,16 @@ fn speed_reach(copy: EstimateReading, low: f64, high: f64) -> String {
 /// The speeds the next session can send at: the share of characters
 /// copied right at each against your aim, and how likely the next group is
 /// to be sent at about each.
-pub fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
-    let rows = speed_forecast(settings, sessions);
+pub fn speed_card(settings: &TrainingSettings, sessions: &History) -> Element {
+    let rows = sessions.figure("speed forecast", without_band(settings), |sessions| {
+        speed_forecast(settings, sessions)
+    });
     let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
         return rsx! {};
     };
     let aim = settings.curriculum.aim.chars_right();
     // The speed your aim is reached at, as the Overview's copy speed says.
-    let Some(reach) = speed_history(settings, sessions)
+    let Some(reach) = speed_history_of(sessions, settings)
         .last()
         .map(|point| speed_reach(point.reading(), first.wpm, last.wpm))
     else {

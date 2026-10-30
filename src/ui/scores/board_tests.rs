@@ -20,7 +20,12 @@ fn koch(day: u32, per_group: f64) -> SessionResult {
 }
 
 fn board(sessions: Vec<SessionResult>) -> Ui {
-    Ui::new(ScoresTab, ScoresTabProps { sessions })
+    Ui::new(
+        ScoresTab,
+        ScoresTabProps {
+            sessions: sessions.into(),
+        },
+    )
 }
 
 #[test]

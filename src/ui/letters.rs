@@ -15,9 +15,11 @@
 
 use cw_core::{
     CharacterDiagnostic, MASTERED_MIN_ACCURACY, MasteryStatus, RECOGNITION_MIN_TRIES, Recognition,
-    RecognitionBand, RecognitionBands, SessionResult, TrainingSettings, character_diagnostics,
+    RecognitionBand, RecognitionBands, TrainingSettings, character_diagnostics,
 };
 use dioxus::prelude::*;
+
+use crate::ui::figures::History;
 
 use crate::ui::bigram::id_part;
 use crate::ui::help;
@@ -229,9 +231,9 @@ fn with_status(letters: &[CharacterDiagnostic], status: MasteryStatus) -> Vec<ch
 }
 
 #[component]
-pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+pub fn LettersTab(settings: TrainingSettings, #[props(into)] sessions: History) -> Element {
     let bands = settings.recognition;
-    let letters = character_diagnostics(&sessions);
+    let letters = sessions.figure("letters", (), character_diagnostics);
     if letters.is_empty() {
         return rsx! {
             div { class: "card", p { class: "muted", "No letter data yet." } }

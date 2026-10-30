@@ -4,12 +4,14 @@
 //! What the store holds is read alongside the page, since a deletion that
 //! only reached the screen would come back at the next launch.
 
-use cw_core::{CharSetMode, SessionResult, TrainingSettings};
+use cw_core::{CharSetMode, SessionHistoryRow, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
 use crate::persist::Store;
 use crate::testing::{Ui, run, stored_run, stored_session, test_settings};
+use crate::ui::figures::History;
 use crate::ui::stats::StatsView;
+use crate::ui::stats_detail::HISTORY_PAGE;
 
 /// Five sessions a day apart, oldest first, the way the store keeps them.
 fn history() -> Vec<SessionResult> {
@@ -410,6 +412,41 @@ fn a_contest_row_opens_the_runs_results() {
         ui.click("btn-history");
         assert!(ui.has("2 sessions on this device"));
         assert!(recorder.calls().is_empty(), "nothing was started");
+    });
+}
+
+/// A long history makes the rows of the sessions it shows, and no others:
+/// a row reads its run's log, and a page more makes the rows of that page.
+#[test]
+fn a_long_history_makes_only_the_rows_it_shows() {
+    run(|| async {
+        let long: Vec<SessionResult> = (0..100u64)
+            .map(|day| {
+                let mut session = stored_session("2026-10-01", &[("KM", "KM")]);
+                session.timestamp = day * 86_400_000;
+                session
+            })
+            .collect();
+        let (mut ui, _recorder) = open_history(&long);
+        let made = |ui: &mut Ui, shown: usize| {
+            ui.with_app(|_| {
+                let history = crate::state::in_root(consume_context::<Memo<History>>);
+                let history = history.peek().clone();
+                // Found made already, or none at all.
+                history
+                    .figure("history rows", shown, |_| Vec::<SessionHistoryRow>::new())
+                    .len()
+            })
+        };
+        assert_eq!(made(&mut ui, HISTORY_PAGE), HISTORY_PAGE);
+        assert_eq!(ui.controls("history-delete-").len(), HISTORY_PAGE);
+        ui.click("history-more");
+        assert_eq!(made(&mut ui, 2 * HISTORY_PAGE), 2 * HISTORY_PAGE);
+        assert_eq!(ui.take_worked_out("history rows"), 2);
+        // Choosing in the list makes none again.
+        ui.click("history-select");
+        ui.click("history-pick-99");
+        assert_eq!(ui.take_worked_out("history rows"), 0);
     });
 }
 

@@ -18,8 +18,9 @@ use dioxus::prelude::*;
 
 use super::auto_level::AutoLevelCard;
 use super::envelope::EnvelopeCard;
+use super::figures::History;
 use super::heatmap::{StreakCard, StreakCardProps};
-use super::home::Home;
+use super::home::{Home, Practice};
 use super::listen::ListenView;
 use super::paddle::{PaddleKeys, PaddlePad, page_key, use_paddle_keys, window_key};
 use super::results::ResultsView;
@@ -220,17 +221,19 @@ fn history() -> Vec<SessionResult> {
     ]
 }
 
+/// What Home shows of `sessions` on `today`.
+fn practice(sessions: Vec<SessionResult>, today: &str) -> Practice {
+    Practice::of(&History::from(sessions), today)
+}
+
 #[test]
 fn home_renders_the_hero_and_stats() {
     let html = render(|| {
         rsx! {
             Home {
                 settings: TrainingSettings::default(),
-                last_accuracy: Some(0.94),
-                session_count: 3,
+                practice: practice(history(), "2026-09-03"),
                 pool: "KM01".to_string(),
-                sessions: history(),
-                today: "2026-09-03".to_string(),
                 auto_progress: None,
                 on_start: move |_| {},
                 on_listen: move |_| {},
@@ -259,11 +262,8 @@ fn home_in_callsign_mode_points_at_no_character_and_counts_calls() {
         rsx! {
             Home {
                 settings,
-                last_accuracy: None,
-                session_count: 0,
+                practice: practice(Vec::new(), "2026-09-03"),
                 pool: String::new(),
-                sessions: Vec::new(),
-                today: "2026-09-03".to_string(),
                 auto_progress: None,
                 on_start: move |_| {},
                 on_listen: move |_| {},
@@ -286,11 +286,8 @@ fn contest_home(my_call: &'static str) -> String {
         rsx! {
             Home {
                 settings,
-                last_accuracy: None,
-                session_count: 0,
+                practice: practice(Vec::new(), "2026-10-21"),
                 pool: String::new(),
-                sessions: Vec::new(),
-                today: "2026-10-21".to_string(),
                 auto_progress: None,
                 on_start: move |_| {},
                 on_listen: move |_| {},
@@ -368,11 +365,8 @@ fn sprint_home(my_name: &'static str, my_state: &'static str) -> String {
         rsx! {
             Home {
                 settings,
-                last_accuracy: None,
-                session_count: 0,
+                practice: practice(Vec::new(), "2026-10-21"),
                 pool: String::new(),
-                sessions: Vec::new(),
-                today: "2026-10-21".to_string(),
                 auto_progress: None,
                 on_start: move |_| {},
                 on_listen: move |_| {},
@@ -422,11 +416,8 @@ fn home_without_history_invites_a_first_session() {
         rsx! {
             Home {
                 settings: TrainingSettings::default(),
-                last_accuracy: None,
-                session_count: 0,
+                practice: practice(Vec::new(), "2026-09-03"),
                 pool: "KM".to_string(),
-                sessions: Vec::new(),
-                today: "2026-09-03".to_string(),
                 auto_progress: None,
                 on_start: move |_| {},
                 on_listen: move |_| {},
@@ -451,7 +442,7 @@ fn stats_count_sessions_from_every_character_set() {
         StatsView,
         StatsViewProps {
             settings: TrainingSettings::default(),
-            sessions: vec![digits, koch],
+            sessions: vec![digits, koch].into(),
             on_delete: None,
             backups: None,
         },
@@ -1331,11 +1322,8 @@ fn field_day_home(my_call: &'static str, my_section: &'static str) -> String {
         rsx! {
             Home {
                 settings,
-                last_accuracy: None,
-                session_count: 0,
+                practice: practice(Vec::new(), "2026-10-22"),
                 pool: String::new(),
-                sessions: Vec::new(),
-                today: "2026-10-22".to_string(),
                 auto_progress: None,
                 on_start: move |_| {},
                 on_listen: move |_| {},
@@ -1644,7 +1632,7 @@ fn the_level_up_line_shows_only_where_it_is_what_levels_you_up() {
             StatsView,
             StatsViewProps {
                 settings,
-                sessions: vec![session("2026-09-01", 0.85), session("2026-09-02", 0.95)],
+                sessions: vec![session("2026-09-01", 0.85), session("2026-09-02", 0.95)].into(),
                 on_delete: None,
                 backups: None,
             },
@@ -2572,7 +2560,7 @@ mod interactions {
     use super::*;
     use crate::testing::{Ui, stored_session, test_settings};
     use crate::ui::band::BandConditionsCard;
-    use crate::ui::heatmap::ActivityHeatmap;
+    use crate::ui::heatmap::{ActivityHeatmap, Calendar};
     use crate::ui::settings::SettingsView;
     use crate::ui::widgets::control_id;
     use dioxus::prelude::{Code, Key};
@@ -2581,11 +2569,13 @@ mod interactions {
     fn HeatmapHarness() -> Element {
         rsx! {
             ActivityHeatmap {
-                sessions: vec![
-                    stored_session("2026-09-07", &[("KM", "KM")]),
-                    stored_session("2026-09-08", &[("KM", "KX")]),
-                ],
-                today: "2026-09-09".to_string(),
+                calendar: Calendar::of(
+                    &[
+                        stored_session("2026-09-07", &[("KM", "KM")]),
+                        stored_session("2026-09-08", &[("KM", "KX")]),
+                    ],
+                    "2026-09-09",
+                ),
             }
         }
     }
@@ -2770,7 +2760,7 @@ mod interactions {
         let mut ui = Ui::new(
             ScoresTab,
             ScoresTabProps {
-                sessions: contest_history(3),
+                sessions: contest_history(3).into(),
             },
         );
         // The personal best names its contest.
@@ -2798,7 +2788,7 @@ mod interactions {
         let mut ui = Ui::new(
             ScoresTab,
             ScoresTabProps {
-                sessions: contest_history(3),
+                sessions: contest_history(3).into(),
             },
         );
         assert!(ui.shows("pill-all-modes") && ui.shows("pill-contest"));
@@ -2973,7 +2963,7 @@ mod interactions {
     fn LettersHarness() -> Element {
         let half = [("K", "K"), ("K", "X")].repeat(5);
         let clean = vec![("K", "K"); 10];
-        let sessions = [
+        let sessions: Vec<_> = [
             (1, stored_session("2026-09-01", &half)),
             (2, stored_session("2026-09-02", &clean)),
             (3, stored_session("2026-09-03", &clean)),
@@ -3428,7 +3418,7 @@ mod interactions {
         if !long {
             groups.truncate(8);
         }
-        let sessions = (0..sessions)
+        let sessions: Vec<_> = (0..sessions)
             .map(|_| stored_session("2026-09-08", &groups))
             .collect();
         rsx! {
@@ -3736,8 +3726,7 @@ mod interactions {
         let html = render(|| {
             rsx! {
                 ActivityHeatmap {
-                    sessions: vec![stored_session("2019-01-01", &[("KM", "KM")])],
-                    today: "2026-09-09".to_string(),
+                    calendar: Calendar::of(&[stored_session("2019-01-01", &[("KM", "KM")])], "2026-09-09"),
                 }
             }
         });
@@ -3749,7 +3738,7 @@ mod interactions {
     fn a_calendar_with_no_readable_date_draws_nothing() {
         let html = render(|| {
             rsx! {
-                ActivityHeatmap { sessions: Vec::new(), today: "nonsense".to_string() }
+                ActivityHeatmap { calendar: Calendar::of(&[], "nonsense") }
             }
         });
         assert!(html.is_empty());

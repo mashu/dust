@@ -1,17 +1,17 @@
-use std::borrow::Cow;
+use std::rc::Rc;
 
 use cw_core::{
-    AccuracyPoint, CharSetMode, EstimatePoint, EstimateReading, SessionResult, TrainingSettings,
-    accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, best_accuracy,
-    level_up_line, mastered_count, overall_accuracy, practised_modes, span_history, speed_history,
+    AccuracyPoint, CharSetMode, EstimatePoint, EstimateReading, TrainingSettings, accuracy_chart,
+    adaptive_speed_on, adapts_group_size, adapts_speed, best_accuracy, level_up_line,
+    mastered_count, overall_accuracy, practised_modes, span_history, speed_history,
 };
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
-use crate::time::as_shown;
 use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
+use crate::ui::figures::History;
 use crate::ui::format::counted;
 use crate::ui::help;
 use crate::ui::letters::LettersTab;
@@ -48,6 +48,21 @@ struct ChartGeometry {
     dots: Vec<(f64, f64)>,
     floor_pct: f64,
     threshold_y: Option<f64>,
+}
+
+/// What the Overview reads of the whole history, worked out once for it.
+struct Overview {
+    /// The accuracy chart, a point a session.
+    chart: Vec<AccuracyPoint>,
+    average: Option<f64>,
+    best: Option<f64>,
+    mastered: usize,
+}
+
+/// The character sets `sessions` hold any practice in ([`practised_modes`]),
+/// as every card that offers them reads them.
+pub(crate) fn practised(sessions: &History) -> Rc<Vec<CharSetMode>> {
+    sessions.figure("practised modes", (), practised_modes)
 }
 
 /// Accuracy clusters near the top, so the axis starts below the worst session
@@ -273,14 +288,46 @@ pub(crate) fn contest_speeds(settings: &TrainingSettings) -> String {
     format!("{callers} {YOUR_SPEED_KEYS}")
 }
 
+/// The newest of `points`, as many as a trend card draws.
+fn newest(points: &[EstimatePoint]) -> Vec<EstimatePoint> {
+    points[points.len().saturating_sub(TREND_SESSIONS_SHOWN)..].to_vec()
+}
+
+/// Your copy span after each session of the character set `settings`
+/// train ([`span_history`]), as the Overview and the Sampling tab read it:
+/// it reads the set alone.
+pub(crate) fn span_history_of(
+    sessions: &History,
+    settings: &TrainingSettings,
+) -> Rc<Vec<EstimatePoint>> {
+    let mode = settings.curriculum.char_set_mode;
+    sessions.figure("span history", mode, |sessions| {
+        span_history(settings, sessions)
+    })
+}
+
+/// Your copy speed after each session of the character set `settings`
+/// train ([`speed_history`]), as the Overview and the Sampling tab read it:
+/// it reads the curriculum alone, the set, the aim and the group lengths.
+pub(crate) fn speed_history_of(
+    sessions: &History,
+    settings: &TrainingSettings,
+) -> Rc<Vec<EstimatePoint>> {
+    let curriculum = settings.curriculum.clone();
+    sessions.figure("speed history", curriculum, |sessions| {
+        speed_history(settings, sessions)
+    })
+}
+
 /// The copy span: how long a group you copy whole, and how that has moved,
 /// for each character set with groups drawn a character at a time in its
 /// history. Callsigns and words are as long as they are.
 #[component]
-fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+fn SpanCard(settings: TrainingSettings, sessions: History) -> Element {
     let mut chosen = use_signal(|| None::<CharSetMode>);
-    let modes: Vec<CharSetMode> = practised_modes(&sessions)
-        .into_iter()
+    let modes: Vec<CharSetMode> = practised(&sessions)
+        .iter()
+        .copied()
         .filter(|mode| mode.draws_characters())
         .collect();
     let current = settings.curriculum.char_set_mode;
@@ -290,9 +337,10 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
     let mut shown = settings.clone();
     shown.curriculum.char_set_mode = mode;
     let now = mode == current;
+    let points = span_history_of(&sessions, &shown);
     rsx! {
         TrendCard {
-            points: span_history(&shown, &sessions),
+            points: newest(&points),
             icon: IconName::Target,
             title: "Copy span",
             unit: "chars",
@@ -315,9 +363,9 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
 /// "Aim for" asks, and how that has moved, for each character set in the
 /// history.
 #[component]
-fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+fn CopySpeedCard(settings: TrainingSettings, sessions: History) -> Element {
     let mut chosen = use_signal(|| None::<CharSetMode>);
-    let modes = practised_modes(&sessions);
+    let modes = practised(&sessions).to_vec();
     let current = settings.curriculum.char_set_mode;
     let Some(mode) = shown_mode(chosen(), &modes, current) else {
         return rsx! {};
@@ -335,9 +383,10 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
         (true, true) => "Adaptive callers off",
         (true, false) => "Adaptive speed off",
     };
+    let points = speed_history_of(&sessions, &shown);
     rsx! {
         TrendCard {
-            points: speed_history(&shown, &sessions),
+            points: newest(&points),
             icon: IconName::Gauge,
             title: "Copy speed",
             unit: "WPM",
@@ -359,7 +408,9 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
 #[component]
 pub fn StatsView(
     settings: TrainingSettings,
-    sessions: Vec<SessionResult>,
+    /// The history, shared: read where it is kept, never copied.
+    #[props(into)]
+    sessions: History,
     /// Where deleting sessions from the history goes. Without it the history
     /// is only shown.
     on_delete: Option<EventHandler<Vec<SessionPick>>>,
@@ -372,17 +423,16 @@ pub fn StatsView(
     // Only the sampling snapshot narrows to the current set, and it does that
     // itself so it keeps matching what the trainer will actually draw. Each
     // tab works out its own figures when it is shown, and only then: a tab
-    // that is not open costs nothing.
+    // that is not open costs nothing; and what it works out is kept with
+    // the history until that changes, for the tab shown again and for Stats
+    // opened again ([`History::figure`]).
     //
     // History lists the sessions as they are stored, and picks one out by
     // its stamp to delete it; every other tab shows them as the clock reads
     // them, any stamped ahead of it settled after the latest that is not.
     let sessions = match tab() {
         StatsTab::History => sessions,
-        _ => match as_shown(&sessions) {
-            Cow::Owned(shown) => shown,
-            Cow::Borrowed(_) => sessions,
-        },
+        _ => sessions.shown(),
     };
     rsx! {
         div { class: "stack",
@@ -410,23 +460,33 @@ pub fn StatsView(
 }
 
 #[component]
-fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+fn OverviewTab(settings: TrainingSettings, sessions: History) -> Element {
+    #[cfg(test)]
+    crate::testing::rendered("OverviewTab");
     // A line, and a chip, only where a session's own accuracy is what levels
     // you up: not with auto level off or never levelling up, nor while an
     // adaptive feature steers and sessions are judged otherwise.
     let threshold = level_up_line(&settings);
-    let chart = accuracy_chart(&sessions);
     // Over every character sent, and the best of the sessions long enough
     // to go on the board: a group or two copied right is no best.
+    let overview = sessions.figure("overview", (), |sessions| Overview {
+        chart: accuracy_chart(sessions),
+        average: overall_accuracy(sessions),
+        best: best_accuracy(sessions),
+        mastered: mastered_count(sessions),
+    });
     let pct = |accuracy: Option<f64>| {
         accuracy.map_or("—".to_string(), |accuracy| {
             format!("{}%", (accuracy * 100.0).round())
         })
     };
-    let avg = pct(overall_accuracy(&sessions));
-    let best = pct(best_accuracy(&sessions));
-    let mastered = mastered_count(&sessions);
-    let geometry = chart_geometry(&chart, threshold);
+    let avg = pct(overview.average);
+    let best = pct(overview.best);
+    let mastered = overview.mastered;
+    let chart = &overview.chart;
+    let geometry = sessions.figure("accuracy chart", threshold, |_| {
+        chart_geometry(chart, threshold)
+    });
     let latest = chart.last().map(|p| p.accuracy_pct).unwrap_or(0.0);
     rsx! {
         div { class: "stack",
@@ -452,7 +512,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                         div { class: "value", "{mastered}" }
                     }
                 }
-                if let Some(geometry) = geometry {
+                if let Some(geometry) = geometry.as_ref() {
                     div { class: "card chart-card",
                         CardHead {
                             icon: IconName::Chart,

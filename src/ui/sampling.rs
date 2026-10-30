@@ -12,8 +12,10 @@
 //! on, the ones it is still finding out about, and the ones not heard yet,
 //! which have no row: there is nothing yet to draw of them.
 
-use cw_core::{CharSetMode, SamplingRow, SessionResult, TrainingSettings, sampling_rows};
+use cw_core::{CharSetMode, SamplingRow, TrainingSettings, sampling_rows};
 use dioxus::prelude::*;
+
+use crate::ui::figures::{History, without_band};
 
 use crate::ui::bigram::id_part;
 use crate::ui::help;
@@ -229,11 +231,13 @@ fn chips(lines: &[Line], standing: Standing) -> Vec<char> {
 /// next: the most work needed first, the likeliest first, or as taught.
 /// Those practised before and not drawn now are greyed below.
 #[component]
-pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+pub fn NextUpCard(settings: TrainingSettings, #[props(into)] sessions: History) -> Element {
     let mut order = use_signal(|| Order::MostWork);
     let threshold = (1.0 - settings.auto_level.auto_adjust_threshold / 100.0).clamp(0.0, 1.0);
     let top = scale_top(threshold);
-    let rows = sampling_rows(&settings, &sessions);
+    let rows = sessions.figure("sampling rows", without_band(&settings), |sessions| {
+        sampling_rows(&settings, sessions)
+    });
     let (mut drawn, mut others): (Vec<Line>, Vec<Line>) = rows
         .iter()
         .map(|row| line(row, threshold))
