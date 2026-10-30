@@ -1,4 +1,4 @@
-use cw_core::{BoardEntry, FORM_SESSIONS, Ranking, TimelinePoint};
+use cw_core::{BoardEntry, FORM_SESSIONS, PER_SESSION_UP_TO, Ranking, TimelinePoint};
 use dioxus::prelude::*;
 
 use super::{focus, rating_said, what_it_was};
@@ -48,13 +48,12 @@ fn timeline_xy(points: &[TimelinePoint]) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// The form as it went: a line through the median after each session.
-fn form_path(points: &[TimelinePoint], xy: &[(f64, f64)]) -> String {
-    let top = timeline_top(points);
+/// The form as it went: a line through the median after each session
+/// drawn, on a scale whose top is `top`.
+fn form_path(drawn: &[(&TimelinePoint, (f64, f64))], top: f64) -> String {
     path(
-        points
+        drawn
             .iter()
-            .zip(xy)
             .map(|(point, (x, _))| (*x, timeline_y(point.form, top))),
     )
 }
@@ -89,11 +88,16 @@ fn record_path(points: &[TimelinePoint], xy: &[(f64, f64)]) -> String {
 /// What the board ranks by over time: a dot a session, larger where it set
 /// the record, the record as it stood and the form through them, with the
 /// session marked said in full beneath. Marking another redraws the mark
-/// and what is said of it, not the dots.
+/// and what is said of it, not the dots. On a long history, the dots of
+/// its older weeks or months are the best of each.
 #[component]
 pub(super) fn ScoreTimeline(
     /// Every session on the board, oldest first.
     timeline: Vec<TimelinePoint>,
+    /// Where in it the sessions drawn as dots sit, with the form drawn
+    /// through them: every one, but on a long history the newest and the
+    /// best of each older week or month ([`super::timeline_dots`]).
+    dots: Vec<usize>,
     /// The board's rows, best first.
     board: Vec<BoardEntry>,
     /// When the best was set, marked while no row is.
@@ -112,7 +116,11 @@ pub(super) fn ScoreTimeline(
     crate::testing::rendered("ScoreTimeline");
     let xy = timeline_xy(&timeline);
     let record = record_path(&timeline, &xy);
-    let form_line = form_path(&timeline, &xy);
+    let drawn: Vec<(&TimelinePoint, (f64, f64))> = dots
+        .iter()
+        .filter_map(|at| Some((timeline.get(*at)?, *xy.get(*at)?)))
+        .collect();
+    let form_line = form_path(&drawn, timeline_top(&timeline));
     let spots: Vec<(u64, f64, f64)> = timeline
         .iter()
         .zip(&xy)
@@ -129,7 +137,7 @@ pub(super) fn ScoreTimeline(
             CardHead {
                 icon: IconName::Chart,
                 title,
-                help: help::timeline(ranking),
+                help: help::timeline(ranking, timeline.len() > PER_SESSION_UP_TO),
                 note: format!(
                     "{} · the record set {}",
                     counted(total, noun),
@@ -151,7 +159,7 @@ pub(super) fn ScoreTimeline(
                     marked,
                     ring: false,
                 }
-                for (point, (x, y)) in timeline.iter().zip(xy.iter()) {
+                for (point, (x, y)) in drawn.iter() {
                     circle {
                         class: if point.set_record { "timeline-dot record" } else { "timeline-dot" },
                         cx: "{x:.1}",
@@ -308,7 +316,8 @@ mod tests {
         ];
         points[2].form = 100.0;
         let xy = timeline_xy(&points);
-        let path = form_path(&points, &xy);
+        let drawn: Vec<_> = points.iter().zip(xy).collect();
+        let path = form_path(&drawn, timeline_top(&points));
         assert!(path.starts_with("M8.0,"), "{path}");
         assert_eq!(path.matches(" L").count(), 2, "{path}");
         // The last form sits halfway up a scale topped by 200.

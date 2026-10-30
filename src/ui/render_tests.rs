@@ -428,6 +428,30 @@ fn home_without_history_invites_a_first_session() {
     assert!(!html.contains("Last accuracy"));
 }
 
+/// The charts' help says how the older sessions of a long history are
+/// drawn, and says nothing of it before there are that many.
+#[test]
+fn the_charts_say_how_they_draw_a_long_history() {
+    use super::help::{accuracy_over_time, timeline};
+    use cw_core::Ranking;
+    for html in [
+        render(|| accuracy_over_time(None, false)),
+        render(|| timeline(Ranking::PerGroup, false)),
+    ] {
+        assert!(!html.contains("Past 1000 sessions"), "{html}");
+    }
+    let html = render(|| accuracy_over_time(None, true));
+    assert!(
+        html.contains("Past 1000 sessions, the older ones are drawn a week to a point, or a month, at the average of their accuracies"),
+        "{html}"
+    );
+    let html = render(|| timeline(Ranking::PerGroup, true));
+    assert!(
+        html.contains("the older ones show only the best of each week, or month, as a dot"),
+        "{html}"
+    );
+}
+
 #[test]
 fn stats_count_sessions_from_every_character_set() {
     // A history recorded in Digits mode, read while the app is set to Mixed.

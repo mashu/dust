@@ -22,7 +22,8 @@ mod timeline;
 use cw_core::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, CharSetMode, ContestKind,
     FORM_SESSIONS, Ranking, SessionResult, TimelinePoint, assisted_runs, board_kinds, board_modes,
-    latest_run_length, run_kinds, run_lengths, score_board, score_timeline,
+    chart_buckets, chart_day, latest_run_length, run_kinds, run_lengths, score_board,
+    score_timeline,
 };
 use dioxus::prelude::*;
 
@@ -195,6 +196,8 @@ struct Board {
     assisted: Vec<BoardEntry>,
     /// Every session on it, oldest first.
     timeline: Vec<TimelinePoint>,
+    /// Which of those the timeline draws a dot for ([`timeline_dots`]).
+    dots: Vec<usize>,
     /// The dates of the first session on the timeline and the last.
     first_date: String,
     last_date: String,
@@ -214,6 +217,7 @@ impl Board {
                 .unwrap_or_default()
         };
         Self {
+            dots: timeline_dots(sessions, &timeline),
             first_date: date_of(timeline.first()),
             last_date: date_of(timeline.last()),
             empty: entries
@@ -224,6 +228,28 @@ impl Board {
             timeline,
         }
     }
+}
+
+/// Which sessions of `timeline` the timeline draws a dot for, and the form
+/// through: every one up to [`cw_core::PER_SESSION_UP_TO`]; past that, the
+/// newest each, and of each older week or month the best, so that the
+/// record it reached still shows ([`chart_buckets`]).
+fn timeline_dots(sessions: &[SessionResult], timeline: &[TimelinePoint]) -> Vec<usize> {
+    let days: Vec<i64> = timeline
+        .iter()
+        .map(|point| {
+            let date = sessions
+                .get(point.index)
+                .map_or("", |session| &session.date);
+            chart_day(date, point.timestamp)
+        })
+        .collect();
+    chart_buckets(&days)
+        .into_iter()
+        .filter_map(|range| {
+            range.max_by(|a, b| timeline[*a].rating.total_cmp(&timeline[*b].rating))
+        })
+        .collect()
 }
 
 /// Every session of `mode`, best first, with the personal best, the score
@@ -357,6 +383,7 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
             }
             ScoreTimeline {
                 timeline: board.timeline.clone(),
+                dots: board.dots.clone(),
                 board: board.entries.clone(),
                 best_at,
                 marked,
@@ -506,6 +533,45 @@ fn empty_board(sessions: &[SessionResult], of: BoardOf, assisted: bool) -> (&'st
 mod tests {
     use super::*;
     use crate::ui::settings_charset::CHAR_SET_MODES;
+    use cw_core::{POINTS_UP_TO, RECENT_SESSIONS};
+
+    /// Past a thousand sessions on the board, the timeline draws the best
+    /// of each older week, and every one of the newest: the record still
+    /// shows, on a chart that keeps to its points. A shorter one draws
+    /// every session.
+    #[test]
+    fn a_long_timeline_draws_the_best_of_each_older_week() {
+        let first = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let sessions: Vec<SessionResult> = (0..1_100_u64)
+            .map(|at| SessionResult {
+                date: (first + chrono::Days::new(at / 2))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                timestamp: at,
+                ..SessionResult::empty_for_test()
+            })
+            .collect();
+        let timeline: Vec<TimelinePoint> = (0..1_100_usize)
+            .map(|at| TimelinePoint {
+                index: at,
+                timestamp: at as u64,
+                rating: if at == 5 { 99.0 } else { (at % 7) as f64 },
+                record: 99.0,
+                set_record: at == 5,
+                form: 3.0,
+            })
+            .collect();
+        let dots = timeline_dots(&sessions, &timeline);
+        assert!(dots.len() <= POINTS_UP_TO, "{} dots", dots.len());
+        assert!(dots.contains(&5), "the record has its dot");
+        let newest: Vec<usize> = (1_100 - RECENT_SESSIONS..1_100).collect();
+        assert!(dots.ends_with(&newest));
+        assert!(dots.is_sorted());
+        assert_eq!(
+            timeline_dots(&sessions[..10], &timeline[..10]),
+            (0..10).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn every_mode_has_a_name() {
