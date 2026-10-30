@@ -518,17 +518,221 @@ impl Harness {
     }
 }
 
-/// Run a test body on a paused clock, its seeds fresh unless it pins them
-/// ([`crate::time::pin_seeds`]).
+/// Run a test body on a paused clock, every seed it draws pinned to one
+/// ([`crate::time::pin_seeds`]): a fresh one each run, unless the test pins
+/// its own, or `DUST_TEST_SEED` gives one. A test that fails in `body` says
+/// which seed it drew from, so that its run can be drawn again. Past `body`
+/// the seeds are let go and a failure cannot say them, so a test checks
+/// what it drew inside `body`.
 pub fn run<F: std::future::Future<Output = ()>>(body: impl FnOnce() -> F) {
     crate::time::reset_mono_clock();
-    crate::time::pin_seeds(None);
+    let _seeds = TestSeeds::pin(std::env::var(TEST_SEED).ok());
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
         .build()
         .expect("test runtime")
         .block_on(body());
+}
+
+/// What a test's seeds are pinned to when it is given one, to draw a
+/// failed run's again.
+const TEST_SEED: &str = "DUST_TEST_SEED";
+
+/// A test's seeds pinned for as long as it runs, and said should it fail.
+struct TestSeeds;
+
+impl TestSeeds {
+    /// Pin the seeds to `given`, or to a fresh seed without one.
+    fn pin(given: Option<String>) -> Self {
+        let seed = match given {
+            Some(given) => given
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{TEST_SEED}={given} is not a seed")),
+            None => {
+                crate::time::pin_seeds(None);
+                crate::time::seed_rng()
+            }
+        };
+        crate::time::pin_seeds(Some(seed));
+        Self
+    }
+}
+
+impl Drop for TestSeeds {
+    fn drop(&mut self) {
+        // The seed pinned last: the test's own, if it pinned one.
+        if std::thread::panicking()
+            && let Some(seed) = crate::time::pinned_seed()
+        {
+            let test = std::thread::current()
+                .name()
+                .unwrap_or("the test")
+                .to_string();
+            eprintln!("{test} drew its seeds from {seed}: {TEST_SEED}={seed} draws them again.");
+        }
+        crate::time::pin_seeds(None);
+    }
+}
+
+/// What happens on the page [`on_fake_page`] makes up.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "step", rename_all = "lowercase")]
+pub enum PageStep {
+    /// A script run, as `document::eval` runs one.
+    Run { script: String },
+    /// A key pressed or let go, with nothing focused.
+    Key(PageKey),
+    /// The window loses the focus.
+    Blur,
+}
+
+impl PageStep {
+    pub fn run(script: impl Into<String>) -> Self {
+        Self::Run {
+            script: script.into(),
+        }
+    }
+}
+
+impl From<PageKey> for PageStep {
+    fn from(key: PageKey) -> Self {
+        Self::Key(key)
+    }
+}
+
+/// A key event, as a browser's `KeyboardEvent` has it.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageKey {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub key: String,
+    pub code: String,
+    pub ctrl_key: bool,
+    pub alt_key: bool,
+    pub meta_key: bool,
+    pub shift_key: bool,
+    pub repeat: bool,
+    pub is_composing: bool,
+}
+
+impl PageKey {
+    /// The key at `code` pressed, typing `key`.
+    pub fn down(key: &str, code: &str) -> Self {
+        Self {
+            kind: "keydown",
+            key: key.into(),
+            code: code.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The key at `code` let go, typing `key` by then.
+    pub fn up(key: &str, code: &str) -> Self {
+        Self {
+            kind: "keyup",
+            ..Self::down(key, code)
+        }
+    }
+
+    pub fn ctrl(self) -> Self {
+        Self {
+            ctrl_key: true,
+            ..self
+        }
+    }
+
+    pub fn alt(self) -> Self {
+        Self {
+            alt_key: true,
+            ..self
+        }
+    }
+
+    pub fn meta(self) -> Self {
+        Self {
+            meta_key: true,
+            ..self
+        }
+    }
+
+    pub fn shift(self) -> Self {
+        Self {
+            shift_key: true,
+            ..self
+        }
+    }
+
+    /// A press repeated by the key held down.
+    pub fn repeat(self) -> Self {
+        Self {
+            repeat: true,
+            ..self
+        }
+    }
+
+    /// Typed while an input method is composing a character.
+    pub fn composing(self) -> Self {
+        Self {
+            is_composing: true,
+            ..self
+        }
+    }
+}
+
+/// What the scripts on the page did during one step.
+#[derive(Debug, serde::Deserialize)]
+pub struct PageHeard {
+    /// What they sent the app, in order, as it arrives there.
+    pub sent: Vec<serde_json::Value>,
+    /// Whether they kept the page's own default from happening.
+    pub prevented: bool,
+}
+
+/// Take `steps` on a page made up in Node, where the app's page scripts run
+/// as in a webview (`src/fake_page.mjs`), and say what the scripts did
+/// during each. None on a machine with no Node, which the test says; CI has
+/// it, so there a Node that will not start fails the test rather than
+/// passing it untried.
+pub fn on_fake_page(steps: &[PageStep]) -> Option<Vec<PageHeard>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let page = concat!(env!("CARGO_MANIFEST_DIR"), "/src/fake_page.mjs");
+    let node = Command::new("node")
+        .arg(page)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut node = match node {
+        Ok(node) => node,
+        Err(error) if std::env::var_os("CI").is_some() => {
+            panic!("CI has Node, yet it would not start: {error}")
+        }
+        Err(error) => {
+            eprintln!("no Node on this machine ({error}); skipping");
+            return None;
+        }
+    };
+    let json = serde_json::to_vec(steps).expect("the steps, as JSON");
+    node.stdin
+        .take()
+        .expect("Node's input")
+        .write_all(&json)
+        .expect("the steps handed to Node");
+    let out = node.wait_with_output().expect("Node ran");
+    assert!(
+        out.status.success(),
+        "the page failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let heard: Vec<PageHeard> =
+        serde_json::from_slice(&out.stdout).expect("what the page heard, as JSON");
+    assert_eq!(heard.len(), steps.len(), "a word on each step");
+    Some(heard)
 }
 
 /// A rendered page, addressed the way its markup names things.
@@ -1328,5 +1532,94 @@ mod harness_tests {
     fn pressing_something_that_is_not_there_says_so() {
         let mut ui = Ui::new(Counter, ());
         ui.click("nonsense");
+    }
+
+    /// Every seed a test draws comes from the one it was run with: pinned
+    /// to that seed again, the test draws the same ones, in the same order.
+    #[test]
+    fn a_test_draws_every_seed_from_one() {
+        run(|| async {
+            let seed = crate::time::pinned_seed().expect("pinned");
+            let drawn: Vec<u64> = (0..3).map(|_| crate::time::seed_rng()).collect();
+            crate::time::pin_seeds(Some(seed));
+            let again: Vec<u64> = (0..3).map(|_| crate::time::seed_rng()).collect();
+            assert_eq!(drawn, again);
+        });
+    }
+
+    /// A seed given is the one pinned; with none, each run is pinned to a
+    /// fresh one; and the seeds are let go once the test is over, failed
+    /// or not.
+    #[test]
+    fn a_test_is_pinned_to_the_seed_given_or_a_fresh_one() {
+        {
+            let _seeds = TestSeeds::pin(Some("1234\n".into()));
+            assert_eq!(crate::time::pinned_seed(), Some(1234));
+        }
+        assert_eq!(crate::time::pinned_seed(), None);
+        let fresh = |_| {
+            let _seeds = TestSeeds::pin(None);
+            crate::time::pinned_seed().expect("pinned")
+        };
+        let seeds: std::collections::BTreeSet<u64> = (0..8).map(fresh).collect();
+        assert_eq!(seeds.len(), 8, "a fresh seed drawn twice");
+        let failed = std::panic::catch_unwind(|| run(|| async { panic!("failed") }));
+        assert!(failed.is_err());
+        assert_eq!(crate::time::pinned_seed(), None, "kept past a failure");
+    }
+
+    /// A seed given that is no seed fails the test rather than leaving it
+    /// to draw a fresh one.
+    #[test]
+    #[should_panic(expected = "DUST_TEST_SEED=twelve is not a seed")]
+    fn a_seed_given_that_is_no_seed_says_so() {
+        let _seeds = TestSeeds::pin(Some("twelve".into()));
+    }
+
+    /// A script on the made-up page hears the keys on the document and the
+    /// window losing the focus, and what it sends reaches the app, in order,
+    /// though its listeners send it after its body is done; a key it keeps
+    /// from the page is said to be kept.
+    #[test]
+    fn a_script_on_the_fake_page_hears_keys_and_talks_to_the_app() {
+        let script = r#"dioxus.send("ran");
+document.addEventListener("keydown", (e) => {
+    e.preventDefault();
+    dioxus.send([e.key, e.code, e.shiftKey, e.repeat]);
+});
+window.addEventListener("blur", () => dioxus.send("blur"));"#;
+        let Some(heard) = on_fake_page(&[
+            PageStep::run(script),
+            PageKey::down("A", "KeyA").shift().repeat().into(),
+            PageKey::up("A", "KeyA").into(),
+            PageStep::Blur,
+        ]) else {
+            return;
+        };
+        assert_eq!(heard[0].sent, [serde_json::json!("ran")]);
+        assert_eq!(
+            heard[1].sent,
+            [serde_json::json!(["A", "KeyA", true, true])]
+        );
+        assert!(heard[1].prevented);
+        assert!(heard[2].sent.is_empty() && !heard[2].prevented);
+        assert_eq!(heard[3].sent, [serde_json::json!("blur")]);
+    }
+
+    /// A script that throws on the made-up page fails the test, saying what
+    /// it threw.
+    #[test]
+    fn a_script_that_throws_on_the_fake_page_fails_the_test() {
+        let thrown = std::panic::catch_unwind(|| {
+            on_fake_page(&[PageStep::run(r#"throw new Error("no such thing");"#)])
+        });
+        match thrown {
+            Ok(None) => {}
+            Ok(Some(heard)) => panic!("passed: {heard:?}"),
+            Err(failure) => {
+                let said = failure.downcast_ref::<String>().expect("said");
+                assert!(said.contains("no such thing"), "{said}");
+            }
+        }
     }
 }

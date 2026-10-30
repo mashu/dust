@@ -60,6 +60,14 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
+      # The app's tests run the page's key scripts in Node, on a page made up
+      # for them (src/fake_page.mjs). Elsewhere they skip without it; here,
+      # where CI is set, a missing Node fails them.
+      - name: Install Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
       - name: Test cw-core
         run: cargo llvm-cov -p cw-core --locked --lcov --output-path lcov-cw-core.info
 

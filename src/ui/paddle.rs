@@ -279,7 +279,7 @@ fn paddle_for_press(key: &str, code: &str, held: Held, reading: Reading) -> Opti
 /// not by place, they type, and only a `[` or `]` keys a paddle. In a field
 /// the paddles key nothing into they type all the same
 /// ([`PaddleKeys::reading`]).
-fn bracket_for_key(key: &str, code: &str, by_place: bool) -> Option<char> {
+pub(super) fn bracket_for_key(key: &str, code: &str, by_place: bool) -> Option<char> {
     match (key, code) {
         ("[", _) => Some('['),
         ("]", _) => Some(']'),
@@ -1509,3 +1509,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod page_tests;

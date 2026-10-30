@@ -248,6 +248,15 @@ and the desktop build on Windows and macOS as well as Linux, where it is
 also tested. The web app is built and its site checked as Pages would serve
 it.
 
+What carries the keys on macOS, Windows and the phones is tested on Linux:
+the page scripts that hear the paddles and a run's keys are run in Node, on
+a page made up for them, and held to what the app does with the same keys.
+What no test runs: the web build's audio (`src/audio/web`), which needs a
+browser's Web Audio, and the platform audio code, which needs the phone —
+the iOS audio session, Android's volume keys and output latency. The
+mixer, the receiver stream and the timing of a send that they hand their
+work to are tested natively.
+
 ## Desktop bundles
 
 `dx bundle --platform desktop --release` writes to

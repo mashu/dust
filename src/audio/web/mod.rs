@@ -6,6 +6,12 @@
 //! - [`chain`]: the output stage — the volume and the soft limiter.
 //! - [`sidetone`]: the paddle's sidetone, played live.
 //! - [`param`]: moving a gain smoothly from wherever it is.
+//!
+//! No test runs this module, which needs a browser's Web Audio: not where a
+//! send is placed against what is heard, the stretches the stream takes
+//! back, the band rebuilt when it cannot be retuned, nor a clock read as
+//! stalled or asleep. What it hands its work to is tested natively: the
+//! mixer, the receiver stream, and a send's timing.
 
 mod chain;
 mod param;
