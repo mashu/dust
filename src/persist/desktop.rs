@@ -368,19 +368,28 @@ impl Store for DesktopStore {
         Box::pin(async move { saving.await.map(|place| super::saved_as(&place)) })
     }
 
-    /// Written unsynced: it is only a mark, and the first group waits on
-    /// nothing. One a power cut leaves empty still tells of a session cut
-    /// off ([`CutOff::Unread`]).
+    /// Written unsynced: it is only a mark, and no group waits on it. Each
+    /// write is whole, so a copy killed as it writes what its session has
+    /// done so far leaves the mark as it was before or after, never half of
+    /// one; one a power cut leaves empty still tells of a session cut off
+    /// ([`CutOff::Unread`]).
     fn mark_open(&self, open: Option<OpenSession>) {
         let mut held = self.open_held.borrow_mut();
         match open {
             Some(open) => {
-                let Some(mark) = held.take().or_else(|| self.new_mark()) else {
-                    return;
+                let (mark, new) = match held.take() {
+                    Some(mark) => (mark, false),
+                    None => match self.new_mark() {
+                        Some(mark) => (mark, true),
+                        None => return,
+                    },
                 };
-                if let Ok(raw) = serde_json::to_vec(&open)
-                    && fs::write(self.mark_path(&mark.id, "json"), raw).is_ok()
-                {
+                let written = serde_json::to_vec(&open)
+                    .map_err(io::Error::other)
+                    .and_then(|raw| self.write_mark(&mark.id, &raw));
+                // A mark that will not take what its session has done since
+                // keeps what it held.
+                if written.is_ok() || !new {
                     *held = Some(mark);
                 } else {
                     self.unmark(mark);
@@ -430,8 +439,17 @@ impl DesktopStore {
         Some(HeldMark { id, lock })
     }
 
+    /// Write what mark `id` says, whole: under a name no look reads, then
+    /// renamed into place over what it said before.
+    fn write_mark(&self, id: &str, raw: &[u8]) -> io::Result<()> {
+        let writing = self.mark_path(id, "writing");
+        fs::write(&writing, raw)?;
+        fs::rename(&writing, self.mark_path(id, "json"))
+    }
+
     /// The mark gone, and its lock let go once it is.
     fn unmark(&self, mark: HeldMark) {
+        let _ = fs::remove_file(self.mark_path(&mark.id, "writing"));
         let _ = fs::remove_file(self.mark_path(&mark.id, "json"));
         let _ = fs::remove_file(self.mark_path(&mark.id, "lock"));
         drop(mark.lock);
@@ -440,10 +458,12 @@ impl DesktopStore {
     /// Every mark no copy holds, taken: what each tells of is read under its
     /// lock, so a copy that has just marked its session is never taken for
     /// one cut off.
-    fn cut_off(&self) -> Option<CutOff> {
+    fn cut_off(&self) -> Vec<CutOff> {
         let mine = self.open_held.borrow().as_ref().map(|mark| mark.id.clone());
-        let cut = fs::read_dir(self.root.join(OPEN))
-            .ok()?
+        let Ok(marks) = fs::read_dir(self.root.join(OPEN)) else {
+            return Vec::new();
+        };
+        marks
             .flatten()
             .filter_map(|entry| {
                 let path = entry.path();
@@ -458,8 +478,8 @@ impl DesktopStore {
                 let read = fs::read(self.mark_path(&mark.id, "json"));
                 self.unmark(mark);
                 read.ok().map(|raw| CutOff::read(&raw))
-            });
-        CutOff::newest(cut)
+            })
+            .collect()
     }
 }
 
@@ -615,6 +635,7 @@ mod tests {
         OpenSession {
             started_at,
             run: false,
+            so_far: None,
         }
     }
 
@@ -627,19 +648,19 @@ mod tests {
         let second = DesktopStore::at(dir.0.clone());
         first.mark_open(Some(open_at(1)));
         second.mark_open(Some(open_at(2)));
-        assert_eq!(first.cut_off(), None, "the other is still running");
-        assert_eq!(second.cut_off(), None);
+        assert_eq!(first.cut_off(), [], "the other is still running");
+        assert_eq!(second.cut_off(), []);
 
         // The first ends its own, and leaves the second's be.
         first.mark_open(None);
-        assert_eq!(first.cut_off(), None);
+        assert_eq!(first.cut_off(), []);
 
         // The second stops under its session: a copy open all along is told,
         // once, and so would the next to open have been.
         drop(second);
         let third = DesktopStore::at(dir.0.clone());
-        assert_eq!(first.cut_off(), Some(CutOff::Marked(open_at(2))));
-        assert_eq!(third.cut_off(), None, "told of once");
+        assert_eq!(first.cut_off(), [CutOff::Marked(open_at(2))]);
+        assert_eq!(third.cut_off(), [], "told of once");
         let left = fs::read_dir(dir.0.join(OPEN)).unwrap().count();
         assert_eq!(left, 0, "nothing left behind");
     }
@@ -671,7 +692,50 @@ mod tests {
             lock.try_lock().is_err(),
             "the lock was let go of on the way"
         );
-        assert_eq!(DesktopStore::at(dir.0.clone()).cut_off(), None);
+        assert_eq!(DesktopStore::at(dir.0.clone()).cut_off(), []);
+    }
+
+    /// What a session has done so far goes into its mark, again and again
+    /// as it goes, each time whole and with nothing left beside it; a copy
+    /// that stops under the session leaves it for the next, which reads it
+    /// back as it was last written.
+    #[test]
+    fn a_mark_keeps_what_its_session_did_so_far() {
+        let (dir, cut) = store("open-so-far");
+        cut.mark_open(Some(open_at(1)));
+        for groups in 1..=3 {
+            let mut result = SessionResult::empty_for_test();
+            result.groups = vec![
+                cw_core::GroupResult {
+                    sent: "KM".into(),
+                    received: "KM".into(),
+                    correct: true,
+                };
+                groups
+            ];
+            let so_far = crate::persist::SoFar {
+                result,
+                settings: Some(TrainingSettings::default()),
+            };
+            cut.mark_open(Some(OpenSession {
+                so_far: Some(Box::new(so_far)),
+                ..open_at(1)
+            }));
+        }
+        let id = cut.open_held.borrow().as_ref().map(|mark| mark.id.clone());
+        let id = id.expect("marked");
+        let mut left: Vec<String> = fs::read_dir(dir.0.join(OPEN))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, [format!("{id}.json"), format!("{id}.lock")]);
+        drop(cut);
+        let cut = DesktopStore::at(dir.0.clone()).cut_off();
+        let so_far = cut[..].first().and_then(CutOff::so_far).expect("kept");
+        assert_eq!(so_far.result.groups.len(), 3);
+        assert_eq!(so_far.settings, Some(TrainingSettings::default()));
     }
 
     /// A mark a power cut left empty still says a session was cut off.
@@ -683,7 +747,7 @@ mod tests {
         fs::write(cut.mark_path(&id.expect("marked"), "json"), b"").unwrap();
         drop(cut);
         let next = DesktopStore::at(dir.0.clone());
-        assert_eq!(next.cut_off(), Some(CutOff::Unread));
+        assert_eq!(next.cut_off(), [CutOff::Unread]);
     }
 
     #[test]

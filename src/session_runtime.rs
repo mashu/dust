@@ -12,15 +12,16 @@
 //! whichever is live.
 
 use cw_core::{
-    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate, KeyLog,
-    Keys, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult,
-    SplitMix64, Transmission, answer_chars, apply_auto_level, complete_session,
-    generate_training_group, resolve_station,
+    AnswerClose, CharSamplingState, CharSetMode, Completion, ContestEvent, CountersKey,
+    CountersUpdate, Group, KeyLog, Keys, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId,
+    SessionMachine, SessionResult, SplitMix64, TrainingSettings, Transmission, answer_chars,
+    apply_auto_level, complete_result, complete_session, generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{LiveContest, send_run_event, start_run};
+use crate::persist::{OpenSession, SoFar};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::state::{AppCtx, Finished, Notice, Screen};
@@ -73,9 +74,29 @@ pub struct LiveSession {
     /// When the app was last seen running the session: its last heartbeat,
     /// or the last news it heard.
     last_seen: MonoMs,
+    /// How it is marked open, for what it has done to be added to.
+    mark: OpenSession,
 }
 
 impl LiveSession {
+    /// How many of its groups are answered.
+    fn answered(&self) -> usize {
+        let session = self.machine.session();
+        (0..session.group_count())
+            .filter(|&index| session.group(index).is_some_and(Group::confirmed))
+            .count()
+    }
+
+    /// What the session would keep were it ended now, as End session keeps
+    /// it, and the settings auto level judges it by.
+    fn so_far(&self) -> SoFar {
+        let session = self.machine.session();
+        SoFar {
+            result: session.result(now_ms(), local_date_string()),
+            settings: Some(session.settings().clone()),
+        }
+    }
+
     /// Whether what comes under `lease` is this session's to hear: its own
     /// claim, while it holds the audio, or while it is paused, having given
     /// the audio back.
@@ -324,13 +345,14 @@ pub fn start_session(ctx: AppCtx) {
         SessionMachine::start(SessionId::new(lease.turn()), now, fitted, sampler);
     runtime.set(Some(machine.session().clone()));
     screen.set(Screen::Training);
+    let mark = ctx.mark_running(false);
     *app.session.borrow_mut() = Some(Live::Groups(Box::new(LiveSession {
         machine,
         stations: SplitMix64::new(seed_rng()),
         lease: lease.clone(),
         last_seen: now,
+        mark,
     })));
-    ctx.mark_running(false);
     beat(ctx, lease.clone());
     run_effects(ctx, &lease, effects);
 }
@@ -509,7 +531,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         Some(AnswerClose::Unbegun) => ctx.answer.finish(),
         Some(AnswerClose::Settled) | None => {}
     }
-    let effects = {
+    let (effects, so_far) = {
         let mut slot = app.session.borrow_mut();
         let Some(live) = slot
             .as_mut()
@@ -519,6 +541,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
             return;
         };
         let now = MonoMs(mono_ms());
+        let answered = live.answered();
         // Typing still waiting out the box's pause came before this event,
         // so the machine hears it first.
         let mut effects = ctx
@@ -526,6 +549,10 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
             .take()
             .map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), now));
         effects.extend(live.machine.apply(event, now));
+        // A group answered, and the session going on: what it would keep
+        // now goes with its mark, should the app stop under it.
+        let so_far = (live.answered() > answered && !live.machine.is_terminal())
+            .then(|| (live.mark.clone(), live.so_far()));
         // Much of what arrives changes nothing — a key while the box is
         // locked, a timer the machine has forgotten — and publishing it
         // anyway would copy the whole session and redraw the screen for it.
@@ -533,8 +560,11 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         if runtime.peek().as_ref() != Some(session) {
             runtime.set(Some(session.clone()));
         }
-        effects
+        (effects, so_far)
     };
+    if let Some((mark, so_far)) = so_far {
+        ctx.mark_so_far(&mark, so_far);
+    }
     run_effects(ctx, lease, effects);
 }
 
@@ -659,8 +689,6 @@ fn finish_session(ctx: AppCtx) -> bool {
     let AppCtx {
         mut runtime,
         mut auto_message,
-        mut settings,
-        toasts,
         ..
     } = ctx;
     let Some(live) = end_session(ctx) else {
@@ -671,6 +699,21 @@ fn finish_session(ctx: AppCtx) -> bool {
     let run = store.load_auto_counters(&CountersKey::of(session.settings()));
     // The machine only finishes a session it has scored something in.
     let done = complete_session(session, run, now_ms(), local_date_string());
+    auto_message.set(settle_level(ctx, &done));
+    runtime.set(None);
+    keep_and_show(ctx, done.result);
+    true
+}
+
+/// Store what finishing a session did to its level's run, and move the
+/// level if the run earned it, saying so. What it said, if anything.
+fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
+    let AppCtx {
+        mut settings,
+        toasts,
+        ..
+    } = ctx;
+    let store = ctx.app().store;
     match &done.counters {
         CountersUpdate::Keep(key, counters) => store.save_auto_counters(key, *counters),
         CountersUpdate::Clear(keys) => store.clear_auto_counters(keys),
@@ -682,16 +725,46 @@ fn finish_session(ctx: AppCtx) -> bool {
     if let Some(change) = &done.change {
         // Onto the settings as they are now, not as the session started
         // with them, so the level is all it moves. Stored by the app's
-        // settings effect, once the results are up.
+        // settings effect.
         apply_auto_level(&mut settings.write(), change);
     }
     if let Some(message) = &message {
         toasts.show(message.clone());
     }
-    auto_message.set(message);
-    runtime.set(None);
-    keep_and_show(ctx, done.result);
-    true
+    message
+}
+
+/// Keep what the sessions and runs the app stopped under had done by then,
+/// `kept`, as Exit would have kept each ([`AppCtx::tell_of_cut_off`]): in
+/// the history, where each falls by when it was last added to, and a
+/// session of groups counted towards its level's run, the level moved if
+/// the run earned it.
+pub fn keep_cut_off(ctx: AppCtx, kept: Vec<SoFar>) {
+    if kept.is_empty() {
+        return;
+    }
+    let mut sessions = ctx.sessions;
+    let store = ctx.app().store;
+    for so_far in kept {
+        let mut result = so_far.result;
+        // On today's scale, as every session of the history is read.
+        result.score = result.points();
+        if let Some(settings) = so_far.settings.map(TrainingSettings::clamp) {
+            let run = store.load_auto_counters(&CountersKey::of(&settings));
+            let done = complete_result(result, &settings, run);
+            settle_level(ctx, &done);
+            result = done.result;
+        }
+        let mut history = sessions.write();
+        let at = history.partition_point(|session| session.timestamp <= result.timestamp);
+        history.insert(at, result);
+    }
+    let saved = ctx.store_history();
+    store.ask_to_keep();
+    if let Some(problem) = saved.problem() {
+        let mut notices = ctx.notices;
+        notices.write().push(Notice::History(problem));
+    }
 }
 
 /// Add `finished` to the history, store it, and show it on the results
@@ -1556,18 +1629,60 @@ mod tests {
     fn a_session_is_marked_open_while_it_runs() {
         run(|| async {
             let mut h = Harness::new();
-            assert_eq!(h.store.open.get(), None);
+            assert_eq!(h.store.open(), None);
             h.start_training();
-            let open = h.store.open.get().expect("marked open");
+            let open = h.store.open().expect("marked open");
             assert!(!open.run);
             h.send(SessionEvent::Abort);
-            assert_eq!(h.store.open.get(), None, "discarded");
+            assert_eq!(h.store.open(), None, "discarded");
 
             h.start_training();
-            assert!(h.store.open.get().is_some());
+            assert!(h.store.open().is_some());
             h.play_through(30_000).await;
             assert_eq!(h.screen(), Screen::Results);
-            assert_eq!(h.store.open.get(), None, "kept");
+            assert_eq!(h.store.open(), None, "kept");
+        });
+    }
+
+    /// Each group answered puts what the session would keep, were it ended
+    /// then, with its mark: the history is never written mid-session, and
+    /// the mark goes once the session ends.
+    #[test]
+    fn what_a_session_would_keep_goes_with_its_mark_as_each_group_is_answered() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let mut h = Harness::with_settings(settings.clone());
+            h.start_training();
+            let kept_so_far = |h: &Harness| {
+                h.store
+                    .open()
+                    .and_then(|open| open.so_far)
+                    .map(|so_far| (so_far.result.groups.len(), so_far.settings))
+            };
+            assert_eq!(kept_so_far(&h), None, "nothing answered yet");
+            for index in 0..2 {
+                assert!(
+                    h.run_until(4_000, |h| h.awaiting_answer() == Some(index))
+                        .await
+                );
+                let sent = h.sent(index);
+                h.type_answer(index, &sent);
+                assert!(
+                    h.run_until(1_000, |h| kept_so_far(h)
+                        .is_some_and(|(groups, _)| groups == index + 1))
+                        .await,
+                    "{:?}",
+                    kept_so_far(&h)
+                );
+            }
+            let (_, judged_by) = kept_so_far(&h).expect("kept so far");
+            assert_eq!(judged_by, Some(settings.clamp()));
+            assert!(h.store.load_sessions().is_empty(), "stored mid-session");
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.store.open(), None);
+            assert_eq!(h.store.load_sessions()[0].groups.len(), 3);
         });
     }
 
@@ -2454,7 +2569,7 @@ mod tests {
                 "{:?}",
                 h.notices()
             );
-            assert_eq!(h.store.open.get(), None, "told of, so no longer open");
+            assert_eq!(h.store.open(), None, "told of, so no longer open");
         });
     }
 }

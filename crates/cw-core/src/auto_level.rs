@@ -460,12 +460,25 @@ pub enum CountersUpdate {
 /// counts towards.
 pub fn complete_session(
     session: &GroupSession,
-    mut counters: AutoLevelCounters,
+    counters: AutoLevelCounters,
     finished_at: u64,
     date: String,
 ) -> Completion {
-    let settings = session.settings();
-    let result = session.result(finished_at, date);
+    complete_result(
+        session.result(finished_at, date),
+        session.settings(),
+        counters,
+    )
+}
+
+/// Finish a session scored already, `result`, run on `settings`, as
+/// [`complete_session`] does: one the app stopped under is finished so,
+/// from what it had scored by then.
+pub fn complete_result(
+    result: SessionResult,
+    settings: &TrainingSettings,
+    mut counters: AutoLevelCounters,
+) -> Completion {
     let change = evaluate_auto_level(&result, settings, &mut counters);
     let mut next = settings.clone();
     let counters = match &change {

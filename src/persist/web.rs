@@ -390,7 +390,10 @@ impl Store for WebStore {
     fn take_cut_off(&self) -> CutOffTaking {
         Box::pin(async {
             let marks = take_marks().await;
-            CutOff::newest(marks.iter().map(|mark| CutOff::read(mark.as_bytes())))
+            marks
+                .iter()
+                .map(|mark| CutOff::read(mark.as_bytes()))
+                .collect()
         })
     }
 }

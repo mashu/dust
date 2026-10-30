@@ -877,6 +877,49 @@ mod ui_tests {
         });
     }
 
+    /// A session the app stops under, with no Exit — a crash, the phone
+    /// taking the app back — keeps what Exit would have
+    /// kept then: the groups answered, in the history, and counted towards
+    /// the level's run, which here earns a level. The next launch keeps it
+    /// and says so; nothing was stored while it ran.
+    #[test]
+    fn a_session_the_app_stops_under_keeps_what_was_answered() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.auto_level.auto_adjust_level = true;
+            settings.auto_level.auto_adjust_above_threshold_count = 1;
+            settings.auto_level.auto_adjust_threshold = 50.0;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            let store = ui.store.clone();
+            assert!(store.load_sessions().is_empty(), "stored mid-session");
+            drop(ui);
+
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
+            let kept = store.load_sessions();
+            assert_eq!(kept.len(), 1, "the session was kept");
+            assert_eq!(kept[0].groups.len(), 1);
+            assert!(kept[0].groups[0].correct);
+            assert!(
+                ui.has("Dust closed while it ran. The groups you had answered were kept."),
+                "{}",
+                ui.html()
+            );
+            assert_eq!(
+                ui.with_app(|ctx| ctx.settings.peek().curriculum.level),
+                2,
+                "as Exit would have, it counted towards the level"
+            );
+            assert_eq!(store.open(), None, "kept once");
+            let (ui, _recorder) = Ui::launch(store.clone());
+            assert_eq!(store.load_sessions().len(), 1);
+            assert!(!ui.has("was cut off"));
+        });
+    }
+
     /// A session or run the last copy of the app stopped under is told of
     /// as the app opens, once, until it is put away. One another copy is
     /// still running is left to it, and told of if that copy stops under it
@@ -891,6 +934,7 @@ mod ui_tests {
             store.mark_open(Some(OpenSession {
                 started_at,
                 run: false,
+                so_far: None,
             }));
             let (mut ui, _recorder) = Ui::launch(store.clone());
             ui.advance(20).await;
@@ -900,7 +944,7 @@ mod ui_tests {
                 "{}",
                 ui.html()
             );
-            assert_eq!(store.open.get(), None, "told of once");
+            assert_eq!(store.open(), None, "told of once");
             ui.click("btn-dismiss-notice");
             assert!(!ui.has("was cut off"));
 
@@ -908,6 +952,7 @@ mod ui_tests {
             store.mark_open(Some(OpenSession {
                 started_at,
                 run: true,
+                so_far: None,
             }));
             store.open_elsewhere.set(true);
             let (mut ui, _recorder) = Ui::launch(store.clone());
@@ -1089,6 +1134,7 @@ mod ui_tests {
             store.mark_open(Some(OpenSession {
                 started_at: crate::time::now_ms(),
                 run: false,
+                so_far: None,
             }));
             let (mut ui, _recorder) = Ui::launch(store);
             ui.advance(20).await;

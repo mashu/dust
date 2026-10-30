@@ -105,18 +105,58 @@ pub trait Store {
 
 /// A session of groups or a contest run, as it is marked open while it runs
 /// ([`Store::mark_open`]): so that one the app stops under is never lost
-/// without a word.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// without a word, nor what it had done by then.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenSession {
     /// When it started, in milliseconds since the epoch.
     pub started_at: u64,
     /// A contest run, rather than a session of groups.
     pub run: bool,
+    /// What it would keep were it ended now, as of its last answered group
+    /// or logged QSO: kept in its place should the app stop under it. None
+    /// before then, in a mark from before marks held it, and in one whose
+    /// copy of it no longer reads.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_or_none"
+    )]
+    pub so_far: Option<Box<SoFar>>,
+}
+
+/// What a session or run marked open would keep were it ended now: the
+/// session Exit would store, outside the history, which is stored only once
+/// it ends ([`OpenSession::so_far`]).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoFar {
+    pub result: SessionResult,
+    /// The settings a session of groups started with, for auto level to
+    /// judge it by as it would have at its end. None for a contest run,
+    /// which moves no level, and where they no longer read.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_or_none"
+    )]
+    pub settings: Option<TrainingSettings>,
+}
+
+/// A part of a mark that does not read, read as none: the rest of the mark
+/// still tells of what was cut off, and a session whose settings do not
+/// read is kept all the same.
+fn read_or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(raw).ok())
 }
 
 /// A session or run the app stopped under, as its mark tells of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CutOff {
     Marked(OpenSession),
     /// The mark is there and cannot be read: cut short itself, by a power
@@ -125,9 +165,17 @@ pub enum CutOff {
 }
 
 impl CutOff {
+    /// What it would have kept, had it been ended as it was cut off.
+    pub fn so_far(&self) -> Option<&SoFar> {
+        match self {
+            Self::Marked(open) => open.so_far.as_deref(),
+            Self::Unread => None,
+        }
+    }
+
     /// The one to tell of, of all those cut off: the newest that can be
     /// read, or failing that, one that cannot.
-    fn newest(cut: impl IntoIterator<Item = Self>) -> Option<Self> {
+    pub fn newest(cut: impl IntoIterator<Item = Self>) -> Option<Self> {
         cut.into_iter().max_by_key(|cut| match cut {
             Self::Marked(open) => Some(open.started_at),
             Self::Unread => None,
@@ -141,8 +189,9 @@ impl CutOff {
 }
 
 /// The sessions cut off, being looked for: already, or still, where only the
-/// platform can tell which copies are running, as in a browser.
-pub type CutOffTaking = Pin<Box<dyn Future<Output = Option<CutOff>>>>;
+/// platform can tell which copies are running, as in a browser. Every one,
+/// for what each kept so far.
+pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<CutOff>>>>;
 
 /// A backup file on its way: saved already, or still being saved where only
 /// the platform's own thread can save it, as on Android.
@@ -1532,6 +1581,47 @@ pub(crate) mod tests {
         let settings = load_settings_from(&serde_json::to_string(&stored).unwrap());
         assert_eq!(settings.playback.char_wpm_min, 80.0);
         assert_eq!(settings.curriculum.num_groups, 1);
+    }
+
+    /// A mark from before marks held what their session did so far reads as
+    /// it did; one whose session so far no longer reads still tells of the
+    /// session cut off, and one whose settings no longer read keeps the
+    /// session all the same.
+    #[test]
+    fn a_mark_reads_whatever_it_holds_of_its_session_so_far() {
+        let open = |so_far| {
+            CutOff::Marked(OpenSession {
+                started_at: 5,
+                run: false,
+                so_far,
+            })
+        };
+        assert_eq!(CutOff::read(br#"{"startedAt":5,"run":false}"#), open(None));
+        assert_eq!(
+            CutOff::read(br#"{"startedAt":5,"run":false,"soFar":{"result":7}}"#),
+            open(None)
+        );
+        let result = SessionResult::empty_for_test();
+        let raw = serde_json::json!({
+            "startedAt": 5,
+            "run": false,
+            "soFar": { "result": result, "settings": "not settings" },
+        });
+        let kept = SoFar {
+            result,
+            settings: None,
+        };
+        assert_eq!(
+            CutOff::read(raw.to_string().as_bytes()),
+            open(Some(Box::new(kept.clone())))
+        );
+        let written = serde_json::to_vec(&OpenSession {
+            started_at: 5,
+            run: false,
+            so_far: Some(Box::new(kept.clone())),
+        })
+        .unwrap();
+        assert_eq!(CutOff::read(&written), open(Some(Box::new(kept))));
     }
 
     #[test]
