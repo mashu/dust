@@ -36,6 +36,14 @@ cargo test -p cw-core
 cargo test -p dust --features desktop
 ```
 
+The app's tests draw a fresh seed on every run for the stations, calls and
+timing they meet. A test that fails says which seed it drew; give it back to
+draw the same run again:
+
+```bash
+DUST_TEST_SEED=1234567 cargo test -p dust --features desktop name_of_the_test
+```
+
 ## Release
 
 Push a tag `v` + the version in `Cargo.toml`, e.g. `git tag v1.2.3 && git push

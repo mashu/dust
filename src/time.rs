@@ -126,8 +126,9 @@ pub fn seed_rng() -> u64 {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 std::thread_local! {
-    /// While a test has pinned its seeds, the state the next is drawn from.
-    static PINNED_SEEDS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// While a test has pinned its seeds, the seed pinned, and the state the
+    /// next is drawn from.
+    static PINNED_SEEDS: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
 }
 
 /// Pin every seed [`seed_rng`] hands out on this thread to the sequence
@@ -137,7 +138,14 @@ std::thread_local! {
 /// tests can: the app always seeds from the platform.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub fn pin_seeds(seed: Option<u64>) {
-    PINNED_SEEDS.with(|pinned| pinned.set(seed));
+    PINNED_SEEDS.with(|pinned| pinned.set(seed.map(|seed| (seed, seed))));
+}
+
+/// The seed this thread's seeds are pinned to, if they are: pinned again,
+/// it hands them all out again, in the same order.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub fn pinned_seed() -> Option<u64> {
+    PINNED_SEEDS.with(|pinned| pinned.get().map(|(seed, _)| seed))
 }
 
 /// The next of the pinned seeds, as SplitMix64 steps from the one pinned;
@@ -145,8 +153,9 @@ pub fn pin_seeds(seed: Option<u64>) {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 fn next_pinned_seed() -> Option<u64> {
     PINNED_SEEDS.with(|pinned| {
-        let state = pinned.get()?.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        pinned.set(Some(state));
+        let (seed, state) = pinned.get()?;
+        let state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        pinned.set(Some((seed, state)));
         let mut z = state;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -202,6 +211,17 @@ mod tests {
         let seeds = draw(7);
         assert_ne!(seeds[0], seeds[1], "a sequence, not one seed again");
         assert!(!seeds.contains(&super::seed_rng()), "fresh once unpinned");
+    }
+
+    /// While the seeds are pinned, the seed pinned is known, however many
+    /// have been drawn from it; unpinned, there is none.
+    #[test]
+    fn the_seed_pinned_is_known_while_pinned() {
+        super::pin_seeds(Some(42));
+        let _ = (super::seed_rng(), super::seed_rng());
+        assert_eq!(super::pinned_seed(), Some(42));
+        super::pin_seeds(None);
+        assert_eq!(super::pinned_seed(), None);
     }
 
     #[test]

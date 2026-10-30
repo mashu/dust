@@ -518,17 +518,60 @@ impl Harness {
     }
 }
 
-/// Run a test body on a paused clock, its seeds fresh unless it pins them
-/// ([`crate::time::pin_seeds`]).
+/// Run a test body on a paused clock, every seed it draws pinned to one
+/// ([`crate::time::pin_seeds`]): a fresh one each run, unless the test pins
+/// its own, or `DUST_TEST_SEED` gives one. A test that fails says which
+/// seed it drew from, so that its run can be drawn again.
 pub fn run<F: std::future::Future<Output = ()>>(body: impl FnOnce() -> F) {
     crate::time::reset_mono_clock();
-    crate::time::pin_seeds(None);
+    let _seeds = TestSeeds::pin(std::env::var(TEST_SEED).ok());
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
         .build()
         .expect("test runtime")
         .block_on(body());
+}
+
+/// What a test's seeds are pinned to when it is given one, to draw a
+/// failed run's again.
+const TEST_SEED: &str = "DUST_TEST_SEED";
+
+/// A test's seeds pinned for as long as it runs, and said should it fail.
+struct TestSeeds;
+
+impl TestSeeds {
+    /// Pin the seeds to `given`, or to a fresh seed without one.
+    fn pin(given: Option<String>) -> Self {
+        let seed = match given {
+            Some(given) => given
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{TEST_SEED}={given} is not a seed")),
+            None => {
+                crate::time::pin_seeds(None);
+                crate::time::seed_rng()
+            }
+        };
+        crate::time::pin_seeds(Some(seed));
+        Self
+    }
+}
+
+impl Drop for TestSeeds {
+    fn drop(&mut self) {
+        // The seed pinned last: the test's own, if it pinned one.
+        if std::thread::panicking()
+            && let Some(seed) = crate::time::pinned_seed()
+        {
+            let test = std::thread::current()
+                .name()
+                .unwrap_or("the test")
+                .to_string();
+            eprintln!("{test} drew its seeds from {seed}: {TEST_SEED}={seed} draws them again.");
+        }
+        crate::time::pin_seeds(None);
+    }
 }
 
 /// A rendered page, addressed the way its markup names things.
@@ -1318,5 +1361,47 @@ mod harness_tests {
     fn pressing_something_that_is_not_there_says_so() {
         let mut ui = Ui::new(Counter, ());
         ui.click("nonsense");
+    }
+
+    /// Every seed a test draws comes from the one it was run with: pinned
+    /// to that seed again, the test draws the same ones, in the same order.
+    #[test]
+    fn a_test_draws_every_seed_from_one() {
+        run(|| async {
+            let seed = crate::time::pinned_seed().expect("pinned");
+            let drawn: Vec<u64> = (0..3).map(|_| crate::time::seed_rng()).collect();
+            crate::time::pin_seeds(Some(seed));
+            let again: Vec<u64> = (0..3).map(|_| crate::time::seed_rng()).collect();
+            assert_eq!(drawn, again);
+        });
+    }
+
+    /// A seed given is the one pinned; with none, each run is pinned to a
+    /// fresh one; and the seeds are let go once the test is over, failed
+    /// or not.
+    #[test]
+    fn a_test_is_pinned_to_the_seed_given_or_a_fresh_one() {
+        {
+            let _seeds = TestSeeds::pin(Some("1234\n".into()));
+            assert_eq!(crate::time::pinned_seed(), Some(1234));
+        }
+        assert_eq!(crate::time::pinned_seed(), None);
+        let fresh = |_| {
+            let _seeds = TestSeeds::pin(None);
+            crate::time::pinned_seed().expect("pinned")
+        };
+        let seeds: std::collections::BTreeSet<u64> = (0..8).map(fresh).collect();
+        assert_eq!(seeds.len(), 8, "a fresh seed drawn twice");
+        let failed = std::panic::catch_unwind(|| run(|| async { panic!("failed") }));
+        assert!(failed.is_err());
+        assert_eq!(crate::time::pinned_seed(), None, "kept past a failure");
+    }
+
+    /// A seed given that is no seed fails the test rather than leaving it
+    /// to draw a fresh one.
+    #[test]
+    #[should_panic(expected = "DUST_TEST_SEED=twelve is not a seed")]
+    fn a_seed_given_that_is_no_seed_says_so() {
+        let _seeds = TestSeeds::pin(Some("twelve".into()));
     }
 }
