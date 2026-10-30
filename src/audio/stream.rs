@@ -248,11 +248,15 @@ impl<N: Clone> ReceiverStream<N> {
     /// should the clock step on by less before the stream is next topped
     /// up, what is rendered from the change still starts on time, and a
     /// send made there is heard whole. Catching up takes time, so a caller
-    /// reads the clock again after it before scheduling anything.
-    pub fn catch_up_to(&mut self, taken: f64) {
-        if self.next < self.sample_at(taken) {
+    /// reads the clock again after it before scheduling anything. Whether
+    /// the stream had fallen behind: it has nothing to play from where it
+    /// picked up until it is rendered on from there.
+    pub fn catch_up_to(&mut self, taken: f64) -> bool {
+        let behind = self.next < self.sample_at(taken);
+        if behind {
             self.catch_up(self.sample_at(taken + self.margin));
         }
+        behind
     }
 
     /// Watch a send's sound, from `starts` to `ends` on the clock, for the
@@ -560,6 +564,69 @@ mod tests {
         assert!((until - ends).abs() < 1e-4, "to {ends}: {until}");
         assert!(!before.is_set(), "heard out before the stall");
         assert!(!after.is_set(), "starts after the stall");
+    }
+
+    /// Caught up after a stall, the stream is topped up at once, as a
+    /// send's watch does when it finds it fallen behind: it plays on from
+    /// where it picked up, what the mixer plays there, and the send is told
+    /// it lost the stall alone. Left to the next tick, a tenth of a second
+    /// on, the stream played nothing until then and fell behind again, and
+    /// the send was told it lost that tenth as well.
+    #[test]
+    fn a_stream_topped_up_once_caught_up_loses_only_the_stall() {
+        let settings = settings();
+        let lookahead = Mixer::new(SR).lookahead_sec();
+        let sound = plan(&settings, "TEST").sound_end_sec();
+        let mut expected = vec![0.0f32; at(1.2)];
+        mixer(&settings).render(&mut expected, 0);
+        for at_once in [true, false] {
+            let mut stream = ReceiverStream::new(mixer(&settings), 0.0, MARGIN);
+            let test = stream.watch(lookahead, lookahead + sound);
+            let mut browser = Browser::default();
+            stream
+                .render_ahead(0.0, 0.3, |starts, samples| browser.play(starts, samples))
+                .expect("played");
+            // The page busy until 0.6 on the clock, and the send's watch
+            // the first to look.
+            assert!(stream.catch_up_to(0.6), "{at_once}: fallen behind");
+            if at_once {
+                stream
+                    .render_ahead(0.6, 0.5, |starts, samples| browser.play(starts, samples))
+                    .expect("played");
+            }
+            // The next tick.
+            assert_eq!(
+                stream.catch_up_to(0.7),
+                !at_once,
+                "{at_once}: fallen behind again"
+            );
+            stream
+                .render_ahead(0.7, 0.5, |starts, samples| browser.play(starts, samples))
+                .expect("played");
+            let picked_up = if at_once { 0.6 } else { 0.7 } + MARGIN;
+            let (from, until) = test.span().expect("TEST went unheard");
+            assert!(
+                (from - 0.3).abs() < 1e-9,
+                "{at_once}: from the stall: {from}"
+            );
+            assert!(
+                (until - picked_up).abs() < 1e-9,
+                "{at_once}: to where it picked up, {picked_up}: {until}"
+            );
+            let heard = browser.heard(at(1.2));
+            assert!(
+                heard[at(0.3)..at(picked_up)].iter().all(|s| *s == 0.0),
+                "{at_once}: the stall was played"
+            );
+            let first_off = heard[at(picked_up)..]
+                .iter()
+                .zip(&expected[at(picked_up)..])
+                .position(|(a, b)| a != b);
+            assert_eq!(
+                first_off, None,
+                "{at_once}: the stream parts from the mixer"
+            );
+        }
     }
 
     /// A stall longer than the stream makes up leaves nothing in flight to

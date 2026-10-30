@@ -62,12 +62,7 @@ impl MixerStream {
             // A tick that finds the state busy has nothing to add: whatever
             // holds it is topping up already.
             if let Ok(mut stream) = ticking.try_borrow_mut() {
-                let lead = if page_is_hidden() {
-                    STREAM_LEAD_HIDDEN_SEC
-                } else {
-                    STREAM_LEAD_SEC
-                };
-                stream.top_up(lead);
+                stream.top_up(stream_lead());
             }
         });
         Self {
@@ -142,14 +137,29 @@ impl SendWatch {
     /// the context's clock ([`Missed`]). The stream is caught up first, as a
     /// tick would: after a stall the send's clock has run on past where the
     /// stream got to, and the tick that finds it may come only after the
-    /// send's waiter has read that clock and taken the send for heard.
+    /// send's waiter has read that clock and taken the send for heard. And,
+    /// should it have fallen behind, topped up at once from where it picked
+    /// up: left to that tick, up to a tenth of a second away, it would play
+    /// nothing until then, fall behind again, and the send would lose that
+    /// time as well.
     pub fn missed(&self) -> Option<(f64, f64)> {
         if let Some(state) = self.state.upgrade()
             && let Ok(mut state) = state.try_borrow_mut()
+            && state.catch_up()
         {
-            state.catch_up();
+            state.top_up(stream_lead());
         }
         self.missed.span()
+    }
+}
+
+/// How far past what the browser has taken the receiver is kept rendered
+/// just now: further while the page is out of sight.
+fn stream_lead() -> f64 {
+    if page_is_hidden() {
+        STREAM_LEAD_HIDDEN_SEC
+    } else {
+        STREAM_LEAD_SEC
     }
 }
 
@@ -167,10 +177,10 @@ impl StreamState {
     /// Run the mixer on, should the clock have taken all that was rendered
     /// ([`ReceiverStream::catch_up_to`]). Only then: a change just made is
     /// short of the soonest read now once the clock has stepped on since,
-    /// yet still heard on time.
-    fn catch_up(&mut self) {
+    /// yet still heard on time. Whether the stream had fallen behind.
+    fn catch_up(&mut self) -> bool {
         let taken = self.taken();
-        self.stream.catch_up_to(taken);
+        self.stream.catch_up_to(taken)
     }
 
     /// Make `change` as soon as it can be heard, or at `at` should that be
