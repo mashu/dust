@@ -2754,7 +2754,10 @@ exactly as it was while the run went on.
   has begun to reach you: logged before that, each field group is a miss
   (received empty, 1 send), as a guess is no copy, so logging early neither
   raises accuracy nor shrinks the groups a run is ranked over; `l` and `s`
-  hold what you logged and what was sent, for the check. As built (third
+  hold what you logged and what was sent, for the check. A field group
+  keeps its token as keyed (`exchange::keyed_token`), so where that is not
+  what you typed (`T15` for a typed 15, `1T5` for 105), `l` holds what you
+  logged beside it, and the results list that (2026-10-30). As built (third
   pile-up audit), of a call put right with the exchange after it
   (`DE K5XYZ 5NN 214`), the exchange has begun once its first character
   has, not once the `DE` has, and so its speed and a repeat of it count

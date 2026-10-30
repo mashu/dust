@@ -4267,7 +4267,8 @@ impl<S: CallSource> ContestMachine<S> {
     /// exchange has begun to reach you, and a miss before that, as a guess
     /// is no copy. A station logged before, or charged with a NIL, has its
     /// copy kept already: one station, one copy. What no group holds, the
-    /// record does, for the check.
+    /// record does, for the check, and what you logged where the groups
+    /// keep it otherwise, for the results to show.
     fn worked_entry(&mut self, index: usize, read: &LogRead, run_ms: u64) -> Entry {
         let (logged, reading) = (&read.logged, &read.reading);
         let clean = self.logged_clean();
@@ -4313,7 +4314,17 @@ impl<S: CallSource> ContestMachine<S> {
                 .collect()
         };
         let (l, s) = if copies_fields {
-            (Vec::new(), Vec::new())
+            // A field group keeps what you typed as keyed, the token sent
+            // where it reads the same, its digits cut where that one's
+            // were: what you logged goes beside it, unless that is it.
+            let typed = by_field(logged);
+            let kept = groups[1..].iter().map(|kept| &kept.group.received);
+            let l = if typed.iter().eq(kept) {
+                Vec::new()
+            } else {
+                typed
+            };
+            (l, Vec::new())
         } else {
             (by_field(logged), by_field(&sent))
         };
@@ -12487,6 +12498,40 @@ mod tests {
             assert_eq!(view(&runtime).clean, 1, "seed {seed}: {sent} as {value}");
         }
         assert!(cut > 10, "only {cut} cut");
+    }
+
+    /// The results list the exchange you logged as you typed it, where
+    /// its group keeps it otherwise, as keyed for Letters and Mistakes: a
+    /// logger's 7 for `TT7`, and a wrong number typed in digits for a cut
+    /// one, not the token its digits were cut to, which can read as no
+    /// value at all. The check is as it ran. They used to list the token
+    /// kept.
+    #[test]
+    fn the_results_list_the_exchange_as_typed() {
+        let mut rewritten = 0;
+        for seed in 1..40 {
+            for wrong in [false, true] {
+                let mut runtime = habits_runtime(seed, &["K5XYZ"], CallerHabits::Real);
+                let exchange = to_its_exchange(&mut runtime);
+                let sent = serial(&exchange);
+                let value = read_number(&sent).expect("a number") + u32::from(wrong);
+                let typed = value.to_string();
+                runtime.key(OpKey::Esm, "K5XYZ", &typed);
+                runtime.finish_turn();
+                runtime.now += 1_000;
+                runtime.apply(ContestEvent::FinishNow);
+                let (result, run) = result(&runtime);
+                let case = format!("seed {seed}: {sent} as {typed}");
+                rewritten += usize::from(result.groups[1].received != typed);
+                let log = run
+                    .log(&result.groups, &result.group_timings)
+                    .expect("its log");
+                assert_eq!(log[0].fields[0], (Field::Nr, typed, sent), "{case}");
+                let clean = usize::from(!wrong);
+                assert_eq!(run.clean_qsos(&result.groups), Some(clean), "{case}");
+            }
+        }
+        assert!(rewritten > 10, "only {rewritten} kept otherwise");
     }
 
     /// A run worked by hand with Show copy on, its callers sending `calls`

@@ -107,8 +107,10 @@ pub struct QsoRecord {
     /// The exchange you logged, a token for each of the run's fields: a
     /// NIL's always, and otherwise where no group holds it: a QSO's whose
     /// exchange never reached you (its field groups are misses), whose
-    /// station's copy an earlier QSO holds, or whose field groups keep what
-    /// you had when Show copy showed its exchange.
+    /// station's copy an earlier QSO holds, whose field groups keep what
+    /// you had when Show copy showed its exchange, or whose field groups
+    /// keep it otherwise than typed, as keyed (`exchange::keyed_token`).
+    /// Without `s`, the check reads the groups.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub l: Vec<String>,
     /// The call you logged, where its call group does not hold it: the
