@@ -123,7 +123,8 @@ pub struct CallSpec {
     /// A contest's callers: portables and stations abroad come as often as
     /// a contest hears them, not as often as the tier offers them for
     /// practice, and no call is drawn that a contest would score in another
-    /// country than the one it is labelled with (Guantanamo Bay's).
+    /// country than the one it is labelled with (Guantanamo Bay's), or in
+    /// none: a VP2 call's suffix starts with its country's letter.
     pub contest: bool,
 }
 
@@ -541,8 +542,12 @@ const AREA_DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9
 /// what the station is. With the default spec it is drawn exactly as
 /// [`generate_callsign`] draws one, draw for draw. Its country is the one
 /// [`country_of`] reads off it, so the two never disagree where the table
-/// gives one prefix and digit to two countries (`R9`); where a letter after
-/// the digit tells them apart ([`BY_LETTER`]), the suffix starts with it.
+/// gives one prefix and digit to two countries (`R9`). Where a letter after
+/// the digit tells them apart ([`BY_LETTER`]), a contest's call starts its
+/// suffix with its country's letter. Practice keeps the letters it always
+/// drew, so its VP2 call may have one none of VP2's countries has
+/// (`VP2WYP`): `country_of` places that nowhere, and the call keeps the
+/// country of the table's entry it was drawn from.
 pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> GeneratedCall {
     let tier = tier_at(tier);
     let countries = spec.countries.for_one_call(rng);
@@ -558,6 +563,7 @@ pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> Generated
     let letter = BY_LETTER
         .iter()
         .find(|(shared, _, country)| *shared == call.text && *country == prefix.country)
+        .filter(|_| spec.contest)
         .map(|(_, letter, _)| *letter);
     for at in 0..suffix_len(tier, prefix, digit, spec.contest, rng) {
         let drawn = LETTERS[rng.usize_in(0, LETTERS.len() - 1)];
@@ -1539,11 +1545,15 @@ mod tests {
             assert_eq!(drawn, expected, "tier {tier}");
         }
         // KG4 with two letters is Guantanamo Bay's, which only a contest
-        // leaves out (`no_contest_call_is_guantanamo_bays`): practice draws
-        // it where it always did, a few times in 20,000, and the calls after
-        // it as they always came.
+        // leaves out (`no_contest_call_is_guantanamo_bays`), and only a
+        // contest starts a VP2 call with its country's letter
+        // (`a_vp2_call_is_drawn_with_its_countrys_letter`): practice draws
+        // them where it always did, a few times in 20,000, with the letters
+        // it always drew (VP2WYP, not Montserrat's VP2MYP), and the calls
+        // after them as they always came.
         for (tier, at, expected) in [
             (3, 7_277, ["KG4SC", "AF2LY", "SQ5ZL"]),
+            (4, 3_780, ["VP2WYP", "N2XS", "NZ4XG"]),
             (4, 3_785, ["KG4ID", "W8TD", "OP5K"]),
         ] {
             let mut rng = SplitMix64::new(0xABCD ^ u64::from(tier));
@@ -1565,7 +1575,9 @@ mod tests {
     }
 
     /// Every call a contest can send reads back as a call, with the parts
-    /// the generator says it has.
+    /// and the country the generator says it has. Practice's calls do too,
+    /// but for a VP2 call drawn with a letter none of VP2's countries has
+    /// (`generate_callsign_draws_what_it_always_drew`), which reads as none.
     #[test]
     fn every_generated_call_parses_back_into_its_parts() {
         for spec in [CallSpec::default(), CallSpec::contest(Countries::Any)] {
@@ -1576,7 +1588,10 @@ mod tests {
                     assert_eq!(parts.separator, call.digit, "{call:?}");
                     assert_eq!(parts.host, call.host, "{call:?}");
                     assert_eq!(parts.portable, call.marker, "{call:?}");
-                    assert_eq!(country_of(&call.text), Some(call.country), "{call:?}");
+                    match country_of(&call.text) {
+                        None if !spec.contest && call.text.starts_with("VP2") => {}
+                        read => assert_eq!(read, Some(call.country), "{call:?}"),
+                    }
                 }
             }
         }

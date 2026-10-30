@@ -3106,10 +3106,12 @@ files written by scripts, each naming its source and year.
   VP2 goes by the letter after its digit, as cty.dat and MRCE's `DXCC.LIST`
   have it: VP2E Anguilla, VP2M Montserrat, VP2V the British Virgin Islands
   (whose facts are kept by hand, as the table has too few of its calls),
-  any other letter `None`; the generator starts a VP2 call's suffix with
-  its country's letter.
+  any other letter `None`; a contest spec starts a VP2 call's suffix with
+  its country's letter. The default spec keeps the letters it always drew
+  (the golden list pins `VP2WYP` at a seed), so a practice VP2 call can be
+  `None`, and keeps the country of the entry it was drawn from.
   The generator labels each call with the country `country_of` reads off it,
-  so the two agree. `wpx_prefix` reads its WPX prefix: up to the last digit
+  so the two agree, but for such a practice call. `wpx_prefix` reads its WPX prefix: up to the last digit
   (`9A1AA` → `9A1`); a digit marker replaces the digit (`W1XYZ/4` → `W4`);
   a host is the prefix, with 0 added if it has no digit (`PA/N8XYZ` →
   `PA0`), cut as MRCE's `ExtractPrefix` cuts one, to its last digit but
