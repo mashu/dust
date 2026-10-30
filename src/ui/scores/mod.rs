@@ -22,11 +22,13 @@ mod timeline;
 use cw_core::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, CharSetMode, ContestKind,
     FORM_SESSIONS, Ranking, SessionResult, TimelinePoint, assisted_runs, board_kinds, board_modes,
-    latest_run_length, run_kinds, run_lengths, score_board, score_timeline,
+    chart_buckets, chart_day, latest_run_length, run_kinds, run_lengths, score_board,
+    score_timeline,
 };
 use dioxus::prelude::*;
 
 use crate::ui::contest_results::{opened_results, use_opened_run};
+use crate::ui::figures::History;
 use crate::ui::format::short_date;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
@@ -119,22 +121,32 @@ fn run_rule() -> String {
     )
 }
 
+/// The lengths runs of a contest were set to ([`run_lengths`]), and the
+/// latest's ([`latest_run_length`]): what its board can rank by.
+struct RunLengths {
+    lengths: Vec<u32>,
+    latest: Option<u32>,
+}
+
+impl RunLengths {
+    fn of(sessions: &[SessionResult], kind: ContestKind) -> Self {
+        Self {
+            lengths: run_lengths(sessions, kind),
+            latest: latest_run_length(sessions, kind),
+        }
+    }
+}
+
 /// What a contest's board ranks by: the ranking chosen, where this contest
 /// has it; else its verified score among runs of the length of its latest
 /// run, or its clean QSOs an hour where it has no score.
-fn contest_ranking(
-    sessions: &[SessionResult],
-    kind: ContestKind,
-    chosen: Option<Ranking>,
-) -> Ranking {
+fn contest_ranking(runs: &RunLengths, kind: ContestKind, chosen: Option<Ranking>) -> Ranking {
     match chosen {
         Some(Ranking::CleanRate) => Ranking::CleanRate,
-        Some(Ranking::Verified(length))
-            if kind.scored() && run_lengths(sessions, kind).contains(&length) =>
-        {
+        Some(Ranking::Verified(length)) if kind.scored() && runs.lengths.contains(&length) => {
             Ranking::Verified(length)
         }
-        _ => match latest_run_length(sessions, kind) {
+        _ => match runs.latest {
             Some(length) if kind.scored() => Ranking::Verified(length),
             _ => Ranking::CleanRate,
         },
@@ -144,14 +156,15 @@ fn contest_ranking(
 /// What a contest's board can rank by, as its pills offer it: its verified
 /// score at each length its runs were set to, and its clean QSOs an hour.
 /// A contest without a score has the one, and no pills.
-fn contest_rankings(sessions: &[SessionResult], kind: ContestKind) -> Vec<(Ranking, String)> {
+fn contest_rankings(runs: &RunLengths, kind: ContestKind) -> Vec<(Ranking, String)> {
     if !kind.scored() {
         return Vec::new();
     }
-    let lengths = run_lengths(sessions, kind);
+    let lengths = &runs.lengths;
     let several = lengths.len() > 1;
     lengths
-        .into_iter()
+        .iter()
+        .copied()
         .map(|length| {
             let label = if several {
                 format!("Score · {} min", length / 60)
@@ -164,6 +177,81 @@ fn contest_rankings(sessions: &[SessionResult], kind: ContestKind) -> Vec<(Ranki
         .collect()
 }
 
+/// What the history holds boards and runs of: worked out once for it.
+struct Choices {
+    /// The modes with sessions on the board ([`board_modes`]).
+    modes: Vec<CharSetMode>,
+    /// The contests it holds runs of, placed or not ([`run_kinds`]).
+    kinds: Vec<ContestKind>,
+    /// Those with runs on the board ([`board_kinds`]).
+    placed: Vec<ContestKind>,
+}
+
+/// One board of the history, as the tab draws it: worked out once for the
+/// history, what the board is of and what it ranks by.
+struct Board {
+    /// Its rows, best first.
+    entries: Vec<BoardEntry>,
+    /// The runs with Show copy on, listed but never placed.
+    assisted: Vec<BoardEntry>,
+    /// Every session on it, oldest first.
+    timeline: Vec<TimelinePoint>,
+    /// Which of those the timeline draws a dot for ([`timeline_dots`]).
+    dots: Vec<usize>,
+    /// The dates of the first session on the timeline and the last.
+    first_date: String,
+    last_date: String,
+    /// What it says while it places nothing ([`empty_board`]).
+    empty: Option<(&'static str, String)>,
+}
+
+impl Board {
+    fn of(sessions: &[SessionResult], of: BoardOf, ranking: Ranking) -> Self {
+        let entries = score_board(sessions, of, ranking);
+        let assisted = assisted_runs(sessions, of, ranking);
+        let timeline = score_timeline(sessions, of, ranking);
+        let date_of = |point: Option<&TimelinePoint>| {
+            point
+                .and_then(|point| sessions.get(point.index))
+                .map(|session| short_date(&session.date))
+                .unwrap_or_default()
+        };
+        Self {
+            dots: timeline_dots(sessions, &timeline),
+            first_date: date_of(timeline.first()),
+            last_date: date_of(timeline.last()),
+            empty: entries
+                .is_empty()
+                .then(|| empty_board(sessions, of, !assisted.is_empty())),
+            entries,
+            assisted,
+            timeline,
+        }
+    }
+}
+
+/// Which sessions of `timeline` the timeline draws a dot for, and the form
+/// through: every one up to [`cw_core::PER_SESSION_UP_TO`]; past that, the
+/// newest each, and of each older week or month the best, so that the
+/// record it reached still shows ([`chart_buckets`]).
+fn timeline_dots(sessions: &[SessionResult], timeline: &[TimelinePoint]) -> Vec<usize> {
+    let days: Vec<i64> = timeline
+        .iter()
+        .map(|point| {
+            let date = sessions
+                .get(point.index)
+                .map_or("", |session| &session.date);
+            chart_day(date, point.timestamp)
+        })
+        .collect();
+    chart_buckets(&days)
+        .into_iter()
+        .filter_map(|range| {
+            range.max_by(|a, b| timeline[*a].rating.total_cmp(&timeline[*b].rating))
+        })
+        .collect()
+}
+
 /// Every session of `mode`, best first, with the personal best, the score
 /// over time and the board itself. Pointing at a row (or tapping it) marks
 /// on the timeline when it was set. Contest runs are ranked within their
@@ -172,8 +260,12 @@ fn contest_rankings(sessions: &[SessionResult], kind: ContestKind) -> Vec<(Ranki
 /// the QSOs logged clean an hour. The Runs card there lists every run of
 /// it, placed or not; a row there opens the run's results in the tab's
 /// place, as History opens them.
+///
+/// Each board reads every stored run's log: it is worked out once for the
+/// history, and for what it is of and ranks by, and found again as the
+/// pills go back to it ([`History::figure`]).
 #[component]
-pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
+pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
     #[cfg(test)]
     crate::testing::rendered("ScoresTab");
     let mode = use_signal(|| None::<CharSetMode>);
@@ -189,15 +281,19 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     let mut opened = use_opened_run();
     // The Contest pill is always there; a chip for each contest the
     // history holds runs of, placed or not: the Runs card is there.
-    let kinds = run_kinds(&sessions);
-    let modes = board_modes(&sessions);
+    let choices = sessions.figure("board choices", (), |sessions| Choices {
+        modes: board_modes(sessions),
+        kinds: run_kinds(sessions),
+        placed: board_kinds(sessions),
+    });
+    let (modes, kinds) = (choices.modes.clone(), choices.kinds.clone());
     // A mode whose sessions have all been deleted shows every mode again,
     // and a contest with none left the first that has runs on the board, or
     // else the first that has runs.
     let current = mode().filter(|chosen| modes.contains(chosen));
     let contest = kind()
         .filter(|chosen| kinds.contains(chosen))
-        .or_else(|| board_kinds(&sessions).first().copied())
+        .or_else(|| choices.placed.first().copied())
         .or(kinds.first().copied());
     let of = match (current, contest) {
         (None, _) => BoardOf::All,
@@ -205,18 +301,23 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
         (Some(mode), _) => BoardOf::Mode(mode),
     };
     let (ranking, rankings) = match of {
-        BoardOf::Contest(kind) => (
-            contest_ranking(&sessions, kind, rank()),
-            contest_rankings(&sessions, kind),
-        ),
+        BoardOf::Contest(kind) => {
+            let runs = sessions.figure("run lengths", kind, |sessions| {
+                RunLengths::of(sessions, kind)
+            });
+            (
+                contest_ranking(&runs, kind, rank()),
+                contest_rankings(&runs, kind),
+            )
+        }
         _ => (Ranking::PerGroup, Vec::new()),
     };
-    if let Some(results) = opened_results(&sessions, opened, "Scores") {
+    if let Some(results) = sessions.with(|all| opened_results(all, opened, "Scores")) {
         return results;
     }
-    let board = score_board(&sessions, of, ranking);
-    let assisted = assisted_runs(&sessions, of, ranking);
-    let timeline = score_timeline(&sessions, of, ranking);
+    let board = sessions.figure("score board", (of, ranking), |sessions| {
+        Board::of(sessions, of, ranking)
+    });
     let today = crate::time::local_date_string();
     let runs_of = match of {
         BoardOf::Contest(kind) => Some(kind),
@@ -236,8 +337,8 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
         }
     };
 
-    let Some(best) = board.first().cloned() else {
-        let (title, body) = empty_board(&sessions, of, !assisted.is_empty());
+    let Some(best) = board.entries.first().cloned() else {
+        let (title, body) = board.empty.clone().unwrap_or_default();
         return rsx! {
             div { class: "stack",
                 {pills}
@@ -245,10 +346,10 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                     CardHead { icon: IconName::Medal, title }
                     p { class: "muted hint", "{body}" }
                 }
-                if !assisted.is_empty() {
+                if !board.assisted.is_empty() {
                     BoardList {
                         board: Vec::new(),
-                        assisted,
+                        assisted: board.assisted.clone(),
                         best_at: 0,
                         marked,
                         hovered,
@@ -258,23 +359,15 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                     }
                 }
                 if let Some(kind) = runs_of {
-                    RunsCard { sessions: sessions.clone(), kind, on_open: move |pick| opened.set(Some(pick)) }
+                    RunsCard { sessions, kind, on_open: move |pick| opened.set(Some(pick)) }
                 }
             }
         };
     };
     let best_at = best.timestamp;
-    let date_of = |point: Option<&TimelinePoint>| {
-        point
-            .and_then(|point| sessions.get(point.index))
-            .map(|session| short_date(&session.date))
-            .unwrap_or_default()
-    };
-    let first_date = date_of(timeline.first());
-    let last_date = date_of(timeline.last());
-    let form = timeline.last().map(|point| point.form);
-    let form_over = timeline.len().min(FORM_SESSIONS);
-    let total = board.len();
+    let form = board.timeline.last().map(|point| point.form);
+    let form_over = board.timeline.len().min(FORM_SESSIONS);
+    let total = board.entries.len();
     let show_mode = current.is_none();
 
     rsx! {
@@ -289,18 +382,19 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                 ranking,
             }
             ScoreTimeline {
-                timeline,
-                board: board.clone(),
+                timeline: board.timeline.clone(),
+                dots: board.dots.clone(),
+                board: board.entries.clone(),
                 best_at,
                 marked,
                 total,
-                first_date,
-                last_date,
+                first_date: board.first_date.clone(),
+                last_date: board.last_date.clone(),
                 ranking,
             }
             BoardList {
-                board,
-                assisted,
+                board: board.entries.clone(),
+                assisted: board.assisted.clone(),
                 best_at,
                 marked,
                 hovered,
@@ -309,7 +403,7 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                 ranking,
             }
             if let Some(kind) = runs_of {
-                RunsCard { sessions: sessions.clone(), kind, on_open: move |pick| opened.set(Some(pick)) }
+                RunsCard { sessions, kind, on_open: move |pick| opened.set(Some(pick)) }
             }
         }
     }
@@ -439,6 +533,45 @@ fn empty_board(sessions: &[SessionResult], of: BoardOf, assisted: bool) -> (&'st
 mod tests {
     use super::*;
     use crate::ui::settings_charset::CHAR_SET_MODES;
+    use cw_core::{POINTS_UP_TO, RECENT_SESSIONS};
+
+    /// Past a thousand sessions on the board, the timeline draws the best
+    /// of each older week, and every one of the newest: the record still
+    /// shows, on a chart that keeps to its points. A shorter one draws
+    /// every session.
+    #[test]
+    fn a_long_timeline_draws_the_best_of_each_older_week() {
+        let first = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let sessions: Vec<SessionResult> = (0..1_100_u64)
+            .map(|at| SessionResult {
+                date: (first + chrono::Days::new(at / 2))
+                    .format("%Y-%m-%d")
+                    .to_string(),
+                timestamp: at,
+                ..SessionResult::empty_for_test()
+            })
+            .collect();
+        let timeline: Vec<TimelinePoint> = (0..1_100_usize)
+            .map(|at| TimelinePoint {
+                index: at,
+                timestamp: at as u64,
+                rating: if at == 5 { 99.0 } else { (at % 7) as f64 },
+                record: 99.0,
+                set_record: at == 5,
+                form: 3.0,
+            })
+            .collect();
+        let dots = timeline_dots(&sessions, &timeline);
+        assert!(dots.len() <= POINTS_UP_TO, "{} dots", dots.len());
+        assert!(dots.contains(&5), "the record has its dot");
+        let newest: Vec<usize> = (1_100 - RECENT_SESSIONS..1_100).collect();
+        assert!(dots.ends_with(&newest));
+        assert!(dots.is_sorted());
+        assert_eq!(
+            timeline_dots(&sessions[..10], &timeline[..10]),
+            (0..10).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn every_mode_has_a_name() {

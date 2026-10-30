@@ -68,13 +68,42 @@ fn heat_color(intensity: f64) -> String {
     format!("hsl({:.0}, 75%, 45%)", 120.0 * intensity.clamp(0.0, 1.0))
 }
 
+/// The practice calendar of a history on a day, worked out once: its grid
+/// shaded by how much was practised, and by how well, for the toggle to
+/// choose between.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Calendar {
+    volume: HeatmapGrid,
+    accuracy: HeatmapGrid,
+}
+
+impl Calendar {
+    /// The calendar of `sessions` up to `today`; none where `today` does
+    /// not read.
+    pub fn of(sessions: &[SessionResult], today: &str) -> Option<Self> {
+        let grid = |mode| cw_core::build_heatmap(sessions, today, cw_core::HEATMAP_MONTHS, mode);
+        Some(Self {
+            volume: grid(HeatmapColorMode::Volume)?,
+            accuracy: grid(HeatmapColorMode::Accuracy)?,
+        })
+    }
+
+    fn grid(&self, mode: HeatmapColorMode) -> &HeatmapGrid {
+        match mode {
+            HeatmapColorMode::Volume => &self.volume,
+            HeatmapColorMode::Accuracy => &self.accuracy,
+        }
+    }
+}
+
+/// The practice calendar, shaded as the toggle chooses; nothing without one.
 #[component]
-pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
+pub fn ActivityHeatmap(calendar: Option<Calendar>) -> Element {
     let mut mode = use_signal(|| HeatmapColorMode::Volume);
-    let Some(grid) = cw_core::build_heatmap(&sessions, &today, cw_core::HEATMAP_MONTHS, mode())
-    else {
+    let Some(calendar) = calendar else {
         return rsx! {};
     };
+    let grid = calendar.grid(mode()).clone();
     let legend = if mode() == HeatmapColorMode::Volume {
         "More chars"
     } else {

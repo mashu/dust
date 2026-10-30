@@ -9,14 +9,15 @@
 
 use cw_core::{
     DROP_POINTS, ENDURANCE_MIN_SESSIONS, Endurance, EndurancePoint, GROUPS_A_STRETCH,
-    MINUTES_A_STRETCH, SessionResult, StretchUnit, TrainingSettings, endurance, practised_modes,
+    MINUTES_A_STRETCH, StretchUnit, TrainingSettings, endurance,
 };
 use dioxus::prelude::*;
 
+use crate::ui::figures::History;
 use crate::ui::format::counted;
 use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::stats::shown_mode;
+use crate::ui::stats::{practised, shown_mode};
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 
 /// The tallest a bar stands, as a share of the chart: room above it for
@@ -122,12 +123,15 @@ fn height(accuracy: f64, floor: f64) -> f64 {
 /// long sessions, against how the session starts; and before there are,
 /// what it takes.
 #[component]
-pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+pub fn EnduranceCard(settings: TrainingSettings, #[props(into)] sessions: History) -> Element {
     let mut chosen = use_signal(|| None);
-    let curves: Vec<_> = practised_modes(&sessions)
-        .into_iter()
-        .filter_map(|mode| endurance(&sessions, mode).map(|curve| (mode, curve)))
-        .collect();
+    let modes = practised(&sessions);
+    let curves = sessions.figure("endurance", (), |sessions| {
+        modes
+            .iter()
+            .filter_map(|mode| endurance(sessions, *mode).map(|curve| (*mode, curve)))
+            .collect::<Vec<_>>()
+    });
     let modes: Vec<_> = curves.iter().map(|(mode, _)| *mode).collect();
     let current = settings.curriculum.char_set_mode;
     let shown = shown_mode(chosen(), &modes, current)

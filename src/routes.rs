@@ -15,11 +15,12 @@ use crate::persist::auto_progress;
 use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen, SessionPick};
-use crate::time::{as_shown, local_date_string, mono_ms, sleep_ms};
+use crate::time::{local_date_string, mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
 use crate::ui::contest_results::NothingKept;
-use crate::ui::home::{Home, lock_keeps_groups_untimed};
+use crate::ui::figures::use_history;
+use crate::ui::home::{Home, Practice, lock_keeps_groups_untimed};
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
@@ -92,19 +93,18 @@ fn HomeRoute() -> Element {
     // move of the settings, not on every redraw of the screen.
     let progress = use_memo(move || auto_progress(&*ctx.app().store, &ctx.settings.read()));
     use_warm_sampler(ctx);
+    // What Home shows of the history: once for each change to it, and each
+    // day, read from what the screens share of it; the screen opened again
+    // on the same history works nothing out again.
+    let history = use_history(ctx);
+    let today = local_date_string();
+    let practice = use_memo(use_reactive!(|today| Practice::of(&history(), &today)));
     let settings = ctx.settings.read();
-    // Every session counts, whatever character set it was recorded with.
-    let sessions = ctx.sessions.read();
     rsx! {
         Home {
             settings: settings.clone(),
-            last_accuracy: sessions.last().map(|s| s.accuracy),
-            session_count: sessions.len(),
+            practice: practice(),
             pool: compute_char_pool(&settings).into_iter().collect::<String>(),
-            // The streak and the calendar go by the days sessions count
-            // towards, as the clock reads them.
-            sessions: as_shown(&sessions).into_owned(),
-            today: local_date_string(),
             auto_progress: progress(),
             on_start,
             on_listen,
@@ -292,10 +292,13 @@ struct Waiting {
 #[component]
 fn StatsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
+    // The history as the screens share it, never copied, with what was
+    // worked out of it when Stats was last open.
+    let history = use_history(ctx);
     rsx! {
         StatsView {
             settings: ctx.settings.read().clone(),
-            sessions: ctx.sessions.read().clone(),
+            sessions: history(),
             on_delete: move |picked: Vec<SessionPick>| ctx.delete_sessions(&picked),
             backups: Backups {
                 last: *ctx.last_backup.read(),

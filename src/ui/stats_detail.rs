@@ -1,18 +1,18 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    ContestKind, SessionHistoryRow, SessionResult, StoredLog, TrainingSettings, mistake_stats,
-    session_history,
+    ContestKind, SessionHistoryRow, StoredLog, TrainingSettings, history_order, history_row,
+    mistake_stats,
 };
 use dioxus::prelude::*;
 
 use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
-use crate::time::as_shown;
 use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::bigram::{BigramCard, hardest_pairs_card};
 use crate::ui::confusion::confusions_card;
 use crate::ui::contest_results::{opened_results, use_opened_run};
+use crate::ui::figures::History;
 use crate::ui::forecast::{group_length_card, speed_card};
 use crate::ui::format::counted;
 use crate::ui::sampling::NextUpCard;
@@ -20,12 +20,12 @@ use crate::ui::settings_charset::mode_label;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
-pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
-    let mistakes = mistake_stats(&sessions, 12);
-    let (confusion, heat) = (mistakes.confusions, mistakes.bigrams);
+pub fn MistakesTab(#[props(into)] sessions: History) -> Element {
+    let mistakes = sessions.figure("mistakes", (), |sessions| mistake_stats(sessions, 12));
+    let (confusion, heat) = (&mistakes.confusions, mistakes.bigrams.clone());
     rsx! {
         div { class: "stack",
-            {confusions_card(&confusion)}
+            {confusions_card(confusion)}
             if !heat.cols.is_empty() {
                 {hardest_pairs_card(&heat)}
                 BigramCard { heat }
@@ -35,7 +35,7 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
 }
 
 #[component]
-pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
+pub fn SamplingTab(settings: TrainingSettings, sessions: History) -> Element {
     rsx! {
         div { class: "stack",
             NextUpCard { settings: settings.clone(), sessions: sessions.clone() }
@@ -202,31 +202,40 @@ fn HistoryRow(
 /// restored from one, above the list.
 #[component]
 pub fn HistoryTab(
-    sessions: Vec<SessionResult>,
+    #[props(into)] sessions: History,
     on_delete: Option<EventHandler<Vec<SessionPick>>>,
     backups: Option<Backups>,
 ) -> Element {
-    // Each run's log is read and checked to make its row: once for the
-    // history as it stands, not again for every choice made in the list.
-    let rows = use_memo(use_reactive!(|sessions| session_history(&sessions)));
-    let rows = rows.read();
     let mut selecting = use_signal(|| false);
     let mut chosen = use_signal(BTreeSet::<SessionPick>::new);
     let mut confirming = use_signal(|| false);
     let mut shown = use_signal(|| HISTORY_PAGE);
     // The run whose results are open, read again from its row.
     let opened = use_opened_run();
-    if let Some(results) = opened_results(&sessions, opened, "History") {
+    if let Some(results) = sessions.with(|all| opened_results(all, opened, "History")) {
         return results;
     }
 
-    let every: Vec<SessionPick> = rows
-        .iter()
-        .map(|row| SessionPick {
-            index: row.index,
-            timestamp: row.timestamp,
-        })
-        .collect();
+    // Every session, newest first, by its stamp alone; and the rows of
+    // those shown. Each run's log is read and checked to make its row: only
+    // for the rows on the page, once for the history as it stands, not
+    // again for every choice made in the list.
+    let every = sessions.figure("history order", (), |all| {
+        history_order(all)
+            .into_iter()
+            .map(|index| SessionPick {
+                index,
+                timestamp: all[index].timestamp,
+            })
+            .collect::<Vec<_>>()
+    });
+    let rows = sessions.figure("history rows", shown(), |all| {
+        every
+            .iter()
+            .take(shown())
+            .filter_map(|pick| history_row(all, pick.index))
+            .collect::<Vec<_>>()
+    });
     let total = every.len();
     let selecting_now = selecting() && on_delete.is_some() && total > 0;
     // Only what is still in the history counts as chosen.
@@ -247,7 +256,13 @@ pub fn HistoryTab(
     // One stamped ahead of the clock was not made after every backup since.
     let since = backups
         .as_ref()
-        .map(|backups| sessions_since(&as_shown(&sessions), backups.last))
+        .map(|backups| {
+            *sessions
+                .shown()
+                .figure("since backup", backups.last, |shown| {
+                    sessions_since(shown, backups.last)
+                })
+        })
         .unwrap_or_default();
 
     rsx! {
@@ -285,7 +300,7 @@ pub fn HistoryTab(
                 }
             } else {
                 div { class: "history-list",
-                    for (row, key) in rows.iter().take(shown()).zip(row_keys(&rows)) {
+                    for (row, key) in rows.iter().zip(row_keys(&rows)) {
                         HistoryRow {
                             key: "{key}",
                             row: row.clone(),
@@ -325,7 +340,7 @@ pub fn HistoryTab(
                             class: "select-btn danger",
                             onclick: move |_| {
                                 if let Some(on_delete) = on_delete {
-                                    on_delete.call(every.clone());
+                                    on_delete.call(every.to_vec());
                                 }
                                 finish();
                             },

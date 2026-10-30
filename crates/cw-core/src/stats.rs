@@ -985,26 +985,40 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
 }
 
 pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
-    let mut rows: Vec<SessionHistoryRow> = sessions
-        .iter()
-        .enumerate()
-        .map(|(index, s)| SessionHistoryRow {
-            date: s.date.clone(),
-            accuracy_pct: s.accuracy * 100.0,
-            score: s.score,
-            groups: s.groups.len() as u32,
-            correct_groups: s.groups.iter().filter(|g| g.correct).count() as u32,
-            total_chars: s.total_chars,
-            timestamp: s.timestamp,
-            mode: s.char_set_mode,
-            contest: s.contest_kind(),
-            log: s.stored_log(),
-            assisted: s.assisted(),
-            index,
-        })
-        .collect();
-    rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
-    rows
+    history_order(sessions)
+        .into_iter()
+        .filter_map(|index| history_row(sessions, index))
+        .collect()
+}
+
+/// Where each session of `sessions` sits, in the order [`session_history`]
+/// lists them: newest first, and of two that finished at the same moment,
+/// the one stored first. Only the stamps are read, so a list can make the
+/// rows it shows and no others ([`history_row`]).
+pub fn history_order(sessions: &[SessionResult]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..sessions.len()).collect();
+    order.sort_by_key(|&index| std::cmp::Reverse(sessions[index].timestamp));
+    order
+}
+
+/// The row of the session at `index` in `sessions`, as [`session_history`]
+/// lists it: its run's log read and checked, where it has one.
+pub fn history_row(sessions: &[SessionResult], index: usize) -> Option<SessionHistoryRow> {
+    let s = sessions.get(index)?;
+    Some(SessionHistoryRow {
+        date: s.date.clone(),
+        accuracy_pct: s.accuracy * 100.0,
+        score: s.score,
+        groups: s.groups.len() as u32,
+        correct_groups: s.groups.iter().filter(|g| g.correct).count() as u32,
+        total_chars: s.total_chars,
+        timestamp: s.timestamp,
+        mode: s.char_set_mode,
+        contest: s.contest_kind(),
+        log: s.stored_log(),
+        assisted: s.assisted(),
+        index,
+    })
 }
 
 /// The character sets `sessions` hold any practice in, in the order the
@@ -1917,6 +1931,27 @@ mod tests {
         // Each row still names the session it came from, and its mode.
         assert_eq!((rows[0].index, rows[1].index), (1, 0));
         assert_eq!(rows[0].mode, CharSetMode::Koch);
+    }
+
+    /// The order alone reads only the stamps, and a row made from it is the
+    /// row the whole history lists there: two sessions of one moment in the
+    /// order they were stored.
+    #[test]
+    fn a_list_can_make_only_the_rows_it_shows() {
+        let history = [
+            plain("2026-09-01", 10, &[("KM", "KM")]),
+            plain("2026-09-03", 30, &[("KM", "KX")]),
+            plain("2026-09-02", 20, &[("KM", "KM")]),
+            plain("2026-09-03", 30, &[("MK", "MK")]),
+        ];
+        let order = history_order(&history);
+        assert_eq!(order, [1, 3, 2, 0]);
+        let rows: Vec<SessionHistoryRow> = order
+            .iter()
+            .filter_map(|&index| history_row(&history, index))
+            .collect();
+        assert_eq!(rows, session_history(&history));
+        assert_eq!(history_row(&history, 4), None);
     }
 
     #[test]

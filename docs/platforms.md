@@ -712,7 +712,10 @@ Stats are computed across your whole history, and no setting hides any of
 it. Changing course — Koch to Mixed, a new unlock order, a level, callsigns —
 does not hide what you already did: accuracy over time, letter mastery,
 mistakes, the calendar and the streak all count every session, because a
-letter is the same letter whichever set it was sent under.
+letter is the same letter whichever set it was sent under. Past 1,000
+sessions, accuracy over time and the score timeline still draw the newest
+100 one by one, and the older ones a week to a point, or a month, so the
+whole history fits on the chart.
 
 - The sampler learns what it knows of each character from every session,
   whatever set, order or level sent it. The **Sampling** tab's snapshot lists
