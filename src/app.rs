@@ -722,6 +722,9 @@ mod ui_tests {
                 "{}",
                 ui.html()
             );
+            // The harness marks the store as asked; the button must mark it
+            // itself.
+            ui.store.asked_about_lock.set(false);
             ui.click("btn-turn-off-lock-typing");
             assert!(!ui.with_app(|ctx| locked(&ctx.settings.peek())));
             assert!(!locked(&ui.store.load_settings()), "stored at once");

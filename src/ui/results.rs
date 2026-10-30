@@ -154,7 +154,7 @@ fn untimed_hint(result: &SessionResult, lock_on: bool) -> Option<(String, bool)>
         )
     } else if let Some(late) = untimed.first_key_late_ms {
         format!(
-            "{lead}: {}, your first key came about {:.1} s after the group had ended. A group is timed only when you key its first character while it is still sounding.",
+            "{lead}: {}, your first key came about {:.1} s after the group had ended. A group is timed only when you key its first character while the group is still sounding, or, for a short group, within half a second of that character.",
             in_groups(untimed.typed_after),
             late / 1_000.0
         )
@@ -164,7 +164,7 @@ fn untimed_hint(result: &SessionResult, lock_on: bool) -> Option<(String, bool)>
         )
     } else {
         format!(
-            "{lead}: key each character as you hear it. A character is timed when its key comes at least {REACTION_MIN_MS} ms after its sound, and a group only when you key its first character while it is still sounding."
+            "{lead}: key each character as you hear it. A character is timed when its key comes at least {REACTION_MIN_MS} ms after its sound, and a group only when you key its first character while the group is still sounding, or, for a short group, within half a second of that character."
         )
     };
     Some((text, false))

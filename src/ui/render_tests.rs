@@ -1449,7 +1449,11 @@ fn results_with_nothing_timed_say_why() {
     open.typing_locked = false;
     let html = results_of(open, true);
     assert!(html.contains("key each character as you hear it"), "{html}");
-    assert!(html.contains("while it is still sounding"), "{html}");
+    assert!(html.contains("while the group is still sounding"), "{html}");
+    assert!(
+        html.contains("within half a second of that character"),
+        "{html}"
+    );
     assert!(!html.contains("before it ends"), "{html}");
     assert!(!html.contains("Lock typing"), "{html}");
 
@@ -1476,7 +1480,9 @@ fn results_say_how_late_the_first_key_came() {
         "{html}"
     );
     assert!(
-        html.contains("only when you key its first character while it is still sounding"),
+        html.contains(
+            "only when you key its first character while the group is still sounding, or, for a short group, within half a second of that character"
+        ),
         "{html}"
     );
     assert!(!html.contains("Lock typing"), "{html}");

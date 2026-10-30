@@ -281,9 +281,10 @@ impl Store for WebStore {
         }
     }
 
-    /// A browser that keeps nothing asks once a visit.
+    /// A browser that keeps nothing counts it as asked: it holds no settings
+    /// from before 0.16, so a lock on there is one chosen this visit.
     fn asked_about_lock(&self) -> bool {
-        storage().is_some_and(|store| {
+        storage().is_none_or(|store| {
             store
                 .get_item(ASKED_ABOUT_LOCK_KEY)
                 .ok()
