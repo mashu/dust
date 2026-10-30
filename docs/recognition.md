@@ -88,11 +88,21 @@ was sent when all of these hold:
    or a letter read ahead from the word.
 3. **You were keeping up.** The key for the character before it was in by
    the time this one reached you (`end + latency + KEEPING_UP_MS`, 100 ms),
-   put right since or not: otherwise its time is the backlog. A group of more than one character is
-   timed only if typed along — its first key in by then for its last
-   character — and only with the box open: copied whole and typed after, it
-   says how fast you recall, not recognise. With the box shut, only a group
-   of one character can be timed.
+   put right since or not: otherwise its time is the backlog. A group of
+   more than one character is timed only if typed along (`typed_along`) —
+   its first key in by then for its last character, or, however short the
+   rest of the group, by `ALONG_FLOOR_MS` (400 ms) after its first
+   character ended, with the delay and the 100 ms after that — and only
+   with the box open: copied whole and typed after, it says how fast you
+   recall, not recognise. With the box shut, only a group of one character
+   can be timed.
+
+   The floor is for the first key alone. Behind `ET` at 25 WPM the `T` is
+   gone 288 ms after the `E`, sooner than most people key what they heard,
+   so without it such a group could hardly be timed at all. A first key has
+   no backlog behind it, so its time is its character's own, and one the
+   floor lets in is timed at 500 ms at most, with the delay. A later key
+   keeps the 100 ms: more would time the backlog.
 
 A time past `RECOGNITION_MAX_MS` (3 s) counts as 3 s, as slow as a time
 says, rather than leaving the slowest tries out.
