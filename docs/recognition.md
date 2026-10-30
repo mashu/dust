@@ -70,6 +70,15 @@ heard twice. A contest call or exchange token keeps the same record (see
 Contest, below). The record is read leniently: a shape this build does not
 know reads as untimed, never as a lost session.
 
+A group whose first send could not be timed from says why instead, under
+`untimed`: `"heldUp"` (the audio held it up on its way), `"sentAgain"`
+(tried again from the start, heard in part already) or `"paused"` (paused
+with its answer open). The first reason found is the one kept. It is
+written only where there is one, which healthy audio never gives, and read
+as leniently: a reason this build does not know reads as none. A session
+run with Lock typing while sending on says so, `"typingLocked": true`, so
+its results go by the setting it ran with, not by the one set since.
+
 Older builds ignore `charTimes`. `timeToCompleteMs` and `avgResponseMs` are
 still written for them, which need both.
 
