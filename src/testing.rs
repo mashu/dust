@@ -77,9 +77,10 @@ pub fn listen_elsewhere(on_elsewhere: Callback<()>) {
     ELSEWHERE.with_borrow_mut(|heard| heard.push(on_elsewhere));
 }
 
-/// A component costly to draw has rendered: a test can count how often
-/// ([`Ui::take_renders`]), and so tell a hover that redraws a mark from one
-/// that redraws a whole tab.
+/// A component costly to draw has rendered, or something costly to work
+/// out has been: a test can count how often ([`take_renders`]), and so
+/// tell a hover that redraws a mark from one that redraws a whole tab, or a
+/// tap that replays the history from one that does not.
 pub fn rendered(component: &'static str) {
     RENDERS.with_borrow_mut(|renders| {
         match renders.iter_mut().find(|(name, _)| *name == component) {
@@ -87,6 +88,17 @@ pub fn rendered(component: &'static str) {
             None => renders.push((component, 1)),
         }
     });
+}
+
+/// How many times `component` rendered since this was last called for it
+/// ([`rendered`]).
+pub fn take_renders(component: &str) -> usize {
+    RENDERS.with_borrow_mut(|renders| {
+        renders
+            .iter_mut()
+            .find(|(name, _)| *name == component)
+            .map_or(0, |(_, count)| std::mem::take(count))
+    })
 }
 
 pub struct Harness {
@@ -953,12 +965,7 @@ impl Ui {
     /// How many times `component` rendered since this was last called for
     /// it ([`rendered`]).
     pub fn take_renders(&mut self, component: &str) -> usize {
-        RENDERS.with_borrow_mut(|renders| {
-            renders
-                .iter_mut()
-                .find(|(name, _)| *name == component)
-                .map_or(0, |(_, count)| std::mem::take(count))
-        })
+        take_renders(component)
     }
 
     /// Whether anything is ready to run: a task woken, an effect queued, a

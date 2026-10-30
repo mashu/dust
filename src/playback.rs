@@ -225,14 +225,13 @@ pub fn start_letters(ctx: AppCtx, chars: String) {
 pub fn start_stream(ctx: AppCtx) {
     let AppCtx {
         settings,
-        sessions,
         mut stream_heard,
         ..
     } = ctx;
     start_preview(ctx, Preview::Stream, |lease, first| {
         stream_heard.set(Vec::new());
         // Leaning on the same weak characters a session would.
-        let sampler = Sampler::new(&sessions.peek(), &first, seed_rng());
+        let sampler = ctx.sampler(&first, seed_rng());
         loop_stream(lease, settings, sampler, stream_heard)
     });
 }
@@ -266,13 +265,9 @@ pub fn start_band_preview(ctx: AppCtx) {
 /// the history as a run's is, and let go of once they are worked. Nothing
 /// is stored, and no stat hears of them.
 pub fn start_qsos(ctx: AppCtx) {
-    let AppCtx {
-        sessions,
-        mut dialogue,
-        ..
-    } = ctx;
+    let mut dialogue = ctx.dialogue;
     start_preview(ctx, Preview::Qsos, |lease, settings| {
-        let sampler = Sampler::new(&sessions.peek(), &settings, seed_rng());
+        let sampler = ctx.sampler(&settings, seed_rng());
         let heard = hear_qsos(seed_rng(), &settings, sampler, HEAR_QSOS);
         let kind = settings.contest.contest_kind;
         dialogue.set(Some(Dialogue {
@@ -1067,6 +1062,49 @@ mod tests {
             // Drawn evenly, a third of them would be; from a blank slate this
             // seed draws eighteen.
             assert!(ks < 14, "{ks} of 60 were the character always copied");
+        });
+    }
+
+    /// The prior the stream's sampler starts from is built once the
+    /// screens are drawn, not in the tap that starts it: neither the first
+    /// stream nor one started again replays the history.
+    #[test]
+    fn a_stream_starts_from_the_prior_built_ahead_of_the_tap() {
+        run(|| async {
+            let history: Vec<SessionResult> = (0..5)
+                .map(|_| {
+                    crate::testing::stored_session("2026-09-01", &[("KM", "KM"), ("MK", "ME")])
+                })
+                .collect();
+            let (mut ui, recorder) =
+                crate::testing::Ui::app_with_history(test_settings(), &history);
+            let settle = u64::from(crate::time::POLL_MS) * 2;
+            ui.advance(settle).await;
+            assert_eq!(
+                ui.take_renders("SamplerPrior"),
+                1,
+                "built as Home was drawn"
+            );
+            ui.click("btn-listen-to-letters");
+            ui.advance(settle).await;
+            assert_eq!(ui.take_renders("SamplerPrior"), 0, "Listen found it built");
+            for _ in 0..2 {
+                ui.click("btn-stream-groups");
+                assert_eq!(ui.take_renders("SamplerPrior"), 0, "none built in the tap");
+                assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+                ui.click("btn-stop");
+                recorder.clear();
+            }
+            // A session another window kept: a tap before the screen has
+            // built the prior for it again builds it itself, once.
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                sessions.write().push(history[0].clone());
+            });
+            ui.click("btn-stream-groups");
+            assert_eq!(ui.take_renders("SamplerPrior"), 1, "built in the tap");
+            ui.advance(settle).await;
+            assert_eq!(ui.take_renders("SamplerPrior"), 0, "and not again");
         });
     }
 

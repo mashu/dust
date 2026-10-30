@@ -3,10 +3,15 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cw_core::{ContestView, GroupSession, SessionResult, SettingsSection, TrainingSettings};
+use cw_core::{
+    ContestView, GroupSession, Sampler, SamplerPrior, SessionResult, SettingsSection,
+    TrainingSettings,
+};
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
@@ -18,6 +23,7 @@ use crate::persist::{
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live, keep_cut_off};
+use crate::time::{POLL_MS, sleep_ms};
 use crate::ui::format::{counted, day_of, short_date};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +76,10 @@ pub struct AppState {
     pub player: Player,
     pub store: Rc<dyn Store>,
     pub session: Rc<RefCell<Option<Live>>>,
+    /// The prior the last sampler started from, and the key of the history
+    /// it was built from ([`history_key`]): the next one starts from it too
+    /// while both read as they did ([`AppCtx::sampler`]).
+    prior: Rc<RefCell<Option<(u64, SamplerPrior)>>>,
 }
 
 impl AppState {
@@ -86,6 +96,7 @@ impl AppState {
             player: Player::new(make_player),
             store,
             session: Rc::new(RefCell::new(None)),
+            prior: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -361,6 +372,48 @@ impl AppCtx {
             settings.set(merged.clone());
         }
         merged
+    }
+
+    /// A sampler for a session, a run or a stream of `settings`, seeded
+    /// with `seed`: what [`Sampler::new`] makes of the history, from the
+    /// prior built last while the history and what the prior reads of the
+    /// settings are as they were then. Otherwise the history is replayed
+    /// here, which [`Self::warm_sampler`] does ahead of a tap.
+    pub fn sampler(self, settings: &TrainingSettings, seed: u64) -> Sampler {
+        Sampler::from_prior(self.prior(settings), settings, seed)
+    }
+
+    /// The prior a sampler for `settings` starts from: the one kept, while it
+    /// is still the history's, or one built from the history now and kept.
+    fn prior(self, settings: &TrainingSettings) -> SamplerPrior {
+        let sessions = self.sessions.peek();
+        let key = history_key(&sessions);
+        let kept = self.app().prior;
+        if let Some((built_from, prior)) = kept.borrow().as_ref()
+            && *built_from == key
+            && prior.suits(settings)
+        {
+            return prior.clone();
+        }
+        #[cfg(test)]
+        crate::testing::rendered("SamplerPrior");
+        let prior = SamplerPrior::from_history(&sessions, settings);
+        *kept.borrow_mut() = Some((key, prior.clone()));
+        prior
+    }
+
+    /// Build the prior the next sampler starts from, once the screen up now
+    /// has been drawn, so that the tap that starts a session, a run or a
+    /// stream need not replay the history: on a phone that was a pause
+    /// between the tap and anything happening. A prior kept already that is
+    /// still the history's costs a look at every session, and no more.
+    pub fn warm_sampler(self) {
+        // The app's: the screen it is warmed for may be left meanwhile.
+        spawn_forever(async move {
+            sleep_ms(POLL_MS).await;
+            let settings = self.settings.peek().clone().clamp();
+            self.prior(&settings);
+        });
     }
 
     /// Stop whatever is playing outside a session.
@@ -846,6 +899,23 @@ impl AppCtx {
         self.dialogue.set(None);
         self.screen.set(to);
     }
+}
+
+/// A key to the history as a sampler reads it: every session in its place,
+/// by its [`SessionKey`], how many groups it holds and its accuracy. Whatever
+/// stores, deletes, puts back or restores sessions, here or in another copy
+/// of the app, changes it, and it costs a look at each session rather than
+/// a replay of them.
+fn history_key(sessions: &[SessionResult]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    sessions.len().hash(&mut hasher);
+    for session in sessions {
+        session.timestamp.hash(&mut hasher);
+        session.date.hash(&mut hasher);
+        session.groups.len().hash(&mut hasher);
+        session.accuracy.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// When the last backup was saved, as `store` remembers it, but never
@@ -1877,6 +1947,49 @@ mod tests {
         });
         assert_ne!(copy.toast(), Some(told), "told again");
         assert_eq!(store.load_settings().curriculum.num_groups, 9);
+    }
+
+    /// A sampler starts from the prior built last while the history and
+    /// what the prior reads of the settings are as they were: the volume
+    /// builds nothing again, the speeds do, and so does whatever changes
+    /// the history, here or in another tab, once each.
+    #[test]
+    fn the_sampler_prior_is_built_again_only_when_what_it_reads_changes() {
+        let store = holding([1, 2]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        let built = || {
+            a.act(|ctx| {
+                let settings = ctx.settings.peek().clone().clamp();
+                ctx.sampler(&settings, 1);
+            });
+            crate::testing::take_renders("SamplerPrior")
+        };
+        crate::testing::take_renders("SamplerPrior");
+        assert_eq!(built(), 1, "the first");
+        assert_eq!(built(), 0, "kept");
+        let set = |change: fn(&mut TrainingSettings)| {
+            a.act(|ctx| {
+                let mut settings = ctx.settings;
+                change(&mut settings.write());
+            });
+        };
+        set(|settings| settings.band.master_volume = 0.3);
+        assert_eq!(built(), 0, "the volume is not read");
+        set(|settings| settings.playback.char_wpm_max = 36.0);
+        assert_eq!(built(), 1, "the speeds are");
+        a.delete(1);
+        assert_eq!(built(), 1, "deleted");
+        a.act(AppCtx::undo_delete);
+        assert_eq!(built(), 1, "put back");
+        a.finish(day(3));
+        assert_eq!(built(), 1, "kept here");
+        b.finish(day(4));
+        assert_eq!(built(), 0, "not here until it is read");
+        a.act(AppCtx::store_history);
+        assert_eq!(built(), 1, "kept in another tab");
+        restore(&a, [5]);
+        assert_eq!(built(), 1, "restored");
+        assert_eq!(built(), 0);
     }
 
     #[test]

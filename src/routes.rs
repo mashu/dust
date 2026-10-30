@@ -91,6 +91,7 @@ fn HomeRoute() -> Element {
     // Read from the store, a file on desktop and phones: once for each
     // move of the settings, not on every redraw of the screen.
     let progress = use_memo(move || auto_progress(&*ctx.app().store, &ctx.settings.read()));
+    use_warm_sampler(ctx);
     let settings = ctx.settings.read();
     // Every session counts, whatever character set it was recorded with.
     let sessions = ctx.sessions.read();
@@ -205,6 +206,18 @@ fn use_preview_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
     });
 }
 
+/// While a screen with a session, a run or a stream a tap away is up, the
+/// prior the sampler starts from is built once it is drawn, and again
+/// whenever the history changes under it, rather than in the tap
+/// ([`AppCtx::warm_sampler`]).
+fn use_warm_sampler(ctx: AppCtx) {
+    use_effect(move || {
+        // Read to build it again for every change of the history.
+        let _ = ctx.sessions.read();
+        ctx.warm_sampler();
+    });
+}
+
 /// While the band preview runs, the band follows the settings once they
 /// settle ([`BAND_SETTLE_MS`]), and at least every [`BAND_FOLLOW_MAX_MS`]
 /// under a slider that never pauses. Building the band for new receiver
@@ -307,6 +320,7 @@ fn ListenRoute() -> Element {
     let on_stop = use_callback(move |()| ctx.stop_audio());
     let on_back = use_callback(move |()| ctx.go_to(Screen::Home));
     use_preview_stop_when_hidden(ctx, LISTEN_HIDDEN);
+    use_warm_sampler(ctx);
     let preview = ctx.preview.read();
     #[cfg(feature = "desktop")]
     let floating = use_context::<crate::ui::floating::FloatingWindow>();

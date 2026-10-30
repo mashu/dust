@@ -282,7 +282,6 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
         contest: mut view,
         mut announced,
         mut preview,
-        sessions,
         toasts,
         entry,
         ..
@@ -304,7 +303,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     };
     // The callers' calls lean on what the history says is hard, and on what
     // the run copies as it goes.
-    let sampler = Sampler::new(&sessions.peek(), &settings, seed_rng());
+    let sampler = ctx.sampler(&settings, seed_rng());
     let now = MonoMs(mono_ms());
     let (machine, effects) = ContestMachine::start(seed_rng(), now, settings, sampler);
     entry.start(rules, side);
@@ -919,6 +918,44 @@ mod tests {
 
     /// Ending a run with one QSO in the log ends it there, keeping it. The
     /// run screen's End run and the header's Exit both end it so.
+    /// A run and Hear a QSO draw their callers from the prior the app keeps
+    /// ([`AppCtx::sampler`]): built ahead of the tap that starts either,
+    /// the tap replays no history, and built in it only once the history
+    /// has changed since.
+    #[test]
+    fn a_run_and_hear_a_qso_start_from_the_prior_built_ahead() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            let ctx = h.ctx;
+            let built = || crate::testing::take_renders("SamplerPrior");
+            built();
+            h.in_app(|| ctx.warm_sampler());
+            h.advance(u64::from(POLL_MS) * 2).await;
+            assert_eq!(built(), 1, "built ahead");
+            h.in_app(|| crate::playback::start_qsos(ctx));
+            h.pump();
+            assert!(h.in_app(|| ctx.preview.peek().is_qsos()));
+            assert_eq!(built(), 0, "Hear a QSO started from it");
+            h.in_app(|| ctx.stop_audio());
+            h.pump();
+            h.start_training();
+            assert!(view(&h).is_some(), "the run started");
+            assert_eq!(built(), 0, "so did the run");
+            h.in_app(|| crate::session_runtime::abort_run(ctx));
+            h.pump();
+            assert_eq!(h.screen(), Screen::Home);
+            let mut sessions = ctx.sessions;
+            h.in_app(|| {
+                sessions
+                    .write()
+                    .push(crate::testing::stored_run("2026-09-01", &[]))
+            });
+            h.start_training();
+            assert!(view(&h).is_some(), "another run started");
+            assert_eq!(built(), 1, "on a history changed since");
+        });
+    }
+
     #[test]
     fn ending_with_one_qso_keeps_it_and_shows_the_results() {
         run(|| async {
