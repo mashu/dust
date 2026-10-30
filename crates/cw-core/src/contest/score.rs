@@ -10,9 +10,10 @@
 //! What a QSO is worth, and what it counts for, can turn on where you are:
 //! CQ WW's points on your country and continent, ARRL DX's points and
 //! multipliers on your side ([`MyStation`]). A call logged is placed where
-//! it is at home ([`home_country`]); one Dust cannot place is worth no CQ
-//! WW points and no country, and one on your own side of ARRL DX is worth
-//! nothing, as the contest has W/VE work only DX.
+//! it is at home ([`home_country`]); one Dust cannot place is worth a CQ WW
+//! point and no country, as MorseRunner leaves a call its list cannot
+//! place at its default point (`Log.pas:724`), and one on your own side of
+//! ARRL DX is worth nothing, as the contest has W/VE work only DX.
 
 use std::collections::BTreeSet;
 
@@ -104,10 +105,12 @@ impl ScoredQso<'_> {
     /// What it is worth by how far its call puts the station from `me`, as
     /// CQ WW counts it: nothing in your own country, one on your continent,
     /// two between North American countries and three on another
-    /// continent, or yours unknown.
+    /// continent, or yours unknown. A call Dust cannot place is worth one,
+    /// MorseRunner's default for a call it cannot place (`Log.pas:724`,
+    /// `CqWW.pas:258-275`).
     fn distance_points(&self, me: &MyStation<'_>) -> u32 {
         let Some(country) = home_country(self.call) else {
-            return 0;
+            return 1;
         };
         if country == me.country {
             return 0;
@@ -624,8 +627,10 @@ mod tests {
     /// Every CQ WW points rule, from Europe and from North America: none in
     /// your own country, one on your continent, two between North American
     /// countries, three on another continent; a call Dust cannot place is
-    /// worth nothing, and from a call it cannot place every placed station
-    /// is on another continent.
+    /// worth one, as in MorseRunner, and from a call it cannot place every
+    /// placed station is on another continent. A pair in one country is
+    /// worth nothing on two continents too, as in MorseRunner, whose list
+    /// gives a country one continent.
     #[test]
     fn cqww_points_go_by_country_and_continent() {
         let clean = clean();
@@ -653,8 +658,8 @@ mod tests {
             ("TA1XYZ", 1, 3),
             ("YM1AB", 1, 3),
             ("TA2XYZ", 3, 3),
-            ("C31AB", 0, 0),
-            ("KH2AB", 0, 0),
+            ("C31AB", 1, 1),
+            ("KH2AB", 1, 1),
         ] {
             assert_eq!(points(&DL, call), from_dl, "{call} from DL");
             assert_eq!(points(&K1, call), from_k1, "{call} from K1");
@@ -675,6 +680,8 @@ mod tests {
             ("JA1XYZ", "TA1XYZ", 3),
             ("JA1XYZ", "TA2XYZ", 1),
             ("TA1ABC", "DL2ABC", 1),
+            ("TA2ABC", "TA1XYZ", 0),
+            ("TA1ABC", "TA2XYZ", 0),
         ] {
             assert_eq!(points(&me(mine), call), worth, "{call} from {mine}");
         }
@@ -682,7 +689,7 @@ mod tests {
         assert_eq!((nowhere.country, nowhere.continent), ("", ""));
         assert_eq!(points(&nowhere, "DL2ABC"), 3);
         assert_eq!(points(&nowhere, "KH6XYZ"), 3);
-        assert_eq!(points(&nowhere, "C31AB"), 0);
+        assert_eq!(points(&nowhere, "C31AB"), 1);
     }
 
     /// ARRL DX worked by hand from either side: three points a QSO with the

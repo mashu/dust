@@ -545,10 +545,13 @@ North American Sprint.
   built, 4a). F12 sends `NR?`, as MRCE's does in every contest. A QSO's
   points and country go by the call logged, placed where it is at home
   (`home_country`, §11.2), its continent by its prefix (European Turkey is
-  in Europe): a call Dust cannot place is worth no points and no country,
-  and from a call of yours it cannot place every placed station is on
-  another continent. Your own country and continent are read the same way,
-  so NL7AB is Alaska's and VG3ABC Canada's. Your own country is a
+  in Europe): a call Dust cannot place is worth a point and no country,
+  as MRCE leaves a call its list cannot place at its default point
+  (`Log.pas:724`), and from a call of yours it cannot place every placed
+  station is on another continent. Two stations in one country score 0
+  even on two continents (TA1 and TA2), as in MRCE, whose list gives
+  Turkey one continent. Your own country and continent are read the same
+  way, so NL7AB is Alaska's and VG3ABC Canada's. Your own country is a
   multiplier too, as the contest has it. A call that does not say its zone
   (one Dust cannot place, or a Canadian call whose digit names no province,
   such as CH1 or VE0, until you give your province) needs `myZone` before a
