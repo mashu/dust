@@ -126,6 +126,25 @@ fn a_backup_kept_inside_the_app_says_to_move_it_out() {
     });
 }
 
+/// A session stamped ahead of the clock is not new since every backup
+/// until its stamp comes: it counts as finished just after the latest that
+/// was not, so a backup saved after that one holds it. History still lists
+/// it, and the store keeps it, as it was stamped.
+#[test]
+fn a_session_stamped_ahead_of_the_clock_is_not_new_since_every_backup() {
+    run(|| async {
+        let mut sessions = history(12);
+        let ahead = crate::time::now_ms() + 365 * 86_400_000;
+        sessions[11].timestamp = ahead;
+        let store = MemoryStore::default();
+        store.mark_backup(11 * 86_400_000 + 2);
+        let ui = open(store, &sessions);
+        assert!(ui.has("nothing new since"), "{}", ui.html());
+        assert!(ui.has("12 sessions on this device"));
+        assert_eq!(ui.store.load_sessions()[11].timestamp, ahead);
+    });
+}
+
 /// A browser's download is only handed over, and the browser says nothing
 /// if it blocks it: the card tells of the last backup as handed to the
 /// browser, not as saved, and the reminder goes quiet all the same.

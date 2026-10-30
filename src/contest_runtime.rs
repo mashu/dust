@@ -43,6 +43,9 @@ pub struct LiveContest {
     /// What the run has to say to a screen reader, held while anything is
     /// on the air so that speech never covers the Morse.
     unsaid: Vec<String>,
+    /// The local day it started: the day it counts towards, though it may
+    /// end after midnight.
+    started_on: String,
 }
 
 /// The run's Call and Exchange fields, as typed.
@@ -311,6 +314,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
         lease: lease.clone(),
         last_tick: None,
         unsaid: Vec::new(),
+        started_on: local_date_string(),
     })));
     ctx.mark_running(true);
     run_effects(ctx, &lease, effects);
@@ -680,7 +684,7 @@ fn keep_run(ctx: AppCtx) {
     view.set(None);
     // A run moves no level.
     auto_message.set(None);
-    keep_and_show(ctx, live.machine.result(now_ms(), local_date_string()));
+    keep_and_show(ctx, live.machine.result(now_ms(), live.started_on.clone()));
 }
 
 /// A run with no station worked has nothing for any stat: it is let go, and
@@ -901,6 +905,31 @@ mod tests {
                 .expect("its log");
             assert_eq!(stored.qsos.len(), 1);
             assert_eq!(result.groups.len(), 2, "the call and its number");
+        });
+    }
+
+    /// A run is dated the local day it started, so one that runs past
+    /// midnight keeps that day's place in the streak.
+    #[test]
+    fn a_run_is_dated_the_day_it_started() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            if let Some(Live::Contest(live)) = h.app.session.borrow_mut().as_mut() {
+                live.started_on = "2026-10-27".into();
+            }
+            work(&mut h, 60_000, Some(1)).await;
+            let ctx = h.ctx;
+            h.in_app(|| crate::session_runtime::finish_run(ctx));
+            h.pump();
+            let stored = h.store.load_sessions();
+            assert_eq!(
+                stored
+                    .iter()
+                    .map(|run| run.date.as_str())
+                    .collect::<Vec<_>>(),
+                ["2026-10-27"]
+            );
         });
     }
 

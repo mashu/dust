@@ -73,6 +73,9 @@ pub struct LiveSession {
     /// When the app was last seen running the session: its last heartbeat,
     /// or the last news it heard.
     last_seen: MonoMs,
+    /// The local day it started: the day it counts towards, though it may
+    /// end after midnight.
+    started_on: String,
 }
 
 impl LiveSession {
@@ -329,6 +332,7 @@ pub fn start_session(ctx: AppCtx) {
         stations: SplitMix64::new(seed_rng()),
         lease: lease.clone(),
         last_seen: now,
+        started_on: local_date_string(),
     })));
     ctx.mark_running(false);
     beat(ctx, lease.clone());
@@ -691,7 +695,7 @@ fn finish_session(ctx: AppCtx) -> bool {
     let session = live.machine.session();
     let run = store.load_auto_counters(&CountersKey::of(session.settings()));
     // The machine only finishes a session it has scored something in.
-    let done = complete_session(session, run, now_ms(), local_date_string());
+    let done = complete_session(session, run, now_ms(), live.started_on.clone());
     match &done.counters {
         CountersUpdate::Keep(key, counters) => store.save_auto_counters(key, *counters),
         CountersUpdate::Clear(keys) => store.clear_auto_counters(keys),
@@ -790,6 +794,29 @@ mod tests {
             assert!(h.calls().contains(&Call::Shutdown));
             // Two groups, one send each.
             assert_eq!(h.texts().len(), 2);
+        });
+    }
+
+    /// A session is dated the local day it started, so one that runs past
+    /// midnight keeps that day's place in the streak, not the next day's.
+    #[test]
+    fn a_session_is_dated_the_day_it_started() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            if let Some(Live::Groups(live)) = h.app.session.borrow_mut().as_mut() {
+                live.started_on = "2026-10-27".into();
+            }
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let stored = h.store.load_sessions();
+            assert_eq!(
+                stored
+                    .iter()
+                    .map(|session| session.date.as_str())
+                    .collect::<Vec<_>>(),
+                ["2026-10-27"]
+            );
         });
     }
 

@@ -5,8 +5,9 @@
 use cw_core::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, EARLIER_TRIES,
     ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS,
-    MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES,
-    RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
+    MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RATED_GROUP_CHARS,
+    REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW,
+    Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -347,11 +348,11 @@ pub fn board(ranking: Ranking) -> Element {
         dl { class: "help-terms",
             dt { "Points a group" }
             dd {
-                "A session's score is what its groups earn, more for copy at speed. Ranked by what it earned a group, a long session is no better than a short one for the same copy. A session goes on with {BOARD_MIN_GROUPS} groups or more."
+                "A session's score is what its groups earn: more for copy at speed and for a longer group, and a miss costs its whole group. Points a group are what a session would earn in groups of {RATED_GROUP_CHARS} characters, at its speed and the share of characters it missed, so for the same copy a long session is no better than a short one, and groups of any length rate alike. A session goes on with {BOARD_MIN_GROUPS} groups or more."
             }
             dt { "Contest runs" }
             dd {
-                "Under Contest, each contest has a board of its own, ranked by its own measure: the verified score, of what was logged clean, among runs set to the same length; or the QSOs logged clean an hour, fair between lengths. A run goes on once it ran {runs} minutes or more and logged a QSO clean."
+                "Under Contest, each contest has a board of its own, ranked by its own measure: the verified score, of what was logged clean, among runs set to the same length; or the QSOs logged clean an hour, fair between lengths. A run goes on once it ran {runs} minutes or more and logged a QSO clean. Its QSOs are every one it logged, as History counts them: a NIL, one not in the station's log, is among them and is never clean."
             }
             dt { "Assisted" }
             dd { "A run with Show copy on: listed greyed, never placed, and kept out of the record and the form." }

@@ -298,7 +298,10 @@ fn newest(sessions: &[SessionResult]) -> &[SessionResult] {
 /// Every session is scored again as it is read, from what is stored of it, so
 /// the history is on one scale however the score has been worked out over the
 /// versions: sessions saved before speed counted read as they would score
-/// today.
+/// today. Its stamps and days are read as they were stored, whatever the
+/// clock says now: one that is wrong now would otherwise move them for good
+/// at the next save. The screens settle a session stamped ahead of the
+/// clock for themselves ([`crate::time::as_shown`]).
 fn read_history(raw: &str) -> Option<ReadHistory> {
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
@@ -1574,6 +1577,23 @@ pub(crate) mod tests {
         let back = parse_sessions(&raw).expect("a list");
         assert_eq!(back[0].score, stored.points());
         assert!(back[0].score > 1.0, "{}", back[0].score);
+    }
+
+    /// A session finished with the clock set ahead reads as it was stored,
+    /// stamp and day, and so do those stored after a clock set behind: the
+    /// clock now may be the one that is wrong, and what is read is what the
+    /// next save writes.
+    #[test]
+    fn a_history_reads_as_stamped_whatever_the_clock_says() {
+        let now = crate::time::now_ms();
+        let ahead = SessionResult {
+            timestamp: now + 365 * 86_400_000,
+            ..session("2099-10-30")
+        };
+        let raw = serde_json::to_string(&[at(1), at(2), at(3), ahead.clone()]).unwrap();
+        let back = parse_sessions(&raw).expect("a list");
+        assert_eq!(stamps(&back), [1, 2, 3, ahead.timestamp]);
+        assert_eq!(back[3].date, "2099-10-30");
     }
 
     /// A contest run a later version wrote reads as a run, and goes back to

@@ -47,9 +47,10 @@ pub use auto_level::{
 };
 pub use belief::{Estimate, EstimatePoint, EstimateReading};
 pub use board::{
-    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, Ranking, RunEntry,
-    TimelinePoint, assisted_runs, board_kinds, board_modes, board_place, contest_runs,
-    latest_run_length, per_group, rating, run_kinds, run_lengths, score_board, score_timeline,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, RATED_GROUP_CHARS,
+    Ranking, RunEntry, TimelinePoint, assisted_runs, board_kinds, board_modes, board_place,
+    contest_runs, latest_run_length, per_group, rating, run_kinds, run_lengths, score_board,
+    score_timeline,
 };
 pub use callsign::{
     CALLSIGN_TIER_MAX, CallSpec, CallsignParts, Countries, GeneratedCall, call_fault,
@@ -100,7 +101,7 @@ pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
     Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, MonoMs, SendStart,
     SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys,
-    answer_length_matches,
+    answer_length_matches, settle_clock_ahead,
 };
 pub use settings::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AgcDecay, Aim,
@@ -125,9 +126,9 @@ pub use stats::{
     CharacterDiagnostic, ConfusionEntry, EARLIER_TRIES, GROUP_START_BIGRAM_TOKEN,
     HARD_PAIR_MIN_TRIES, HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS,
     MasteryStatus, MistakeStats, RECENT_TRIES, SamplingRow, SessionHistoryRow, SessionRecognition,
-    accuracy_chart, character_diagnostics, group_length_forecast, mastered_count, mistake_stats,
-    practised_modes, sampling_rows, session_history, session_recognition, span_history,
-    speed_forecast, speed_history,
+    accuracy_chart, best_accuracy, character_diagnostics, group_length_forecast, mastered_count,
+    mistake_stats, overall_accuracy, practised_modes, sampling_rows, session_history,
+    session_recognition, span_history, speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 
 use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
+use crate::time::as_shown;
 use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::bigram::{BigramCard, hardest_pairs_card};
 use crate::ui::confusion::confusions_card;
@@ -243,9 +244,10 @@ pub fn HistoryTab(
     };
     let more = total.saturating_sub(shown()).min(HISTORY_PAGE);
 
+    // One stamped ahead of the clock was not made after every backup since.
     let since = backups
         .as_ref()
-        .map(|backups| sessions_since(&sessions, backups.last))
+        .map(|backups| sessions_since(&as_shown(&sessions), backups.last))
         .unwrap_or_default();
 
     rsx! {

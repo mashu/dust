@@ -11,11 +11,10 @@ use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 const BOARD_TOP: usize = 10;
 
 /// What a board says when it holds contest runs among sessions of other
-/// modes: runs earn less a group, so they sit lower than their copy
-/// deserves there.
-const CONTEST_RUNS_NOTE: &str = "A WPX run earns about 30% less a group than a \
-     Callsigns session, since half its groups are short serials. Under Contest, each run is \
-     ranked within its own contest.";
+/// modes: there they are rated as any session is, and under Contest by
+/// their contest's own measure.
+const CONTEST_RUNS_NOTE: &str = "Runs are rated here as any session is, by points a group. \
+     Under Contest, each run is ranked within its own contest, by the contest's own measure.";
 
 /// What a board says when it lists assisted runs.
 const ASSISTED_NOTE: &str = "Runs with Show copy on are assisted: listed greyed after the places, never placed, and kept out of the record and the form.";
