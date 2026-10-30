@@ -359,13 +359,10 @@ impl ContestView {
     }
 
     /// QSOs an hour at `now`, over the last five minutes of run time, once
-    /// the run is a minute old.
+    /// the run is a minute old ([`rate_at`]).
     pub fn rate(&self, now: MonoMs) -> Option<f64> {
-        let run_ms = self.run_ms(now);
         let times: Vec<u64> = self.log.iter().map(|row| row.at_ms).collect();
-        (run_ms >= RATE_AFTER_MS)
-            .then(|| rate_at(&times, run_ms))
-            .flatten()
+        rate_at(&times, self.run_ms(now))
     }
 }
 
@@ -392,9 +389,6 @@ const RUN_STREAM: u64 = u64::MAX;
 /// from under rough habits, apart from every other, so the rest of a run
 /// draws the same whatever its habits.
 const QRM_STREAM: u64 = u64::MAX - 1;
-
-/// The rate shows once the run is a minute old.
-const RATE_AFTER_MS: u64 = MS_PER_MINUTE;
 
 /// How many times the runtime tries a send, and how long past a turn's
 /// length it waits for each attempt before it tries again (`player.rs:28`,
@@ -4319,6 +4313,7 @@ impl<S: CallSource> ContestMachine<S> {
                 nr,
                 k: String::new(),
                 c: station.caller.call.country.to_string(),
+                lp: QsoRecord::place_of(&logged.call),
                 l,
                 lc,
                 s,
@@ -4440,6 +4435,7 @@ impl<S: CallSource> ContestMachine<S> {
                 nr,
                 k: NIL.to_string(),
                 c: String::new(),
+                lp: QsoRecord::place_of(&logged.call),
                 l: rules
                     .copied(side)
                     .iter()
@@ -4504,6 +4500,7 @@ impl<S: CallSource> ContestMachine<S> {
                 nr,
                 k: LOST.to_string(),
                 c: station.caller.call.country.to_string(),
+                lp: Vec::new(),
                 l: Vec::new(),
                 lc: String::new(),
                 s: Vec::new(),
@@ -7653,6 +7650,9 @@ mod tests {
             .map(|qso| (qso.k.as_str(), qso.c.as_str()))
             .collect();
         assert_eq!(kinds, [("lost", "K"), ("", "G")]);
+        // The QSO logged keeps where its call was placed, for the score.
+        assert!(run.qsos[0].lp.is_empty());
+        assert_eq!(run.qsos[1].lp, ["G", "EU"]);
         assert_eq!(result.groups[0].received, "K5XYZ");
         assert_eq!(view(&moved_on).clean, 1);
     }

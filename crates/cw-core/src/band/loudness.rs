@@ -10,6 +10,8 @@
 //! same AGC the players run, look-ahead and all; and its loudest sample, with
 //! the crests of the band's hiss on top of it, is what full volume is sized
 //! by. The hiss's crests stay under the knee, so the AGC never hears them.
+//! With the AGC off nothing rides a pile-up down, so there full volume
+//! leaves room for the stations that can sound together.
 
 use super::agc::{AGC_MAX_DUCK_DB, Agc, agc_lookahead_samples};
 use super::calibration::{heard_floor_rms, noise_level};
@@ -18,8 +20,10 @@ use super::filter::{FilterDesign, ReceiverFilter};
 use super::knee::agc_knee;
 use super::memo::{Exact, LastAnswer};
 use super::output::SOFT_LIMIT_KNEE;
+use crate::contest::RunStyle;
 use crate::settings::{
-    AgcDecay, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, WPM_MAX, WPM_MIN,
+    AgcDecay, CharSetMode, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, STATIONS_MAX, STATIONS_MIN,
+    STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, WPM_MAX, WPM_MIN,
 };
 use crate::timing::{StationVoice, ToneEvent, plan_morse_playback_for};
 
@@ -152,13 +156,49 @@ pub fn loudest_station(settings: &TrainingSettings) -> f64 {
 /// Never more than the AGC ever takes off ([`AGC_MAX_DUCK_DB`]): here so a
 /// receiver that somehow delivered nothing could not ask for an endless
 /// gain.
+///
+/// With the AGC off, nothing rides a pile-up down where its stations'
+/// elements overlap and their crests add, so full volume is turned down by
+/// as many times as they can be louder together than the loudest station
+/// alone ([`stations_together`]). A station alone plays as loud as it
+/// would anyway, and with the AGC on so does a pile-up.
 pub fn full_volume_gain(settings: &TrainingSettings) -> f64 {
     let loudest = loudest_station(settings);
-    if loudest.is_finite() && loudest > 0.0 {
+    let alone = if loudest.is_finite() && loudest > 0.0 {
         (SOFT_LIMIT_KNEE * CLEAN_MARGIN / loudest).clamp(1.0, db_to_gain(AGC_MAX_DUCK_DB))
     } else {
         1.0
+    };
+    alone / stations_together(settings)
+}
+
+/// How many times as loud as the loudest station alone the stations that
+/// can call at once come to together, at most: one with the AGC on, whose
+/// ceiling rides their sum down, and one for a station alone. With it off,
+/// in a group session, the station you copy and every other caller the
+/// pile-up level under it as the filter passes them
+/// ([`crate::Transmission::calling`]); in a contest's pile-up, every caller
+/// the stations range lets call, each as strong as the top of the strength
+/// range. QRM and the band's own stations are left out, as for one station.
+fn stations_together(settings: &TrainingSettings) -> f64 {
+    if settings.band.agc_enabled {
+        return 1.0;
     }
+    let most = f64::from(settings.band.stations_max.clamp(STATIONS_MIN, STATIONS_MAX));
+    let top = *settings.volume_range().end() / VOLUME_MAX;
+    let together = if settings.curriculum.char_set_mode == CharSetMode::Contest {
+        match settings.contest.contest_style {
+            RunStyle::Single => 1.0,
+            RunStyle::Pileup => most * top,
+        }
+    } else {
+        let down_db = settings
+            .band
+            .pileup_level_db
+            .clamp(PILEUP_LEVEL_MIN_DB, PILEUP_LEVEL_MAX_DB);
+        top * (1.0 + (most - 1.0) * db_to_gain(-down_db))
+    };
+    together.max(1.0)
 }
 
 fn listen(ask: &LoudestAsk, settings: &TrainingSettings) -> f64 {
@@ -247,6 +287,7 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, c
 mod tests {
     use super::*;
     use crate::settings::FilterShape;
+    use crate::timing::PILEUP_CALLER_SEPARATION_HZ;
 
     fn gain(edit: impl FnOnce(&mut TrainingSettings)) -> f64 {
         let mut settings = TrainingSettings::default();
@@ -273,6 +314,90 @@ mod tests {
             (heard - SOFT_LIMIT_KNEE * CLEAN_MARGIN).abs() < 1e-9,
             "{heard}"
         );
+    }
+
+    /// With the AGC off nothing rides a pile-up down where its stations'
+    /// elements overlap, so full volume leaves room for them: the station
+    /// you copy at full strength and four callers, each as loud through the
+    /// filter as the pile-up level lets one be, keyed together, stay under
+    /// the limiter's knee. A station alone plays as before, and so does a
+    /// pile-up with the AGC on; a contest's pile-up leaves room for each
+    /// caller at full strength, and its single caller for one.
+    #[test]
+    fn with_the_agc_off_a_pileup_stays_under_the_limiter() {
+        let pileup = |agc: bool| {
+            let mut settings = TrainingSettings::default();
+            settings.band.agc_enabled = agc;
+            settings.band.stations_min = 5;
+            settings.band.stations_max = 5;
+            settings.clamp()
+        };
+        let alone = gain(|s| s.band.agc_enabled = false);
+        assert_eq!(full_volume_gain(&pileup(true)), gain(|_| {}));
+        let settings = pileup(false);
+        let full = full_volume_gain(&settings);
+        assert!(full < alone, "{full:.2} against {alone:.2} alone");
+        let receiver = FilterDesign::from_settings(&settings);
+        let centre = receiver.pitch_hz();
+        let level = db_to_gain(-settings.band.pileup_level_db);
+        let wpm = settings.playback.char_wpm_max;
+        // The nearest a caller may sit, and the next caller beyond it.
+        let (near, next) = (130.0, 130.0 + PILEUP_CALLER_SEPARATION_HZ);
+        let voices = [0.0, -near, near, -next, next].map(|off| {
+            let tone_hz = centre + off;
+            let through = receiver.response_at(centre) / receiver.response_at(tone_hz);
+            StationVoice {
+                tone_hz,
+                char_wpm: wpm,
+                effective_wpm: wpm,
+                volume: if off == 0.0 {
+                    VOLUME_MAX
+                } else {
+                    (level * through).min(VOLUME_MAX)
+                },
+                weight: 1.0,
+                dash_ratio: 3.0,
+            }
+        });
+        let sr = f64::from(LISTEN_RATE);
+        let mut summed = vec![0.0; (LISTEN_SEC * sr) as usize];
+        for voice in &voices {
+            for tone in plan_morse_playback_for(LISTEN_TEXT, &settings, voice).events {
+                let start = (tone.start_sec * sr).round() as usize;
+                let len = (tone.duration_sec * sr).round() as usize;
+                let angular = std::f64::consts::TAU * tone.frequency_hz;
+                for (i, sample) in summed.iter_mut().skip(start).take(len).enumerate() {
+                    let t = i as f64 / sr;
+                    *sample += (angular * t).sin() * tone.envelope_at(t);
+                }
+            }
+        }
+        let mut filter = ReceiverFilter::new(LISTEN_RATE, &receiver);
+        let loudest = summed
+            .iter()
+            .map(|&sample| filter.process(sample).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            loudest * full < SOFT_LIMIT_KNEE,
+            "the pile-up peaks {:.2} at full volume",
+            loudest * full
+        );
+        assert!(
+            loudest * alone > SOFT_LIMIT_KNEE,
+            "sized for one station, it would not"
+        );
+        // A contest's pile-up of three, each caller as strong as the top
+        // of the range, and a contest's single caller.
+        let contest = |style: RunStyle| {
+            gain(|s| {
+                s.band.agc_enabled = false;
+                s.band.stations_max = 3;
+                s.curriculum.char_set_mode = CharSetMode::Contest;
+                s.contest.contest_style = style;
+            })
+        };
+        assert!((contest(RunStyle::Pileup) - alone / 3.0).abs() < 1e-9);
+        assert_eq!(contest(RunStyle::Single), alone);
     }
 
     /// The hiss crests on top of the station: the more of it the receiver

@@ -545,10 +545,13 @@ North American Sprint.
   built, 4a). F12 sends `NR?`, as MRCE's does in every contest. A QSO's
   points and country go by the call logged, placed where it is at home
   (`home_country`, §11.2), its continent by its prefix (European Turkey is
-  in Europe): a call Dust cannot place is worth no points and no country,
-  and from a call of yours it cannot place every placed station is on
-  another continent. Your own country and continent are read the same way,
-  so NL7AB is Alaska's and VG3ABC Canada's. Your own country is a
+  in Europe): a call Dust cannot place is worth a point and no country,
+  as MRCE leaves a call its list cannot place at its default point
+  (`Log.pas:724`), and from a call of yours it cannot place every placed
+  station is on another continent. Two stations in one country score 0
+  even on two continents (TA1 and TA2), as in MRCE, whose list gives
+  Turkey one continent. Your own country and continent are read the same
+  way, so NL7AB is Alaska's and VG3ABC Canada's. Your own country is a
   multiplier too, as the contest has it. A call that does not say its zone
   (one Dust cannot place, or a Canadian call whose digit names no province,
   such as CH1 or VE0, until you give your province) needs `myZone` before a
@@ -1344,8 +1347,12 @@ station, and is lost then. The checks follow MRCE's `Log.pas:1030-1100`:
 
 `QsoCheck` holds the errors found, a NIL alone or a busted call and field
 errors together, and whether the QSO is a dupe, which is no error: a dupe
-copied right is clean. Raw drops a call already in the log as typed, as a
-logger marks a dupe; verified counts each clean, non-dupe station once.
+copied right is clean. A dupe is only that: a station already logged clean
+and logged again with something wrong counts once, by what is wrong, as its
+row reads, never as a dupe beside it (MRCE marks a dupe by the call as
+typed, `Log.pas:733-738`, so a busted call is never one). Raw drops a call
+already in the log as typed, as a logger marks a dupe; verified counts each
+clean, non-dupe station once.
 
 Logged QSOs cannot be edited, as in MRCE.
 
@@ -1946,7 +1953,10 @@ flight, which Dust's "a logged QSO is final" rule covers.
   clean" beside it; a dupe copied right is clean.
 - **Rate:** QSOs per hour over the last 5 minutes of run time, as MRCE's
   `ShowRate` (`Log.pas:1133-1147`), shown after the first minute; Simple QSO
-  shows minutes per QSO.
+  shows minutes per QSO. MRCE shows a rate from the start; Dust's first
+  minute has none, and so a stored run under a minute keeps no rate, nor
+  the pace told by it, in History, on the Runs card and on its results
+  (`Rates::of`), where one QSO ten seconds in would read 360 an hour.
 - **Speed.** Callers' speeds are drawn from the Speed card's ranges:
   evenly, through `resolve_station` (`timing/station.rs:33-47`), or, as
   built with adaptive callers' speed (2026-10-22), from your copy speed
@@ -2721,7 +2731,9 @@ pub struct QsoRecord {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub k: String,      // "" logged, "nil", or "lost"
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub c: String,      // the station's country key, for multipliers
+    pub c: String,      // the station's country key, as drawn
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lp: Vec<String>, // where the call logged placed its station when logged: [country, continent], "" for none
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub l: Vec<String>, // the exchange you logged, a token a field: a NIL's, or where no group holds it
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2737,8 +2749,12 @@ pub struct QsoRecord {
 
 Your callsign and exchange are not stored in a run: no score needs them.
 Checks, dupes, points, multipliers and rates are worked out on read, as
-`score` is. `a` is kept because the groups' `sends` count only the repeats
-charged to the copy, and the results show the `?×n` the run showed. `v`
+`score` is, each QSO's call placed where `lp` says it was placed when it
+was logged, kept as the facts about you are, because the call tables
+change; a run from a build before `lp` is placed by the tables of the
+build that reads it. `a` is kept because the groups' `sends` count only
+the repeats charged to the copy, and the results show the `?×n` the run
+showed. `v`
 rises only for a change an older reader would misread; a key that later
 phases add with a default does not raise it.
 
@@ -3087,8 +3103,15 @@ files written by scripts, each naming its source and year.
   the table has not seen still places a prefix only one country has (`KG3`
   is K); a prefix the table lacks, or a shared one with such a digit, is
   `None` (`C31`, `NL7`, `VP8`), never a country that only shares a letter.
+  VP2 goes by the letter after its digit, as cty.dat and MRCE's `DXCC.LIST`
+  have it: VP2E Anguilla, VP2M Montserrat, VP2V the British Virgin Islands
+  (whose facts are kept by hand, as the table has too few of its calls),
+  any other letter `None`; a contest spec starts a VP2 call's suffix with
+  its country's letter. The default spec keeps the letters it always drew
+  (the golden list pins `VP2WYP` at a seed), so a practice VP2 call can be
+  `None`, and keeps the country of the entry it was drawn from.
   The generator labels each call with the country `country_of` reads off it,
-  so the two agree. `wpx_prefix` reads its WPX prefix: up to the last digit
+  so the two agree, but for such a practice call. `wpx_prefix` reads its WPX prefix: up to the last digit
   (`9A1AA` → `9A1`); a digit marker replaces the digit (`W1XYZ/4` → `W4`);
   a host is the prefix, with 0 added if it has no digit (`PA/N8XYZ` →
   `PA0`), cut as MRCE's `ExtractPrefix` cuts one, to its last digit but

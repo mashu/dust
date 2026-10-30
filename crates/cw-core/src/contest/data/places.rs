@@ -305,11 +305,17 @@ pub fn home_country(call: &str) -> Option<&'static str> {
 /// islands' (KH, AH, NH, WH), the Caribbean islands' (KP, NP, WP) and
 /// Guantanamo Bay's (KG4 with two letters) are DX, as is any call outside
 /// the US and Canada and any Dust cannot place, Sable and St Paul Islands'
-/// CY0 and CY9 among them.
+/// CY0 and CY9 among them: the station is at home in the USA's `K` or
+/// Canada's `VE` ([`home_country`], [`w_ve_country`]).
 pub(crate) fn w_ve(call: &str) -> bool {
-    call_area(call)
-        .and_then(|area| home(call, &area))
-        .is_some_and(|home| matches!(home, Home::Us | Home::Canada))
+    home_country(call).is_some_and(w_ve_country)
+}
+
+/// Whether a station at home in `country`, by the call table's keys, is
+/// W/VE, as the ARRL DX contest has the sides: the USA's `K`, which leaves
+/// out Alaska's `KL`, Hawaii's `KH6` and the islands, or Canada's `VE`.
+pub(crate) fn w_ve_country(country: &str) -> bool {
+    matches!(country, "K" | "VE")
 }
 
 /// The ARRL or RAC section a station signing `call` is in by its call
