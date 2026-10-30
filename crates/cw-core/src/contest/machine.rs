@@ -985,11 +985,12 @@ struct Air {
     /// How much of each reply has been counted: a key that logs without
     /// sending counts what has reached you so far.
     counted: Vec<Counted>,
-    /// The place among its segments of QRM carried on from a turn taken off
-    /// the air, some of which went out under your message there, the
-    /// receiver muted: no send heard, though it sounds here, as a caller's
-    /// so is ([`Counted::Muted`]).
-    qrm_muted: Option<usize>,
+    /// The places among its segments of QRM no send heard, though it
+    /// sounds, as a caller's so is ([`Counted::Muted`]): one carried on from
+    /// a turn taken off the air, some of which went out under your message
+    /// there, the receiver muted, and any the browser skipped some of
+    /// ([`ContestMachine::missed`]).
+    qrm_muted: Vec<usize>,
     /// Log rows whose check shows once their TU is out
     /// ([`Self::checks_at_sec`]), or once it is off the air.
     pending: Vec<usize>,
@@ -1809,20 +1810,28 @@ impl<S: CallSource> ContestMachine<S> {
     /// heard. Nothing more of it counts, for Enter or a copy, Show copy
     /// never shows it, and its station sends it again, when asked, as one
     /// you never heard; what it costs its caller is spent all the same, as
-    /// it was sent. The news comes at the player's first look after the
-    /// stall, which the heard timer for anything in it, and the turn's end,
-    /// come after; what a key pressed in that moment counted stands.
+    /// it was sent. QRM any of which it skipped is no send heard either.
+    /// The news comes at the player's first look after the stall, which
+    /// the heard timer for anything in it, and the turn's end, come after;
+    /// what a key pressed in that moment counted stands.
     fn missed(&mut self, from_sec: f64, until_sec: f64) {
         let Some(air) = self.air.as_mut() else {
             return;
         };
+        let skipped =
+            |segment: &Segment| segment.end_sec > from_sec && segment.start_sec < until_sec;
+        for (at, segment) in air.turn.segments.iter().enumerate() {
+            if segment.who == Sender::Qrm && skipped(segment) && !air.qrm_muted.contains(&at) {
+                air.qrm_muted.push(at);
+            }
+        }
         let callers = air
             .turn
             .segments
             .iter()
             .filter(|segment| segment.who.is_caller());
         for ((segment, (reply, _)), counted) in callers.zip(&air.replies).zip(&mut air.counted) {
-            if segment.end_sec <= from_sec || segment.start_sec >= until_sec {
+            if !skipped(segment) {
                 continue;
             }
             // A call on its timeout costs it the try once it is on its way,
@@ -2539,7 +2548,8 @@ impl<S: CallSource> ContestMachine<S> {
         }
         let qsk = self.settings.contest.contest_qsk;
         // A caller's rest, or QRM's, that went out in part under your
-        // message before an Esc is never heard, though it sounds after it.
+        // message before an Esc is never heard, though it sounds after it,
+        // nor is a send the browser skipped some of.
         let mut counted = air.counted.iter();
         let mut shown: Vec<ShownText> = air
             .turn
@@ -2549,7 +2559,7 @@ impl<S: CallSource> ContestMachine<S> {
             .enumerate()
             .filter(|(at, (segment, _))| {
                 let unheard = (segment.who.is_caller() && counted.next() == Some(&Counted::Muted))
-                    || air.qrm_muted == Some(*at);
+                    || air.qrm_muted.contains(at);
                 segment.who != Sender::You && !air.turn.muted(segment, qsk) && !unheard
             })
             .map(|(_, (segment, text))| ShownText {
@@ -2916,11 +2926,11 @@ impl<S: CallSource> ContestMachine<S> {
         // waits are planned with it, so it never cuts the turn short. A rest
         // of it carried over your key goes on first, and nothing more of it
         // sends over that rest.
-        let mut qrm_muted = None;
+        let mut qrm_muted = Vec::new();
         if let Some(qrm) = self.qrm.as_mut() {
             if let Some(going_on) = mine.qrm {
                 qrm.carried(start_run, going_on.rest.end_sec);
-                qrm_muted = going_on.muted.then_some(segments.len());
+                qrm_muted.extend(going_on.muted.then_some(segments.len()));
                 segments.push(going_on.rest);
                 texts.push(going_on.whole);
             }
@@ -3260,7 +3270,8 @@ impl<S: CallSource> ContestMachine<S> {
     /// that had not begun is gone with the turn. Without full break-in, one
     /// some of which went out under your message, the turn having `sounded`
     /// by `run_now`, goes on unheard, as a caller's rest does
-    /// ([`Self::overlapping`]), and so does one that went on so already.
+    /// ([`Self::overlapping`]), and so does one that went on so already, or
+    /// that the browser skipped some of ([`Self::missed`]).
     fn qrm_going_on(&self, air: &Air, run_now: u64, sounded: bool) -> Option<QrmRest> {
         let heard_run = air.heard_run();
         let (at, (segment, whole)) =
@@ -3278,7 +3289,7 @@ impl<S: CallSource> ContestMachine<S> {
                 })?;
         let start = heard_run + whole_ms(segment.start_sec);
         let qsk = self.settings.contest.contest_qsk;
-        let muted = air.qrm_muted == Some(at)
+        let muted = air.qrm_muted.contains(&at)
             || (sounded && start < run_now && air.turn.muted(segment, qsk));
         let elapsed = run_now.saturating_sub(start) as f64 / 1_000.0;
         let (from, skip_sec) = self.going_on_from(segment, elapsed)?;
@@ -12200,6 +12211,67 @@ mod tests {
             }
         }
         assert!(tried.iter().all(|tried| *tried >= 20), "{tried:?}");
+    }
+
+    /// QRM some of which a browser fallen behind its clock skipped is no
+    /// send heard, as a caller's is not: Show copy shows none of it, in the
+    /// turn it was skipped in nor as its rest carried over your next key,
+    /// while the QRM after it shows whole. Not skipped, with full break-in,
+    /// it shows whole. It used to show whole either way.
+    #[test]
+    fn qrm_skipped_in_part_is_not_shown() {
+        let qrm_shown = |runtime: &Runtime<ScriptCalls>| -> Vec<String> {
+            view(runtime)
+                .shown
+                .into_iter()
+                .filter(|text| text.qrm)
+                .map(|text| text.text)
+                .collect()
+        };
+        let texts = |sends: &[&Segment]| -> Vec<String> {
+            sends.iter().map(|send| send.text.clone()).collect()
+        };
+        let mut tried = 0;
+        for seed in 1..20 {
+            for (skipped, keyed) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut runtime = qrm_under_the_first_cq(seed, true);
+                let cq = runtime.last_turn().clone();
+                let first = qrm_in(&cq)[0].clone();
+                // A station that came earlier may still hold the frequency.
+                if first.start_sec > 0.0 || first.end_sec < 1.0 {
+                    continue;
+                }
+                tried += 1;
+                runtime.run_to(runtime.now + 500);
+                if skipped {
+                    runtime.apply(ContestEvent::TurnMissed {
+                        id: cq.id,
+                        from_sec: 0.2,
+                        until_sec: 0.4,
+                    });
+                }
+                // Keyed over, it goes on from where it was, and what QRM
+                // follows it is in the next turn.
+                let after = if keyed {
+                    let effects = runtime.key(OpKey::Cq, "", "");
+                    let going = played(&effects).expect("it goes on").clone();
+                    let sends = qrm_in(&going);
+                    assert!(first.text.ends_with(&sends[0].text));
+                    texts(&sends[1..])
+                } else {
+                    texts(&qrm_in(&cq)[1..])
+                };
+                runtime.finish_turn();
+                let shown: Vec<String> = (!skipped)
+                    .then(|| first.text.clone())
+                    .into_iter()
+                    .chain(after)
+                    .collect();
+                let case = format!("seed {seed}, skipped {skipped}, keyed {keyed}");
+                assert_eq!(qrm_shown(&runtime), shown, "{case}");
+            }
+        }
+        assert!(tried >= 20, "{tried}");
     }
 
     /// QRM carried over your key, its rest timed from where it was heard,
