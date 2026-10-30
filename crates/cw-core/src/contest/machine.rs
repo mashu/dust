@@ -2242,7 +2242,7 @@ impl<S: CallSource> ContestMachine<S> {
             }
         }
         let worked = self.working;
-        self.note_sent(&message);
+        self.note_sent(&message, &deaf);
         let (mut replying, took) = self.hear(&message, fields, call, &deaf, logs);
         self.went_on(worked, took, &call.typed, true);
         let garbled = self.keyed_over(&carried.callers, your_end, &deaf);
@@ -2612,13 +2612,20 @@ impl<S: CallSource> ContestMachine<S> {
     }
 
     /// What Enter reads after `message`: a CQ or TU ends the QSO, as
-    /// logging does; a call is the call last sent, and not corrected yet,
-    /// and once a call goes out that is none of a gone station's, Enter
-    /// sends that station's calls again. Whether your exchange was taken is
-    /// for the callers to say.
-    fn note_sent(&mut self, message: &[MessagePart]) {
+    /// logging does, but for a TU the station you work never heard, being
+    /// one of the `deaf` still sending, which closed nothing: Enter's TU
+    /// and log is still to come, as MorseRunner's C and N hold after F3. A
+    /// call is the call last sent, and not corrected yet, and once a call
+    /// goes out that is none of a gone station's, Enter sends that
+    /// station's calls again. Whether your exchange was taken is for the
+    /// callers to say.
+    fn note_sent(&mut self, message: &[MessagePart], deaf: &[usize]) {
+        let unheard = self
+            .qso_station()
+            .is_some_and(|index| deaf.contains(&index));
         for part in message {
             match part {
+                MessagePart::Tu if unheard => {}
                 MessagePart::Cq | MessagePart::Tu => self.end_qso(),
                 MessagePart::HisCall(call) => {
                     self.qso.call_sent = call.clone();
@@ -3828,7 +3835,7 @@ impl<S: CallSource> ContestMachine<S> {
                 corrected: qso.corrected || corrected,
                 ..qso
             };
-            self.note_sent(sent);
+            self.note_sent(sent, &unheard.deaf);
         }
         // Esc takes back only a message that logged nothing.
         let (_, took) = self.hear(sent, &unheard.fields, &unheard.call, &unheard.deaf, false);
@@ -8755,6 +8762,50 @@ mod tests {
         let tu = runtime.last_turn().clone();
         assert!(sent_by(&tu, 0)[0].end_sec > tu.your_end_sec().expect("your TU"));
         assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Done);
+    }
+
+    /// Your TU without logging (F3), keyed over the station you work while
+    /// it sends its exchange, never reached it and closed nothing: Enter
+    /// on its call sends the TU alone and logs, as MorseRunner's C and N
+    /// still hold after F3, and the exchange it sent again on its timeout
+    /// is no repeat you asked for. Enter used to send the call and your
+    /// exchange again, and charge a repeat for the exchange that drew.
+    #[test]
+    fn enter_after_a_tu_the_station_never_heard_sends_the_tu_and_logs() {
+        for style in [RunStyle::Single, RunStyle::Pileup] {
+            let mut runtime = slow_caller(style, 1);
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "K5XYZ", "");
+            let exchange = sent_by(runtime.last_turn(), 0)[0].clone();
+            let nr = serial(&exchange.text);
+            runtime.run_to(runtime.now + ms(exchange.start_sec + 0.2));
+            runtime.key(OpKey::Tu, "K5XYZ", &nr);
+            let tu = runtime.last_turn().clone();
+            let your_end = tu.your_end_sec().expect("your TU");
+            assert!(sent_by(&tu, 0)[0].end_sec > your_end, "{style:?}");
+            let state = runtime.machine.stations[0].caller.state;
+            assert_eq!(state, CallerState::NeedEnd, "{style:?}: not done");
+            let fields = Fields {
+                call: "K5XYZ".into(),
+                exch: nr.clone(),
+                ..Fields::default()
+            };
+            let enter = esm(&view(&runtime).qso, &fields, &RULES[0], Side::Dx);
+            assert_eq!(enter.message, [MessagePart::Tu], "{style:?}");
+            // Its exchange again, on its timeout; then Enter logs.
+            runtime.finish_turn();
+            let again = next_turn(&mut runtime);
+            let sent = said_by(&again, 0).expect("its exchange again");
+            assert!(exchange.text.ends_with(sent), "{style:?}: {sent}");
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "K5XYZ", &nr);
+            assert!(yours(runtime.last_turn()).starts_with("TU"), "{style:?}");
+            runtime.finish_turn();
+            let log = view(&runtime).log;
+            assert_eq!(log.len(), 1, "{style:?}");
+            assert_eq!(log[0].asked, 0, "{style:?}");
+            assert_eq!(view(&runtime).clean, 1, "{style:?}");
+        }
     }
 
     /// Keyed over again and again, a caller still sending goes on through

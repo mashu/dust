@@ -1061,7 +1061,13 @@ it, and Enter on the call your TU without logging went to, its exchange
 not copied yet, would clear a QSO waiting to be logged. F3 keeps only
 the call it went to, so Enter or `.` on that call sends the TU alone and
 logs the QSO it closed, as MRCE's TU and log does while that call still
-counts as sent, and any other call starts afresh. Its call sent in
+counts as sent, and any other call starts afresh. An F3 the station you
+work never heard, still sending its exchange as it ended, closed nothing:
+it keeps Enter's QSO as it was, C and N with it, as MRCE's F3 always
+does, so Enter on the call sends the TU and logs, and the exchange the
+station sends again on its timeout is no repeat you asked for (as built,
+2026-10-30; Enter used to send the call and exchange again, and charge a
+repeat for the exchange that drew). Its call sent in
 answer to your partial, or to a piece of its call, is no correction: you
 asked for it. A station that corrects you again after you sent its call
 right never heard that call, sent over its correction in a pile-up: Enter's
