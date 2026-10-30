@@ -114,6 +114,18 @@ struct Sounding {
     resent: Option<MonoMs>,
 }
 
+/// An answer complete, and what had been heard of its group by then.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Completed {
+    /// The moment its length first matched, or the confirm.
+    at: MonoMs,
+    /// How many times the group had been heard by then.
+    heard: u32,
+    /// When the latest send heard to its end had ended by then, if one had:
+    /// what the answer is timed from.
+    after: Option<MonoMs>,
+}
+
 /// Where a session is. Every phase that is about a group names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
@@ -164,11 +176,11 @@ pub struct Group {
     /// when there is one.
     tally: Option<CopyTally>,
     start_at: MonoMs,
-    /// When the last send of the group ended; none while it is still going.
+    /// When the latest send of the group heard to its end ended, since the
+    /// group last began from the start; none before one has.
     end_at: Option<MonoMs>,
-    /// When the answer was complete: the moment its length first matched,
-    /// or the confirm.
-    answer_at: Option<MonoMs>,
+    /// The answer, once it is complete.
+    answer: Option<Completed>,
     /// The character and effective speed it was sent at, once its first
     /// send starts.
     played_wpm: Option<(f64, f64)>,
@@ -182,8 +194,16 @@ pub struct Group {
     planned_wpm: Option<(f64, f64)>,
     /// How many times this group is sent before the answer window opens.
     repeats: u32,
-    /// Sends already finished for this group.
+    /// Sends finished since the group last began from the start.
     plays_done: u32,
+    /// How many times the group has been heard, the send going out aside:
+    /// every send finished, and every one a pause cut short once its first
+    /// character had sounded. A send some of which went unheard is none.
+    heard: u32,
+    /// When the send going out has its first character heard: from then on
+    /// it has given something away, and counts as heard. None for a send
+    /// some of which went unheard.
+    sending: Option<MonoMs>,
     /// Its answer was complete when the session was paused. It stands as
     /// it was timed, unless it is changed after the pause: keys either
     /// side of a pause cannot be timed against one send.
@@ -198,13 +218,15 @@ impl Group {
             tally: None,
             start_at: MonoMs::default(),
             end_at: None,
-            answer_at: None,
+            answer: None,
             played_wpm: None,
             sounding: None,
             keys: Keys::default(),
             planned_wpm: None,
             repeats: 1,
             plays_done: 0,
+            heard: 0,
+            sending: None,
             paused_complete: false,
         }
     }
@@ -231,24 +253,39 @@ impl Group {
         })
     }
 
-    /// How long the answer took, from the end of the send — never quicker
-    /// than a person types — and what its characters' recognition is read
-    /// from ([`CharTimes`]), where its first send can be timed. `box_open`
-    /// is whether the box took keys while the group was sent.
+    /// The answer complete at `now`, with what had been heard by then: the
+    /// send going out counts once its first character has sounded.
+    fn completed(&self, now: MonoMs) -> Completed {
+        let sounding = self.sending.is_some_and(|heard| heard <= now);
+        Completed {
+            at: now,
+            heard: self.heard.saturating_add(u32::from(sounding)),
+            after: self.end_at,
+        }
+    }
+
+    /// How long the answer took, from the end of the latest send heard to
+    /// its end before it — never quicker than a person types — how many
+    /// times the group was heard by then, and what its characters'
+    /// recognition is read from ([`CharTimes`]), where its first send can be
+    /// timed. `box_open` is whether the box took keys while the group was
+    /// sent.
     fn timing(&self, box_open: bool) -> SessionTiming {
         let chars = self.sent.chars().count().max(1) as f64;
-        let measured = match (self.end_at, self.answer_at) {
-            (Some(end), Some(answer)) => answer.since(end) as f64,
-            // Answered before the send ended: as fast as it gets.
-            _ => 0.0,
-        };
+        let (measured, sends) = self.answer.map_or((0, 1), |answer| {
+            // No send heard to its end before it, typed along the first:
+            // as fast as it gets.
+            let measured = answer.after.map_or(0, |end| answer.at.since(end));
+            (measured, answer.heard)
+        });
         SessionTiming {
-            time_to_complete_ms: measured.max(MIN_RESPONSE_MS_PER_CHAR * chars),
+            time_to_complete_ms: (measured as f64).max(MIN_RESPONSE_MS_PER_CHAR * chars),
             char_wpm: self.played_wpm.map(|(char_wpm, _)| char_wpm),
             effective_wpm: self.played_wpm.map(|(_, effective_wpm)| effective_wpm),
-            // A group answered before its last send was heard was heard
-            // fewer times than planned, and is scored for what it was.
-            sends: self.plays_done.clamp(1, self.repeats.max(1)),
+            // Every hearing before the answer costs, the send it was typed
+            // along included; a group answered before its last send was
+            // heard is scored for the sends it was.
+            sends: sends.max(1),
             char_times: self
                 .sounding
                 .as_ref()
@@ -518,11 +555,11 @@ impl GroupSession {
         }
     }
 
-    /// Group `index` was paused for `ms` with its answer open: the answer
-    /// is timed from the group's end as if the pause had not been, and keys
-    /// typed either side of the pause cannot be timed against its
-    /// characters. An answer already complete when it paused is timed as it
-    /// stands.
+    /// Group `index` was paused for `ms` with its answer open, to be answered
+    /// or sent again: the answer is timed from the end of its send as if the
+    /// pause had not been, and keys typed either side of the pause cannot be
+    /// timed against its characters. An answer already complete when it
+    /// paused is timed as it stands.
     pub(crate) fn note_paused(&mut self, index: usize, ms: u64) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
@@ -530,37 +567,35 @@ impl GroupSession {
         if group.confirmed() {
             return;
         }
+        // Complete already, it stands as timed, and one corrected after the
+        // pause is timed from the end of the send less the pause, as one
+        // not complete is.
         group.end_at = group.end_at.map(|end| end.plus(ms));
-        match &mut group.answer_at {
-            // Complete already: moved on with the end, so it stands as
-            // timed, and an answer corrected after the pause is timed from
-            // the end of the send less the pause, as one not complete is.
-            Some(answer) => {
-                *answer = answer.plus(ms);
-                group.paused_complete = true;
-            }
-            None => {
-                if let Some(sounding) = &mut group.sounding {
-                    sounding.trusted = false;
-                }
-            }
+        if group.answer.is_some() {
+            group.paused_complete = true;
+        } else if let Some(sounding) = &mut group.sounding {
+            sounding.trusted = false;
         }
     }
 
+    /// Group `index` goes out from the start at `now`: an answer from here
+    /// on is timed from its sends from here on. What was heard of it before
+    /// still counts.
     pub(crate) fn begin_group(&mut self, index: usize, now: MonoMs) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
         };
         group.start_at = now;
         group.plays_done = 0;
+        group.end_at = None;
         self.current_group = index;
         self.focused_group = index;
     }
 
-    /// A send of `index` started, as `start` says: its speeds, and for its
-    /// first send, what its characters are timed from. The first send tried
-    /// again cannot be timed: it was heard in part already. A later send
-    /// marks where keys stop being timed.
+    /// A send of `index` started, as `start` says: its speeds, when it is
+    /// first heard, and for its first send, what its characters are timed
+    /// from. The first send tried again cannot be timed: it was heard in
+    /// part already. A later send marks where keys stop being timed.
     pub(crate) fn start_playback(&mut self, index: usize, start: &SendStart) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
@@ -568,6 +603,14 @@ impl GroupSession {
         if start.char_wpm > 0.0 && start.effective_wpm > 0.0 {
             group.played_wpm = Some((start.char_wpm, start.effective_wpm));
         }
+        // Heard once its first character has reached the ear: a send cut
+        // before then gave nothing away.
+        let first = start
+            .char_ends_ms
+            .first()
+            .copied()
+            .unwrap_or(start.first_char_ms);
+        group.sending = Some(start.heard_at().plus(u64::from(first)));
         match (&mut group.sounding, group.plays_done) {
             (None, 0) => {
                 group.sounding = Some(Sounding {
@@ -589,10 +632,34 @@ impl GroupSession {
         }
     }
 
-    /// Count one finished send of `index`.
+    /// Count one finished send of `index`: heard, to its end.
     pub(crate) fn note_play_finished(&mut self, index: usize) {
         if let Some(group) = self.groups.get_mut(index) {
             group.plays_done = group.plays_done.saturating_add(1);
+            group.heard = group.heard.saturating_add(1);
+            group.sending = None;
+        }
+    }
+
+    /// The send of `index` going out was cut short at `at` by a pause, and
+    /// goes out again from the start: heard in part, it counts as heard
+    /// once its first character had sounded.
+    pub(crate) fn cut_send(&mut self, index: usize, at: MonoMs) {
+        if let Some(group) = self.groups.get_mut(index)
+            && let Some(heard) = group.sending.take()
+        {
+            group.heard = group.heard.saturating_add(u32::from(heard <= at));
+        }
+    }
+
+    /// Some of the send of `index` going out went unheard, the browser
+    /// fallen behind its audio clock: it counts as no hearing, however it
+    /// ends. Where in it the skip fell is not said, so neither is whether
+    /// its first character was heard, and a sound that failed is no choice
+    /// of the learner's: it costs only the time of sending it again.
+    pub(crate) fn drop_send(&mut self, index: usize) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.sending = None;
         }
     }
 
@@ -609,7 +676,8 @@ impl GroupSession {
         }
     }
 
-    /// The last send of `index` was seen to end at `now`.
+    /// A send of `index` heard to its end was seen to end at `now`: what an
+    /// answer after it is timed from.
     pub(crate) fn end_playback(&mut self, index: usize, now: MonoMs) {
         if let Some(group) = self.groups.get_mut(index) {
             group.end_at = Some(now);
@@ -639,13 +707,14 @@ impl GroupSession {
     }
 
     /// Stamp the moment the answer reached the group's length, the first
-    /// time it does; withdraw the stamp when it no longer does.
+    /// time it does, with what had been heard of the group by then;
+    /// withdraw the stamp when it no longer does.
     pub(crate) fn mark_answer_complete(&mut self, index: usize, complete: bool, now: MonoMs) {
         if let Some(group) = self.groups.get_mut(index)
             && !group.confirmed()
         {
-            group.answer_at = if complete {
-                group.answer_at.or(Some(now))
+            group.answer = if complete {
+                group.answer.or_else(|| Some(group.completed(now)))
             } else {
                 None
             };
@@ -663,7 +732,7 @@ impl GroupSession {
         if group.confirmed() {
             return None;
         }
-        group.answer_at = group.answer_at.or(Some(now));
+        group.answer = group.answer.or_else(|| Some(group.completed(now)));
         self.focused_group = (index + 1).min(last);
         group.tally = Some(CopyTally::of(&group.sent, &group.input));
         group.answered()
@@ -776,8 +845,9 @@ pub struct GroupResult {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionTiming {
-    /// From the end of the send to the answer, never quicker than
-    /// [`MIN_RESPONSE_MS_PER_CHAR`] a character.
+    /// From the end of the latest send heard to its end before the answer,
+    /// to the answer, never quicker than [`MIN_RESPONSE_MS_PER_CHAR`] a
+    /// character.
     pub time_to_complete_ms: f64,
     #[serde(default)]
     pub char_wpm: Option<f64>,
@@ -785,8 +855,9 @@ pub struct SessionTiming {
     /// have been sent with the session's spacing.
     #[serde(default)]
     pub effective_wpm: Option<f64>,
-    /// How many times the group was sent before it was answered. Older saves
-    /// sent each group once.
+    /// How many times the group was heard before it was answered: each send
+    /// once its first character had sounded. Older saves sent each group
+    /// once.
     #[serde(default = "one_send")]
     pub sends: u32,
     /// What its characters' recognition times are read from
