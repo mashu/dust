@@ -194,11 +194,12 @@ pub struct Group {
     /// Sends finished since the group last began from the start.
     plays_done: u32,
     /// How many times the group has been heard, the send going out aside:
-    /// every send finished, and every one a pause or a miss cut short once
-    /// its first character had sounded.
+    /// every send finished, and every one a pause cut short once its first
+    /// character had sounded. A send some of which went unheard is none.
     heard: u32,
     /// When the send going out has its first character heard: from then on
-    /// it has given something away, and counts as heard.
+    /// it has given something away, and counts as heard. None for a send
+    /// some of which went unheard.
     sending: Option<MonoMs>,
     /// Its answer was complete when the session was paused. It stands as
     /// it was timed, unless it is changed after the pause: keys either
@@ -551,11 +552,11 @@ impl GroupSession {
         }
     }
 
-    /// Group `index` was paused for `ms` with its answer open: the answer
-    /// is timed from the group's end as if the pause had not been, and keys
-    /// typed either side of the pause cannot be timed against its
-    /// characters. An answer already complete when it paused is timed as it
-    /// stands.
+    /// Group `index` was paused for `ms` with its answer open, to be answered
+    /// or sent again: the answer is timed from the end of its send as if the
+    /// pause had not been, and keys typed either side of the pause cannot be
+    /// timed against its characters. An answer already complete when it
+    /// paused is timed as it stands.
     pub(crate) fn note_paused(&mut self, index: usize, ms: u64) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
@@ -637,14 +638,25 @@ impl GroupSession {
         }
     }
 
-    /// The send of `index` going out was cut short at `at`, by a pause or by
-    /// some of it going unheard, and goes out again from the start: heard
-    /// in part, it counts as heard once its first character had sounded.
+    /// The send of `index` going out was cut short at `at` by a pause, and
+    /// goes out again from the start: heard in part, it counts as heard
+    /// once its first character had sounded.
     pub(crate) fn cut_send(&mut self, index: usize, at: MonoMs) {
         if let Some(group) = self.groups.get_mut(index)
             && let Some(heard) = group.sending.take()
         {
             group.heard = group.heard.saturating_add(u32::from(heard <= at));
+        }
+    }
+
+    /// Some of the send of `index` going out went unheard, the browser
+    /// fallen behind its audio clock: it counts as no hearing, however it
+    /// ends. Where in it the skip fell is not said, so neither is whether
+    /// its first character was heard, and a sound that failed is no choice
+    /// of the learner's: it costs only the time of sending it again.
+    pub(crate) fn drop_send(&mut self, index: usize) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.sending = None;
         }
     }
 
