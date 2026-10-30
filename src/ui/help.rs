@@ -174,9 +174,11 @@ pub fn endurance() -> Element {
             dt { "The dashed line" }
             dd { "Your start's level, carried across the rest, to hold each stretch against." }
             dt { "A copper bar" }
-            dd { "{DROP_POINTS:.0} points or more under your start: where you begin to tire." }
+            dd {
+                "{DROP_POINTS:.0} points or more under your start, and further than chance would put it over the sessions read: where you begin to tire. A few sessions can show only a big drop; more show a smaller one."
+            }
             dt { "Steady through · Fades after" }
-            dd { "How far into a session you stay within {DROP_POINTS:.0} points of your start." }
+            dd { "How far into a session you go before the first copper bar." }
         }
     }
 }

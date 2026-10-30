@@ -71,7 +71,7 @@ pub use contest::{
 };
 pub use endurance::{
     DROP_POINTS, ENDURANCE_MIN_SESSIONS, Endurance, EndurancePoint, GROUPS_A_STRETCH,
-    MINUTES_A_STRETCH, StretchUnit, endurance,
+    MINUTES_A_STRETCH, StretchUnit, WARM_UP_POINTS, endurance,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,

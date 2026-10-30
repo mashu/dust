@@ -3043,11 +3043,11 @@ mod interactions {
         assert_eq!(first_square(&ui), "pair-k-m");
     }
 
-    /// Three sessions of twenty groups, the first ten copied clean, then
-    /// two groups in the third five each with a character wrong, and three
-    /// in the last five.
+    /// `sessions` sessions of twenty groups, the first ten copied clean,
+    /// then two groups in the third five each with a character wrong, and
+    /// three in the last five.
     #[component]
-    fn EnduranceHarness(long: bool) -> Element {
+    fn EnduranceHarness(long: bool, sessions: usize) -> Element {
         let mut groups = vec![("KM", "KM"); 10];
         groups.extend([("KM", "KE"); 2]);
         groups.extend([("KM", "KM"); 3]);
@@ -3056,7 +3056,7 @@ mod interactions {
         if !long {
             groups.truncate(8);
         }
-        let sessions = (0..3)
+        let sessions = (0..sessions)
             .map(|_| stored_session("2026-09-08", &groups))
             .collect();
         rsx! {
@@ -3065,13 +3065,20 @@ mod interactions {
     }
 
     /// The Endurance card says how far into a session copy holds, and
-    /// before there are sessions long enough, what it takes.
+    /// before there are sessions long enough, what it takes. Three sessions
+    /// are too few to call the same dips a fade.
     #[test]
     fn the_endurance_card_says_how_far_copy_holds() {
-        let ui = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: true });
+        let ui = Ui::new(
+            EnduranceHarness,
+            EnduranceHarnessProps {
+                long: true,
+                sessions: 12,
+            },
+        );
         assert!(ui.has(">Endurance<"));
         assert!(
-            ui.has("Accuracy as a session goes on · Koch · last 3 sessions"),
+            ui.has("Accuracy as a session goes on · Koch · last 12 sessions"),
             "{}",
             ui.html()
         );
@@ -3087,7 +3094,28 @@ mod interactions {
         assert_eq!(ui.html().matches("class=\"endu-bar fades\"").count(), 2);
         assert_eq!(ui.html().matches("class=\"endu-bar first\"").count(), 1);
 
-        let short = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: false });
+        let few = Ui::new(
+            EnduranceHarness,
+            EnduranceHarnessProps {
+                long: true,
+                sessions: 3,
+            },
+        );
+        assert!(few.has("class=\"endu-headline good\">Steady through group 20<"));
+        assert!(
+            few.has(
+                "Some stretches dip below it, but no further than chance would over 3 sessions"
+            )
+        );
+        assert!(!few.has("class=\"endu-bar fades\""));
+
+        let short = Ui::new(
+            EnduranceHarness,
+            EnduranceHarnessProps {
+                long: false,
+                sessions: 3,
+            },
+        );
         assert!(short.has(">Endurance<"));
         assert!(
             short
