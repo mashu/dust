@@ -427,7 +427,9 @@ card:
   stands out. When the last one was saved is kept under `dust_last_backup`,
   or in `last_backup.txt`. A restored backup counts as the last one only when
   it holds every session here that had finished by the time it was saved: one
-  from another device leaves this one's own sessions in no backup. A browser never says whether it kept a download,
+  from another device leaves this one's own sessions in no backup. A mark
+  later than now, left by a clock set ahead, counts as made now, so the
+  sessions after it are counted once the clock is right. A browser never says whether it kept a download,
   so the web app's card says the last backup was handed to the browser, not
   saved.
 
@@ -443,7 +445,9 @@ storage (`navigator.storage.persist()`) rather than clear it to make room.
 Chrome decides by itself; Firefox asks once. That guards against the browser,
 not against someone clearing the site's data: only a backup does.
 
-The history keeps your newest 500 sessions. A browser also gives each site only
+The history keeps your newest 500 sessions, newest as they were stored, in
+the order they finished, whatever the clock said: a session stamped by a clock
+set back is not the first to go. A browser also gives each site only
 a few megabytes; should the history outgrow that — hundreds of sessions of
 hundreds of groups, or long contest runs, which take more room — the newest
 that fit are kept, and the app says so.

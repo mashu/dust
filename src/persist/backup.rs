@@ -203,7 +203,23 @@ pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -
         }
     }
     if added {
-        sessions.sort_by_key(|(session, _)| session.timestamp);
+        // In among the sessions here, each before the first that finished
+        // after it; those here keep their order, the order they were
+        // stored in. Sorted whole, one a clock set back stamped went to the
+        // front, the first the history lets go for want of room.
+        let (mut new, before): (Vec<_>, Vec<_>) = sessions
+            .into_iter()
+            .partition(|(_, came)| matches!(came, Came::Added));
+        new.sort_by_key(|(session, _)| session.timestamp);
+        let mut new = new.into_iter().peekable();
+        sessions = Vec::with_capacity(before.len() + new.len());
+        for kept in before {
+            while let Some(added) = new.next_if(|(added, _)| added.timestamp < kept.0.timestamp) {
+                sessions.push(added);
+            }
+            sessions.push(kept);
+        }
+        sessions.extend(new);
     }
     let mut merged = Merged {
         sessions: Vec::with_capacity(sessions.len()),
@@ -357,6 +373,25 @@ mod tests {
             },
             "restoring twice does nothing"
         );
+    }
+
+    /// A restore puts each session it adds before the first here that
+    /// finished after it, and leaves those here in the order they were
+    /// stored: one a clock set back stamped stays last, rather than go to
+    /// the front, the first the history lets go when it has no room.
+    #[test]
+    fn restoring_leaves_the_sessions_here_in_their_order() {
+        let current = vec![at(10, "a"), at(20, "b"), at(5, "c")];
+        let merged = merge_sessions(&current, vec![at(15, "d"), at(1, "e")]);
+        assert_eq!(
+            merged
+                .sessions
+                .iter()
+                .map(|s| s.timestamp)
+                .collect::<Vec<_>>(),
+            [1, 10, 15, 20, 5]
+        );
+        assert_eq!(merged.added, [at(1, "e"), at(15, "d")]);
     }
 
     /// A run whose log an older version dropped takes it back from a copy

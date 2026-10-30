@@ -188,7 +188,7 @@ impl AppCtx {
     /// in it lives as long as the app, so it is made in the root scope.
     pub fn new(app: AppState, settings: TrainingSettings, sessions: Vec<SessionResult>) -> Self {
         in_root(move || {
-            let last_backup = app.store.last_backup();
+            let last_backup = backup_mark(&*app.store);
             // What reading the store at launch set aside, told of at once.
             let set_aside = app.store.take_set_aside();
             let stored_settings = CopyValue::new(settings.clone().clamp());
@@ -391,7 +391,7 @@ impl AppCtx {
         // A backup another copy saved since is the last one here too, so a
         // restore of an older one never takes the mark back past it.
         let mut last_backup = self.last_backup;
-        let marked = store.last_backup();
+        let marked = backup_mark(&*store);
         if marked > *last_backup.peek() {
             last_backup.set(marked);
         }
@@ -565,7 +565,9 @@ impl AppCtx {
             sessions.peek().clone(),
             backup.settings.as_ref().map(|_| settings.peek().clone()),
         );
-        let backed_up = covers_up_to(&backup.sessions, &before.0, backup.saved_at);
+        // As of when it was saved, or now, if a clock set ahead says later.
+        let saved_at = backup.saved_at.min(crate::time::now_ms());
+        let backed_up = covers_up_to(&backup.sessions, &before.0, saved_at);
         let merged = merge_sessions(&before.0, backup.sessions);
         // What it adds was deleted by hand, maybe; it is wanted back now.
         let noted = self.note_deleted(&merged.added, false);
@@ -595,9 +597,9 @@ impl AppCtx {
         // only if that is all there was here by then. A backup from another
         // device leaves this one's own sessions in no backup at all.
         let mut last_backup = self.last_backup;
-        if backed_up && backup.saved_at > last_backup.peek().unwrap_or(0) {
-            store.mark_backup(backup.saved_at);
-            last_backup.set(Some(backup.saved_at));
+        if backed_up && saved_at > last_backup.peek().unwrap_or(0) {
+            store.mark_backup(saved_at);
+            last_backup.set(Some(saved_at));
         }
         store.ask_to_keep();
         let from = day_of(backup.saved_at)
@@ -776,6 +778,21 @@ impl AppCtx {
         self.dialogue.set(None);
         self.screen.set(to);
     }
+}
+
+/// When the last backup was saved, as `store` remembers it, but never
+/// later than now. A mark a clock set ahead left is later than every session
+/// finished once the clock is put right, and the reminder said nothing new
+/// since until the real time caught up with it, a year on maybe: such a
+/// mark is taken as made now, and remembered so.
+fn backup_mark(store: &dyn Store) -> Option<u64> {
+    let marked = store.last_backup()?;
+    let now = crate::time::now_ms();
+    if marked > now {
+        store.mark_backup(now);
+        return Some(now);
+    }
+    Some(marked)
 }
 
 /// The sessions `store` remembers as deleted by hand.
@@ -1433,6 +1450,34 @@ mod tests {
         a.act(AppCtx::undo_restore);
         assert_eq!(days(&store.load_sessions()), [3]);
         assert_eq!(a.act(|ctx| ctx.settings.peek().curriculum.num_groups), 4);
+    }
+
+    /// A backup marked by a clock set ahead counts as saved now, and so does
+    /// a backup from such a clock that is restored: sessions finished from
+    /// now on are counted since. Marked later than every session finished
+    /// once the clock was put right, it used to say nothing new since until
+    /// the real time caught up with it.
+    #[test]
+    fn a_backup_marked_by_a_clock_set_ahead_counts_from_now() {
+        let year = 365 * 86_400_000;
+        let store = holding([1]);
+        store.mark_backup(crate::time::now_ms() + year);
+        let a = Tab::on(&store);
+        let marked = a.act(|ctx| *ctx.last_backup.peek()).expect("marked");
+        assert!(marked <= crate::time::now_ms(), "{marked}");
+        assert_eq!(store.last_backup(), Some(marked), "remembered so");
+
+        let store = holding([1]);
+        let a = Tab::on(&store);
+        a.act(|ctx| {
+            ctx.restore_backup(Backup {
+                saved_at: crate::time::now_ms() + year,
+                settings: None,
+                sessions: vec![day(1)],
+            })
+        });
+        let marked = store.last_backup().expect("marked");
+        assert!(marked <= crate::time::now_ms(), "{marked}");
     }
 
     /// A restore of a backup older than one another tab saved since leaves

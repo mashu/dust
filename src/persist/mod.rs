@@ -716,6 +716,11 @@ pub fn prune_deleted(mut deleted: Vec<Deleted>, now: u64) -> Vec<Deleted> {
 /// session stored, or put back, elsewhere and deleted by hand is dropped
 /// for the same reason; one the store let go for want of room is neither,
 /// kept, and let go again as the history is stored.
+///
+/// The history keeps the order sessions were stored in, which is the
+/// order they finished in, whatever the clock said: the store lets go of
+/// the first when it has no room, so a session stamped by a clock set back
+/// must not move to the front.
 pub fn merge_history(
     base: &[SessionResult],
     ours: &[SessionResult],
@@ -727,53 +732,75 @@ pub fn merge_history(
     }
     let was_here = pair_sessions(&each(base), &each(ours));
     let was_there = pair_sessions(&each(base), &each(theirs));
-    // Each session of `base` as it is stored now, if it still is.
+    // Each session of `base` as it is stored now, if it still is, and where.
     let mut stored = vec![None; base.len()];
-    for (session, was) in theirs.iter().zip(&was_there) {
+    for (there, (session, was)) in theirs.iter().zip(&was_there).enumerate() {
         if let Some(was) = was {
-            stored[*was] = Some(session);
+            stored[*was] = Some((there, session));
         }
     }
-    let mut merged = Vec::with_capacity(theirs.len().max(ours.len()));
+    // Each session kept, and where the store has it, if it does.
+    let mut merged: Vec<(SessionResult, Option<usize>)> =
+        Vec::with_capacity(theirs.len().max(ours.len()));
+    // Each session added here, and where it is kept.
     let mut added_here = Vec::new();
     for (session, was) in ours.iter().zip(&was_here) {
         match was {
             None => {
-                merged.push(session.clone());
-                added_here.push(session);
+                added_here.push((merged.len(), session));
+                merged.push((session.clone(), None));
             }
             Some(was) => match stored[*was] {
                 // Deleted elsewhere.
                 None if deleted.contains(&SessionKey::of(session)) => {}
                 // Missing from the store, and not deleted: lost there.
-                None => merged.push(session.clone()),
+                None => merged.push((session.clone(), None)),
                 // Changed here, or else as it is stored.
-                Some(stored) if *session == base[*was] => merged.push(stored.clone()),
-                Some(_) => merged.push(session.clone()),
+                Some((there, stored)) if *session == base[*was] => {
+                    merged.push((stored.clone(), Some(there)));
+                }
+                Some((there, _)) => merged.push((session.clone(), Some(there))),
             },
         }
     }
-    // Added elsewhere, unless it was added here too, as two copies
-    // restoring one backup each add the same session.
-    let added_there: Vec<&SessionResult> = theirs
+    // Added elsewhere, unless deleted by hand, or added here too, as two
+    // copies restoring one backup each add the same session.
+    let added_there: Vec<(usize, &SessionResult)> = theirs
         .iter()
+        .enumerate()
         .zip(&was_there)
-        .filter(|(session, was)| was.is_none() && !deleted.contains(&SessionKey::of(session)))
-        .map(|(session, _)| session)
+        .filter(|((_, session), was)| was.is_none() && !deleted.contains(&SessionKey::of(session)))
+        .map(|(added, _)| added)
         .collect();
-    let before = merged.len();
-    merged.extend(
-        added_there
-            .iter()
-            .zip(pair_sessions(&added_here, &added_there))
-            .filter(|(_, same)| same.is_none())
-            .map(|(session, _)| (*session).clone()),
-    );
-    // In among the rest, by when each finished.
-    if merged.len() > before {
-        merged.sort_by_key(|session| session.timestamp);
+    let here: Vec<&SessionResult> = added_here.iter().map(|(_, session)| *session).collect();
+    let there: Vec<&SessionResult> = added_there.iter().map(|(_, session)| *session).collect();
+    let mut new = Vec::new();
+    for (&(at, session), same) in added_there.iter().zip(pair_sessions(&here, &there)) {
+        match same {
+            // Kept here already: where the store has it too.
+            Some(same) => merged[added_here[same].0].1 = Some(at),
+            None => new.push((at, session)),
+        }
     }
-    merged
+    // Each where the store has it: after the session it follows there, and
+    // in among what this copy added since by when it finished. Sorted by
+    // when each finished, a session a clock set back stamped went to the
+    // front, and was the first the history let go.
+    let mut new = new.into_iter().peekable();
+    let mut after = 0;
+    for (at, session) in theirs.iter().enumerate() {
+        if let Some(kept) = merged.iter().position(|(_, there)| *there == Some(at)) {
+            after = kept + 1;
+        } else if let Some((_, added)) = new.next_if(|(added, _)| *added == at) {
+            let place = merged[after..]
+                .iter()
+                .position(|(kept, _)| kept.timestamp > session.timestamp)
+                .map_or(merged.len(), |later| after + later);
+            merged.insert(place, (added.clone(), Some(at)));
+            after = place + 1;
+        }
+    }
+    merged.into_iter().map(|(session, _)| session).collect()
 }
 
 /// Which of `from` each of `to` is, if any: the one with the same
@@ -1166,6 +1193,20 @@ pub(crate) mod tests {
         let theirs = [at(1), at(2), at(3)];
         let merged_now = merge_history(&[at(2)], &[at(2)], &theirs, &deleted(&[1]));
         assert_eq!(stamps(&merged_now), [2, 3]);
+    }
+
+    /// A session another copy stored, stamped by a clock set back, stays
+    /// where the store has it, after what it followed there, and what this
+    /// copy adds goes after it. Sorted by its stamp, it went to the front,
+    /// the first session the history lets go when it has no room.
+    #[test]
+    fn a_session_a_clock_set_back_stamped_keeps_its_place() {
+        let base = [at(10), at(20)];
+        let merged_now = merged(&base, &[at(10), at(20), at(30)], &[at(10), at(20), at(5)]);
+        assert_eq!(stamps(&merged_now), [10, 20, 5, 30]);
+        // Added elsewhere before the first session here: first.
+        let merged_now = merged(&base, &base, &[at(7), at(10), at(20)]);
+        assert_eq!(stamps(&merged_now), [7, 10, 20]);
     }
 
     /// A session filled in on one side — a run's log put back by a restore —
