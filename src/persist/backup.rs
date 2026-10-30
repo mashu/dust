@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use cw_core::{SessionResult, TrainingSettings};
 use serde::Serialize;
 
-use super::{SessionKey, load_settings_from, parse_sessions};
+use super::legacy::parse_sessions;
+use super::{SessionKey, load_settings_from};
 
 /// The key that marks a file as a backup, and the version of its layout.
 const MARK: &str = "dustBackup";

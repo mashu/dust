@@ -8,9 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
+use super::legacy::read_history;
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SETTINGS_HELD,
-    SetAside, Store, newest, over_stored, read_history, read_settings_from,
+    SetAside, Store, newest, over_stored, read_settings_from,
 };
 
 const THEME: &str = "theme.txt";

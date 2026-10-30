@@ -12,10 +12,12 @@ use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
+use super::legacy::{
+    Aside, HISTORY_BUDGET, Kept, read_history, set_aside_from, store_newest_that_fit,
+};
 use super::{
-    Aside, BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Kept, OpenSession,
-    SETTINGS_HELD, SetAside, Store, newest, over_stored, read_history, read_settings_from,
-    saved_now, set_aside_from, store_newest_that_fit,
+    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SETTINGS_HELD,
+    SetAside, Store, newest, over_stored, read_settings_from, saved_now,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -36,13 +38,6 @@ const LAST_BACKUP_KEY: &str = "dust_last_backup";
 /// mark whose lock nobody holds was cut off, and one held belongs to a tab
 /// still running it.
 const OPEN_PREFIX: &str = "dust_open_session_";
-
-/// How much of the site's storage the history may take, in characters.
-/// Browsers give a site about five million; the rest is left for the
-/// settings, the counters and the room a write needs. Other sites on the
-/// origin may have taken some of it, and then a write that does not fit
-/// keeps fewer of the newest sessions ([`store_newest_that_fit`]).
-const HISTORY_BUDGET: usize = 3_000_000;
 
 #[derive(Default)]
 pub struct WebStore {
