@@ -22,6 +22,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The Rust every job builds with, the same in every workflow
+  # (scripts/check-pinned-versions.sh): a new stable's lints wait for a
+  # deliberate move.
+  RUST_TOOLCHAIN: "1.99.1"
   DIOXUS_CLI_VERSION: "0.7.10"
   # Belt and braces with .cargo/config.toml: a Pages runner on a new LLVM
   # must not strip the wasm-bindgen metadata section.
@@ -34,24 +38,28 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
+          # Every crate's build script runs here: leave it no token.
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Add wasm target
         run: rustup target add wasm32-unknown-unknown
 
       - name: Cache Rust builds
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: pages-web
           cache-directories: target/dx
 
       - name: Install cargo-binstall
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-binstall
 
@@ -122,6 +130,6 @@ jobs:
 
       - name: Upload Pages artifact
         if: inputs.upload
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site

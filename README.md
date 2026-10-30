@@ -14,11 +14,15 @@ Linux, Windows, macOS, Android or iOS from
 ## Build
 
 ```bash
-curl -sSL https://dioxus.dev/install.sh | bash   # once
+cargo install dioxus-cli --version 0.7.10 --locked   # once
 
 dx serve --platform desktop
 dx serve --platform web
 ```
+
+`dx` must match the `dioxus` in `Cargo.lock`. CI builds with the Rust release
+named by `RUST_TOOLCHAIN` in `.github/workflows`, so its lints are that
+release's.
 
 On Linux, install ALSA and WebKitGTK first:
 
