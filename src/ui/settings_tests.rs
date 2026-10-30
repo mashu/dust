@@ -1396,6 +1396,33 @@ fn the_character_sets_reset_leaves_an_order_of_ones_own() {
     });
 }
 
+/// A preset tried in place of an unlock order of the learner's own does
+/// not cost it: Your own brings it back, whichever presets were tried, and
+/// it is stored aside meanwhile.
+#[test]
+fn a_preset_tried_keeps_an_unlock_order_of_ones_own() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.commit("field-sequence-order", "ZQXJKMRSU");
+        ui.click("pill-morsemania");
+        assert_eq!(
+            value_of(&ui, "field-sequence-order"),
+            "KMRSUAPTLOWINJEF0YVG5Q9ZH38B?427C16DX/=+"
+        );
+        ui.click("pill-lcwo");
+        let stored = ui.stored_settings().await.curriculum.kept_sequence;
+        assert_eq!(stored.iter().collect::<String>(), "ZQXJKMRSU");
+
+        ui.click("pill-your-own");
+        assert!(ui.input_tag("pill-your-own").contains("active"));
+        assert_eq!(value_of(&ui, "field-sequence-order"), "ZQXJKMRSU");
+        assert!(ui.has("Unlocked in your own order"));
+        let stored = ui.stored_settings().await.curriculum.custom_sequence;
+        assert_eq!(stored.iter().collect::<String>(), "ZQXJKMRSU");
+    });
+}
+
 /// Your sending is on the Tone and volume card in Contest mode only, in
 /// decibels from the loudest down to off, at -3 dB until you set it; it
 /// is stored, a preset leaves it alone, and the card's reset puts it back.

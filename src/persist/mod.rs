@@ -725,6 +725,7 @@ pub(crate) mod tests {
         c.mixed_letters_percent = 33;
         c.custom_sequence = vec!['Z', 'Q', 'X'];
         c.sequence_is_custom = true;
+        c.kept_sequence = vec!['K', 'M'];
         c.practice_window = cw_core::PracticeWindow::Last3;
         c.callsign_level = 5;
         c.word_list = vec!["CQ".into(), "TEST".into()];

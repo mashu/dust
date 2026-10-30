@@ -291,6 +291,10 @@ pub struct CurriculumSettings {
     pub custom_sequence: Vec<char>,
     /// True when the user chose Unlock order → Your own, even if the order still matches a preset.
     pub sequence_is_custom: bool,
+    /// An unlock order of the learner's own, kept while a preset is chosen
+    /// in its place, for Your own to bring back. Empty while their own is
+    /// chosen, and when they have none.
+    pub kept_sequence: Vec<char>,
     pub practice_window: PracticeWindow,
     /// Callsign structure tier, the level of the callsign character set. Its own
     /// field, the way digits have one, so switching modes never reinterprets a
@@ -322,6 +326,7 @@ impl Default for CurriculumSettings {
             mixed_letters_percent: 70,
             custom_sequence: Vec::new(),
             sequence_is_custom: false,
+            kept_sequence: Vec::new(),
             practice_window: PracticeWindow::All,
             callsign_level: LEVEL_MIN,
             word_list: Vec::new(),
@@ -1753,13 +1758,14 @@ mod tests {
     /// What no card's reset touches. Progress, not preference: where you have
     /// got to, and what the sampler has learned. And what the learner made,
     /// which one press should not cost them: an unlock order of their own,
-    /// and their word list.
+    /// kept aside or not, and their word list.
     const LEFT_BY_RESETS: &[&str] = &[
         "level",
         "digitsLevel",
         "callsignLevel",
         "customSequence",
         "sequenceIsCustom",
+        "keptSequence",
         "wordList",
     ];
 
@@ -1788,8 +1794,8 @@ mod tests {
     }
 
     /// The Character set's reset puts back an unlock order a preset gave,
-    /// and leaves one of the learner's own, and their word list, as they
-    /// are. In Contest mode it puts the contest's own choices back and stays
+    /// and leaves one of the learner's own, chosen or kept aside for the
+    /// preset, and their word list, as they are. In Contest mode it puts the contest's own choices back and stays
     /// in Contest: the contest is where the card is.
     #[test]
     fn the_character_sets_reset_keeps_what_the_learner_made_and_the_contest() {
@@ -1802,6 +1808,9 @@ mod tests {
         );
         assert_eq!(preset.curriculum.char_set_mode, CharSetMode::Mixed);
         assert_eq!(preset.curriculum.word_list, ["PARIS", "QRZ"]);
+        // Their own order, kept aside for the preset, is kept still.
+        preset.choose_sequence(SequenceChoice::Custom);
+        assert_eq!(preset.curriculum.custom_sequence, ['Z', 'Q']);
 
         let mut own = wildly_different();
         own.reset_section(SettingsSection::CharacterSet);
@@ -1921,6 +1930,9 @@ mod tests {
         s.curriculum.mixed_letters_percent = 33;
         s.curriculum.custom_sequence = vec!['Z', 'Q'];
         s.curriculum.sequence_is_custom = true;
+        // Never kept beside an order of their own chosen in the app, but
+        // moved all the same, so that a reset that touched it would show.
+        s.curriculum.kept_sequence = vec!['X', 'J'];
         s.curriculum.practice_window = PracticeWindow::Last3;
         s.curriculum.word_list = vec!["PARIS".to_string(), "QRZ".to_string()];
         s.playback.char_wpm_min = 31.0;
