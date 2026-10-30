@@ -531,7 +531,10 @@ impl AppCtx {
     /// turns down, so there the backup card tells of the last one as handed
     /// to the browser, not as saved ([`Store::confirms_backups`]). It quiets
     /// the reminder all the same: the hand-over is all a browser ever says
-    /// of a download, and a reminder that never goes quiet is not read.
+    /// of a download, and a reminder that never goes quiet is not read. So
+    /// does a file saved inside the app, as on an iPhone, which the message
+    /// and the card say goes with the app until it is moved out
+    /// ([`Store::backups_inside_app`]).
     pub fn save_backup(self) {
         self.sync_with_store();
         let at = crate::time::now_ms();
@@ -541,9 +544,17 @@ impl AppCtx {
         dioxus::core::spawn_forever(async move {
             match saving.await {
                 Ok(said) => {
-                    self.app().store.mark_backup(at);
+                    let store = self.app().store;
+                    store.mark_backup(at);
                     let mut last_backup = self.last_backup;
                     last_backup.set(Some(at));
+                    // Kept inside the app, it is no backup until moved out.
+                    let said = match store.backups_inside_app() {
+                        Some(how) => format!(
+                            "{said} It goes if Dust is deleted: move it out {how} to keep it."
+                        ),
+                        None => said,
+                    };
                     self.toasts.show(said);
                 }
                 Err(why) => self

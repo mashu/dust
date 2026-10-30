@@ -96,6 +96,36 @@ fn the_card_says_when_a_backup_is_due() {
     });
 }
 
+/// Where a backup file is saved inside the app, as on an iPhone, it goes
+/// with the app until it is moved out: the message and the card say so,
+/// and how. It used to count as safe, the card saying nothing new since.
+#[test]
+fn a_backup_kept_inside_the_app_says_to_move_it_out() {
+    run(|| async {
+        let store = MemoryStore::default();
+        store.backups_inside.set(Some("with the Files app,"));
+        let mut ui = open(store, &history(12));
+        assert!(ui.has(
+            "12 sessions and no backup yet. Save one and move it out of Dust&#39;s folder with the Files app, to keep them safe"
+        ));
+        ui.click("btn-save-a-backup");
+        assert!(
+            ui.has("It goes if Dust is deleted: move it out with the Files app, to keep it."),
+            "{}",
+            ui.html()
+        );
+        assert!(
+            ui.has("in Dust&#39;s folder · nothing new since"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has(
+            "A backup file is saved in Dust&#39;s own folder, which goes if Dust is deleted: move each one out with the Files app, to keep your history and settings safe."
+        ));
+        assert!(!ui.has("backup-card due"));
+    });
+}
+
 /// A browser's download is only handed over, and the browser says nothing
 /// if it blocks it: the card tells of the last backup as handed to the
 /// browser, not as saved, and the reminder goes quiet all the same.

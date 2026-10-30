@@ -46,6 +46,9 @@ pub struct MemoryStore {
     /// Backup files are handed over with no word of whether they were
     /// kept, the way a browser's downloads are.
     pub unconfirmed_backups: Cell<bool>,
+    /// Backup files are kept inside the app, the way an iPhone keeps them,
+    /// and moved out as this says.
+    pub backups_inside: Cell<Option<&'static str>>,
     /// How many times the store was asked to keep its data.
     pub keep_asks: Cell<u32>,
     /// The session or run marked open, as a copy of the app that stopped
@@ -162,6 +165,10 @@ impl Store for MemoryStore {
 
     fn confirms_backups(&self) -> bool {
         !self.unconfirmed_backups.get()
+    }
+
+    fn backups_inside_app(&self) -> Option<&'static str> {
+        self.backups_inside.get()
     }
 
     fn ask_to_keep(&self) {

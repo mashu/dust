@@ -55,6 +55,29 @@ pub fn files_dir() -> Option<PathBuf> {
     path.ok().map(PathBuf::from)
 }
 
+/// Whether a backup file goes to the app's own folder on the shared
+/// storage, which Android deletes with the app: before Android 10, which
+/// adds a file to Downloads only through the media store. As
+/// [`files_dir`], it asks Android from the app's own thread; Android that
+/// cannot be asked is taken for a later one.
+pub fn backups_inside_app() -> bool {
+    let android = ndk_context::android_context();
+    // Safety: as in `files_dir`.
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(android.vm().cast()) }) else {
+        return false;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return false;
+    };
+    let version = env
+        .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
+        .and_then(|value| value.i());
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    version.is_ok_and(|version| version < ANDROID_10)
+}
+
 use super::BackupSaving;
 use super::desktop::{free_name, write_whole};
 

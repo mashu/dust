@@ -88,8 +88,7 @@ pub trait Store {
     /// When a backup was last saved, in milliseconds since the epoch.
     fn last_backup(&self) -> Option<u64>;
     fn mark_backup(&self, at: u64);
-    /// Whether this build can hand the user a backup file: an app on a
-    /// phone has nowhere outside itself to put one.
+    /// Whether this build can hand the user a backup file at all.
     fn saves_backups(&self) -> bool;
     /// Hand `contents` to the user as a file called `name`, outside the
     /// store, somewhere they can reach it: a download in a browser, a file
@@ -102,6 +101,15 @@ pub trait Store {
     /// blocked or turned down, it says nothing.
     fn confirms_backups(&self) -> bool {
         true
+    }
+    /// Whether a backup file this store saves is kept inside the app, and
+    /// deleted with it, until the user moves it out: and if so, how they
+    /// do, in words that follow "move it out". An iPhone keeps it in the
+    /// app's own Documents, and Android before 10 in the app's own folder
+    /// on the shared storage; a backup there is no backup against deleting
+    /// the app.
+    fn backups_inside_app(&self) -> Option<&'static str> {
+        None
     }
     /// Ask the platform to keep what is stored rather than clear it when it
     /// needs room. Only a browser clears a store on its own, and it may ask

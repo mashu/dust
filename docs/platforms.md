@@ -414,6 +414,13 @@ card:
   - iOS puts it in the app's Documents folder, which the Info.plist keys in
     `Dioxus.toml` (`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`)
     show in the Files app under On My iPhone, Dust.
+
+  The app's own folders, on iOS and on Android before 10, are deleted with
+  the app, and the backup in them with the store it backs up: such a file is
+  no backup until it is moved out. There the message after saving says so,
+  and how (with the Files app, to iCloud Drive or another app; with a file
+  manager), the card tells of the last one as saved in Dust's folder, and
+  its note says to move each one out to keep it safe.
 - **Restore a backup** adds the sessions in the file that are not here yet
   and takes its settings, level included, all but this device's own: its
   volume, and how its keyboard and paddles key (**Swap [ and ] paddles**,

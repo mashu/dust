@@ -34,6 +34,9 @@ pub struct DesktopStore {
     root: PathBuf,
     /// Where backup files go, when there is anywhere the user can reach.
     backup_folder: Option<PathBuf>,
+    /// How the user moves a backup file out of the app, where it is saved
+    /// inside it ([`Store::backups_inside_app`]).
+    backups_inside: Option<&'static str>,
     /// The stored history could not be read, nor moved out of the way, the
     /// last time it was read, so it is not to be written over until a read
     /// says otherwise.
@@ -56,6 +59,7 @@ impl DesktopStore {
     pub fn new() -> Self {
         Self {
             backup_folder: backup_folder(),
+            backups_inside: backups_inside_app(),
             ..Self::at(data_dir())
         }
     }
@@ -65,6 +69,7 @@ impl DesktopStore {
         Self {
             root: root.into(),
             backup_folder: None,
+            backups_inside: None,
             history_held: Cell::new(false),
             settings_held: Cell::new(false),
             set_aside: RefCell::new(Vec::new()),
@@ -263,6 +268,20 @@ fn backup_folder() -> Option<PathBuf> {
         .or_else(dirs::home_dir)
 }
 
+/// How the user moves a backup file out of the app, where this build saves
+/// it inside the app ([`Store::backups_inside_app`]): with the Files app on
+/// an iPhone, a file manager on Android before 10.
+fn backups_inside_app() -> Option<&'static str> {
+    if cfg!(target_os = "ios") {
+        return Some("with the Files app, to iCloud Drive or another app,");
+    }
+    #[cfg(all(target_os = "android", not(test)))]
+    if super::android::backups_inside_app() {
+        return Some("with a file manager, to Download say,");
+    }
+    None
+}
+
 /// `name` in `folder`, or, if a file is already called that, the first of
 /// `name-2`, `name-3` and so on that is free: an earlier backup is never
 /// written over.
@@ -447,6 +466,10 @@ impl Store for DesktopStore {
 
     fn saves_backups(&self) -> bool {
         cfg!(all(target_os = "android", not(test))) || self.backup_folder.is_some()
+    }
+
+    fn backups_inside_app(&self) -> Option<&'static str> {
+        self.backups_inside
     }
 
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
