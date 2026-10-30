@@ -154,6 +154,41 @@ fn a_restore_puts_back_what_is_missing_and_can_be_undone() {
     });
 }
 
+/// The card says what a restore does; a restore takes the backup's
+/// settings, the level among them, but keeps this device's volume and
+/// paddle keys, and says so. The card said it put back whatever was missing
+/// here, and a restore set a computer's volume and paddles as a phone had
+/// them.
+#[test]
+fn a_restore_keeps_this_devices_volume_and_paddle_keys() {
+    run(|| async {
+        let all = history(2);
+        let mut ui = open(MemoryStore::default(), &all[1..]);
+        assert!(
+            ui.has("Restoring one adds the sessions missing here and takes its settings, level included, though not this device&#39;s volume and paddle keys."),
+            "{}",
+            ui.html()
+        );
+        let here = test_settings().clamp();
+        let mut saved = test_settings();
+        saved.curriculum.level = 9;
+        saved.band.master_volume = here.band.master_volume / 2.0;
+        saved.playback.paddle_swap = !here.playback.paddle_swap;
+        let file = write_backup(&saved, &all, 0);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(20).await;
+        assert!(
+            ui.has("Restored 1 session and your settings, keeping this device&#39;s volume and paddle keys."),
+            "{}",
+            ui.html()
+        );
+        let stored = ui.store.load_settings();
+        assert_eq!(stored.curriculum.level, 9);
+        assert_eq!(stored.band.master_volume, here.band.master_volume);
+        assert_eq!(stored.playback.paddle_swap, here.playback.paddle_swap);
+    });
+}
+
 /// Restoring the same backup again changes nothing, and says so.
 #[test]
 fn a_backup_already_restored_adds_nothing() {

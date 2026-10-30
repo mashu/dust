@@ -165,6 +165,28 @@ impl TrainingSettings {
     }
 }
 
+impl TrainingSettings {
+    /// Take `here`'s settings of the device in place of these, restored
+    /// from a backup, and say whether any of them differed. They are set for
+    /// the device rather than for the training: how loud it plays, and how
+    /// its keyboard and paddles key, which a backup from a phone has no say
+    /// in on a computer.
+    pub fn keep_device_settings(&mut self, here: &Self) -> bool {
+        let device = |settings: &Self| {
+            (
+                settings.band.master_volume,
+                settings.playback.paddle_swap,
+                settings.playback.paddle_keys_by_place,
+            )
+        };
+        let differed = device(self) != device(here);
+        self.band.master_volume = here.band.master_volume;
+        self.playback.paddle_swap = here.playback.paddle_swap;
+        self.playback.paddle_keys_by_place = here.playback.paddle_keys_by_place;
+        differed
+    }
+}
+
 /// Add the names `T` is read by to `keys`, aliases among them.
 fn names_of<T: DeserializeOwned>(keys: &mut HashSet<&'static str>) {
     let _ = T::deserialize(Names(keys));
@@ -784,6 +806,24 @@ mod tests {
         for retired in RETIRED {
             assert!(!read.contains(retired), "{retired} is read after all");
         }
+    }
+
+    /// A restore keeps this device's volume and paddle keys and takes the
+    /// rest, the level among them, and says whether the device's differed.
+    #[test]
+    fn a_restore_keeps_the_settings_of_the_device() {
+        let mut here = TrainingSettings::default();
+        here.band.master_volume = 0.3;
+        here.playback.paddle_swap = true;
+        let mut restored = TrainingSettings::default();
+        restored.curriculum.level = 14;
+        restored.playback.paddle_keys_by_place = false;
+        assert!(restored.keep_device_settings(&here));
+        assert_eq!(restored.curriculum.level, 14);
+        assert_eq!(restored.band.master_volume, 0.3);
+        assert!(restored.playback.paddle_swap);
+        assert!(restored.playback.paddle_keys_by_place);
+        assert!(!restored.clone().keep_device_settings(&here), "the same");
     }
 
     /// A save from before the stations a pile-up opened were kept in mind,

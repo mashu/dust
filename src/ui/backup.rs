@@ -31,6 +31,9 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
     "if this device's data is lost"
 };
 
+/// What a restore does: no more, and no less.
+const RESTORING: &str = "adds the sessions missing here and takes its settings, level included, though not this device's volume and paddle keys. Undo, in the message that follows, puts both back";
+
 /// The files offered to restore from. An Android picker that filters by
 /// type hides a backup that another app stored untyped, so on Android —
 /// the app, or the web app in a browser there — every file is offered, and
@@ -101,7 +104,9 @@ pub fn BackupCard(
         (None, _) => "No backup yet".to_string(),
     };
     let note = if !can_save {
-        "Bring in a backup saved by the web app or on a computer: restoring it adds the sessions missing here and takes its settings.".to_string()
+        format!(
+            "Bring in a backup saved by the web app or on a computer: restoring it {RESTORING}."
+        )
     } else if due && last.is_some() {
         format!(
             "{} since your last backup. A new one keeps them safe {AT_RISK}.",
@@ -114,7 +119,7 @@ pub fn BackupCard(
         )
     } else {
         format!(
-            "A backup file keeps your history and settings safe {AT_RISK}. Restoring one puts back whatever is missing here."
+            "A backup file keeps your history and settings safe {AT_RISK}. Restoring one {RESTORING}."
         )
     };
     rsx! {

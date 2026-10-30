@@ -415,7 +415,11 @@ card:
     `Dioxus.toml` (`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`)
     show in the Files app under On My iPhone, Dust.
 - **Restore a backup** adds the sessions in the file that are not here yet
-  and takes its settings, level included. Undo, in the message that follows,
+  and takes its settings, level included, all but this device's own: its
+  volume, and how its keyboard and paddles key (**Swap [ and ] paddles**,
+  **Paddles on the keys right of P**), which a backup from a phone has no
+  say in on a computer; the card says so before, and the message after, when they
+  differed. Undo, in the message that follows,
   puts both back as they were: what the restore added taken out, what it
   filled in as it was, and what the history let go to make room for it back,
   while whatever another window kept or deleted meanwhile stands. A file that is not a backup, or far too large

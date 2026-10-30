@@ -554,9 +554,10 @@ impl AppCtx {
     }
 
     /// Put back what `backup` holds: every session of it not already here,
-    /// and its settings, level and all, where it holds any. Until another
-    /// restore, Undo puts both back as they were. A store that cannot take
-    /// the history leaves everything as it was and says why.
+    /// and its settings, level and all, where it holds any, but for this
+    /// device's own ([`TrainingSettings::keep_device_settings`]). Until
+    /// another restore, Undo puts both back as they were. A store that
+    /// cannot take the history leaves everything as it was and says why.
     pub fn restore_backup(self, backup: Backup) {
         self.sync_with_store();
         let mut sessions = self.sessions;
@@ -587,9 +588,11 @@ impl AppCtx {
             &sessions.peek(),
             before.1,
         );
-        // Stored by the app's settings effect.
+        // Stored by the app's settings effect; this device's own kept.
         let with_settings = backup.settings.is_some();
-        if let Some(restored) = backup.settings {
+        let mut kept_device = false;
+        if let Some(mut restored) = backup.settings {
+            kept_device = restored.keep_device_settings(&settings.peek());
             settings.set(restored);
         }
         let store = self.app().store;
@@ -606,6 +609,11 @@ impl AppCtx {
             .filter(|_| backup.saved_at > 0)
             .map(|day| format!(" from {}", short_date(&day)))
             .unwrap_or_default();
+        let from = if kept_device {
+            format!("{from}, keeping this device's volume and paddle keys")
+        } else {
+            from
+        };
         let (added, filled) = (restored.added.len(), restored.filled.len());
         let mut text = match (added, filled, with_settings) {
             (0, 0, true) if !restored.brought => {
