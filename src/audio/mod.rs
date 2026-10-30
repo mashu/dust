@@ -243,6 +243,10 @@ pub mod fake {
         /// clock skips it: said once the send's clock has passed the start
         /// of it.
         pub skip_next: Cell<Option<(f64, f64)>>,
+        /// What of every send its stream skips, as for
+        /// [`Self::skip_next`], once that is spent: a stream that keeps
+        /// falling behind.
+        pub skip_every: Cell<Option<(f64, f64)>>,
     }
 
     impl Recorder {
@@ -341,7 +345,8 @@ pub mod fake {
         /// How long it waits before it starts, a send asked to start at a
         /// given time, in the ticks of its clock.
         wait_ms: u32,
-        /// What of its sound its stream skips ([`Recorder::skip_next`]).
+        /// What of its sound its stream skips ([`Recorder::skip_next`],
+        /// [`Recorder::skip_every`]).
         skipped: Option<(f64, f64)>,
     }
 
@@ -476,7 +481,11 @@ pub mod fake {
                 played: Cell::new(0),
                 latency_sec,
                 wait_ms: (wait_sec * 1_000.0).round() as u32,
-                skipped: self.recorder.skip_next.take(),
+                skipped: self
+                    .recorder
+                    .skip_next
+                    .take()
+                    .or(self.recorder.skip_every.get()),
             }))
         }
 

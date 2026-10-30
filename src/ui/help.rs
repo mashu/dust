@@ -437,7 +437,7 @@ pub fn session_shape() -> Element {
             dt { "Pause after each group" }
             dd { "Time to read the last group before the next is sent. Zero keeps contest pace." }
             dt { "Countdown" }
-            dd { "Seconds counted down before the first group, to get ready." }
+            dd { "Seconds counted down before the first group, and after Resume, to get ready." }
             dt { "Group size" }
             dd { "How many characters a group holds: one size, or a range drawn from for each group." }
             dt { "Adapt group size to me" }

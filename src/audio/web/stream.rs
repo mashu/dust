@@ -15,9 +15,10 @@ use super::{page_is_hidden, reported_latency};
 use crate::audio::mixer::{Mixer, Swept};
 use crate::audio::stream::{Missed, ReceiverStream, Taken};
 
-/// How far ahead of the audio clock the receiver is kept rendered. Enough to
-/// ride over a busy main thread; a change made sooner than this takes back
-/// what was rendered past it, so it costs nothing in how soon it is heard.
+/// How far past what the browser has taken the receiver is kept rendered.
+/// Enough to ride over a busy main thread; a change made sooner than this
+/// takes back what was rendered past it, so it costs nothing in how soon it
+/// is heard.
 const STREAM_LEAD_SEC: f64 = 0.5;
 /// A hidden tab's timers fire about once a second at best, so the receiver
 /// is rendered further ahead while the page is out of sight.
@@ -28,9 +29,9 @@ const STREAM_TICK_MS: u32 = 100;
 /// made: past whatever it is already rendering, so the stretch taken back
 /// has not begun to be played. A stream fallen behind picks up there too.
 const CHANGE_MARGIN_SEC: f64 = 0.03;
-/// How far ahead a change renders at once, the rest left to the next tick:
-/// a click that starts a band and a send is two changes, and each takes
-/// back whatever the one before it rendered.
+/// How far past what the browser has taken a change renders at once, the
+/// rest left to the next tick: a click that starts a band and a send is two
+/// changes, and each takes back whatever the one before it rendered.
 const CHANGE_LEAD_SEC: f64 = 0.2;
 
 /// The receiver, streamed into the graph.
@@ -61,12 +62,7 @@ impl MixerStream {
             // A tick that finds the state busy has nothing to add: whatever
             // holds it is topping up already.
             if let Ok(mut stream) = ticking.try_borrow_mut() {
-                let lead = if page_is_hidden() {
-                    STREAM_LEAD_HIDDEN_SEC
-                } else {
-                    STREAM_LEAD_SEC
-                };
-                stream.top_up(lead);
+                stream.top_up(stream_lead());
             }
         });
         Self {
@@ -141,20 +137,38 @@ impl SendWatch {
     /// the context's clock ([`Missed`]). The stream is caught up first, as a
     /// tick would: after a stall the send's clock has run on past where the
     /// stream got to, and the tick that finds it may come only after the
-    /// send's waiter has read that clock and taken the send for heard.
+    /// send's waiter has read that clock and taken the send for heard. And,
+    /// should it have fallen behind, topped up at once from where it picked
+    /// up: left to that tick, up to a tenth of a second away, it would play
+    /// nothing until then, fall behind again, and the send would lose that
+    /// time as well.
     pub fn missed(&self) -> Option<(f64, f64)> {
         if let Some(state) = self.state.upgrade()
             && let Ok(mut state) = state.try_borrow_mut()
+            && state.catch_up()
         {
-            state.catch_up();
+            state.top_up(stream_lead());
         }
         self.missed.span()
     }
 }
 
+/// How far past what the browser has taken the receiver is kept rendered
+/// just now: further while the page is out of sight.
+fn stream_lead() -> f64 {
+    if page_is_hidden() {
+        STREAM_LEAD_HIDDEN_SEC
+    } else {
+        STREAM_LEAD_SEC
+    }
+}
+
 impl StreamState {
     /// What the browser has taken of the stream, on the context's clock:
-    /// whatever it is already rendering, its base latency past the clock.
+    /// all before the clock, and the device buffer, its base latency long,
+    /// that it renders from there in one go whenever its audio thread wakes
+    /// ([`ReceiverStream::catch_up_to`]). Nothing handed over short of it
+    /// is sure to start on time.
     fn taken(&self) -> f64 {
         self.ctx.current_time() + reported_latency(&self.ctx, "baseLatency")
     }
@@ -166,10 +180,10 @@ impl StreamState {
     /// Run the mixer on, should the clock have taken all that was rendered
     /// ([`ReceiverStream::catch_up_to`]). Only then: a change just made is
     /// short of the soonest read now once the clock has stepped on since,
-    /// yet still heard on time.
-    fn catch_up(&mut self) {
+    /// yet still heard on time. Whether the stream had fallen behind.
+    fn catch_up(&mut self) -> bool {
         let taken = self.taken();
-        self.stream.catch_up_to(taken);
+        self.stream.catch_up_to(taken)
     }
 
     /// Make `change` as soon as it can be heard, or at `at` should that be
@@ -198,8 +212,8 @@ impl StreamState {
         made
     }
 
-    /// Render until the receiver runs `lead` ahead of the clock, and let go
-    /// of what has played.
+    /// Render until the receiver runs `lead` past what the browser has
+    /// taken, and let go of what has played.
     fn top_up(&mut self, lead: f64) {
         if self.ctx.state() == AudioContextState::Closed {
             return;
@@ -213,12 +227,12 @@ impl StreamState {
         // Picked up only should the clock have taken all that was rendered,
         // and then where a stretch can still start on time, as a change is
         // made: one started at the clock just read would start in the past,
-        // play at once from its first sample, late, over the next.
-        let rendered = self
-            .stream
-            .render_until(taken, now + lead, |starts, samples| {
-                schedule(ctx, into, starts, samples)
-            });
+        // play at once from its first sample, late, over the next. The lead
+        // is counted from what was taken, so a long base latency does not
+        // eat into it.
+        let rendered = self.stream.render_ahead(taken, lead, |starts, samples| {
+            schedule(ctx, into, starts, samples)
+        });
         // A stretch the browser would not take is tried again on the next
         // tick; a context that cannot make a buffer at all is one the next
         // send finds closed.

@@ -354,7 +354,14 @@ fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -
     match rng.usize_in(0, 10) {
         0 => match rng.f64() {
             draw if draw < 0.1 => SessionEvent::PlaybackHeldUp { index },
-            draw if draw < 0.2 => SessionEvent::PlaybackMissed { index },
+            draw if draw < 0.2 => {
+                let from_sec = rng.pick_in_range(0.0, 6.0);
+                SessionEvent::PlaybackMissed {
+                    index,
+                    from_sec,
+                    until_sec: from_sec + rng.pick_in_range(0.0, 2.0),
+                }
+            }
             _ => SessionEvent::PlaybackEnded {
                 index,
                 duration_sec: rng.pick_in_range(0.0, 5.0),
@@ -424,8 +431,9 @@ fn adaptive_lengths_never_leave_the_range() {
 }
 
 /// Seeds past [`SEEDS`] get to answers, where the first ones mostly count
-/// down and end before any group is answered: no count down, the box shut
-/// or not, no end for a while, and now and then a send and its copy that fit.
+/// down and end before any group is answered: a count down of a second in
+/// a few, none in the rest, the box shut or not, no end for a while, and
+/// now and then a send, its copy and its news that fit.
 const ANSWERING_SEEDS: u64 = SEEDS / 2;
 
 #[test]
@@ -438,9 +446,12 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
         let mut settings = wild_settings(&mut rng).clamp();
         let answering = seed >= SEEDS;
         if answering {
-            settings.playback.countdown_sec = 0;
+            settings.playback.countdown_sec = u32::from(rng.f64() < 0.25);
             settings.playback.lock_input_during_group_playback = rng.f64() < 0.5;
         }
+        // Half the answering seeds never pause, so that what is heard of a
+        // group there is only what its sends plan.
+        let pausing = !answering || rng.f64() < 0.5;
         let groups = settings.curriculum.num_groups.max(1) as usize;
         let sampler = Sampler::new(&[], &settings, seed);
         let (mut machine, mut effects) =
@@ -451,8 +462,9 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
         // Where the current group's characters were last said to end, for
         // keys that follow them.
         let mut ends: Vec<MonoMs> = Vec::new();
-        // A session resumed from a pause counts down mid-session.
-        let mut resumed = false;
+        // Paused at some point: a send a pause cuts short is heard as well
+        // as those it plans.
+        let mut paused = false;
         for step in 0..200 {
             check_effects(&effects, groups, seed, step);
             timers.extend(effects.iter().filter_map(|effect| match effect {
@@ -473,10 +485,21 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                     event = coherent(&mut rng, &machine, &mut ends, event, now);
                 }
             }
+            if !pausing
+                && matches!(
+                    event,
+                    SessionEvent::Pause | SessionEvent::PlaybackStopped { .. }
+                )
+            {
+                event = SessionEvent::TimerFired {
+                    id: timers.last().copied().unwrap_or(0),
+                };
+            }
             let answered = machine.session().any_confirmed();
             let was_paused = matches!(machine.phase(), SessionPhase::Paused { .. });
+            let was_counting = matches!(machine.phase(), SessionPhase::Countdown { .. });
             effects = machine.apply(event.clone(), MonoMs(now));
-            resumed |= was_paused && event == SessionEvent::Resume;
+            paused |= matches!(machine.phase(), SessionPhase::Paused { .. });
             // A pause lets the audio go and starts nothing; once paused,
             // nothing but Resume, End session or Discard does anything.
             if event == SessionEvent::Pause && !was_paused && !was_terminal {
@@ -543,10 +566,12 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                     "seed {seed} step {step}: phase points at group {index} of {groups}"
                 );
             }
+            // Only the start and Resume count down: never a group sent again
+            // for some of it unheard, as a learner is about to type.
             if let SessionPhase::Countdown { remaining } = machine.phase() {
                 assert!(
-                    remaining >= 1 && (resumed || !machine.session().any_confirmed()),
-                    "seed {seed} step {step}: counting down from {remaining} mid-session"
+                    remaining >= 1 && (was_counting || event == SessionEvent::Resume),
+                    "seed {seed} step {step}: {event:?} counted down from {remaining}"
                 );
             }
             if let SessionPhase::Paused { index, .. } = machine.phase() {
@@ -597,6 +622,25 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 .all(|t| t.time_to_complete_ms >= MIN_RESPONSE_MS_PER_CHAR),
             "seed {seed}: an answer quicker than anyone types"
         );
+        // With no pause, a group is heard no more often than it is planned
+        // to be sent: a send made again for one some of whose characters
+        // went unheard takes the lost one's place.
+        if !paused {
+            let answered = (0..machine.session().group_count()).filter(|&index| {
+                machine
+                    .session()
+                    .group(index)
+                    .is_some_and(|group| group.confirmed() && !group.sent().is_empty())
+            });
+            for (index, timing) in answered.zip(&result.group_timings) {
+                let repeats = machine.session().group_repeats(index);
+                assert!(
+                    timing.sends <= repeats,
+                    "seed {seed}: group {index} heard {} times, sent {repeats}",
+                    timing.sends
+                );
+            }
+        }
         // A group's keys are its answer's, and what is read from them is the
         // rule's, whatever the runtime said.
         for (group, timing) in result.groups.iter().zip(&result.group_timings) {
@@ -624,8 +668,9 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
 }
 
 /// `event` made the current group's: a send starting now, its characters
-/// ending 300 ms apart, kept in `ends`; or its own copy, each key a moment
-/// after its character ended. Anything else as it was.
+/// ending 300 ms apart, kept in `ends`; its own copy, each key a moment
+/// after its character ended; or what its send says of itself as it goes
+/// and ends. Anything else as it was.
 fn coherent(
     rng: &mut SplitMix64,
     machine: &SessionMachine<Sampler>,
@@ -669,6 +714,20 @@ fn coherent(
             },
             text: sent,
         },
+        SessionEvent::PlaybackEnded { duration_sec, .. } => SessionEvent::PlaybackEnded {
+            index: current,
+            duration_sec,
+        },
+        SessionEvent::PlaybackMissed {
+            from_sec,
+            until_sec,
+            ..
+        } => SessionEvent::PlaybackMissed {
+            index: current,
+            from_sec,
+            until_sec,
+        },
+        SessionEvent::PlaybackHeldUp { .. } => SessionEvent::PlaybackHeldUp { index: current },
         other => other,
     }
 }
