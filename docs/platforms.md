@@ -320,21 +320,51 @@ has; without one it is drawn solid.
 
 ## Where your progress lives
 
-Nothing syncs. Each install keeps its own history, in the place that platform
-gives it:
+Dust syncs nothing. Each install keeps its own history, in the place that
+platform gives it:
 
 | Build | Location |
 | --- | --- |
-| Web | `localStorage` for that exact origin (`https://mashu.github.io`, or `localhost:8080` while developing — the two are separate stores) |
+| Web | `localStorage` for that exact origin (`https://mashu.github.io`, shared with every other Pages site of the account, below; or `localhost:8080` while developing — the two are separate stores) |
 | Linux | `~/.local/share/dust/` (`$XDG_DATA_HOME`) |
-| Windows / macOS | the platform data dir `dirs` reports |
+| Windows | `%APPDATA%\dust\`, the roaming application data `dirs` reports |
+| macOS | `~/Library/Application Support/dust/` |
 | Android | `dust/` in the app's own files folder, which Android names for the user the app runs as: `/data/data/<package>/files/` for the phone's owner, `/data/user/<user>/<package>/files/` for a work profile, another user, Private Space or a cloned app. `dirs` has no `HOME` to work from, so the store asks Android (`Context.getFilesDir()`, over JNI), or failing that works it out from `/proc/self/cmdline` and the process's uid |
 | iOS | `Library/Application Support/dust/` inside the app container |
 
 `DUST_DATA_DIR` overrides the directory on every desktop and mobile build,
 which is what a portable install uses. A build with no data folder to be
 had keeps `dust/` in the temporary folder, never in whatever folder it was
-started in.
+started in. A desktop uninstaller leaves the folder where it is: it is the
+user's, and named `dust`, not after the bundle identifier.
+
+The phones back it up themselves. The manifest `dx` writes sets no
+`android:allowBackup`, so Android's Auto Backup is on: with backup on in the
+phone's settings, the whole files folder, `dust/` included, goes to the
+user's Google account, and comes back on a new phone or a reinstall; setting
+up a new phone straight from the old one copies it too. That is kept on
+purpose, as for most users it is the only copy of the history they have. On
+iOS, iCloud Backup and a backup on a computer take the app container the
+same way. The privacy policy and the Privacy card say all of this, platform
+by platform (`Platform::kept` in `src/ui/privacy.rs`, which a test holds the
+policy to).
+
+A browser keys `localStorage`, its few megabytes of room,
+`navigator.storage.persist()` and Web Locks by origin, not by path, and a
+Pages project site is a path under `https://<owner>.github.io`. So every
+other project the account publishes on Pages shares Dust's store: one can
+read it, clear it (`localStorage.clear()`, or a user clearing that site's
+data), or fill the room, and then the history keeps fewer of its newest
+sessions (`store_newest_that_fit`) and says so. Dust keeps its side clean:
+every key and lock name it uses starts with `dust_`, and it removes only
+keys of its own, by exact name or by its own prefix, never the rest. Giving
+the web app an origin of its own ends the sharing: a custom domain set on
+the Dust repository's own Pages site (a subdomain such as
+`dust.example.org`; one set on the account's user site would carry every
+project site along with it), or a user or organisation site
+(`<name>.github.io`) that holds only Dust. A new origin starts with an empty
+store, so users move with a backup, and the policy and
+`PRIVACY_POLICY_URL` change with it.
 
 A session or contest run is marked open while it runs, and the mark goes
 once it ends, stored or discarded. Each copy of the app marks its own, a
