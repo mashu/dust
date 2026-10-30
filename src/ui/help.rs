@@ -520,7 +520,7 @@ pub fn auto_level() -> Element {
             }
             dt { "With Adapt speed to me" }
             dd {
-                "The speed is moved to keep your characters right at your aim, so in the middle of your Character speed range a session counts neither way. Once it comes at the top or the bottom of the range, where the speed can go no further, it counts as a session at one speed does: up at the threshold or better, down below it. Set the top to the speed you are training for: a new character comes in once you copy the threshold there."
+                "The speed is moved to keep your characters right at your aim, so in the middle of your speed range a session counts neither way. Once it comes at the top or the bottom of the range, where the speed can go no further, it is judged on the groups sent there, as a session at that one speed is: up at the threshold or better, down below it. Set the top to the speed you are training for: a new character comes in once you copy the threshold there."
             }
             dt { "Sessions above to level up" }
             dd { "How many good sessions it takes to unlock a new character. Zero never levels up." }
