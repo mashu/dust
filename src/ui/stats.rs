@@ -297,13 +297,14 @@ fn newest(points: &[EstimatePoint]) -> Vec<EstimatePoint> {
 
 /// Your copy span after each session of the character set `settings`
 /// train ([`span_history`]), as the Overview and the Sampling tab read it:
-/// it reads the set alone.
+/// it reads the set, and the group lengths when the set's first session
+/// sent none.
 pub(crate) fn span_history_of(
     sessions: &History,
     settings: &TrainingSettings,
 ) -> Rc<Vec<EstimatePoint>> {
-    let mode = settings.curriculum.char_set_mode;
-    sessions.figure("span history", mode, |sessions| {
+    let curriculum = settings.curriculum.clone();
+    sessions.figure("span history", curriculum, |sessions| {
         span_history(settings, sessions)
     })
 }

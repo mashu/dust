@@ -126,6 +126,8 @@ fn SettingsRoute() -> Element {
     let on_stop_band = use_callback(move |()| ctx.stop_audio());
     let on_play_sample = use_callback(move |text| playback::start_sample(ctx, text));
     let on_hear_qsos = use_callback(move |()| playback::start_qsos(ctx));
+    // Hear a QSO starts from the prior, built once the screen is drawn.
+    use_warm_sampler(ctx);
     use_band_follow(ctx);
     use_qsos_follow(ctx);
     use_preview_stop_when_hidden(ctx, SETTINGS_HIDDEN);

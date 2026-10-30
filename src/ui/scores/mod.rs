@@ -247,7 +247,10 @@ fn timeline_dots(sessions: &[SessionResult], timeline: &[TimelinePoint]) -> Vec<
     chart_buckets(&days)
         .into_iter()
         .filter_map(|range| {
-            range.max_by(|a, b| timeline[*a].rating.total_cmp(&timeline[*b].rating))
+            // The first of equals, as the record line takes the first.
+            range
+                .rev()
+                .max_by(|a, b| timeline[*a].rating.total_cmp(&timeline[*b].rating))
         })
         .collect()
 }
