@@ -890,7 +890,8 @@ impl Said {
 /// How long a message stays up.
 pub const TOAST_MS: u32 = 4_000;
 /// How long a message that offers to undo something stays up: long enough
-/// to read it and change your mind.
+/// to read it and change your mind. A message to read through rather than
+/// glance at stays as long.
 pub const ACTION_TOAST_MS: u32 = 8_000;
 
 /// Something a message offers to do.
@@ -917,6 +918,9 @@ impl ToastAction {
 pub struct Toast {
     pub text: String,
     pub action: Option<ToastAction>,
+    /// Whether it is to be read through, a sentence or two, rather than
+    /// glanced at.
+    long: bool,
     /// Which raise this was. The same words raised twice are two toasts,
     /// each up for its own full time.
     serial: u64,
@@ -925,7 +929,7 @@ pub struct Toast {
 impl Toast {
     /// How long this one stays up.
     pub fn lasts_ms(&self) -> u32 {
-        if self.action.is_some() {
+        if self.action.is_some() || self.long {
             ACTION_TOAST_MS
         } else {
             TOAST_MS
@@ -945,20 +949,27 @@ impl Toasts {
     }
 
     pub fn show(self, text: impl Into<String>) {
-        self.raise(text.into(), None);
+        self.raise(text.into(), None, false);
+    }
+
+    /// A message of a sentence or two, up as long as one with something to
+    /// do about it, to be read through.
+    pub fn show_long(self, text: impl Into<String>) {
+        self.raise(text.into(), None, true);
     }
 
     /// A message with something to do about it.
     pub fn show_with(self, text: impl Into<String>, action: ToastAction) {
-        self.raise(text.into(), Some(action));
+        self.raise(text.into(), Some(action), false);
     }
 
-    fn raise(self, text: String, action: Option<ToastAction>) {
+    fn raise(self, text: String, action: Option<ToastAction>, long: bool) {
         static RAISED: AtomicU64 = AtomicU64::new(0);
         let mut shown = self.0;
         shown.set(Some(Toast {
             text,
             action,
+            long,
             serial: RAISED.fetch_add(1, Ordering::Relaxed),
         }));
     }

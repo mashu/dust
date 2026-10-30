@@ -3,6 +3,7 @@ use cw_core::{GroupResult, RangeSetting, SettingsSection, TrainingSettings, alig
 use dioxus::prelude::*;
 
 use crate::state::AppCtx;
+use crate::ui::paddle::use_typed_field;
 
 /// What was typed into a number field, held inside its bounds. `None` for
 /// anything that is not a finite number, which leaves the value as it was.
@@ -864,6 +865,10 @@ impl TextDraft {
 /// leaving the box, or by a button given its `draft`, and only then is it
 /// kept as the setting keeps it ([`TextDraft`]). Each commit redraws the
 /// box, so it shows what was kept even when that is what it held already.
+///
+/// The paddles key nothing into it, so the keys right of P type there
+/// ([`crate::ui::paddle::TypedField`]): a call's `/`, or an unlock order's
+/// `+`.
 #[component]
 pub fn TextField(
     label: &'static str,
@@ -882,6 +887,7 @@ pub fn TextField(
     let draft = draft.unwrap_or(own);
     let shown = draft.shown(|| value);
     let id = control_id("field", label);
+    let typed = use_typed_field();
     rsx! {
         div { class,
             label { r#for: "{id}", "{label}" }
@@ -893,6 +899,9 @@ pub fn TextField(
                 autocapitalize: "characters",
                 autocomplete: "off",
                 spellcheck: false,
+                "data-typed": "true",
+                onfocus: move |_| typed.focus(),
+                onblur: move |_| typed.blur(),
                 oninput: move |e| draft.hold(e.value()),
                 onchange: move |e| {
                     draft.settle();

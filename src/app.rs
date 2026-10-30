@@ -1241,6 +1241,63 @@ mod ui_tests {
         });
     }
 
+    /// A key right of P that keys a paddle into the box only by where it
+    /// sits, typing a character Dust sends — a German keyboard's `+` —
+    /// says why a letter landed there and how to type the `+` instead; a
+    /// `]`, which is the paddle by what it types, says nothing. It is said
+    /// once, and up long enough to read.
+    #[test]
+    fn a_character_keyed_by_place_into_the_box_says_how_to_type_it_once() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.curriculum.min_group_size = 3;
+            settings.curriculum.max_group_size = 3;
+            settings.playback.keyer_mode = cw_core::KeyerMode::IambicA;
+            settings.playback.keyer_wpm = 20.0;
+            let (mut ui, _recorder) = awaiting_answer(settings).await;
+            let toast =
+                |ui: &mut Ui| ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+            let dah = |ui: &mut Ui, key: &str, down: bool| {
+                let key = Key::Character(key.into());
+                if down {
+                    ui.press_key("group-input-0", key, Code::BracketRight);
+                } else {
+                    ui.release_key("group-input-0", key, Code::BracketRight);
+                }
+            };
+            dah(&mut ui, "]", true);
+            ui.advance(100).await;
+            dah(&mut ui, "]", false);
+            ui.advance(600).await;
+            assert!(box_shows(&ui, "T"), "{}", ui.input_tag("group-input-0"));
+            assert_eq!(toast(&mut ui), None, "a ] is the paddle by what it types");
+
+            dah(&mut ui, "+", true);
+            ui.advance(100).await;
+            dah(&mut ui, "+", false);
+            let told = toast(&mut ui).unwrap_or_default();
+            assert!(told.starts_with("That + keyed a paddle"), "{told}");
+            assert!(
+                told.contains("To type +, turn off Paddles on the keys right of P"),
+                "{told}"
+            );
+            ui.advance(u64::from(crate::state::TOAST_MS) + 100).await;
+            assert_eq!(
+                toast(&mut ui).as_deref(),
+                Some(told.as_str()),
+                "read through"
+            );
+            ui.advance(u64::from(crate::state::ACTION_TOAST_MS)).await;
+            assert_eq!(toast(&mut ui), None);
+            assert!(box_shows(&ui, "TT"), "{}", ui.input_tag("group-input-0"));
+
+            dah(&mut ui, "+", true);
+            ui.advance(100).await;
+            dah(&mut ui, "+", false);
+            assert_eq!(toast(&mut ui), None, "said once");
+        });
+    }
+
     /// Enter on the heels of a key confirms what the box shows, not what the
     /// session had been told before the key.
     #[test]

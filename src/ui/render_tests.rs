@@ -3964,6 +3964,117 @@ mod interactions {
         });
     }
 
+    /// A field the paddles key nothing into, the unlock order, with the
+    /// paddles beside it, keyed as on Linux by the window as well where
+    /// `on_linux`; and a button that takes the field off the page.
+    #[component]
+    fn TypedFieldHarness(on_linux: bool) -> Element {
+        let mut shown = use_signal(|| true);
+        rsx! {
+            Keyed { screen: Screen::Settings, on_linux,
+                if shown() {
+                    crate::ui::widgets::TextField {
+                        label: "Sequence order",
+                        value: String::new(),
+                        on_commit: move |_: String| {},
+                    }
+                }
+                button {
+                    id: control_id("btn", "drop field"),
+                    onclick: move |_| shown.set(false),
+                }
+                WindowPlus {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// Buttons that hand the paddles what the desktop's window hears on
+    /// Linux: a German keyboard's `+`, pressed and let go.
+    #[component]
+    fn WindowPlus() -> Element {
+        let keys = use_context::<PaddleKeys>();
+        rsx! {
+            button {
+                id: control_id("btn", "window plus down"),
+                onclick: move |_| window_key(keys, "+", "BracketRight", true),
+            }
+            button {
+                id: control_id("btn", "window plus up"),
+                onclick: move |_| window_key(keys, "+", "BracketRight", false),
+            }
+        }
+    }
+
+    /// A German keyboard's `+` pressed in `at` and let go, heard by the
+    /// root and, `on_linux`, by the window as well: whether the page left
+    /// it to type.
+    async fn tap_plus(ui: &mut Ui, at: &str, on_linux: bool) -> bool {
+        let plus = Key::Character("+".into());
+        let left = ui.press_key(at, plus.clone(), Code::BracketRight);
+        if on_linux {
+            ui.click("btn-window-plus-down");
+        }
+        ui.advance(100).await;
+        ui.release_key(at, plus, Code::BracketRight);
+        if on_linux {
+            ui.click("btn-window-plus-up");
+        }
+        ui.advance(1_000).await;
+        left
+    }
+
+    /// In a field the paddles key nothing into, the keys right of P type
+    /// what they type, paddles by place or not: a German keyboard's `+` is
+    /// left to the unlock order and keys nothing, from the page or, on
+    /// Linux, the window, while a `[` is still a paddle, kept from the
+    /// field. With the cursor gone from the field, or the field gone from
+    /// the page with the cursor in it, the `+` is the dah again.
+    #[test]
+    fn a_bracket_key_types_in_a_field_the_paddles_key_nothing_into() {
+        for on_linux in [false, true] {
+            crate::testing::run(|| async move {
+                let mut ui = Ui::new(TypedFieldHarness, TypedFieldHarnessProps { on_linux });
+                let field = "field-sequence-order";
+                assert!(
+                    ui.input_tag(field).contains(r#"data-typed="true""#),
+                    "{}",
+                    ui.input_tag(field)
+                );
+                ui.focus(field);
+                assert!(
+                    tap_plus(&mut ui, field, on_linux).await,
+                    "the + was kept from the field"
+                );
+                assert!(ui.has(">· −<"), "a paddle keyed: {}", ui.html());
+                let dit = Key::Character("[".into());
+                assert!(
+                    !ui.press_key(field, dit.clone(), Code::BracketLeft),
+                    "the [ was left to the field"
+                );
+                ui.advance(30).await;
+                ui.release_key(field, dit, Code::BracketLeft);
+                ui.advance(1_000).await;
+
+                ui.blur(field);
+                assert!(
+                    !tap_plus(&mut ui, "keyed-root", on_linux).await,
+                    "the + was left to the page"
+                );
+                // The root keyed the `[` too, but for the window on Linux.
+                let heard = if on_linux { ">T<" } else { ">ET<" };
+                assert!(ui.has(heard), "{}", ui.html());
+
+                ui.focus(field);
+                ui.click("btn-drop-field");
+                assert!(!ui.shows(field));
+                assert!(!tap_plus(&mut ui, "keyed-root", on_linux).await);
+                let heard = if on_linux { ">TT<" } else { ">ETT<" };
+                assert!(ui.has(heard), "{}", ui.html());
+            });
+        }
+    }
+
     /// The window losing the focus, or the page going, takes the key
     /// releases with it: the paddles open, the element sounding finishes,
     /// and the letter it ends is heard.

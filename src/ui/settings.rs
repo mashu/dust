@@ -500,7 +500,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
             }
             Switch {
                 title: "Paddles on the keys right of P",
-                description: "The two keys right of P are the paddles, whatever your keyboard types on them, as a USB paddle needs. Turn this off to type what they type, such as + on a German keyboard; then only [ and ] key the paddles.",
+                description: "The two keys right of P are the paddles, whatever your keyboard types on them, as a USB paddle needs; in a box they key nothing into, such as your words or your call, they type. Turn this off to type what they type in the answer box too, such as + on a German keyboard or / and = on a Dvorak; then only [ and ] key the paddles.",
                 checked: s.paddle_keys_by_place,
                 onchange: move |on| settings.write().playback.paddle_keys_by_place = on,
             }

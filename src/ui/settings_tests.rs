@@ -825,6 +825,41 @@ fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
     });
 }
 
+/// The paddles are on the keys right of P by place, as they ship, but in
+/// the boxes they key nothing into those keys type: the starter words' `+`
+/// and `=` in the word list, on a German keyboard or a Dvorak, and a
+/// Dvorak's `/` in the unlock order. Out of the box, they are the paddles
+/// again, and kept from the page.
+#[test]
+fn the_keys_right_of_p_type_in_the_word_list_and_the_unlock_order() {
+    run(|| async {
+        use dioxus::prelude::{Code, Key};
+        // Whether the page left the key to type.
+        let press = |ui: &mut Ui, at: &str, typed: &str, code: Code| {
+            let key = Key::Character(typed.into());
+            let left = ui.press_key(at, key.clone(), code);
+            ui.release_key(at, key, code);
+            left
+        };
+        let (mut ui, _recorder) = on_words();
+        assert!(ui.stored_settings().await.playback.paddle_keys_by_place);
+        let words = "field-word-list";
+        ui.focus(words);
+        assert!(press(&mut ui, words, "+", Code::BracketRight), "+ kept");
+        assert!(press(&mut ui, words, "=", Code::BracketRight), "= kept");
+        ui.blur(words);
+        assert!(!press(&mut ui, words, "+", Code::BracketRight));
+        ui.advance(1_000).await;
+
+        ui.click("seg-koch");
+        let order = "field-sequence-order";
+        ui.focus(order);
+        assert!(press(&mut ui, order, "/", Code::BracketLeft), "/ kept");
+        ui.blur(order);
+        assert!(!press(&mut ui, order, "/", Code::BracketLeft));
+    });
+}
+
 /// A text file loads as the words, and says what it came to; Starter words
 /// puts the starter list back.
 #[test]
