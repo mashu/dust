@@ -1,23 +1,31 @@
 //! Hears the app go for good, where the platform says so first: the
 //! desktop window closed, the browser page left, closed or reloaded. A
 //! session or run going on is ended there and then as Exit ends it, kept
-//! as Exit keeps it, rather than left for the next launch to find cut off.
+//! as Exit keeps it, rather than left for the next launch to find cut off,
+//! and the settings are stored with it, a level it earned included.
 //! A phone takes an app back with no word, and a crash says none: then the
 //! next launch keeps what the session's mark held
 //! ([`crate::state::AppCtx::tell_of_cut_off`]).
 
 use dioxus::prelude::*;
 
+use crate::app::store_settings_now;
 use crate::session_runtime::finish_run;
 use crate::state::AppCtx;
 
 /// While the app is up, end whatever has the training screen as the app
-/// goes, as Exit would.
+/// goes, as Exit would, and store the settings as they are then.
 pub fn use_end_on_close(ctx: AppCtx) {
     let on_closed = use_callback(move |()| {
         if ctx.session_running() {
             finish_run(ctx);
         }
+        // What the end moved in the settings, a level earned or a run's
+        // speed, goes to the store with the counters the end stored, as
+        // does an edit still waiting on the settings screen. The app's
+        // settings effect would store them only after this: a closed
+        // desktop window is gone by then, and a page left may be.
+        store_settings_now(ctx);
     });
     listen_closed(on_closed);
 }

@@ -349,7 +349,8 @@ it pressed then; the history itself is written only once the session ends.
 A session cut off is kept from its mark as Exit would have kept it, in the
 history and towards its level's run, and the app says that it was. Closing
 the desktop window, or leaving or reloading the page, ends a session there
-and then as Exit does, so nothing is left to find. On desktop and
+and then as Exit does, so nothing is left to find, and stores the settings
+with it, a level it earned included. On desktop and
 mobile the marks are `open/<id>.json`, each beside the `open/<id>.lock` its
 copy holds, and each written whole, under another name first; one a power
 cut left empty still says a session was cut off. A

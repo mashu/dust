@@ -345,10 +345,11 @@ fn use_stored_settings(ctx: AppCtx) {
 }
 
 /// Store the settings at once, rather than once an edit on the settings
-/// screen has been still for a moment: the page has gone out of sight, and a
+/// screen has been still for a moment, or once the effect that stores them
+/// next runs: the page has gone out of sight, or the app is closing, and a
 /// tab closed or an app put away straight after an edit would lose it while
 /// it waited. Not while a session runs, which stores nothing until it ends.
-fn store_settings_now(ctx: AppCtx) {
+pub(crate) fn store_settings_now(ctx: AppCtx) {
     if *ctx.screen.peek() != Screen::Training {
         ctx.store_settings();
     }
@@ -947,6 +948,47 @@ mod ui_tests {
             let (ui, _recorder) = Ui::launch(store.clone());
             assert!(!ui.has("was cut off"));
             assert_eq!(store.load_sessions().len(), 1);
+        });
+    }
+
+    /// A session ended as the app closes that earns a level stores the
+    /// level there and then, with the run it cleared to earn it: the window
+    /// is gone before the app's settings effect would have stored it, and
+    /// the level would be lost with the run.
+    #[test]
+    fn closing_the_app_as_a_session_earns_a_level_stores_the_level() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.auto_level.auto_adjust_level = true;
+            settings.auto_level.auto_adjust_above_threshold_count = 2;
+            settings.auto_level.auto_adjust_threshold = 50.0;
+            let key = cw_core::CountersKey::of(&settings);
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            // One session above the threshold already: this one earns it.
+            let run_so_far = cw_core::AutoLevelCounters { above: 1, below: 0 };
+            ui.store.save_auto_counters(&key, run_so_far);
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            let store = ui.store.clone();
+            // Read as the close is heard, before anything else of the app
+            // runs.
+            let level = ui.with_app(|_| {
+                crate::page_closed::close_app();
+                store.load_settings().curriculum.level
+            });
+            assert_eq!(level, 2, "the level the session earned");
+            assert_eq!(
+                store.load_auto_counters(&key),
+                cw_core::AutoLevelCounters::default(),
+                "the run that earned it, cleared"
+            );
+            drop(ui);
+
+            let (mut ui, _recorder) = Ui::launch(store);
+            assert_eq!(ui.with_app(|ctx| ctx.settings.peek().curriculum.level), 2);
         });
     }
 
