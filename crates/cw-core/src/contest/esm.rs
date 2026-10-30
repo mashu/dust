@@ -84,7 +84,7 @@ pub struct QsoState {
     /// the silence does.
     pub sent_fits_gone: bool,
     /// The station your last message was for, by the call you had for it,
-    /// or "The station", where it was still sending and never heard the
+    /// or "the station", where it was still sending and never heard the
     /// message: the first time in a run, the hint says so till the next
     /// key. Empty otherwise.
     pub unheard_by: String,
@@ -341,12 +341,10 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
 /// What the hint says once `name`, the station a message was for, never
 /// heard it, still sending: as a station on the air pays no heed while it
 /// sends, the message went for nothing, and it sending again is all that
-/// tells you so.
+/// tells you so. What to do comes first, so a phone's line too short for
+/// a long call cuts only why.
 pub(super) fn unheard_hint(name: &str) -> (String, String) {
-    fit(
-        format!("{name} was still sending and did not hear you"),
-        ": wait for it to finish",
-    )
+    fit(format!("Let {name} finish"), ": it did not hear you")
 }
 
 /// What Enter does, as [`esm`] says, whatever the last message met.
@@ -855,6 +853,24 @@ mod tests {
             ..corrected
         };
         hints.push(esm(&thanked, &fields, rules(), Side::Dx).hint);
+        // A station still sending that missed you, unnamed or by a call of
+        // up to 15 characters, is told of whole, why and all; a name longer
+        // still leaves the line only what to do.
+        for name in ["the station", "K5XYZ", "VP2E/K5XYZ", "VP2E/KH6ABC/MM"] {
+            let missed = QsoState {
+                unheard_by: name.into(),
+                ..QsoState::default()
+            };
+            let said = esm(&missed, &fields, rules(), Side::Dx);
+            assert_eq!(said.hint_more, "", "{:?}", said.hint);
+            hints.push(said.hint);
+        }
+        let (hint, more) = unheard_hint("VP2E/KH6ABCD/QRP");
+        assert_eq!(
+            (hint.as_str(), more.as_str()),
+            ("Let VP2E/KH6ABCD/QRP finish", ": it did not hear you")
+        );
+        hints.push(hint);
         hints.sort();
         hints.dedup();
         assert!(hints.len() >= 10, "{hints:?}");

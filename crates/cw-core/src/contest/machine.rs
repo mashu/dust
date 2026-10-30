@@ -2361,7 +2361,8 @@ impl<S: CallSource> ContestMachine<S> {
     /// worked as you keyed it, `worked`, a single caller, or one whose call
     /// the message or the Call field, `typed`, holds, a slip and all. None
     /// for a pile-up caller only calling, as your message was for another.
-    /// Named by the call you had for it, whole; else "The station".
+    /// Named by the call you had for it, whole; else "the station", as the
+    /// hint names it mid-line.
     fn unheard_by(
         &self,
         message: &[MessagePart],
@@ -2391,7 +2392,7 @@ impl<S: CallSource> ContestMachine<S> {
                     || worked == Some(*index)
                     || named(*index).is_some())
         })?;
-        Some(named(index).map_or_else(|| "The station".to_string(), |call| (*call).to_string()))
+        Some(named(index).map_or_else(|| "the station".to_string(), |call| (*call).to_string()))
     }
 
     /// The callers you keyed over, `callers`, that never heard
@@ -9056,7 +9057,7 @@ mod tests {
             assert_eq!(enter.label, "Send K5XYZ + exch", "Enter does as ever");
             enter.hint + &enter.hint_more
         };
-        let notice = "K5XYZ was still sending and did not hear you: wait for it to finish";
+        let notice = "Let K5XYZ finish: it did not hear you";
         let mut runtime = runtime(&["K5XYZ"]);
         let cq = runtime.last_turn().clone();
         let call = sent_by(&cq, 0)[0].clone();
@@ -9087,8 +9088,7 @@ mod tests {
             let turn = runtime.last_turn();
             assert!(sent_by(turn, 0)[0].end_sec > turn.your_end_sec().expect("your CQ"));
             let single = style == RunStyle::Single;
-            let notice =
-                "The station was still sending and did not hear you: wait for it to finish";
+            let notice = "Let the station finish: it did not hear you";
             assert_eq!(
                 said(&effects),
                 single.then_some(notice).into_iter().collect::<Vec<_>>()
