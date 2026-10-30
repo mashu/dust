@@ -202,12 +202,12 @@ pub fn confusions() -> Element {
 pub fn hardest_pairs() -> Element {
     rsx! {
         p {
-            "A pair is two characters one after the other: the one you heard first, then the one that went wrong. These are the pairs where the second goes wrong clearly more often after the first than it does anywhere else: the pair trips you, not the letter."
+            "A pair is two characters one after the other: the one you heard first, then the one that went wrong. These are the pairs where the second goes wrong clearly more often after the first than it does overall: the pair trips you, not the letter."
         }
         dl { class: "help-terms",
             dt { "Listed" }
             dd {
-                "Once a pair has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong at least 10 points and half again more often than its second character does overall."
+                "Once a pair has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong at least 10 points and half again more often than its second character does overall, by more than chance would make it. With many pairs heard a few always go wrong more often by luck, so the more pairs you have heard, the clearer a pair has to be."
             }
             dt { "The bar" }
             dd { "How often the second character went wrong after the first; the mark on it, how often it goes wrong overall." }
@@ -219,7 +219,7 @@ pub fn hardest_pairs() -> Element {
 pub fn bigram() -> Element {
     rsx! {
         p {
-            "Each square is a pair: the character at the start of its row, followed by the one at the head of its column. Its colour is how often the second went wrong after the first: the deeper, the more often. An empty square was never heard; ▸ is the start of a group."
+            "Each square is a pair: the character at the start of its row, followed by the one at the head of its column. Its colour is how often the second went wrong after the first: the deeper, the more often. A pair heard only a few times is drawn near how often its second character goes wrong overall. An empty square was never heard; ▸ is the start of a group."
         }
         dl { class: "help-terms",
             dt { "A square" }

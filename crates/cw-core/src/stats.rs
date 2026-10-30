@@ -36,6 +36,11 @@ const HARD_PAIR_MIN_WRONG: u32 = 2;
 /// wrong to be called hard: ten points of error rate, and half as often again.
 const HARD_PAIR_MIN_EXCESS: f64 = 0.10;
 pub const HARD_PAIR_RATIO: f64 = 1.5;
+/// How often a history whose pairs are no harder than their letters lists
+/// one anyway: one in twenty. With hundreds of pairs heard, a few always go
+/// wrong more often by luck alone, so this is shared among every pair heard
+/// [`HARD_PAIR_MIN_TRIES`] times, each held to its part of it.
+const HARD_PAIR_CHANCE: f64 = 0.05;
 /// How many of the hardest pairs are listed.
 const HARD_PAIRS_SHOWN: usize = 5;
 
@@ -138,6 +143,14 @@ pub struct BigramCell {
     /// What `col` was copied as when it went wrong here, most often first:
     /// the character typed, or none for one left out.
     pub taken_for: Vec<(Option<char>, u32)>,
+    /// How dark its square is drawn: its rate, with how `col` does overall
+    /// counted as [`HARD_PAIR_MIN_TRIES`] tries of it, so that a pair heard
+    /// once or twice is drawn near its letter's usual rather than at none
+    /// or all of the time.
+    pub shade: f64,
+    /// It goes wrong clearly more often than `col` does overall: one of the
+    /// hardest pairs, before they are cut to a handful.
+    pub stands_out: bool,
 }
 
 /// How often a character went wrong, wherever it came: what a pair is held
@@ -181,7 +194,8 @@ pub struct BigramHeatmap {
     pub cols: Vec<char>,
     /// One per row and column, row by row.
     pub cells: Vec<BigramCell>,
-    pub max_rate: f64,
+    /// The darkest any heard square is shaded ([`BigramCell::shade`]).
+    pub max_shade: f64,
     /// How each column's character fares overall, in the order of `cols`.
     pub overall: Vec<CharTally>,
     /// The pairs that go wrong most often for their second character, worst
@@ -620,10 +634,16 @@ fn bigram_grid(
             .collect()
     };
     let overall: Vec<CharTally> = cols.iter().map(|c| overall(*c)).collect();
-    let mut max_rate: f64 = 0.0;
+    // Every pair heard often enough is tested, and shares the chance of a
+    // list turning up by luck.
+    let tested = pairs
+        .values()
+        .filter(|tally| tally.total >= HARD_PAIR_MIN_TRIES)
+        .count();
+    let mut max_shade: f64 = 0.0;
     let mut cells = Vec::with_capacity(rows.len() * cols.len());
     for &row in &rows {
-        for &col in &cols {
+        for (&col, &letter) in cols.iter().zip(&overall) {
             let (total, mut taken_for) = match pairs.get(&(row, col)) {
                 Some(tally) => (
                     tally.total,
@@ -644,7 +664,12 @@ fn bigram_grid(
             } else {
                 f64::from(wrong) / f64::from(total)
             };
-            max_rate = max_rate.max(rate);
+            let prior = f64::from(HARD_PAIR_MIN_TRIES);
+            let shade = (f64::from(wrong) + prior * letter.rate()) / (f64::from(total) + prior);
+            if total > 0 {
+                max_shade = max_shade.max(shade);
+            }
+            let stands_out = stands_out(wrong, total, letter, tested);
             cells.push(BigramCell {
                 row,
                 col,
@@ -652,6 +677,8 @@ fn bigram_grid(
                 total,
                 wrong,
                 taken_for,
+                shade,
+                stands_out,
             });
         }
     }
@@ -660,32 +687,76 @@ fn bigram_grid(
         rows,
         cols,
         cells,
-        max_rate,
+        max_shade,
         overall,
         hardest,
     }
 }
 
-/// The pairs heard often enough to tell, and missed more than once, that go
-/// wrong at least ten points, and half as often again, more often than their
-/// second character does overall: worst first, by how far over, then by how
-/// often missed.
+/// Whether a pair of `total` tries, `wrong` of them missed, goes wrong
+/// clearly more often than its second character, whose tries are
+/// `letter`: heard [`HARD_PAIR_MIN_TRIES`] times and missed more than once,
+/// at least ten points and half as often again more often than the letter
+/// overall, and more than chance would make it, with `tested` pairs
+/// sharing [`HARD_PAIR_CHANCE`].
+fn stands_out(wrong: u32, total: u32, letter: CharTally, tested: usize) -> bool {
+    if total < HARD_PAIR_MIN_TRIES || wrong < HARD_PAIR_MIN_WRONG {
+        return false;
+    }
+    let rate = f64::from(wrong) / f64::from(total);
+    let usual = letter.rate();
+    rate - usual >= HARD_PAIR_MIN_EXCESS
+        && rate >= usual * HARD_PAIR_RATIO
+        && chance_of_as_many(wrong, total, letter) <= HARD_PAIR_CHANCE / tested.max(1) as f64
+}
+
+/// The chance that `wrong` or more of `tries` tries of a letter go wrong
+/// when the letter's misses in `letter` fall at random over all its tries:
+/// how often a pair no harder than its letter does as badly. Fisher's exact
+/// test, one-sided. Counts that cannot come from one tally give a chance of
+/// one: nothing to go on.
+fn chance_of_as_many(wrong: u32, tries: u32, letter: CharTally) -> f64 {
+    let (all, missed) = (letter.total, letter.wrong);
+    let right = all.saturating_sub(missed);
+    if tries > all || missed > all || wrong > missed.min(tries) || tries - wrong > right {
+        return 1.0;
+    }
+    // ln C(n, k), a factor at a time.
+    let ln_choose = |n: u32, k: u32| -> f64 {
+        let k = k.min(n - k);
+        (1..=k)
+            .map(|i| (f64::from(n - k + i) / f64::from(i)).ln())
+            .sum()
+    };
+    let mut p =
+        (ln_choose(missed, wrong) + ln_choose(right, tries - wrong) - ln_choose(all, tries)).exp();
+    let mut tail = 0.0;
+    for k in wrong..=missed.min(tries) {
+        tail += p;
+        // From k misses among the tries to k + 1: the tries hold at least
+        // `tries - wrong` of the letter's right ones, so none is short.
+        let more = f64::from(missed - k) * f64::from(tries - k);
+        let fewer = f64::from(k + 1) * f64::from(right + k + 1 - tries);
+        p *= more / fewer;
+    }
+    tail.min(1.0)
+}
+
+/// The pairs that stand out ([`BigramCell::stands_out`]): worst first, by
+/// how far over their letter they go wrong, then by how often missed.
 fn hardest_pairs(cells: &[BigramCell], cols: &[char], overall: &[CharTally]) -> Vec<HardPair> {
     let mut hard: Vec<HardPair> = cells
         .iter()
-        .filter(|cell| cell.total >= HARD_PAIR_MIN_TRIES && cell.wrong >= HARD_PAIR_MIN_WRONG)
+        .filter(|cell| cell.stands_out)
         .filter_map(|cell| {
             let at = cols.iter().position(|c| *c == cell.col)?;
-            let usual = overall.get(at)?.rate();
-            let over =
-                cell.rate - usual >= HARD_PAIR_MIN_EXCESS && cell.rate >= usual * HARD_PAIR_RATIO;
-            over.then_some(HardPair {
+            Some(HardPair {
                 row: cell.row,
                 col: cell.col,
                 wrong: cell.wrong,
                 total: cell.total,
                 rate: cell.rate,
-                overall: usual,
+                overall: overall.get(at)?.rate(),
             })
         })
         .collect();
@@ -1194,7 +1265,7 @@ mod tests {
         assert_eq!((cell.total, cell.wrong), (1, 1));
         assert_eq!(cell.rate, 1.0);
         assert_eq!(cell.taken_for, [(Some('M'), 1)]);
-        assert_eq!(heat.max_rate, 1.0);
+        assert_eq!(heat.max_shade, 1.0, "+ is missed every time it is sent");
         // An empty history draws no grid at all.
         let empty = mistake_stats(&[], 8).bigrams;
         assert!(empty.rows.is_empty() && empty.cols.is_empty() && empty.cells.is_empty());
@@ -1231,42 +1302,150 @@ mod tests {
     }
 
     /// The hardest pairs are the ones that go wrong more often than their
-    /// second character does overall, heard often enough to tell: a letter
-    /// that is hard everywhere is the Letters tab's, not a pair's.
+    /// second character does overall, by more than chance would make it: a
+    /// letter that is hard everywhere is the Letters tab's, not a pair's.
     #[test]
     fn the_hardest_pairs_are_harder_than_their_letter() {
         let mut groups = Vec::new();
-        // M after K: wrong four times in five. M after U: right six times.
-        groups.extend([("KM", "KN"); 4]);
-        groups.push(("KM", "KM"));
-        groups.extend([("UM", "UM"); 6]);
+        // M after K: wrong sixteen times in twenty. M after U: right thirty
+        // times.
+        groups.extend([("KM", "KN"); 16]);
+        groups.extend([("KM", "KM"); 4]);
+        groups.extend([("UM", "UM"); 30]);
         // R is hard everywhere, after K as after U: no pair of it stands out.
         // Nor does Z after W, missed every time, where Z goes wrong seven
         // times in ten anyway: that is not half as often again.
         groups.extend([("WZ", "WX"); 5]);
         groups.extend([("UZ", "UX"); 2]);
         groups.extend([("UZ", "UZ"); 3]);
-        groups.extend([("KR", "KS"); 3]);
-        groups.extend([("KR", "KR"); 2]);
-        groups.extend([("UR", "US"); 3]);
-        groups.extend([("UR", "UR"); 2]);
+        groups.extend([("KR", "KS"); 6]);
+        groups.extend([("KR", "KR"); 4]);
+        groups.extend([("UR", "US"); 6]);
+        groups.extend([("UR", "UR"); 4]);
         // E after U: missed once in five, too seldom to tell.
         groups.push(("UE", "UT"));
         groups.extend([("UE", "UE"); 4]);
-        // S starting a group: missed in two of five, and fine after K.
-        groups.extend([("SK", "TK"); 2]);
-        groups.extend([("SK", "SK"); 3]);
-        groups.extend([("KS", "KS"); 10]);
+        // T after K: missed in two of five, and right ten times after U.
+        // Luck alone does that one time in ten: too often to tell, over so
+        // many pairs.
+        groups.extend([("KT", "KX"); 2]);
+        groups.extend([("KT", "KT"); 3]);
+        groups.extend([("UT", "UT"); 10]);
+        // S starting a group: missed in twelve of twenty, and fine after K.
+        groups.extend([("SK", "TK"); 12]);
+        groups.extend([("SK", "SK"); 8]);
+        groups.extend([("KS", "KS"); 40]);
         let session = plain("2026-09-01", 1, &groups);
-        let hardest = mistake_stats(&[session], 8).bigrams.hardest;
-        let pairs: Vec<(char, char)> = hardest.iter().map(|p| (p.row, p.col)).collect();
+        let heat = mistake_stats(&[session], 8).bigrams;
+        let pairs: Vec<(char, char)> = heat.hardest.iter().map(|p| (p.row, p.col)).collect();
         assert_eq!(pairs, [('K', 'M'), (GROUP_START_BIGRAM_TOKEN, 'S')]);
-        let km = &hardest[0];
-        assert_eq!((km.wrong, km.total), (4, 5));
+        let km = &heat.hardest[0];
+        assert_eq!((km.wrong, km.total), (16, 20));
         assert!((km.rate - 0.8).abs() < 1e-9);
-        assert!((km.overall - 4.0 / 11.0).abs() < 1e-9);
+        assert!((km.overall - 16.0 / 50.0).abs() < 1e-9);
+        let kt = heat
+            .cells
+            .iter()
+            .find(|c| (c.row, c.col) == ('K', 'T'))
+            .expect("KT");
+        assert!(!kt.stands_out, "{kt:?}");
         // Nothing heard yet, nothing hard.
         assert!(mistake_stats(&[], 8).bigrams.hardest.is_empty());
+    }
+
+    /// The chance a pair does as badly as it did with no pair any harder
+    /// than its letter: Fisher's exact test.
+    #[test]
+    fn the_chance_of_as_many_misses_is_fishers() {
+        let letter = |wrong, total| CharTally { wrong, total };
+        // Two misses of fifteen, both in one pair of five: C(13,3)/C(15,5).
+        let chance = chance_of_as_many(2, 5, letter(2, 15));
+        assert!((chance - 286.0 / 3003.0).abs() < 1e-12, "{chance}");
+        // Every miss in the pair, or none needed: certain.
+        assert!((chance_of_as_many(0, 5, letter(2, 15)) - 1.0).abs() < 1e-12);
+        // One miss of two among the tries, of four: 1 - C(2,2)/C(4,2).
+        assert!((chance_of_as_many(1, 2, letter(2, 4)) - 5.0 / 6.0).abs() < 1e-12);
+        // Counts no one tally could give say nothing.
+        assert_eq!(chance_of_as_many(3, 5, letter(2, 15)), 1.0);
+        assert_eq!(chance_of_as_many(1, 20, letter(2, 15)), 1.0);
+    }
+
+    /// A learner whose misses do not depend on the character before is
+    /// almost never shown a hardest pair, however many pairs they have
+    /// heard; a pair that really is harder is found. Each square is shaded
+    /// by its tries, so one heard once and missed is not drawn darkest.
+    #[test]
+    fn a_learner_with_no_hard_pair_is_almost_never_shown_one() {
+        use crate::rng::{Rng, SplitMix64};
+        const LETTERS: [char; 26] = [
+            'K', 'M', 'U', 'R', 'E', 'S', 'N', 'A', 'P', 'T', 'L', 'W', 'I', 'J', 'Z', 'F', 'O',
+            'Y', 'V', 'G', 'Q', 'B', 'C', 'D', 'H', 'X',
+        ];
+        // `sessions` of twenty groups of three of the first `letters`, each
+        // character missed at the chance `missed` gives it after the one
+        // before.
+        let history = |rng: &mut SplitMix64,
+                       sessions: u64,
+                       letters: usize,
+                       missed: &dyn Fn(char, char) -> f64| {
+            (0..sessions)
+                .map(|timestamp| {
+                    let groups: Vec<(String, String)> = (0..20)
+                        .map(|_| {
+                            let sent: String = (0..3)
+                                .map(|_| LETTERS[rng.usize_in(0, letters - 1)])
+                                .collect();
+                            let mut before = GROUP_START_BIGRAM_TOKEN;
+                            let received = sent
+                                .chars()
+                                .map(|ch| {
+                                    let wrong = rng.f64() < missed(before, ch);
+                                    before = ch;
+                                    if wrong { '5' } else { ch }
+                                })
+                                .collect();
+                            (sent, received)
+                        })
+                        .collect();
+                    let groups: Vec<(&str, &str)> = groups
+                        .iter()
+                        .map(|(sent, received)| (sent.as_str(), received.as_str()))
+                        .collect();
+                    plain("2026-09-01", timestamp, &groups)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut rng = SplitMix64::new(63);
+        for (sessions, letters) in [(10, 10), (30, 15), (100, 26)] {
+            let shown = (0..40)
+                .filter(|_| {
+                    let sessions = history(&mut rng, sessions, letters, &|_, _| 0.1);
+                    !mistake_stats(&sessions, 8).bigrams.hardest.is_empty()
+                })
+                .count();
+            assert!(
+                shown <= 4,
+                "{shown} of 40, {sessions} sessions of {letters}"
+            );
+        }
+        let hard = |before: char, ch: char| if (before, ch) == ('K', 'M') { 0.7 } else { 0.1 };
+        let found = (0..20)
+            .filter(|_| {
+                let heat = mistake_stats(&history(&mut rng, 100, 15, &hard), 8).bigrams;
+                heat.hardest.first().map(|pair| (pair.row, pair.col)) == Some(('K', 'M'))
+            })
+            .count();
+        assert!(found >= 18, "{found} of 20");
+        // A pair heard once and missed is shaded near its letter's usual.
+        let once = plain("2026-09-01", 1, &[("KM", "KX"), ("UM", "UM"), ("UM", "UM")]);
+        let heat = mistake_stats(&[once], 8).bigrams;
+        let km = heat
+            .cells
+            .iter()
+            .find(|c| (c.row, c.col) == ('K', 'M'))
+            .expect("KM");
+        assert_eq!(km.rate, 1.0);
+        assert!((km.shade - (1.0 + 5.0 / 3.0) / 6.0).abs() < 1e-12, "{km:?}");
     }
 
     #[test]

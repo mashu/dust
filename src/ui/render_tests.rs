@@ -2947,10 +2947,22 @@ mod interactions {
     }
 
     /// A mouse opens a day's card by pointing at the square and closes it by
-    /// M after K copied wrong four times in five, taken for N; M after U
-    /// right six times out of six.
+    /// M after K copied wrong sixteen times in twenty, taken for N; M after
+    /// U right twenty-four times out of twenty-four.
     #[component]
     fn MistakesHarness() -> Element {
+        let mut groups = vec![("KM", "KN"); 16];
+        groups.extend([("KM", "KM"); 4]);
+        groups.extend([("UM", "UM"); 24]);
+        rsx! {
+            crate::ui::stats_detail::MistakesTab { sessions: vec![stored_session("2026-09-08", &groups)] }
+        }
+    }
+
+    /// The same shares as [`MistakesHarness`], over a quarter of the tries:
+    /// M after K wrong four times in five, M after U right six times.
+    #[component]
+    fn FewMistakesHarness() -> Element {
         let mut groups = vec![("KM", "KN"); 4];
         groups.push(("KM", "KM"));
         groups.extend([("UM", "UM"); 6]);
@@ -2968,7 +2980,7 @@ mod interactions {
         let ui = Ui::new(MistakesHarness, ());
         assert!(ui.has("Hardest pairs"));
         assert!(ui.has("class=\"pair-name\">M after K<"), "{}", ui.html());
-        assert!(ui.has(">4 of 5<"));
+        assert!(ui.has(">16 of 20<"));
         assert!(ui.has(">80% here · M 36% overall<"));
         // The bar marks where M stands overall.
         assert!(ui.has("class=\"bar-mark\" style=\"left: 36.4%;\""));
@@ -2983,10 +2995,19 @@ mod interactions {
         assert!(unheard.contains("aria-label=\"K after K: not heard yet\""));
         assert!(
             ui.input_tag("pair-k-m")
-                .contains("aria-label=\"M after K: 4 of 5 wrong\"")
+                .contains("aria-label=\"M after K: 16 of 20 wrong\"")
         );
         assert!(ui.has("Tap a pair for details."));
         assert!(!ui.has("pair-card"));
+
+        // The same shares over five tries could be chance.
+        let mut few = Ui::new(FewMistakesHarness, ());
+        assert!(few.has("No pair stands out yet"), "{}", few.html());
+        assert!(!few.has("class=\"pair-name\""));
+        few.click("pair-k-m");
+        assert!(few.has(
+            ">Wrong 2.2× as often as M overall, but over too few tries to tell from chance.<"
+        ));
     }
 
     /// Each confusion shows the two characters in Morse, the elements that
@@ -2997,7 +3018,7 @@ mod interactions {
         assert!(ui.has(">Common confusions<"));
         let html = ui.html();
         let at = html
-            .find("aria-label=\"M taken for N: 4 times, 36% of every M sent\"")
+            .find("aria-label=\"M taken for N: 16 times, 36% of every M sent\"")
             .expect("M taken for N");
         let row = &html[at..];
         let row = &row[..row.find("of every M<").expect("its share")];
@@ -3008,7 +3029,7 @@ mod interactions {
             .map(|rest| rest.split('"').next().unwrap_or(""))
             .collect();
         assert_eq!(marks, ["dah", "dah differs", "dah", "dit differs"]);
-        assert!(row.contains(">4×<"));
+        assert!(row.contains(">16×<"));
         assert!(row.contains("width: 36.4%;"));
         assert!(!ui.has("Once each"), "one confusion, drawn in full");
     }
@@ -3135,12 +3156,12 @@ mod interactions {
             "class=\"tip-date\">M after K<",
             ">Wrong<",
             ">80%<",
-            ">4 of 5<",
+            ">16 of 20<",
             ">M overall<",
             ">36%<",
-            ">4 of 11<",
+            ">16 of 44<",
             ">Taken for<",
-            ">N 4×<",
+            ">N 16×<",
             ">Wrong 2.2× as often as M overall: the pair is the trouble.<",
         ] {
             assert!(ui.has(text), "no {text} on the card: {}", ui.html());
