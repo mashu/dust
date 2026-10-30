@@ -251,6 +251,14 @@ impl<N: Clone> ReceiverStream<N> {
     /// reads the clock again after it before scheduling anything. Whether
     /// the stream had fallen behind: it has nothing to play from where it
     /// picked up until it is rendered on from there.
+    ///
+    /// Counted against `taken`, not the browser's clock itself: the browser
+    /// has not yet rendered what lies between the two, but renders a device
+    /// buffer, its base latency long, in one go whenever its audio thread
+    /// wakes. A stretch less than a buffer ahead of the clock when it is
+    /// read can reach the browser, once rendered, after the buffer it falls
+    /// in, and then plays late, from its first sample, over the one after
+    /// it.
     pub fn catch_up_to(&mut self, taken: f64) -> bool {
         let behind = self.next < self.sample_at(taken);
         if behind {
@@ -910,7 +918,12 @@ mod tests {
     /// A step past the margin is a hold-up: the clock has taken where the
     /// send was made, and where its sound starts, before any of it was
     /// handed over. The stream picks up the margin past the clock, and the
-    /// send is told what of it went unheard: from its start to there.
+    /// send is told what of it went unheard: from its start to there. So it
+    /// is though the browser's own clock may still be short of the send,
+    /// what it has taken being its base latency past that clock: handed
+    /// over less than a device buffer ahead of it, the send could not be
+    /// sure to start on time, and played late it would be heard over what
+    /// follows.
     #[test]
     fn a_clock_step_past_a_send_is_made_loses_its_start() {
         let settings = settings();

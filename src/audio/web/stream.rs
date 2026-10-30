@@ -165,7 +165,10 @@ fn stream_lead() -> f64 {
 
 impl StreamState {
     /// What the browser has taken of the stream, on the context's clock:
-    /// whatever it is already rendering, its base latency past the clock.
+    /// all before the clock, and the device buffer, its base latency long,
+    /// that it renders from there in one go whenever its audio thread wakes
+    /// ([`ReceiverStream::catch_up_to`]). Nothing handed over short of it
+    /// is sure to start on time.
     fn taken(&self) -> f64 {
         self.ctx.current_time() + reported_latency(&self.ctx, "baseLatency")
     }
