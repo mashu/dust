@@ -26,7 +26,7 @@ const STREAM_LEAD_HIDDEN_SEC: f64 = 2.5;
 const STREAM_TICK_MS: u32 = 100;
 /// How far past the browser's clock, beyond its base latency, a change is
 /// made: past whatever it is already rendering, so the stretch taken back
-/// has not begun to be played.
+/// has not begun to be played. A stream fallen behind picks up there too.
 const CHANGE_MARGIN_SEC: f64 = 0.03;
 /// How far ahead a change renders at once, the rest left to the next tick:
 /// a click that starts a band and a send is two changes, and each takes
@@ -53,7 +53,7 @@ impl MixerStream {
         let state = Rc::new(RefCell::new(StreamState {
             ctx: ctx.clone(),
             into: into.clone(),
-            stream: ReceiverStream::new(mixer, ctx.current_time()),
+            stream: ReceiverStream::new(mixer, ctx.current_time(), CHANGE_MARGIN_SEC),
             stopped: Vec::new(),
         }));
         let ticking = Rc::clone(&state);
@@ -153,14 +153,23 @@ impl SendWatch {
 }
 
 impl StreamState {
-    fn soonest(&self) -> f64 {
-        self.ctx.current_time() + reported_latency(&self.ctx, "baseLatency") + CHANGE_MARGIN_SEC
+    /// What the browser has taken of the stream, on the context's clock:
+    /// whatever it is already rendering, its base latency past the clock.
+    fn taken(&self) -> f64 {
+        self.ctx.current_time() + reported_latency(&self.ctx, "baseLatency")
     }
 
-    /// Run the mixer on to the clock, should it have fallen behind it.
+    fn soonest(&self) -> f64 {
+        self.taken() + CHANGE_MARGIN_SEC
+    }
+
+    /// Run the mixer on, should the clock have taken all that was rendered
+    /// ([`ReceiverStream::catch_up_to`]). Only then: a change just made is
+    /// short of the soonest read now once the clock has stepped on since,
+    /// yet still heard on time.
     fn catch_up(&mut self) {
-        let soonest = self.soonest();
-        self.stream.catch_up_to(soonest);
+        let taken = self.taken();
+        self.stream.catch_up_to(taken);
     }
 
     /// Make `change` as soon as it can be heard, or at `at` should that be
@@ -199,15 +208,15 @@ impl StreamState {
         // stretch put at the moment read before it would start in the past.
         self.catch_up();
         let now = self.ctx.current_time();
-        let soonest = self.soonest();
+        let taken = self.taken();
         let (ctx, into) = (&self.ctx, &self.into);
-        // Picked up only should the clock have run past what was rendered,
+        // Picked up only should the clock have taken all that was rendered,
         // and then where a stretch can still start on time, as a change is
         // made: one started at the clock just read would start in the past,
         // play at once from its first sample, late, over the next.
         let rendered = self
             .stream
-            .render_until(soonest, now + lead, |starts, samples| {
+            .render_until(taken, now + lead, |starts, samples| {
                 schedule(ctx, into, starts, samples)
             });
         // A stretch the browser would not take is tried again on the next

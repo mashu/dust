@@ -52,6 +52,10 @@ pub struct ReceiverStream<N> {
     out: Vec<f32>,
     /// The clock's moment at sample 0.
     origin: f64,
+    /// How far past what the clock has taken the stream picks up, should it
+    /// fall behind: far enough that a stretch handed over then can still
+    /// start on time.
+    margin: f64,
     /// Where the next stretch starts.
     next: u64,
     queued: VecDeque<Queued<N>>,
@@ -121,8 +125,9 @@ pub enum Taken<N> {
 }
 
 impl<N: Clone> ReceiverStream<N> {
-    /// `mixer` from `now` on the clock it is played by.
-    pub fn new(mixer: Mixer, now: f64) -> Self {
+    /// `mixer` from `now` on the clock it is played by, picked up `margin`
+    /// past what that clock has taken should the stream fall behind it.
+    pub fn new(mixer: Mixer, now: f64, margin: f64) -> Self {
         let sample_rate = f64::from(mixer.sample_rate());
         let stretch = ((STRETCH_SEC * sample_rate).round() as usize).max(128);
         Self {
@@ -131,6 +136,7 @@ impl<N: Clone> ReceiverStream<N> {
             stretch,
             out: vec![0.0; stretch],
             origin: now,
+            margin,
             next: 0,
             queued: VecDeque::new(),
             idle: false,
@@ -144,17 +150,18 @@ impl<N: Clone> ReceiverStream<N> {
     }
 
     /// Render stretches until the next starts at `until` or later, each
-    /// handed to `play` with the moment it starts: from `soonest` at the
-    /// earliest, the soonest a stretch can still start on time, should the
-    /// clock have run past what was rendered. A stretch `play` will not take
-    /// is not rendered either.
+    /// handed to `play` with the moment it starts: from the margin past
+    /// `taken` at the earliest, the soonest a stretch can still start on
+    /// time, should the clock have taken all that was rendered, as it has
+    /// all before `taken` ([`Self::catch_up_to`]). A stretch `play` will
+    /// not take is not rendered either.
     pub fn render_until<E>(
         &mut self,
-        soonest: f64,
+        taken: f64,
         until: f64,
         mut play: impl FnMut(f64, &[f32]) -> Result<N, E>,
     ) -> Result<(), E> {
-        self.catch_up(self.sample_at(soonest));
+        self.catch_up_to(taken);
         while !self.idle && self.time(self.next) < until {
             // What has finished goes before the copy is taken, so no copy
             // carries it.
@@ -231,11 +238,18 @@ impl<N: Clone> ReceiverStream<N> {
         over
     }
 
-    /// Run the mixer on to the clock's moment `soonest`, should it have
-    /// fallen behind it ([`Self::catch_up`]). Catching up takes time, so a
-    /// caller reads the clock again after it before scheduling anything.
-    pub fn catch_up_to(&mut self, soonest: f64) {
-        self.catch_up(self.sample_at(soonest));
+    /// Run the mixer on to the margin past `taken`, should the clock have
+    /// taken all that was rendered, as it has all before `taken`
+    /// ([`Self::catch_up`]). Short of that nothing is lost: a change is
+    /// made the margin past what the clock had taken when it was read, and
+    /// should the clock step on by less before the stream is next topped
+    /// up, what is rendered from the change still starts on time, and a
+    /// send made there is heard whole. Catching up takes time, so a caller
+    /// reads the clock again after it before scheduling anything.
+    pub fn catch_up_to(&mut self, taken: f64) {
+        if self.next < self.sample_at(taken) {
+            self.catch_up(self.sample_at(taken + self.margin));
+        }
     }
 
     /// Watch a send's sound, from `starts` to `ends` on the clock, for the
@@ -252,8 +266,8 @@ impl<N: Clone> ReceiverStream<N> {
         missed
     }
 
-    /// Fallen behind `soonest` — a long task, a hidden page — the stream
-    /// picks up from there rather than playing into the past all at once.
+    /// Fallen behind — a long task, a hidden page — the stream picks up
+    /// from `soonest` rather than playing into the past all at once.
     /// What should have played meanwhile is lost, but the mixer is run on
     /// over it unheard, so everything after it plays when it was meant to,
     /// and a send's own clock still says when it is heard; a send whose
@@ -434,7 +448,7 @@ mod tests {
     #[test]
     fn a_stream_that_falls_behind_keeps_its_time() {
         let settings = settings();
-        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
             .render_until(0.0, 0.3, |starts, samples| browser.play(starts, samples))
@@ -464,7 +478,7 @@ mod tests {
     #[test]
     fn a_stream_caught_up_first_plays_on_from_the_clock_after() {
         let settings = settings();
-        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
             .render_until(0.0, 0.3, |starts, samples| browser.play(starts, samples))
@@ -509,7 +523,7 @@ mod tests {
     #[test]
     fn a_send_in_a_stall_is_told_it_went_unheard() {
         let settings = settings();
-        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let lookahead = stream.mixer().lookahead_sec();
         let sound = plan(&settings, "TEST").sound_end_sec();
         assert!(sound > 1.0, "TEST sounds across the stall: {sound}");
@@ -548,7 +562,7 @@ mod tests {
         let mut swept = Swept::new();
         alone.start(send(&settings, "TEST TEST", 0.0), &mut swept);
         drop(swept);
-        let mut stream = ReceiverStream::new(alone, 0.0);
+        let mut stream = ReceiverStream::new(alone, 0.0, 0.0);
         let lookahead = stream.mixer().lookahead_sec();
         let sound = plan(&settings, "TEST TEST").sound_end_sec();
         assert!(sound > 2.5, "TEST TEST outlasts a stall made up: {sound}");
@@ -617,7 +631,7 @@ mod tests {
                 mixer.start_at(send(&settings, "E", heard_at), None, wait, &mut swept);
                 mixer
             };
-            let mut stream = ReceiverStream::new(waiting(), 0.0);
+            let mut stream = ReceiverStream::new(waiting(), 0.0, 0.0);
             let waited = stream.watch(heard_at, heard_at + dit);
             let mut browser = Browser::default();
             stream
@@ -643,7 +657,7 @@ mod tests {
         }
 
         // Made after the stall, a send plays when it was made to.
-        let mut stream = ReceiverStream::new(Mixer::new(SR), 0.0);
+        let mut stream = ReceiverStream::new(Mixer::new(SR), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
             .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
@@ -697,7 +711,7 @@ mod tests {
         };
         for stall in [1.9, 2.1] {
             let resumes = 0.5 + stall;
-            let mut stream = ReceiverStream::new(mixer(true), 0.0);
+            let mut stream = ReceiverStream::new(mixer(true), 0.0, 0.0);
             let yours = stream.watch(lookahead, reply_at);
             let reply = stream.watch(reply_at, reply_at + dit);
             let mut browser = Browser::default();
@@ -748,6 +762,95 @@ mod tests {
         }
     }
 
+    /// How far past what the browser has taken its stream makes a change,
+    /// and picks up after falling behind.
+    const MARGIN: f64 = 0.03;
+
+    /// A send made the margin past what the clock has taken, `taken`, the
+    /// stream rendered a good way ahead of it; then topped up with the
+    /// clock read again `step` on, as the browser tops up after a change.
+    /// What the browser played, when the send was made, and the watch on
+    /// its sound.
+    fn sent_then_topped_up(
+        settings: &TrainingSettings,
+        taken: f64,
+        step: f64,
+    ) -> (Browser, f64, Missed) {
+        let mut stream = ReceiverStream::new(mixer(settings), 0.0, MARGIN);
+        let mut browser = Browser::default();
+        stream
+            .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        let (made, taken_back) = stream.change_at(taken + MARGIN, |mixer, swept| {
+            mixer.start(send(settings, "TEST", taken + MARGIN), swept);
+        });
+        browser.take_back(taken_back);
+        let lookahead = stream.mixer().lookahead_sec();
+        let sound = plan(settings, "TEST").sound_end_sec();
+        let sent = stream.watch(made + lookahead, made + lookahead + sound);
+        stream
+            .render_until(taken + step, taken + step + 0.5, |starts, samples| {
+                browser.play(starts, samples)
+            })
+            .expect("played");
+        (browser, made, sent)
+    }
+
+    /// The browser's clock moves in steps, a burst of its audio thread at a
+    /// time, and can step on between a send made and the top-up after it,
+    /// which reads it again. Made the margin past what the clock had taken,
+    /// the send is still ahead of it after a step short of the margin: the
+    /// top-up renders on from where the send was made, so it is heard whole
+    /// and on time, sample for sample as the mixer plays it made there, and
+    /// is told nothing. Taken for the stream fallen behind, the step cost
+    /// the band a gap and the send its start, unheard, and the send was
+    /// taken for held up.
+    #[test]
+    fn a_clock_step_after_a_send_is_made_loses_none_of_it() {
+        let settings = settings();
+        let lookahead = Mixer::new(SR).lookahead_sec();
+        // A burst of 512 frames at 48 kHz: past the look-ahead, short of
+        // the margin.
+        let step = 512.0 / 48_000.0;
+        assert!(lookahead < step && step < MARGIN, "a step of {step}");
+        let taken = 0.2;
+        let (browser, made, sent) = sent_then_topped_up(&settings, taken, step);
+        assert!(!sent.is_set(), "taken for unheard: {:?}", sent.span());
+        let heard = browser.heard(at(0.7));
+        let cut = at(made);
+        let mut straight = mixer(&settings);
+        let mut expected = vec![0.0f32; at(0.7)];
+        straight.render(&mut expected[..cut], 0);
+        straight.start(send(&settings, "TEST", taken + MARGIN), &mut Swept::new());
+        straight.render(&mut expected[cut..], 0);
+        let first_off = heard.iter().zip(&expected).position(|(a, b)| a != b);
+        assert_eq!(first_off, None, "the stream parts from the mixer there");
+    }
+
+    /// A step past the margin is a hold-up: the clock has taken where the
+    /// send was made, and where its sound starts, before any of it was
+    /// handed over. The stream picks up the margin past the clock, and the
+    /// send is told what of it went unheard: from its start to there.
+    #[test]
+    fn a_clock_step_past_a_send_is_made_loses_its_start() {
+        let settings = settings();
+        let lookahead = Mixer::new(SR).lookahead_sec();
+        let step = MARGIN + 2.0 * lookahead;
+        let taken = 0.2;
+        let (_, made, sent) = sent_then_topped_up(&settings, taken, step);
+        let (from, until) = sent.span().expect("its start went unheard");
+        let starts = made + lookahead;
+        assert!(
+            (from - starts).abs() < 1e-4,
+            "from its start, {starts}: {from}"
+        );
+        let picked_up = taken + step + MARGIN;
+        assert!(
+            (until - picked_up).abs() < 1e-4,
+            "to where the stream picked up, {picked_up}: {until}"
+        );
+    }
+
     /// A change made mid-stretch, the queue a good way ahead of it, plays
     /// exactly as the mixer would have played with the change made at that
     /// sample in the first place: the stretch it falls in played again to
@@ -760,7 +863,7 @@ mod tests {
         let changed = |mixer: &mut Mixer, swept: &mut Swept| {
             mixer.start_at(send(&settings, "EEE", at), None, 0, swept);
         };
-        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
             .render_until(0.0, 1.0, |starts, samples| browser.play(starts, samples))
@@ -798,7 +901,7 @@ mod tests {
     #[test]
     fn a_change_between_stretches_takes_them_back_whole() {
         let settings = settings();
-        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
             .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
@@ -825,7 +928,7 @@ mod tests {
         let mut quiet = settings();
         quiet.band.noise_enabled = false;
         quiet.band.agc_enabled = false;
-        let mut stream = ReceiverStream::new(Mixer::new(SR), 0.0);
+        let mut stream = ReceiverStream::new(Mixer::new(SR), 0.0, 0.0);
         assert!(stream.mixer().is_quiet());
         let mut browser = Browser::default();
         stream
@@ -855,7 +958,7 @@ mod tests {
     #[test]
     fn a_band_taken_away_leaves_the_stream_to_go_quiet() {
         let settings = settings();
-        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0, 0.0);
         let mut browser = Browser::default();
         stream
             .render_until(0.0, 1.0, |starts, samples| browser.play(starts, samples))
