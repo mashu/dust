@@ -723,10 +723,9 @@ mod ui_tests {
                 ui.html()
             );
             ui.click("btn-turn-off-lock-typing");
-            let locked =
-                |settings: &TrainingSettings| settings.playback.lock_input_during_group_playback;
             assert!(!ui.with_app(|ctx| locked(&ctx.settings.peek())));
             assert!(!locked(&ui.store.load_settings()), "stored at once");
+            assert!(ui.store.asked_about_lock(), "chosen: Home need not ask");
             assert!(!ui.shows("btn-turn-off-lock-typing"));
             assert!(ui.has("It is off now"), "{}", ui.html());
         });
@@ -1528,6 +1527,75 @@ mod ui_tests {
                 ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text)),
                 None
             );
+        });
+    }
+
+    /// Whether `settings` lock typing while a group is sent.
+    fn locked(settings: &TrainingSettings) -> bool {
+        settings.playback.lock_input_during_group_playback
+    }
+
+    /// A store with `settings`, past the first launch, never asked about
+    /// the lock.
+    fn store_with(settings: &TrainingSettings) -> std::rc::Rc<MemoryStore> {
+        let store = std::rc::Rc::new(MemoryStore::default());
+        store.save_settings(settings);
+        store.mark_tutorial_done();
+        store
+    }
+
+    /// A store from before Dust 0.16 still has Lock typing while sending
+    /// on, the default then, and every save keeps it: Home asks once
+    /// whether to keep it. Typing along turns it off, stored at once, and
+    /// nothing is asked at the next launch.
+    #[test]
+    fn a_lock_left_on_from_the_old_default_is_asked_about_once() {
+        run(|| async {
+            let store = store_with(&test_settings());
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            assert!(ui.shows("lock-ask"), "{}", ui.html());
+            assert!(ui.has("Lock typing while sending is on"));
+            assert!(ui.has("It was the default before Dust 0.16."));
+            ui.click("btn-type-along");
+            assert!(!ui.with_app(|ctx| locked(&ctx.settings.peek())));
+            assert!(!locked(&store.load_settings()), "stored at once");
+            assert!(store.asked_about_lock());
+            assert!(!ui.shows("lock-ask"));
+            drop(ui);
+            let (ui, _recorder) = Ui::launch(store);
+            assert!(!ui.shows("lock-ask"), "{}", ui.html());
+        });
+    }
+
+    /// Kept on, it stays on and is not asked about again; a lock already
+    /// off, or turned on by hand in the settings, is never asked about.
+    #[test]
+    fn a_lock_kept_or_chosen_is_not_asked_about() {
+        run(|| async {
+            let store = store_with(&test_settings());
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.click("btn-keep-it-on");
+            assert!(ui.with_app(|ctx| locked(&ctx.settings.peek())));
+            assert!(locked(&store.load_settings()));
+            assert!(store.asked_about_lock());
+            assert!(!ui.shows("lock-ask"));
+            drop(ui);
+            let (ui, _recorder) = Ui::launch(store);
+            assert!(!ui.shows("lock-ask"), "{}", ui.html());
+            drop(ui);
+
+            let mut open = test_settings();
+            open.playback.lock_input_during_group_playback = false;
+            let store = store_with(&open);
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            assert!(!ui.shows("lock-ask"));
+            assert!(!store.asked_about_lock(), "nothing to ask");
+            ui.click("nav-settings");
+            ui.commit("switch-lock-typing-while-sending", "true");
+            assert!(store.asked_about_lock(), "chosen by hand");
+            ui.click("nav-practice");
+            assert!(ui.with_app(|ctx| locked(&ctx.settings.peek())));
+            assert!(!ui.shows("lock-ask"), "{}", ui.html());
         });
     }
 

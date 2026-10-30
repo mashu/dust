@@ -21,6 +21,7 @@ use super::{
 const THEME_KEY: &str = "dust_theme";
 const TUTORIAL_KEY: &str = "dust_tutorial_done";
 const TOLD_OF_PADDLE_KEYS_KEY: &str = "dust_told_of_paddle_keys";
+const ASKED_ABOUT_LOCK_KEY: &str = "dust_asked_about_lock";
 const SETTINGS_KEY: &str = "dust_settings";
 const UNREADABLE_SETTINGS_KEY: &str = "dust_settings_unreadable";
 const SESSIONS_KEY: &str = "dust_sessions";
@@ -277,6 +278,23 @@ impl Store for WebStore {
     fn mark_told_of_paddle_keys(&self) {
         if let Some(store) = storage() {
             let _ = store.set_item(TOLD_OF_PADDLE_KEYS_KEY, "told");
+        }
+    }
+
+    /// A browser that keeps nothing asks once a visit.
+    fn asked_about_lock(&self) -> bool {
+        storage().is_some_and(|store| {
+            store
+                .get_item(ASKED_ABOUT_LOCK_KEY)
+                .ok()
+                .flatten()
+                .is_some()
+        })
+    }
+
+    fn mark_asked_about_lock(&self) {
+        if let Some(store) = storage() {
+            let _ = store.set_item(ASKED_ABOUT_LOCK_KEY, "asked");
         }
     }
 
