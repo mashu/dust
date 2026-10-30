@@ -1344,8 +1344,12 @@ station, and is lost then. The checks follow MRCE's `Log.pas:1030-1100`:
 
 `QsoCheck` holds the errors found, a NIL alone or a busted call and field
 errors together, and whether the QSO is a dupe, which is no error: a dupe
-copied right is clean. Raw drops a call already in the log as typed, as a
-logger marks a dupe; verified counts each clean, non-dupe station once.
+copied right is clean. A dupe is only that: a station already logged clean
+and logged again with something wrong counts once, by what is wrong, as its
+row reads, never as a dupe beside it (MRCE marks a dupe by the call as
+typed, `Log.pas:733-738`, so a busted call is never one). Raw drops a call
+already in the log as typed, as a logger marks a dupe; verified counts each
+clean, non-dupe station once.
 
 Logged QSOs cannot be edited, as in MRCE.
 

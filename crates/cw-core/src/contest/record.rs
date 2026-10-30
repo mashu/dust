@@ -1160,6 +1160,33 @@ mod tests {
         assert_eq!(stored.summary(&groups[1..]), None);
     }
 
+    /// A station worked again and logged with its call busted counts once,
+    /// as a busted call, and no dupe beside it, as its row reads.
+    #[test]
+    fn a_dupe_logged_busted_counts_once() {
+        let mut stored = run();
+        stored.qsos = vec![
+            qso(30_000, 2, 1),
+            QsoRecord {
+                lc: "K5XYW".into(),
+                sc: "K5XYZ".into(),
+                l: vec!["215".into()],
+                s: vec!["215".into()],
+                ..qso(60_000, 0, 2)
+            },
+        ];
+        let groups = [group("K5XYZ", "K5XYZ"), group("214", "214")];
+        assert_eq!(
+            stored.errors(&groups),
+            Some(RunErrors {
+                busted_calls: 1,
+                wrong: vec![(Field::Nr, 0)],
+                nils: 0,
+                dupes: 0,
+            })
+        );
+    }
+
     /// A run is known by its mark, and the history says whether its log
     /// reads, was dropped by an older version, or is one this version
     /// cannot read.
