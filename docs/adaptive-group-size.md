@@ -227,7 +227,10 @@ These were settled with the proposed defaults and can be revisited:
    it can still shorten are left out, and a session is judged on how well you
    copied the rest: see [Auto level](adaptive-speed.md#auto-level), with the
    simulation. A new character then shortens the groups until things
-   settle.
+   settle. Each character's own tally leaves them out too, for Letters,
+   What comes up next and how often it is drawn: counted as misses, they
+   made every character look unmastered. Home's Auto level card says a
+   session is judged so.
 4. **What counts as success:** the whole group, which is what a span means.
    Judging per character would separate "didn't know the letter" from "lost
    the group", at the cost of a second model.

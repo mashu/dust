@@ -381,6 +381,8 @@ impl ContestRun {
                 })
                 .collect(),
             group_timings: timings,
+            // A call or a number is as long as it is.
+            length_floor: None,
         };
         result.score = result.points();
         result

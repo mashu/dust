@@ -185,7 +185,7 @@ impl Move {
                         .iter()
                         .any(|id| settings.sequence_choice() == SequenceChoice::Preset(*id))
             }
-            Self::AutoLevel => auto.auto_adjust_level,
+            Self::AutoLevel => settings.curriculum.char_set_mode.levels() && auto.auto_adjust_level,
             Self::UpAfter(sessions) => auto.auto_adjust_above_threshold_count == sessions,
             Self::DownAfter(sessions) => auto.auto_adjust_below_threshold_count == sessions,
         }
@@ -213,7 +213,14 @@ impl Move {
                     settings.choose_sequence(SequenceChoice::Preset(*id));
                 }
             }
-            Self::AutoLevel => settings.write().auto_level.auto_adjust_level = true,
+            Self::AutoLevel => {
+                let mut settings = settings.write();
+                // A word list has no level to move: Koch has.
+                if !settings.curriculum.char_set_mode.levels() {
+                    settings.set_char_set_mode(CharSetMode::Koch);
+                }
+                settings.auto_level.auto_adjust_level = true;
+            }
             Self::UpAfter(sessions) => {
                 settings
                     .write()
@@ -279,6 +286,11 @@ impl Move {
             // The orders are offered once there are letters to learn: Koch
             // first.
             Self::Order(_) => vec![control_id("seg", "Koch")],
+            // Auto level is offered once there is a level to move: Koch
+            // first.
+            Self::AutoLevel if !settings.curriculum.char_set_mode.levels() => {
+                vec![control_id("seg", "Koch")]
+            }
             Self::AutoLevel => vec![control_id("switch", AUTO_LEVEL_SWITCH)],
             Self::UpAfter(_) => vec![control_id("number", LEVEL_UP_FIELD)],
             Self::DownAfter(_) => vec![control_id("number", LEVEL_DOWN_FIELD)],
@@ -522,7 +534,7 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "Auto level",
-        text: "Let the trainer move the level: three good sessions unlock the next character, and one poor session takes it back. A session is good at or above the accuracy threshold.",
+        text: "Let the trainer move the level: three good sessions unlock the next character, or in Callsigns a harder tier, and one poor session takes it back. A session is good at or above the accuracy threshold.",
         moves: &[Move::AutoLevel, Move::UpAfter(3), Move::DownAfter(1)],
         shows: None,
         screen: ON_SETTINGS,
@@ -1853,6 +1865,32 @@ mod tests {
             ui.click("pill-your-own");
             let stored = ui.stored_settings().await.curriculum.custom_sequence;
             assert_eq!(stored.iter().collect::<String>(), "ZQXJKMRSU");
+        });
+    }
+
+    /// A word list has no level for auto level to move, and Settings shows
+    /// no Auto level card for it: in Words the guide's Auto level step
+    /// points at Koch, and Show me picks it before it switches auto level
+    /// on, as the Unlock order step does for an order. It used to promise
+    /// a new character after three good sessions, which never came.
+    #[test]
+    fn in_words_the_auto_level_step_picks_koch_first() {
+        run(|| async {
+            let mut settings = needs_everything();
+            settings.curriculum.char_set_mode = CharSetMode::Words;
+            let (mut ui, _recorder) = opened_at(settings, "Auto level");
+            assert!(!ui.shows("switch-adjust-the-level-for-me"), "{}", ui.html());
+            assert!(ui.has("#seg-koch {"), "{}", ui.html());
+            ui.click("tour-show-me");
+            assert!(
+                ui.run_until(10_000, |ui| moves_made(ui) == 3).await,
+                "{}",
+                ui.html()
+            );
+            let stored = ui.stored_settings().await;
+            assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Koch);
+            assert!(stored.auto_level.auto_adjust_level);
+            assert!(ui.shows("switch-adjust-the-level-for-me"));
         });
     }
 

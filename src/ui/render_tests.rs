@@ -481,6 +481,7 @@ fn auto_level_card_shows_both_meters() {
                     alternating_mixed: true,
                     next_mixed_axis: Some(MixedAutoLevelAxis::Letters),
                     judged_at: None,
+                    judged_on_reached: false,
                 },
             }
         }
@@ -489,6 +490,7 @@ fn auto_level_card_shows_both_meters() {
     assert!(html.contains("3/5"));
     assert!(html.contains("90% to pass"));
     assert!(!html.contains("Adapt speed to me"));
+    assert!(!html.contains("Adapt group size to me"));
 }
 
 /// With adaptive speed steering, the card says where a session counts.
@@ -507,15 +509,83 @@ fn auto_level_card_says_where_adaptive_speed_counts() {
                     below_disabled: false,
                     alternating_mixed: false,
                     next_mixed_axis: None,
-                    judged_at: Some((15.0, 30.0)),
+                    judged_at: Some(((15.0, 15.0), (30.0, 30.0))),
+                    judged_on_reached: false,
                 },
             }
         }
     });
     assert!(html.contains("90% to pass"), "{html}");
     assert!(html.contains(
-        "a session counts only once it comes at the top of your speed range, 30 WPM, or its bottom, 15 WPM. In between it counts neither way."
+        "a session counts only once it comes at the top of your speed range, 30 WPM, or its bottom, 15 WPM, and is judged on the groups sent there. In between it counts neither way."
     ));
+    assert!(!html.contains("Character/Effective"));
+}
+
+/// Under Farnsworth, the ends are named as the Speed settings put them,
+/// not as the copy speed the characters and the spacing make together:
+/// Character speed 20 with Effective speed 8 to 15 used to read "17 WPM"
+/// and "13 WPM", which no setting shows.
+#[test]
+fn auto_level_card_names_the_ends_as_the_speed_settings_do() {
+    let html = render(|| {
+        rsx! {
+            AutoLevelCard {
+                progress: AutoLevelProgress {
+                    threshold: 90.0,
+                    above_count: 0,
+                    above_target: 2,
+                    below_count: 0,
+                    below_target: 1,
+                    above_disabled: false,
+                    below_disabled: false,
+                    alternating_mixed: false,
+                    next_mixed_axis: None,
+                    judged_at: Some(((20.0, 8.0), (20.0, 15.0))),
+                    judged_on_reached: false,
+                },
+            }
+        }
+    });
+    assert!(
+        html.contains("top of your speed range, 20/15 WPM, or its bottom, 20/8 WPM"),
+        "{html}"
+    );
+    assert!(html.contains("Each reads Character/Effective speed."));
+}
+
+/// With adaptive group size steering, a session is judged on what was
+/// reached, not the accuracy it shows, and the card says so: Last accuracy
+/// under the chip's threshold while Up still counts is no contradiction.
+#[test]
+fn auto_level_card_says_how_adaptive_group_size_is_judged() {
+    let html = render(|| {
+        rsx! {
+            AutoLevelCard {
+                progress: AutoLevelProgress {
+                    threshold: 90.0,
+                    above_count: 1,
+                    above_target: 2,
+                    below_count: 0,
+                    below_target: 1,
+                    above_disabled: false,
+                    below_disabled: false,
+                    alternating_mixed: false,
+                    next_mixed_axis: None,
+                    judged_at: None,
+                    judged_on_reached: true,
+                },
+            }
+        }
+    });
+    assert!(
+        html.contains(
+            "Adapt group size to me is on: a session is judged on the characters you reached."
+        ),
+        "{html}"
+    );
+    assert!(html.contains("a session can pass with its own accuracy under the threshold"));
+    assert!(!html.contains("Adapt speed to me"));
 }
 
 #[test]

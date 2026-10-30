@@ -771,6 +771,23 @@ fn the_starter_list_unfolds_and_folds() {
     });
 }
 
+/// Auto level moves a level, and a word list has none: Words shows no Auto
+/// level card, where its switch used to promise a new character that never
+/// came. In Callsigns it says what it moves there, the callsign tier.
+#[test]
+fn auto_level_says_what_it_moves_and_is_gone_where_nothing_moves() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        assert!(!ui.shows("switch-adjust-the-level-for-me"), "{}", ui.html());
+        ui.click("seg-callsigns");
+        assert!(ui.shows("switch-adjust-the-level-for-me"));
+        assert!(ui.has("Moves to a harder callsign tier after a run of good sessions."));
+        assert!(!ui.has("Unlocks a new character"));
+        ui.click("seg-koch");
+        assert!(ui.has("Unlocks a new character after a run of good sessions."));
+    });
+}
+
 /// Callsigns are sent whole too: a few calls of the tier, with more to
 /// come, and no character on its own.
 #[test]
