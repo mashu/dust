@@ -14,11 +14,15 @@ Linux, Windows, macOS, Android or iOS from
 ## Build
 
 ```bash
-curl -sSL https://dioxus.dev/install.sh | bash   # once
+cargo install dioxus-cli --version 0.7.10 --locked   # once
 
 dx serve --platform desktop
 dx serve --platform web
 ```
+
+`dx` must match the `dioxus` in `Cargo.lock`. CI builds with the Rust release
+named by `RUST_TOOLCHAIN` in `.github/workflows`, so its lints are that
+release's.
 
 On Linux, install ALSA and WebKitGTK first:
 
@@ -51,7 +55,10 @@ without it.
 ## Release
 
 Push a tag `v` + the version in `Cargo.toml`, e.g. `git tag v1.2.3 && git push
-origin v1.2.3`. CI builds every bundle and attaches it to the release.
+origin v1.2.3`, on a commit pushed to `main`. The release waits for that
+commit's CI run and stops unless it passed; then it builds every bundle and
+attaches it to the release. The Android APK needs the release key:
+[docs/platforms.md](docs/platforms.md#release-signing).
 
 ## License
 

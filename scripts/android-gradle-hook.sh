@@ -268,3 +268,46 @@ check_android_apk_version() {
     return 1
   fi
 }
+
+# Fail unless every native library in the APK or app bundle at `archive`
+# has its segments aligned to 16 KB pages. Play takes no app targeting
+# Android 15 or later without that, and a phone with 16 KB pages may not
+# load the library at all. .cargo/config.toml asks the linker for it.
+check_android_page_size() {
+  python3 - "$1" << 'PY'
+import re
+import struct
+import sys
+import zipfile
+
+archive = sys.argv[1]
+page = 16384
+with zipfile.ZipFile(archive) as bundle:
+    libraries = [
+        name for name in bundle.namelist() if re.fullmatch(r"(base/)?lib/[^/]+/[^/]+\.so", name)
+    ]
+    if not libraries:
+        sys.exit("No native libraries in " + archive)
+    misaligned = []
+    for name in libraries:
+        elf = bundle.read(name)
+        if elf[:4] != b"\x7fELF":
+            sys.exit(name + " is not an ELF file")
+        wide = elf[4] == 2
+        order = "<" if elf[5] == 1 else ">"
+        word = "Q" if wide else "I"
+        (table,) = struct.unpack_from(order + word, elf, 0x20 if wide else 0x1C)
+        size, count = struct.unpack_from(order + "HH", elf, 0x36 if wide else 0x2A)
+        for index in range(count):
+            header = table + index * size
+            (kind,) = struct.unpack_from(order + "I", elf, header)
+            (align,) = struct.unpack_from(order + word, elf, header + (48 if wide else 28))
+            # PT_LOAD: a segment the loader maps.
+            if kind == 1 and align < page:
+                misaligned.append(f"{name}: a segment aligned to {align} bytes")
+                break
+    if misaligned:
+        sys.exit("Not aligned to 16 KB pages:\n  " + "\n  ".join(misaligned))
+    print(f"Native libraries aligned to 16 KB pages: {', '.join(libraries)}")
+PY
+}

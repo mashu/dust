@@ -3,3 +3,10 @@
 # before `dx bundle` can run wasm-bindgen. Never strip wasm objects.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "strip=none"]
+
+# Play takes no app targeting Android 15 or later whose native libraries are
+# not aligned to 16 KB pages, and a phone with 16 KB pages may not load them.
+# NDK r28 and later link so by default; r27's clang asks for 4 KB. dx passes
+# a target's rustflags on to the link, whatever NDK it finds.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

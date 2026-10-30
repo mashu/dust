@@ -1,8 +1,12 @@
 # Build a sideloadable Android APK on demand.
 #
 # Actions → Android APK → Run workflow, on any branch. The APK lands in the run's
-# artifacts, signed with Gradle's debug key, so a phone installs it once you allow
-# installs from unknown sources.
+# artifacts, and a phone installs it once you allow installs from unknown sources.
+# The release profile builds what a release ships: the release build type, signed
+# with the release key from the ANDROID_* secrets (docs/platforms.md, Release
+# signing), so it installs over a release and a release over it. The debug profile
+# builds the debug build type, signed with a debug key Gradle makes for the run: it
+# installs only where Dust is not installed yet.
 #
 # Audio goes through cpal's AAudio/oboe backend, the same player the desktop build
 # uses. If that ever blocks a toolchain bring-up, `--features mobile-silent` builds
@@ -23,12 +27,20 @@ concurrency:
   group: android-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  # The Rust every job builds with, the same in every workflow
+  # (scripts/check-pinned-versions.sh): a new stable's lints wait for a
+  # deliberate move.
+  RUST_TOOLCHAIN: "1.99.1"
   DIOXUS_CLI_VERSION: "0.7.10"
   ANDROID_TRIPLE: aarch64-linux-android
   # Fallback only; the runner image normally ships an NDK already.
   NDK_FALLBACK_VERSION: "27.2.12479018"
+  PROFILE: ${{ inputs.profile }}
 
 jobs:
   apk:
@@ -37,18 +49,38 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: aarch64-linux-android
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: "17"
+
+      # Without the key a release-profile build stops here: an APK signed with
+      # any other key could not update a release install, nor be updated by one.
+      - name: Set up the release key
+        if: env.PROFILE != 'debug'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source scripts/android-release-signing.sh
+          if ! install_android_release_signing "$PWD" "${RUNNER_TEMP}/dust-release.p12"; then
+            echo "::error title=No Android release key::Add the ANDROID_* secrets (docs/platforms.md, Release signing), or run with the debug profile."
+            exit 1
+          fi
+          echo "ANDROID_RELEASE_CERT_SHA256=${ANDROID_RELEASE_CERT_SHA256}" >> "$GITHUB_ENV"
 
       - name: Resolve the Android SDK and NDK
         run: |
@@ -79,14 +111,15 @@ jobs:
             echo "NDK_HOME=$ndk"
           } >> "$GITHUB_ENV"
 
+      # Not target/dx: the Gradle project dx writes there holds the key's
+      # passwords.
       - name: Cache Rust builds
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: android
-          cache-directories: target/dx
 
       - name: Install cargo-binstall
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-binstall
 
@@ -106,7 +139,7 @@ jobs:
           install_android_gradle_hook "$PWD"
           trap 'rm -f "$ANDROID_GRADLE_HOOK"' EXIT
           args=(bundle --platform android --target "${ANDROID_TRIPLE}" --package-types apk --locked)
-          if [[ "${{ inputs.profile }}" != "debug" ]]; then
+          if [[ "$PROFILE" != "debug" ]]; then
             args+=(--release)
           fi
           echo "dx ${args[*]}"
@@ -135,6 +168,12 @@ jobs:
           # shellcheck disable=SC1091
           source scripts/android-gradle-hook.sh
           check_android_apk_version "$PWD" "$apk"
+          check_android_page_size "$apk"
+          if [[ "$PROFILE" != "debug" ]]; then
+            # shellcheck disable=SC1091
+            source scripts/android-release-signing.sh
+            check_android_apk_release "$apk" "$ANDROID_RELEASE_CERT_SHA256"
+          fi
 
           mkdir -p artifacts
           name="dust-${version}-android-arm64.apk"
@@ -143,8 +182,14 @@ jobs:
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dust-android
           path: artifacts/*
           if-no-files-found: error
+
+      - name: Remove the release key
+        if: always()
+        run: |
+          rm -rf target/dx "${RUNNER_TEMP}/dust-release.p12"
+          git checkout -- Dioxus.toml
