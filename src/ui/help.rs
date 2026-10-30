@@ -126,7 +126,9 @@ pub fn speed(aim: f64) -> Element {
             dd { "Copper: more than 10 points under it." }
             {likely_and_notch(format!("Your aim, {aim}."))}
             dt { "Your aim · about 21 WPM" }
-            dd { "The speed at which you copy your aim: Copy speed on the Overview." }
+            dd {
+                "The speed at which you copy your aim: Copy speed on the Overview. Over the fastest you have been sent, it says only that: nothing yet shows how much faster you could go."
+            }
             dt { "Chance next" }
             dd {
                 "How likely the next group is to come at about that speed. With Adapt speed to me the trainer leans towards where you copy your aim; without it, every speed in the range is as likely."
@@ -153,7 +155,9 @@ pub fn group_length(aim: f64) -> Element {
             dd { "Copper: more than 10 points under it." }
             {likely_and_notch(format!("Your aim, {aim}."))}
             dt { "Your aim · up to 4 characters" }
-            dd { "The longest length you copy whole as often as your aim asks." }
+            dd {
+                "The longest length you copy whole as often as your aim asks, never past the longest group you have been sent."
+            }
             dt { "Chance next" }
             dd {
                 "How likely the next group is to be that long. With Adapt group size to me the trainer leans towards the lengths you copy as your aim asks; without it, every length is as likely."
@@ -259,6 +263,14 @@ pub fn copy_span() -> Element {
         dl { class: "help-terms",
             dt { "± and the band" }
             dd { "How sure the model is: the shaded band is one spread either side of its best guess." }
+            dt { "Over 3 chars" }
+            dd {
+                "You copy the longest groups you have been sent whole more often than not, so all that can be said is that your span is longer. Longer groups would show how much."
+            }
+            dt { "Up · down · steady" }
+            dd {
+                "How it moved over the sessions drawn: steady unless the move is more than twice the spreads of the first and the last together."
+            }
             dt { "Adapting" }
             dd { "Adapt group size to me is on, and steering the length of your groups by it now." }
         }
@@ -275,6 +287,14 @@ pub fn copy_speed(aim: f64) -> Element {
         dl { class: "help-terms",
             dt { "± and the band" }
             dd { "How sure the model is: the shaded band is one spread either side of its best guess." }
+            dt { "Over 20 WPM" }
+            dd {
+                "You copy {aim} right even at the fastest you have been sent, so all that can be said is that your copy speed is higher. Faster sends would show how much."
+            }
+            dt { "Up · down · steady" }
+            dd {
+                "How it moved over the sessions drawn: steady unless the move is more than twice the spreads of the first and the last together."
+            }
             dt { "Adapting" }
             dd { "Adapt speed to me is on, and steering the speed of your groups by it now." }
         }

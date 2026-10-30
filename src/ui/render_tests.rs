@@ -2578,6 +2578,31 @@ mod interactions {
         assert!(ui.has(">Speed<"));
     }
 
+    /// Before any session of the set chosen, the Group length and Speed
+    /// cards say there is none to read, rather than reading the model's
+    /// first guess out as how you copy.
+    #[test]
+    fn the_sampling_cards_say_when_there_is_no_history_to_read() {
+        let mut ui = stats(true, CharSetMode::Koch);
+        ui.click("seg-sampling");
+        assert!(ui.has(">Group length<") && ui.has(">Speed<"));
+        assert_eq!(
+            ui.html().matches("No Koch sessions to read yet.").count(),
+            2,
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Your aim ·"));
+        assert!(!ui.has("Across your range"));
+        assert!(!ui.shows("next-length-2") && !ui.shows("next-speed-16"));
+
+        // The set with a history reads it.
+        let mut ui = stats(true, CharSetMode::Mixed);
+        ui.click("seg-sampling");
+        assert!(!ui.has("No Mixed sessions"));
+        assert!(ui.has(">Your aim · 70% whole<") && ui.has(">Your aim · 94% right<"));
+    }
+
     /// Mixed history from `history`, and a Koch session that missed Q, seen
     /// with `mode` chosen and one letter unlocked.
     #[component]

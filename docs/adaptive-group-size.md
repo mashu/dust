@@ -48,7 +48,9 @@ $$
 $$
 
 - **Prior:** $S \sim \mathcal N(\tfrac{\min + \max}{2}, 3^2)$ over the grid, and
-  $w$ uniform. The range you chose is a fair first guess at your span.
+  $w$ uniform. The range you chose is a fair first guess at your span. The
+  history Stats shows starts from the middle of what its first session sent
+  instead, so a change to the range does not redraw the past.
 - **History weights $\omega_i$:** before each session, all earlier evidence is
   multiplied by $0.5^{1/10}$, so a session ten sessions back counts half as
   much. Groups in the current session count 1. The estimate follows you as
@@ -172,8 +174,12 @@ that lag.
   with an uncertainty band. A chip says whether adaptive length is steering.
   With more than one character set in the history, a pill for each shows its
   own span; choosing callsigns in the settings keeps the others on show.
+  Past the longest or shortest group sent it says only "over" or "under"
+  that length, and it calls a move up or down only past twice the first and
+  last spreads together.
 - **Stats → Sampling:** a "Group length" card. Each length gets its chance of
-  coming next and how often a group that long is copied whole.
+  coming next and how often a group that long is copied whole. Before any
+  session of the set it says there is none to read.
 
 ## Tests
 

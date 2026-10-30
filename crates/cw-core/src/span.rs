@@ -23,7 +23,9 @@ use std::sync::OnceLock;
 
 use crate::aim::{self, Leaning, Spread};
 use crate::alignment::CopyTally;
-use crate::belief::{Estimate, EstimatePoint, GridBelief, Tally, sessions_in_order};
+use crate::belief::{
+    Estimate, EstimatePoint, FirstGuess, GridBelief, Tally, joined, range_of, sessions_in_order,
+};
 use crate::rng::Rng;
 use crate::session::SessionResult;
 use crate::settings::{GROUP_SIZE_MAX, TrainingSettings};
@@ -114,7 +116,7 @@ impl SpanBelief {
     /// The belief the history leaves for `settings`, its first guess the
     /// middle of the group size range.
     pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
-        Self::replay(history, settings, |_, _| {})
+        Self::replay(history, settings, FirstGuess::Settings, |_, _, _| {})
     }
 
     /// The belief a new session starts from: the history's, with all of it
@@ -127,34 +129,61 @@ impl SpanBelief {
     }
 
     /// The span after each session of the history that counts towards it,
-    /// oldest first.
+    /// oldest first, with the shortest and the longest group sent up to
+    /// then. Its first guess is the middle of what the first session sent,
+    /// not of today's range, so that a change to the range does not redraw
+    /// the past.
     pub fn history(history: &[SessionResult], settings: &TrainingSettings) -> Vec<EstimatePoint> {
         let mut points = Vec::new();
-        Self::replay(history, settings, |session, span| {
-            points.push(EstimatePoint {
-                timestamp: session.timestamp,
-                estimate: span.estimate(),
-            });
-        });
+        let mut sent = None;
+        Self::replay(
+            history,
+            settings,
+            FirstGuess::FirstSession,
+            |session, span, lengths| {
+                sent = joined(sent, lengths);
+                if let Some(sent) = sent {
+                    points.push(EstimatePoint {
+                        timestamp: session.timestamp,
+                        estimate: span.estimate(),
+                        sent,
+                    });
+                }
+            },
+        );
         points
     }
 
-    /// Learn from the history in the order it was practised, telling `after`
-    /// where the belief stands after each session. Only sessions of the
-    /// character set `settings` trains count: a callsign is as long as it
-    /// is, and digits are not held the way letters are.
+    /// Learn from the history in the order it was practised, its first
+    /// guess as `first` says, telling `after` where the belief stands after
+    /// each session and the shortest and longest group it sent. Only
+    /// sessions of the character set `settings` trains count: a callsign is
+    /// as long as it is, and digits are not held the way letters are.
     fn replay(
         history: &[SessionResult],
         settings: &TrainingSettings,
-        mut after: impl FnMut(&SessionResult, &Self),
+        first: FirstGuess,
+        mut after: impl FnMut(&SessionResult, &Self, Option<(f64, f64)>),
     ) -> Self {
-        let (shortest, longest) = crate::sampling::group_size_bounds(settings);
-        let mut span = Self::new((shortest + longest) as f64 / 2.0);
         let mode = settings.curriculum.char_set_mode;
-        if !mode.draws_characters() {
-            return span;
-        }
-        for session in sessions_in_order(history, mode) {
+        let sessions = if mode.draws_characters() {
+            sessions_in_order(history, mode)
+        } else {
+            Vec::new()
+        };
+        let first_sent = match first {
+            FirstGuess::Settings => None,
+            FirstGuess::FirstSession => sessions.first().and_then(|session| lengths_sent(session)),
+        };
+        let centre = first_sent.map_or_else(
+            || {
+                let (shortest, longest) = crate::sampling::group_size_bounds(settings);
+                (shortest + longest) as f64 / 2.0
+            },
+            |(shortest, longest)| (shortest + longest) / 2.0,
+        );
+        let mut span = Self::new(centre);
+        for session in sessions {
             span.belief.fade();
             let mut tally = Tally::new();
             for group in &session.groups {
@@ -164,7 +193,7 @@ impl SpanBelief {
             for (length, whole, missed) in tally.rows() {
                 span.observe(length, whole, missed);
             }
-            after(session, &span);
+            after(session, &span, lengths_sent(session));
         }
         span
     }
@@ -267,6 +296,18 @@ impl SpanBelief {
     }
 }
 
+/// The shortest and the longest group `session` sent, in characters.
+fn lengths_sent(session: &SessionResult) -> Option<(f64, f64)> {
+    range_of(
+        session
+            .groups
+            .iter()
+            .map(|group| group.sent.chars().count())
+            .filter(|length| *length > 0)
+            .map(|length| length as f64),
+    )
+}
+
 /// How strongly each length from `shortest` to `longest` is favoured for one
 /// cell of the posterior: leaning towards an aim set so that, over the
 /// lengths drawn, groups are copied whole `target` of the time.
@@ -283,6 +324,7 @@ fn length_weights(shortest: usize, longest: usize, target: f64, cell: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::belief::EstimateReading;
     use crate::rng::SplitMix64;
     use crate::session::GroupResult;
     use crate::settings::CharSetMode;
@@ -572,9 +614,48 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[1].estimate.mean > pair[0].estimate.mean)
         );
-        assert_eq!(
-            points.last().map(|p| p.estimate),
-            Some(SpanBelief::from_history(&history, &koch()).estimate())
+        let sent: Vec<(f64, f64)> = points.iter().map(|p| p.sent).collect();
+        assert_eq!(sent, [(4.0, 4.0), (4.0, 6.0), (4.0, 8.0)]);
+    }
+
+    /// The span shown for the history takes nothing from today's range: a
+    /// wider range redraws none of it. Copying every group sent whole says
+    /// only that the span is past the longest one, so that is all it says;
+    /// the model's first guess is not shown as a span.
+    #[test]
+    fn the_span_shown_is_the_historys_and_never_past_what_was_sent() {
+        let history: Vec<SessionResult> = (0..30)
+            .map(|n| session(n, &[("KMR", true), ("KM", true), ("KMR", true)]))
+            .collect();
+        let narrow = {
+            let mut settings = koch();
+            settings.curriculum.max_group_size = 3;
+            settings
+        };
+        let mut wide = koch();
+        wide.curriculum.max_group_size = 12;
+        let points = SpanBelief::history(&history, &narrow);
+        assert_eq!(points, SpanBelief::history(&history, &wide));
+        let last = points.last().expect("a point");
+        assert_eq!(last.sent, (2.0, 3.0));
+        assert!(last.estimate.mean > 3.0, "{last:?}");
+        assert_eq!(last.reading(), EstimateReading::Over(3.0));
+        assert_eq!(last.within_sent().1, 3.0);
+        // Where the history pins it down, it is read as it is.
+        let mut rng = SplitMix64::new(64);
+        let spread: Vec<SessionResult> = (0..20)
+            .map(|n| {
+                let groups: Vec<(&str, bool)> = ["KM", "KMR", "KMRS", "KMRSU", "KMRSUA"]
+                    .iter()
+                    .map(|sent| (*sent, copies(sent.len(), 4.0, 0.7, &mut rng)))
+                    .collect();
+                session(n, &groups)
+            })
+            .collect();
+        let last = *SpanBelief::history(&spread, &wide).last().expect("a point");
+        assert!(
+            matches!(last.reading(), EstimateReading::About(span) if (span.mean - 4.0).abs() < 1.0),
+            "{last:?}"
         );
     }
 }

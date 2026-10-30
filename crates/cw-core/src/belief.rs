@@ -25,6 +25,75 @@ pub struct Estimate {
 pub struct EstimatePoint {
     pub timestamp: u64,
     pub estimate: Estimate,
+    /// The least and the most sent up to then, in the estimate's own units:
+    /// the shortest and the longest group, or the slowest and the fastest
+    /// speed. Past them the history has nothing to say, and the estimate is
+    /// the model's first guess.
+    pub sent: (f64, f64),
+}
+
+/// What an estimate can be said to be, from what was sent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EstimateReading {
+    /// About its mean, give or take its spread.
+    About(Estimate),
+    /// More than the most ever sent: every length or speed sent was copied
+    /// as well as the estimate asks.
+    Over(f64),
+    /// Less than the least ever sent.
+    Under(f64),
+}
+
+impl EstimatePoint {
+    /// What it can be said to be: its estimate while that lies within what
+    /// was sent, and past either end only that it is past it.
+    pub fn reading(&self) -> EstimateReading {
+        let (least, most) = self.sent;
+        if self.estimate.mean > most {
+            EstimateReading::Over(most)
+        } else if self.estimate.mean < least {
+            EstimateReading::Under(least)
+        } else {
+            EstimateReading::About(self.estimate)
+        }
+    }
+
+    /// Its mean, and a spread either side of it, as (below, mean, above),
+    /// each kept within what was sent.
+    pub fn within_sent(&self) -> (f64, f64, f64) {
+        let (least, most) = self.sent;
+        let keep = |value: f64| value.max(least).min(most);
+        let Estimate { mean, sd } = self.estimate;
+        (keep(mean - sd), keep(mean), keep(mean + sd))
+    }
+}
+
+/// Where a belief rebuilt from the history takes its first guess from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FirstGuess {
+    /// The middle of what today's settings allow: where a session drawn
+    /// with nothing learned yet should start.
+    Settings,
+    /// The middle of what the first session sent: an estimate shown for the
+    /// history, which today's settings must not move.
+    FirstSession,
+}
+
+/// The least and the most of `values`, none of none.
+pub(crate) fn range_of(values: impl IntoIterator<Item = f64>) -> Option<(f64, f64)> {
+    values.into_iter().fold(None, |range, value| {
+        let (least, most) = range.unwrap_or((value, value));
+        Some((least.min(value), most.max(value)))
+    })
+}
+
+/// Two ranges as one.
+pub(crate) fn joined(a: Option<(f64, f64)>, b: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    range_of(
+        a.into_iter()
+            .chain(b)
+            .flat_map(|(least, most)| [least, most]),
+    )
 }
 
 /// The posterior over a grid of cells, kept as log weights: there is no

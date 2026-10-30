@@ -43,7 +43,10 @@ use std::sync::OnceLock;
 
 use crate::aim::{self, Leaning, Spread};
 use crate::alignment::{CopyTally, align_group, align_holding};
-use crate::belief::{Estimate, EstimatePoint, GridBelief, Tally, pick_index, sessions_in_order};
+use crate::belief::{
+    Estimate, EstimatePoint, FirstGuess, GridBelief, Tally, joined, pick_index, range_of,
+    sessions_in_order,
+};
 use crate::callsign::parse_callsign;
 use crate::contest::{Field, GroupCopy};
 use crate::rng::Rng;
@@ -112,6 +115,11 @@ fn p_right(ln_speed: f64, cell: usize) -> f64 {
 fn ln_speed_at(rate: f64, cell: usize) -> f64 {
     let rate = rate.clamp(0.01, (1.0 - LAPSE) * 0.999);
     ln_speed_of(cell) - slope_of(cell) * (logit(rate / (1.0 - LAPSE)) - reference_logit())
+}
+
+/// The speed of grid point `bin`, in WPM.
+fn grid_speed(bin: usize) -> f64 {
+    (SPEED_FROM.ln() + bin as f64 * LOG_STEP).exp()
 }
 
 /// The grid point nearest a speed, for the table: speeds past either end of
@@ -427,7 +435,7 @@ impl SpeedBelief {
     /// The belief the history leaves for `settings`, its first guess the
     /// middle of the speeds they allow.
     pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
-        Self::replay(history, settings, |_, _| {})
+        Self::replay(history, settings, FirstGuess::Settings, |_, _, _| {})
     }
 
     /// The belief a new session starts from: the history's, all of it one
@@ -439,70 +447,67 @@ impl SpeedBelief {
     }
 
     /// The copy speed at `rate` of characters right after each session of
-    /// the history that counts towards it, oldest first.
+    /// the history that counts towards it, oldest first, with the slowest
+    /// and the fastest speed it was read from up to then. Its first guess is
+    /// the middle of what the first session sent, not of today's speeds, so
+    /// that a change to the speeds does not redraw the past.
     pub fn history(
         history: &[SessionResult],
         settings: &TrainingSettings,
         rate: f64,
     ) -> Vec<EstimatePoint> {
         let mut points = Vec::new();
-        Self::replay(history, settings, |session, speed| {
-            points.push(EstimatePoint {
-                timestamp: session.timestamp,
-                estimate: speed.estimate(rate),
-            });
-        });
+        let mut sent = None;
+        Self::replay(
+            history,
+            settings,
+            FirstGuess::FirstSession,
+            |session, speed, speeds| {
+                sent = joined(sent, speeds);
+                if let Some(sent) = sent {
+                    points.push(EstimatePoint {
+                        timestamp: session.timestamp,
+                        estimate: speed.estimate(rate),
+                        sent,
+                    });
+                }
+            },
+        );
         points
     }
 
-    /// Learn from the history in the order it was practised, telling `after`
-    /// where the belief stands after each session. Only sessions of the
-    /// character set `settings` trains count: a callsign at 30 WPM is not a
-    /// two-letter Koch group at 30 WPM. Groups cut short are read as
-    /// `settings` would read them now: their lost ends the length's while
-    /// group size adapts and the group could be shorter ([`speed_tally`]).
+    /// Learn from the history in the order it was practised, its first
+    /// guess as `first` says, telling `after` where the belief stands after
+    /// each session and the slowest and fastest speed the session said
+    /// anything at. Only sessions of the character set `settings` trains
+    /// count: a callsign at 30 WPM is not a two-letter Koch group at 30 WPM.
+    /// Groups cut short are read as `settings` would read them now: their
+    /// lost ends the length's while group size adapts and the group could be
+    /// shorter ([`speed_tally`]).
     fn replay(
         history: &[SessionResult],
         settings: &TrainingSettings,
-        mut after: impl FnMut(&SessionResult, &Self),
+        first: FirstGuess,
+        mut after: impl FnMut(&SessionResult, &Self, Option<(f64, f64)>),
     ) -> Self {
-        let (low, high) = SpeedPath::of(settings).bounds();
+        let floor = crate::sampling::adaptive_bounds(settings).map(|(shortest, _)| shortest);
+        let sessions: Vec<_> = sessions_in_order(history, settings.curriculum.char_set_mode)
+            .into_iter()
+            .map(|session| (session, session_evidence(session, floor)))
+            .collect();
+        let first_sent = match first {
+            FirstGuess::Settings => None,
+            FirstGuess::FirstSession => sessions.iter().find_map(|(_, (_, sent))| *sent),
+        };
+        let (low, high) = first_sent.unwrap_or_else(|| SpeedPath::of(settings).bounds());
         let mut speed = Self::new((low * high).sqrt());
-        speed.length_floor =
-            crate::sampling::adaptive_bounds(settings).map(|(shortest, _)| shortest);
-        let floor = speed.length_floor;
-        for session in sessions_in_order(history, settings.curriculum.char_set_mode) {
+        speed.length_floor = floor;
+        for (session, (tally, sent)) in sessions {
             speed.belief.fade();
-            let contest = session.char_set_mode == CharSetMode::Contest;
-            let evidence = |sent: &str, received: &str| {
-                if contest {
-                    whole_evidence(sent, received).map(as_whole)
-                } else {
-                    speed_evidence(sent, received, floor).map(|counts| by_character(sent, counts))
-                }
-            };
-            let mut tally = Tally::new();
-            let counted = session.groups.iter().zip(speed_groups(session));
-            for (index, (group, counts)) in counted.enumerate() {
-                if !counts {
-                    continue;
-                }
-                let timing = session.group_timings.get(index);
-                let char_wpm = timing
-                    .and_then(|timing| timing.char_wpm)
-                    .unwrap_or(session.char_wpm);
-                let effective_wpm = timing
-                    .and_then(|timing| timing.effective_wpm)
-                    .unwrap_or(session.effective_wpm);
-                if let Some((hits, misses)) = evidence(&group.sent, &group.received) {
-                    let bin = speed_bin(copy_speed(char_wpm, effective_wpm).ln());
-                    tally.add(bin, hits, misses);
-                }
-            }
             for (bin, hits, misses) in tally.rows() {
                 speed.observe(bin, hits, misses);
             }
-            after(session, &speed);
+            after(session, &speed, sent);
         }
         speed
     }
@@ -610,6 +615,47 @@ impl SpeedBelief {
     }
 }
 
+/// What `session` says about speed, its groups cut short read with `floor`
+/// as the shortest group adaptive group size draws ([`speed_tally`]): the
+/// hits and misses at each grid speed, and the slowest and the fastest
+/// speed they were sent at, kept to the grid.
+fn session_evidence(
+    session: &SessionResult,
+    floor: Option<usize>,
+) -> (Tally<usize>, Option<(f64, f64)>) {
+    let contest = session.char_set_mode == CharSetMode::Contest;
+    let evidence = |sent: &str, received: &str| {
+        if contest {
+            whole_evidence(sent, received).map(as_whole)
+        } else {
+            speed_evidence(sent, received, floor).map(|counts| by_character(sent, counts))
+        }
+    };
+    let mut tally = Tally::new();
+    let mut speeds = Vec::new();
+    let counted = session.groups.iter().zip(speed_groups(session));
+    for (index, (group, counts)) in counted.enumerate() {
+        if !counts {
+            continue;
+        }
+        let timing = session.group_timings.get(index);
+        let char_wpm = timing
+            .and_then(|timing| timing.char_wpm)
+            .unwrap_or(session.char_wpm);
+        let effective_wpm = timing
+            .and_then(|timing| timing.effective_wpm)
+            .unwrap_or(session.effective_wpm);
+        if let Some((hits, misses)) = evidence(&group.sent, &group.received) {
+            let copy = copy_speed(char_wpm, effective_wpm);
+            tally.add(speed_bin(copy.ln()), hits, misses);
+            if copy.is_finite() {
+                speeds.push(copy.clamp(grid_speed(0), grid_speed(SPEED_POINTS - 1)));
+            }
+        }
+    }
+    (tally, range_of(speeds))
+}
+
 /// Round speeds from about `low` to about `high`, 1, 2, 5, 10 or 20 WPM
 /// apart: as close together as keeps them to a dozen.
 pub(crate) fn forecast_speeds(low: f64, high: f64) -> Vec<f64> {
@@ -679,6 +725,7 @@ fn candidates(low: f64, high: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::belief::EstimateReading;
     use crate::contest::ContestLog;
     use crate::rng::SplitMix64;
     use crate::session::{GroupResult, SessionTiming};
@@ -980,6 +1027,30 @@ mod tests {
                 ..SessionTiming::default()
             }],
             ..SessionResult::empty_for_test()
+        }
+    }
+
+    /// The copy speed shown for the history takes nothing from today's
+    /// speeds: a wider range redraws none of it. Copying near the ceiling at
+    /// the one speed ever sent says only that the copy speed is past it, so
+    /// that is all it says, however the evidence piles up.
+    #[test]
+    fn the_copy_speed_shown_is_the_historys_and_never_past_what_was_sent() {
+        let history: Vec<SessionResult> = (0..30)
+            .map(|n| {
+                let mut session = stored(n, 20.0, "KMRSU");
+                session.groups = vec![session.groups[0].clone(); 20];
+                session.group_timings = vec![session.group_timings[0].clone(); 20];
+                session
+            })
+            .collect();
+        let points = SpeedBelief::history(&history, &settings(15.0, 30.0), 0.94);
+        let wide = SpeedBelief::history(&history, &settings(15.0, 40.0), 0.94);
+        assert_eq!(points, wide);
+        assert_eq!(points.len(), 30);
+        for point in &points {
+            assert!((point.sent.0 - 20.0).abs() < 1e-9 && (point.sent.1 - 20.0).abs() < 1e-9);
+            assert_eq!(point.reading(), EstimateReading::Over(point.sent.1));
         }
     }
 
