@@ -197,6 +197,14 @@ A Dioxus that asks for a later 0.34, 0.35 or 0.36 leaves the patch unused
 in the same way. Those still lose the wake: vendor that release in place of
 this one, as published, and make the same change.
 
+As a backstop, a thread of the app's own wakes the event loop every quarter
+second whatever else does ([`src/main.rs`](../src/main.rs)), and each wake
+has tao take what is waiting. A wake lost some other way then holds the
+app's tasks back a quarter second at most, well inside the two seconds a
+session's heartbeat takes for time away. A wake with nothing waiting costs
+the loop one empty turn. It does not depend on the patch, and can stay
+when the patch goes.
+
 ### Building an APK
 
 ```bash

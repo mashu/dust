@@ -197,6 +197,54 @@ fn launch_mobile() {
         .launch(App);
 }
 
+/// How often Android's event loop is woken whatever else wakes it: well
+/// inside a session's two-second heartbeat gap, so a task held up until
+/// the next kick is not taken for time the app was away.
+#[cfg(all(target_os = "android", not(test)))]
+const LOOP_KICK_MS: u64 = 250;
+
+/// Wake the event loop every [`LOOP_KICK_MS`], on Android. Every task the
+/// app has runs when Dioxus's word to poll it reaches tao's event loop, and
+/// tao 0.34 lost that word whenever the looper woke for a lifecycle event
+/// at the same moment: nothing ran again until something else woke the
+/// loop. `vendor/tao` takes the word on every wake now
+/// (docs/platforms.md, Android); this is the backstop, should a wake go
+/// missing some other way, as each wake has tao take what is waiting.
+///
+/// `main` runs on the event loop's own thread, whose looper tao has made
+/// ready before calling it.
+#[cfg(all(target_os = "android", not(test)))]
+fn kick_the_event_loop() {
+    use dioxus::mobile::tao::platform::android::prelude::ndk::looper::ForeignLooper;
+
+    let Some(looper) = ForeignLooper::for_thread() else {
+        return;
+    };
+    let _ = kick_every(std::time::Duration::from_millis(LOOP_KICK_MS), move || {
+        looper.wake();
+        true
+    });
+}
+
+/// Call `kick` every `period`, on a thread of its own, for as long as it
+/// says to go on.
+#[cfg(any(test, target_os = "android"))]
+fn kick_every(
+    period: std::time::Duration,
+    kick: impl Fn() -> bool + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("dust-loop-kick".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(period);
+                if !kick() {
+                    break;
+                }
+            }
+        })
+}
+
 fn main() {
     #[cfg(feature = "desktop")]
     {
@@ -204,11 +252,40 @@ fn main() {
     }
     #[cfg(not(any(feature = "desktop", feature = "web")))]
     {
+        #[cfg(all(target_os = "android", not(test)))]
+        kick_the_event_loop();
         launch_mobile();
     }
     // A browser applies each render as it comes, frames or none.
     #[cfg(feature = "web")]
     {
         dioxus::launch(App);
+    }
+}
+
+#[cfg(test)]
+mod kick_tests {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// The loop is kicked again and again, not once, and the kicks stop
+    /// once there is nothing left to kick.
+    #[test]
+    fn the_event_loop_is_kicked_until_it_is_gone() {
+        let (kicked, kicks) = mpsc::channel();
+        let kicker = super::kick_every(Duration::from_millis(1), move || kicked.send(()).is_ok())
+            .expect("a thread");
+        for _ in 0..3 {
+            kicks
+                .recv_timeout(Duration::from_secs(10))
+                .expect("kicked again");
+        }
+        // Gone: the next kick finds no one, and the thread ends.
+        drop(kicks);
+        let given_up = Instant::now() + Duration::from_secs(10);
+        while !kicker.is_finished() {
+            assert!(Instant::now() < given_up, "the kicks went on");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }
