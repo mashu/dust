@@ -63,7 +63,7 @@ fn a_backup_is_saved_with_everything_and_remembered() {
         );
         let backup = read_backup(contents).expect("a backup");
         assert_eq!(backup.sessions.len(), 5);
-        assert_eq!(backup.settings, test_settings().clamp());
+        assert_eq!(backup.settings, Some(test_settings().clamp()));
         assert_eq!(ui.store.last_backup(), Some(backup.saved_at));
         assert!(ui.has(&format!("Backup saved as {name}, in your downloads.")));
         assert!(ui.has("nothing new since"));

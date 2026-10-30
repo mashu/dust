@@ -362,13 +362,28 @@ file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
 that field. A settings file from before the AGC threshold went comes back
 with a threshold raised under the AGC as the RF gain backed off as far, which
-is how the AGC heard it. A history that
+is how the AGC heard it. A setting a later build added, which this one does
+not read, is kept and written back with the rest, as are the keys a later
+build added to a session, a group, its timing or a counter: a copy of this
+build left open beside a newer one never strips them. A history that
 cannot be read at all is set aside beside the new one rather than written over,
 and if it cannot even be moved, nothing is saved over it until a later read
 of it reads, or sets it aside: a file another program had open for a moment
-holds back no more than the saves made meanwhile. A browser keeps the newest
-five copies it set aside, `dust_sessions_unreadable`, `_2`, `_3`…, and lets
-the oldest go first when a new one needs the room.
+holds back no more than the saves made meanwhile. Sessions that cannot be
+read are set aside the same way, and so are settings that do not read at all,
+a `settings.json` edited by hand and left with a stray comma say, before the
+defaults the app opens with are written over them: `settings.unreadable-*.json`
+beside it, or `dust_settings_unreadable` in a browser. The app says what it set
+aside, once, and how to have it back. A set-aside history is a list of
+sessions, which **Restore a backup** reads too: mended, or in a later version
+that reads what this one could not, it puts its sessions back and leaves the
+settings alone. On a computer the notice names the file; on a phone or in a
+browser the copy stays in the app's own store, out of reach, and a backup is
+the way back. A browser keeps the newest five copies it set aside,
+`dust_sessions_unreadable`, `_2`, `_3`…, and lets the oldest go first when a
+new one needs the room; a copy with no room beside what it is set aside from
+is moved into that room instead, so a large history that cannot be read never
+holds back every save after it.
 
 From contest mode on, a mode added later is written under the name of the
 older mode closest to it, plus a mark only newer builds read, so older builds

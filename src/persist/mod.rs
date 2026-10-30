@@ -40,6 +40,10 @@ pub trait Store {
     fn mark_tutorial_done(&self);
     /// The stored settings, clamped; `None` when nothing stored reads as
     /// settings at all: a first launch, or a store that cannot be read.
+    ///
+    /// Settings stored that do not read at all are set aside first
+    /// ([`Store::take_set_aside`]), and until they are, held: written over
+    /// by nothing.
     fn read_settings(&self) -> Option<TrainingSettings>;
     /// The stored settings, clamped; defaults for whatever could not be read.
     fn load_settings(&self) -> TrainingSettings {
@@ -67,6 +71,11 @@ pub trait Store {
     }
     /// Store the newest of `sessions`, up to [`MAX_SESSIONS`].
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved;
+    /// What reading the store has set aside, as it could not read it, since
+    /// this was last asked: taken, so the user is told of each once.
+    fn take_set_aside(&self) -> Vec<SetAside> {
+        Vec::new()
+    }
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters;
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters);
     fn clear_auto_counters(&self, keys: &[CountersKey]);
@@ -140,6 +149,20 @@ impl CutOff {
     }
 }
 
+/// What a read set aside, as it could not read it, beside what it was
+/// written over by ([`Store::take_set_aside`]). `kept` is where the copy is,
+/// where the user can reach it: a file on a computer; nowhere they can on
+/// a phone or in a browser, where it stays in the app's own store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetAside {
+    /// The settings, whole: the app went on with its defaults.
+    Settings { kept: Option<String> },
+    /// The history, whole: the app went on without one.
+    History { kept: Option<String> },
+    /// `count` sessions of the history: the app went on without them.
+    Sessions { count: usize, kept: Option<String> },
+}
+
 /// The sessions cut off, being looked for: already, or still, where only the
 /// platform can tell which copies are running, as in a browser.
 pub type CutOffTaking = Pin<Box<dyn Future<Output = Option<CutOff>>>>;
@@ -159,6 +182,12 @@ fn saved_now(result: Result<String, String>) -> BackupSaving {
 fn saved_as(place: &str) -> String {
     format!("Backup saved as {place}.")
 }
+
+/// Why settings were not stored: those stored could not be read, nor set
+/// aside, when they were last read, so they are kept as they are rather
+/// than written over. In words that follow "could not be saved:".
+#[cfg(any(feature = "web", feature = "native-runtime"))]
+const SETTINGS_HELD: &str = "the settings stored could not be read, so they were left as they are";
 
 /// What became of a history handed to [`Store::save_sessions`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -337,21 +366,33 @@ fn aside_number(prefix: &str, key: &str) -> Option<u64> {
     }
 }
 
-/// Keep `raw`, what could not be read of a history, set aside in `store`
-/// under `prefix`, and say whether it is kept. A copy set aside before is
-/// never written over, and one set aside already is not kept twice.
+/// What became of a copy of what could not be read, set aside.
+#[cfg(any(feature = "web", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kept {
+    /// Set aside now.
+    Now,
+    /// Set aside before: the same copy is kept already.
+    Already,
+    /// Not kept.
+    Not,
+}
+
+/// Keep `raw`, what could not be read, set aside in `store` under
+/// `prefix`, and say whether it is kept. A copy set aside before is never
+/// written over, and one set aside already is not kept twice.
 ///
 /// Each copy goes under the number after the newest, so the numbers say
 /// which is newer, and only the newest [`MAX_SET_ASIDE`] are kept. One that
 /// does not fit lets the oldest go, one at a time, until it does; if it
-/// does not fit even then, those go back as they were. Nothing reads a
-/// copy set aside back but a person, while a history that cannot be set
+/// does not fit even then, those go back as they were. A copy set aside is
+/// there for a person to recover from, while a history that cannot be set
 /// aside holds back every session finished after it: so old copies give
 /// way to a new one, the oldest first.
 #[cfg(any(feature = "web", test))]
-fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
+fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> Kept {
     let Ok(keys) = store.keys() else {
-        return false;
+        return Kept::Not;
     };
     let mut numbered: Vec<(u64, String)> = keys
         .into_iter()
@@ -362,16 +403,16 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
         .last()
         .map_or(Some(1), |(number, _)| number.checked_add(1))
     else {
-        return false;
+        return Kept::Not;
     };
     // Each copy already set aside, oldest first, and what it holds.
     let mut older = Vec::with_capacity(numbered.len());
     for (_, key) in numbered {
         match store.get(&key) {
-            Ok(Some(kept)) if kept == raw => return true,
+            Ok(Some(kept)) if kept == raw => return Kept::Already,
             Ok(Some(kept)) => older.push((key, kept)),
             Ok(None) => {}
-            Err(()) => return false,
+            Err(()) => return Kept::Not,
         }
     }
     let key = match next {
@@ -384,7 +425,7 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
             for (key, kept) in &older {
                 store.set(key, kept);
             }
-            return false;
+            return Kept::Not;
         };
         store.remove(oldest);
         gone += 1;
@@ -393,7 +434,52 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
     for (key, _) in &older[gone..first_kept] {
         store.remove(key);
     }
-    true
+    Kept::Now
+}
+
+/// Set `unread`, what could not be read of `raw`, stored under `key`, aside
+/// under `prefix` before anything writes over it, and say whether it is
+/// kept. `rest` is what `key` is to hold once it is: the sessions that
+/// could be read, or nothing, when none of `raw` could be.
+///
+/// A copy goes beside what is stored, if there is room for it. If there is
+/// not, it is moved: `key` gives up its room first, holding only `rest`,
+/// and the copy goes into the room that frees; should even that fail, `key`
+/// is put back as it was. A history too large to copy beside itself used
+/// to be held instead, for as long as the browser kept it, and every
+/// session finished after it went unsaved.
+#[cfg(any(feature = "web", test))]
+fn set_aside_from(
+    store: &impl Aside,
+    key: &str,
+    raw: &str,
+    prefix: &str,
+    unread: &str,
+    rest: Option<&str>,
+) -> Kept {
+    let kept = keep_aside(store, prefix, unread);
+    if kept != Kept::Not {
+        if rest.is_none() {
+            store.remove(key);
+        }
+        return kept;
+    }
+    let room = match rest {
+        Some(rest) => store.set(key, rest),
+        None => {
+            store.remove(key);
+            true
+        }
+    };
+    let moved = if room {
+        keep_aside(store, prefix, unread)
+    } else {
+        Kept::Not
+    };
+    if moved == Kept::Not {
+        store.set(key, raw);
+    }
+    moved
 }
 
 /// `written`, a record as this build writes it, laid over `stored`, the
@@ -890,7 +976,7 @@ pub(crate) mod tests {
         let pretty = serde_json::to_string_pretty(&moved).expect("serialize");
         assert_eq!(load_settings_from(&pretty), moved);
         let backup = backup::read_backup(&backup::write_backup(&moved, &[], 1)).expect("a backup");
-        assert_eq!(backup.settings, moved);
+        assert_eq!(backup.settings, Some(moved));
     }
 
     /// A merge keeps what is stored, and lays over it only what this copy
@@ -1155,16 +1241,16 @@ pub(crate) mod tests {
     #[test]
     fn what_could_not_be_read_is_set_aside_beside_what_was_before() {
         let shelf = Shelf::with_room(usize::MAX);
-        assert!(keep_aside(&shelf, "aside", "first"));
-        assert!(keep_aside(&shelf, "aside", "second"));
-        assert!(keep_aside(&shelf, "aside", "first"), "kept already");
+        assert_eq!(keep_aside(&shelf, "aside", "first"), Kept::Now);
+        assert_eq!(keep_aside(&shelf, "aside", "second"), Kept::Now);
+        assert_eq!(keep_aside(&shelf, "aside", "first"), Kept::Already);
         assert_eq!(
             shelf.aside(),
             shelved(&[("aside", "first"), ("aside_2", "second")])
         );
         // A store that cannot be read: not kept, and nothing changed.
         shelf.unreadable.set(true);
-        assert!(!keep_aside(&shelf, "aside", "third"));
+        assert_eq!(keep_aside(&shelf, "aside", "third"), Kept::Not);
         shelf.unreadable.set(false);
         assert_eq!(shelf.aside().len(), 2);
         assert_eq!(aside_number("aside", "asidea"), None);
@@ -1184,7 +1270,7 @@ pub(crate) mod tests {
         for n in 2..=20 {
             shelf.set(&format!("aside_{n}"), &n.to_string());
         }
-        assert!(keep_aside(&shelf, "aside", "new"));
+        assert_eq!(keep_aside(&shelf, "aside", "new"), Kept::Now);
         assert_eq!(
             shelf.aside(),
             shelved(&[
@@ -1195,7 +1281,7 @@ pub(crate) mod tests {
                 ("aside_21", "new"),
             ])
         );
-        assert!(keep_aside(&shelf, "aside", "newer"));
+        assert_eq!(keep_aside(&shelf, "aside", "newer"), Kept::Now);
         assert_eq!(shelf.aside().len(), MAX_SET_ASIDE);
         assert_eq!(
             shelf.aside().last(),
@@ -1209,19 +1295,67 @@ pub(crate) mod tests {
     fn a_copy_set_aside_makes_room_by_letting_the_oldest_go() {
         // The history's own room, and a little short of room for three.
         let shelf = Shelf::with_room(2 + 4 + 4 + 5);
-        assert!(keep_aside(&shelf, "aside", "aaaa"));
-        assert!(keep_aside(&shelf, "aside", "bbbb"));
-        assert!(keep_aside(&shelf, "aside", "cccccc"), "room made");
+        assert_eq!(keep_aside(&shelf, "aside", "aaaa"), Kept::Now);
+        assert_eq!(keep_aside(&shelf, "aside", "bbbb"), Kept::Now);
+        assert_eq!(
+            keep_aside(&shelf, "aside", "cccccc"),
+            Kept::Now,
+            "room made"
+        );
         assert_eq!(
             shelf.aside(),
             shelved(&[("aside_2", "bbbb"), ("aside_3", "cccccc")])
         );
-        assert!(!keep_aside(&shelf, "aside", "far too long for it"));
+        assert_eq!(
+            keep_aside(&shelf, "aside", "far too long for it"),
+            Kept::Not
+        );
         assert_eq!(
             shelf.aside(),
             shelved(&[("aside_2", "bbbb"), ("aside_3", "cccccc")]),
             "put back as they were"
         );
+    }
+
+    /// A history too large to copy beside itself is moved aside into its
+    /// own room; one only some of whose sessions could not be read keeps
+    /// the rest. It used to be held instead, for as long as the browser
+    /// kept it, and every session finished after it went unsaved.
+    #[test]
+    fn a_history_too_large_to_copy_beside_itself_is_moved_aside() {
+        let (raw, unread, rest) = ("r".repeat(100), "u".repeat(60), "g".repeat(40));
+        // Room for the history and a little more, never for it twice.
+        let shelf = Shelf::with_room(150);
+        shelf.set("history", &raw);
+        let kept = set_aside_from(&shelf, "history", &raw, "aside", &raw, None);
+        assert_eq!(kept, Kept::Now);
+        assert_eq!(shelf.aside(), shelved(&[("aside", raw.as_str())]));
+        assert_eq!(shelf.get("history"), Ok(None), "out of the way of a save");
+
+        let shelf = Shelf::with_room(150);
+        shelf.set("history", &raw);
+        let kept = set_aside_from(&shelf, "history", &raw, "aside", &unread, Some(&rest));
+        assert_eq!(kept, Kept::Now);
+        assert_eq!(shelf.aside(), shelved(&[("aside", unread.as_str())]));
+        assert_eq!(shelf.get("history"), Ok(Some(rest.clone())));
+
+        // With room to copy, the history stays as it is until a save.
+        let shelf = Shelf::with_room(usize::MAX);
+        shelf.set("history", &raw);
+        let kept = set_aside_from(&shelf, "history", &raw, "aside", &unread, Some(&rest));
+        assert_eq!(kept, Kept::Now);
+        assert_eq!(shelf.get("history"), Ok(Some(raw.clone())));
+        let again = set_aside_from(&shelf, "history", &raw, "aside", &unread, Some(&rest));
+        assert_eq!(again, Kept::Already, "not twice");
+
+        // Where nothing can be set aside, the history is put back as it was.
+        let shelf = Shelf::with_room(150);
+        shelf.set("history", &raw);
+        shelf.unreadable.set(true);
+        let kept = set_aside_from(&shelf, "history", &raw, "aside", &raw, None);
+        assert_eq!(kept, Kept::Not);
+        shelf.unreadable.set(false);
+        assert_eq!(shelf.get("history"), Ok(Some(raw)));
     }
 
     /// A browser's history is capped by room. Large sessions — two hundred
@@ -1477,7 +1611,7 @@ pub(crate) mod tests {
             r#"{{"dustBackup":1,"settings":{old},"sessions":[]}}"#
         ))
         .expect("a backup");
-        assert_eq!(backup.settings.band.rf_gain_db, -15.0);
+        assert_eq!(backup.settings.map(|s| s.band.rf_gain_db), Some(-15.0));
 
         // And a merge with a copy that read the same old save keeps it,
         // beside a change made here.
