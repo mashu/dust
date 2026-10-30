@@ -205,6 +205,22 @@ session's heartbeat takes for time away. A wake with nothing waiting costs
 the loop one empty turn. It does not depend on the patch, and can stay
 when the patch goes.
 
+Should the app stand still anyway, with the audio held, it says so in the
+system log ([`src/stall_log.rs`](../src/stall_log.rs)). Every wait the
+app's tasks make goes through `sleep_ms`, which notes when the task is due
+again, and a claim of the audio is due at once. A thread looks every half
+second, and the first time it finds the app more than 1.5 seconds past due
+while a lease holds the audio, it writes one line for that stall:
+
+```text
+dust: stalled: a task due 2140 ms ago has not run, audio held
+```
+
+`adb logcat -s RustStdoutStderr` shows it. A long wait asked for, such as
+the stream's pause between groups, is not due until it is over, so none
+should ever appear: one is worth a report, with what was on the screen and
+what had just been tapped. The desktop and web builds have none of this.
+
 ### Building an APK
 
 ```bash

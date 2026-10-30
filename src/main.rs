@@ -30,6 +30,7 @@ mod playback;
 mod player;
 mod routes;
 mod session_runtime;
+mod stall_log;
 mod state;
 // A phone's Back and a browser's; tests press it on a page of their own.
 #[cfg(any(test, feature = "web", target_os = "android"))]
@@ -200,7 +201,7 @@ fn launch_mobile() {
 /// How often Android's event loop is woken whatever else wakes it: well
 /// inside a session's two-second heartbeat gap, so a task held up until
 /// the next kick is not taken for time the app was away.
-#[cfg(all(target_os = "android", not(test)))]
+#[cfg(any(test, target_os = "android"))]
 const LOOP_KICK_MS: u64 = 250;
 
 /// Wake the event loop every [`LOOP_KICK_MS`], on Android. Every task the
@@ -253,7 +254,10 @@ fn main() {
     #[cfg(not(any(feature = "desktop", feature = "web")))]
     {
         #[cfg(all(target_os = "android", not(test)))]
-        kick_the_event_loop();
+        {
+            kick_the_event_loop();
+            stall_log::start();
+        }
         launch_mobile();
     }
     // A browser applies each render as it comes, frames or none.
