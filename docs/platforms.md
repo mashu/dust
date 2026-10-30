@@ -153,13 +153,70 @@ dx bundle --platform android --target aarch64-linux-android --package-types apk 
 Pass `--target` explicitly: without it `dx` builds for the host architecture,
 which on an x86_64 machine means an emulator APK that a phone will not run.
 
+That APK is the debug build type, signed with your own debug key, so it
+installs only where Dust is not installed yet.
+
 On Debian the `google-android-*-installer` packages in contrib fetch Google's
 SDK bits; the official `commandlinetools` zip plus `sdkmanager` gives tighter
 control over NDK versions. Either way you need JDK 17 and
 `ANDROID_HOME`/`ANDROID_NDK_HOME` exported.
 
 Without cutting a release: **Actions → Android APK → Run workflow**, on any
-branch. The APK is attached to that run as an artifact.
+branch. The APK is attached to that run as an artifact. With the release
+profile it is signed with the release key, as a release's is, and installs
+over one; with the debug profile it is a debug build like the one above.
+
+### Release signing
+
+An APK installs over the one before it only if both carry the same key. A
+release's APK is Android's release build type, minified and not
+debuggable, signed with the project's own release key, so each release
+installs over the last and keeps its history. `dx` builds that type only
+when `Dioxus.toml` has a `[bundle.android]` table, so CI writes one at build
+time from four repository secrets
+([`scripts/android-release-signing.sh`](../scripts/android-release-signing.sh)),
+then checks that the APK is not debuggable and carries that key. Without
+the secrets the APK job fails and the release goes out with no APK.
+
+One-time, make the key and add the secrets. The password must be letters
+and digits: `dx` passes it to Gradle through a template that would change
+anything else.
+
+```bash
+install -m 700 -d ~/.android
+pw="$(openssl rand -hex 24)"
+printf 'ANDROID_KEYSTORE_PASSWORD=%s\nANDROID_KEY_PASSWORD=%s\nANDROID_KEY_ALIAS=dust\n' \
+  "$pw" "$pw" > ~/.android/dust-release.env
+chmod 600 ~/.android/dust-release.env
+keytool -genkeypair -v \
+  -keystore ~/.android/dust-release.p12 \
+  -storetype PKCS12 \
+  -alias dust \
+  -keyalg RSA -keysize 4096 -validity 10000 \
+  -dname "CN=Dust Morse Trainer, O=Dust, C=US" \
+  -storepass "$pw" \
+  -keypass "$pw"
+chmod 600 ~/.android/dust-release.p12
+base64 -w0 ~/.android/dust-release.p12 | gh secret set ANDROID_KEYSTORE_BASE64
+printf '%s' "$pw" | gh secret set ANDROID_KEYSTORE_PASSWORD
+printf '%s' "$pw" | gh secret set ANDROID_KEY_PASSWORD
+printf 'dust' | gh secret set ANDROID_KEY_ALIAS
+unset pw
+```
+
+Without `gh`, add the same four under Settings → Secrets and variables →
+Actions. Back up `~/.android/dust-release.p12` and the env file beside it:
+GitHub never shows a secret again, and an APK signed with any other key can
+never update an install.
+
+The Play build is signed with Play's own app signing key, so the Play app
+and a GitHub APK, both `dev.dust.morse`, cannot update each other. Nor can
+any later release update an APK from 0.16.1 or before, which carried a
+throwaway debug key. Android refuses such an install. To move across, save
+a backup (Stats → History → Save a backup), uninstall, install the other
+build and restore the backup. Uninstalling deletes the app's data, and on
+Android 9 and older the backup with it, as it lies in the app's own
+`Android/data/dev.dust.morse/files/Download`: copy it elsewhere first.
 
 ### Play Store
 

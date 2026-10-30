@@ -45,7 +45,8 @@ cargo test -p dust --features desktop
 Push a tag `v` + the version in `Cargo.toml`, e.g. `git tag v1.2.3 && git push
 origin v1.2.3`, on a commit pushed to `main`. The release waits for that
 commit's CI run and stops unless it passed; then it builds every bundle and
-attaches it to the release.
+attaches it to the release. The Android APK needs the release key:
+[docs/platforms.md](docs/platforms.md#release-signing).
 
 ## License
 

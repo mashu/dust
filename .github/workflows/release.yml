@@ -365,6 +365,25 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Each release's APK must install over the last one, so it is signed with
+      # the release key, never a debug key Gradle makes on the runner. Without
+      # the key this job fails, and the release goes out with no APK.
+      - name: Set up the release key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source scripts/android-release-signing.sh
+          if ! install_android_release_signing "$PWD" "${RUNNER_TEMP}/dust-release.p12"; then
+            echo "::error title=No Android release key::The release has no APK. Add the ANDROID_* secrets (docs/platforms.md, Release signing)."
+            exit 1
+          fi
+          echo "ANDROID_RELEASE_CERT_SHA256=${ANDROID_RELEASE_CERT_SHA256}" >> "$GITHUB_ENV"
+
       - name: Resolve the Android SDK and NDK
         run: |
           set -euo pipefail
@@ -391,11 +410,12 @@ jobs:
             echo "NDK_HOME=$ndk"
           } >> "$GITHUB_ENV"
 
+      # Not target/dx: the Gradle project dx writes there holds the key's
+      # passwords.
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release-android
-          cache-directories: target/dx
 
       - name: Install cargo-binstall
         uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
@@ -440,6 +460,9 @@ jobs:
           # shellcheck disable=SC1091
           source scripts/android-gradle-hook.sh
           check_android_apk_version "$PWD" "$apk"
+          # shellcheck disable=SC1091
+          source scripts/android-release-signing.sh
+          check_android_apk_release "$apk" "$ANDROID_RELEASE_CERT_SHA256"
           mkdir -p artifacts
           cp "$apk" "artifacts/dust-${VERSION}-android-arm64.apk"
           ls -lh artifacts
@@ -450,6 +473,12 @@ jobs:
           name: dust-android
           path: artifacts/*
           if-no-files-found: error
+
+      - name: Remove the release key
+        if: always()
+        run: |
+          rm -rf target/dx "${RUNNER_TEMP}/dust-release.p12"
+          git checkout -- Dioxus.toml
 
   ios:
     name: iOS IPA

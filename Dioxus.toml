@@ -51,7 +51,9 @@ icon = [
 desktop_template = "assets/linux/dust.desktop.hbs"
 
 # Play Store submissions from 2026-08-31 must target API 36.
-# Signing stays out of this file: see scripts/android-play-bundle.sh.
+# Signing stays out of this file: CI adds the release key at build time
+# (scripts/android-release-signing.sh), and scripts/android-play-bundle.sh
+# signs with the Play upload key.
 [android]
 min_sdk = 24
 target_sdk = 36

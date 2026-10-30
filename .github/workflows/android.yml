@@ -1,8 +1,12 @@
 # Build a sideloadable Android APK on demand.
 #
 # Actions → Android APK → Run workflow, on any branch. The APK lands in the run's
-# artifacts, signed with Gradle's debug key, so a phone installs it once you allow
-# installs from unknown sources.
+# artifacts, and a phone installs it once you allow installs from unknown sources.
+# The release profile builds what a release ships: the release build type, signed
+# with the release key from the ANDROID_* secrets (docs/platforms.md, Release
+# signing), so it installs over a release and a release over it. The debug profile
+# builds the debug build type, signed with a debug key Gradle makes for the run: it
+# installs only where Dust is not installed yet.
 #
 # Audio goes through cpal's AAudio/oboe backend, the same player the desktop build
 # uses. If that ever blocks a toolchain bring-up, `--features mobile-silent` builds
@@ -59,6 +63,25 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Without the key a release-profile build stops here: an APK signed with
+      # any other key could not update a release install, nor be updated by one.
+      - name: Set up the release key
+        if: env.PROFILE != 'debug'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source scripts/android-release-signing.sh
+          if ! install_android_release_signing "$PWD" "${RUNNER_TEMP}/dust-release.p12"; then
+            echo "::error title=No Android release key::Add the ANDROID_* secrets (docs/platforms.md, Release signing), or run with the debug profile."
+            exit 1
+          fi
+          echo "ANDROID_RELEASE_CERT_SHA256=${ANDROID_RELEASE_CERT_SHA256}" >> "$GITHUB_ENV"
+
       - name: Resolve the Android SDK and NDK
         run: |
           set -euo pipefail
@@ -88,11 +111,12 @@ jobs:
             echo "NDK_HOME=$ndk"
           } >> "$GITHUB_ENV"
 
+      # Not target/dx: the Gradle project dx writes there holds the key's
+      # passwords.
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: android
-          cache-directories: target/dx
 
       - name: Install cargo-binstall
         uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
@@ -144,6 +168,11 @@ jobs:
           # shellcheck disable=SC1091
           source scripts/android-gradle-hook.sh
           check_android_apk_version "$PWD" "$apk"
+          if [[ "$PROFILE" != "debug" ]]; then
+            # shellcheck disable=SC1091
+            source scripts/android-release-signing.sh
+            check_android_apk_release "$apk" "$ANDROID_RELEASE_CERT_SHA256"
+          fi
 
           mkdir -p artifacts
           name="dust-${version}-android-arm64.apk"
@@ -157,3 +186,9 @@ jobs:
           name: dust-android
           path: artifacts/*
           if-no-files-found: error
+
+      - name: Remove the release key
+        if: always()
+        run: |
+          rm -rf target/dx "${RUNNER_TEMP}/dust-release.p12"
+          git checkout -- Dioxus.toml
