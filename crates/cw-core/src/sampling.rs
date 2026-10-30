@@ -93,6 +93,66 @@ impl CharSamplingState {
     }
 }
 
+/// What a [`Sampler`] starts from: what the history says of each
+/// character, of your copy span and of your copy speed, as a new session
+/// sees it. Building it replays the history, too much to do inside a tap
+/// on a slow phone, so the app builds it ahead, keeps it until the history
+/// changes, and starts each sampler from a copy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SamplerPrior {
+    state: CharSamplingState,
+    span: SpanBelief,
+    speed: SpeedBelief,
+    /// What of the settings it was built for.
+    built_for: PriorSettings,
+}
+
+/// What of the settings a [`SamplerPrior`] is built from: the character set
+/// whose sessions the span and the speed replay, the group size range the
+/// span's first guess sits in the middle of, the shortest group adaptive
+/// group size draws, which a group's lost end is read against, and the
+/// speeds the copy speed's first guess sits in the middle of. Settings that
+/// agree in these build the same prior from the same history, whatever else
+/// they say.
+#[derive(Clone, Debug, PartialEq)]
+struct PriorSettings {
+    mode: CharSetMode,
+    group_sizes: (usize, usize),
+    length_floor: Option<usize>,
+    speeds: (f64, f64),
+}
+
+impl PriorSettings {
+    fn of(settings: &TrainingSettings) -> Self {
+        Self {
+            mode: settings.curriculum.char_set_mode,
+            group_sizes: group_size_bounds(settings),
+            length_floor: length_floor(settings),
+            speeds: SpeedPath::of(settings).bounds(),
+        }
+    }
+}
+
+impl SamplerPrior {
+    /// What the history says to a session of `settings`.
+    pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
+        Self {
+            state: CharSamplingState::for_session(history),
+            span: SpanBelief::for_session(history, settings),
+            speed: SpeedBelief::for_session(history, settings),
+            built_for: PriorSettings::of(settings),
+        }
+    }
+
+    /// Whether it is the prior `settings` would build from the history it
+    /// was built from: they agree in all it reads of them. A change of
+    /// level, volume or call leaves it as it was; one of the character set,
+    /// the group sizes or the speeds does not.
+    pub fn suits(&self, settings: &TrainingSettings) -> bool {
+        self.built_for == PriorSettings::of(settings)
+    }
+}
+
 /// The trainer's own group source: groups drawn for the curriculum, leaning
 /// on the characters the history says are hard and on those this session
 /// has not sent yet, and learning from every answer as it comes. With
@@ -115,10 +175,21 @@ impl Sampler {
     /// knows about the alphabet it trains. `seed` should differ from session
     /// to session.
     pub fn new(history: &[SessionResult], settings: &TrainingSettings, seed: u64) -> Self {
+        Self::from_prior(
+            SamplerPrior::from_history(history, settings),
+            settings,
+            seed,
+        )
+    }
+
+    /// The sampler [`Self::new`] makes, from a prior built ahead: it draws
+    /// what that one draws, as long as the prior suits `settings`
+    /// ([`SamplerPrior::suits`]).
+    pub fn from_prior(prior: SamplerPrior, settings: &TrainingSettings, seed: u64) -> Self {
         Self {
-            state: CharSamplingState::for_session(history),
-            span: SpanBelief::for_session(history, settings),
-            speed: SpeedBelief::for_session(history, settings),
+            state: prior.state,
+            span: prior.span,
+            speed: prior.speed,
             length_floor: length_floor(settings),
             rng: SplitMix64::new(seed),
         }
@@ -661,6 +732,7 @@ fn generate_group(
 mod tests {
     use super::*;
     use crate::session::GroupResult;
+    use crate::settings::Aim;
 
     /// Teach `sampler` that `typed` was the answer to `sent`, played at
     /// `played` if it was measured.
@@ -1714,6 +1786,114 @@ mod tests {
             struggling < fresh - 1.0,
             "struggling {struggling}, fresh {fresh}"
         );
+    }
+
+    /// One group a sampler drew: what it sent, how many times, and at what
+    /// speed.
+    type Drawn = (String, u32, Option<(f64, f64)>);
+
+    /// What a sampler draws: each group, its repeats and its speed, an
+    /// answer to each learned from as it comes, the first character of
+    /// every third group missed, so what it learns as it goes is drawn from
+    /// too.
+    fn draws(mut sampler: Sampler, settings: &TrainingSettings, groups: usize) -> Vec<Drawn> {
+        (0..groups)
+            .map(|index| {
+                let (group, repeats) = sampler.next_group(settings);
+                let speed = GroupSource::next_speed(&mut sampler, settings);
+                let typed: String = if index % 3 == 0 {
+                    group.chars().skip(1).collect()
+                } else {
+                    group.clone()
+                };
+                answer(&mut sampler, &group, &typed, speed);
+                (group, repeats, speed)
+            })
+            .collect()
+    }
+
+    /// A sampler started from a prior built ahead, for settings that read
+    /// alike, draws every group and speed a new one draws: with no history,
+    /// with one, and with a simulated learner's, lengths and speeds
+    /// adapting.
+    #[test]
+    fn a_sampler_from_a_prior_built_ahead_draws_what_a_new_one_does() {
+        use crate::learner_sim::{Adapting, IMPROVING, Judged, practise};
+        let (_, simulated) = practise(IMPROVING, Adapting::Both, Aim::Balanced, Judged::Now, 30, 3);
+        let cases = [
+            (Vec::new(), length_settings(false)),
+            (history_of("KMKMKM", true), length_settings(true)),
+            (simulated, Adapting::Both.settings(Aim::Balanced)),
+        ];
+        for (history, settings) in &cases {
+            // Built while another level, volume and call were set.
+            let mut before = settings.clone();
+            before.curriculum.level -= 1;
+            before.band.master_volume /= 2.0;
+            before.contest.set_my_call("W1AW");
+            let prior = SamplerPrior::from_history(history, &before);
+            assert!(prior.suits(settings));
+            for seed in [1, 7, 42] {
+                assert_eq!(
+                    draws(
+                        Sampler::from_prior(prior.clone(), settings, seed),
+                        settings,
+                        200
+                    ),
+                    draws(Sampler::new(history, settings, seed), settings, 200),
+                    "seed {seed}"
+                );
+            }
+        }
+    }
+
+    /// A prior is built again only for settings that read differently: the
+    /// character set, the group sizes or the speeds, each of which moves
+    /// it. Anything else leaves it as it is.
+    #[test]
+    fn a_prior_suits_every_setting_it_does_not_read() {
+        use crate::learner_sim::Adapting;
+        let settings = Adapting::Both.settings(Aim::Balanced);
+        let history = history_of("KMKMKM", false);
+        let prior = SamplerPrior::from_history(&history, &settings);
+        let alike: [fn(&mut TrainingSettings); 5] = [
+            |s| s.curriculum.level = 3,
+            |s| s.curriculum.aim = Aim::Stretch,
+            |s| s.band.master_volume = 0.3,
+            |s| s.contest.set_my_call("W1AW"),
+            |s| s.playback.lock_input_during_group_playback = true,
+        ];
+        for change in alike {
+            let mut moved = settings.clone();
+            change(&mut moved);
+            let moved = moved.clamp();
+            assert!(prior.suits(&moved), "{moved:?}");
+            assert_eq!(SamplerPrior::from_history(&history, &moved), prior);
+        }
+        let apart: [fn(&mut TrainingSettings); 7] = [
+            |s| s.curriculum.char_set_mode = CharSetMode::Mixed,
+            |s| s.curriculum.min_group_size = 3,
+            |s| s.curriculum.max_group_size = 6,
+            |s| s.curriculum.adaptive_group_size = false,
+            |s| s.playback.char_wpm_min = 18.0,
+            |s| s.playback.char_wpm_max = 25.0,
+            |s| {
+                s.playback.link_char_to_effective = false;
+                s.playback.effective_wpm_min = 8.0;
+                s.playback.effective_wpm_max = 10.0;
+            },
+        ];
+        for change in apart {
+            let mut moved = settings.clone();
+            change(&mut moved);
+            let moved = moved.clamp();
+            assert!(!prior.suits(&moved), "{moved:?}");
+            let rebuilt = SamplerPrior::from_history(&history, &moved);
+            assert!(
+                (&rebuilt.span, &rebuilt.speed) != (&prior.span, &prior.speed),
+                "the prior does not read what moved: {moved:?}"
+            );
+        }
     }
 
     /// A learner for both beliefs at once. Each character is recognised with
