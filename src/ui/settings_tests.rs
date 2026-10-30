@@ -94,6 +94,24 @@ fn random_opens_every_fixed_value_into_a_range() {
     });
 }
 
+/// Sends per group says what the box does while a group is sent again, as
+/// Lock typing while sending has it: off, as it ships, you type along from
+/// the first send; on, the box opens once the last has gone.
+#[test]
+fn sends_per_group_says_when_you_can_type_as_the_lock_has_it() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.playback.lock_input_during_group_playback = false;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(ui.has("type along from the first send"), "{}", ui.html());
+        assert!(!ui.has("before the answer box opens"));
+        ui.commit("switch-lock-typing-while-sending", "true");
+        assert!(ui.has("before the answer box opens"));
+        assert!(!ui.has("type along from the first send"));
+    });
+}
+
 /// A number committed past what the field allows comes back as the most it
 /// allows, even when that is what the setting already was. Until then the
 /// 999 is the box's own: nothing is written over it while it is typed.

@@ -1993,7 +1993,7 @@ fn training_without_repeats_omits_the_counter() {
     assert!(!html.contains("per group"));
     // One short line to answer by. How to key with the paddles is said on
     // the settings screen, beside them.
-    assert!(html.contains(">Type what you heard — no rush.<"), "{html}");
+    assert!(html.contains(">Type what you heard.<"), "{html}");
     assert!(!html.contains("dits"), "{html}");
     // The confirmed group shows its comparison.
     assert!(html.contains("ch sent-row"));

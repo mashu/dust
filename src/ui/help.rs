@@ -421,7 +421,7 @@ pub fn session_shape() -> Element {
             dt { "Aim for" }
             dd { "How hard adapting pushes: Comfortable keeps copy mostly clean, Stretch pushes to where you miss often." }
             dt { "Sends per group" }
-            dd { "How many times each group is sent before the answer box opens, a word space apart." }
+            dd { "How many times each group is sent, a word space apart. Type along from the first send; with Lock typing while sending on, the box opens after the last." }
             dt { "Lock typing while sending" }
             dd {
                 "Keeps you copying by ear rather than typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters cannot be timed (Stats → Letters)."

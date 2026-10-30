@@ -329,6 +329,13 @@ fn AimFor(settings: Signal<TrainingSettings>, aim: Aim, note: String) -> Element
 fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
     let shape = use_memo(move || SessionShape::of(&settings.read()));
     let s = shape.read();
+    // When the box takes typing while a group is sent again, as the lock
+    // has it.
+    let repeat_hint = if s.lock_input {
+        "Each group is sent this many times before the answer box opens — one word space apart, like a station repeating its call. Switch to Random to vary it per group."
+    } else {
+        "Each group is sent this many times, one word space apart, like a station repeating its call: type along from the first send. Switch to Random to vary it per group."
+    };
     rsx! {
         div { class: "card stack-sm",
             SectionHead {
@@ -456,7 +463,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     min_bound: f64::from(GROUP_REPEAT_MIN),
                     max_bound: f64::from(GROUP_REPEAT_MAX),
                     step: 1.0,
-                    hint: "Each group is repeated this many times before the answer box opens — one word space apart, like a station repeating its call. Switch to Random to vary it per group.",
+                    hint: repeat_hint,
                 }
                 Switch {
                     title: "Lock typing while sending",

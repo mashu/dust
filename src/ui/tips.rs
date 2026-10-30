@@ -4,7 +4,7 @@ use crate::time::sleep_ms;
 
 /// Tips for training on groups.
 pub const TIPS: &[&str] = &[
-    "Hear the group first, then type it—let it buffer so you recognize whole letters and words.",
+    "Type each character the moment you hear it—that is how Stats → Letters times how fast you recognise it.",
     "Stay relaxed; short, regular sessions work better than long cramming.",
     "If you fall behind, press Next to move on to the next group, keep your rhythm and avoid pile-up.",
     "If you miss a letter, learn to let it go.",
