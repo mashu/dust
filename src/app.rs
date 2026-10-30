@@ -692,7 +692,8 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(short_session());
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "training");
-            assert!(ui.has("Listen — the box opens when it ends."));
+            // Groups of two characters, typing locked as they are sent.
+            assert!(ui.has("Listen — typing locked, so not timed."));
             // The nav is out of the way while a session runs.
             assert!(!ui.has("bottom-nav"));
             assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
@@ -790,7 +791,7 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(settings);
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "training");
-            assert!(ui.has("Listen — the box opens when it ends."));
+            assert!(ui.has("Listen — typing locked, so not timed."));
             // Locked, but neither read-only nor disabled: either would take
             // the focus away, and a phone's keyboard with it.
             let sending = ui.input_tag("group-input-0");

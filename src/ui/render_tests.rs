@@ -2179,6 +2179,42 @@ fn training_shows_the_send_counter_while_repeating() {
     assert!(html.contains("Send 2/2"));
     assert!(html.contains("2× per group"));
     assert!(html.contains("answer locked"));
+    // Two characters typed only once sent: none of them can be timed.
+    assert!(
+        html.contains(">Listen — typing locked, so not timed.<"),
+        "{html}"
+    );
+}
+
+/// A group of one character sent with typing locked can still be timed,
+/// keyed as soon as the box opens: the hint says only when it opens.
+#[test]
+fn a_locked_group_of_one_character_is_not_called_untimed() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["K".to_string(), String::new()],
+                inputs: vec![String::new(), String::new()],
+                confirmed: vec![false, false],
+                focused: 0,
+                playing: true,
+                locked: true,
+                repeat_total: 1,
+                repeat_done: 0,
+                on_change: move |_: TypedAnswer| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(
+        html.contains(">Listen — the box opens when it ends.<"),
+        "{html}"
+    );
+    assert!(!html.contains("not timed"), "{html}");
 }
 
 #[test]
