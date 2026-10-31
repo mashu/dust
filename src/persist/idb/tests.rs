@@ -842,6 +842,60 @@ fn a_history_of_any_length_is_read_whole() {
     assert!(load.sessions.windows(2).all(|pair| pair[0].0 < pair[1].0));
 }
 
+/// A backup holds every record the database does, each as it is stored,
+/// with what a later build added to it, and in their places those the app
+/// has yet to see stored; never one deleted, though the app still holds
+/// it, as it does until it hears another tab deleted it. Where the database
+/// cannot be listed, nothing is written until the app gives every session
+/// it holds, and those are the backup.
+#[test]
+fn a_backup_holds_every_record_stored_and_none_deleted() {
+    let fake = Fake::default();
+    let tab = opened(&fake);
+    let settings = cw_core::TrainingSettings::default();
+    let sessions = [ago(4), ago(3), ago(2), ago(1)];
+    let records: Vec<Record> = sessions.iter().map(record_of).collect();
+    let mut later = records[0].clone();
+    later.json = later.json.replacen('{', r#"{"later":[1,2],"#, 1);
+    let first = read_record(&later.json).expect("it reads");
+    assert_ne!(first, sessions[0], "with what the later build added");
+    done(tab.apply(HistoryChange {
+        put: vec![later, records[1].clone(), records[2].clone()],
+        ..HistoryChange::default()
+    }));
+    done(tab.apply(HistoryChange {
+        forget: vec![(records[1].id, Deleted::of(&sessions[1], 7))],
+        ..HistoryChange::default()
+    }));
+    let changes = fake.changes();
+    let unsaved = vec![records[1].clone(), records[3].clone()];
+    let backup = BackupFile::new(&settings, 42, unsaved);
+    let (raw, backed) = done(tab.back_up(&backup)).expect("written");
+    assert_eq!(
+        backed,
+        BackedUp {
+            sessions: 3,
+            left_out: 0
+        }
+    );
+    assert!(raw.contains(r#""later":[1,2]"#), "kept as stored: {raw}");
+    let read = crate::persist::backup::read_backup(&raw).expect("a backup");
+    assert_eq!(
+        read.sessions,
+        [first, sessions[2].clone(), sessions[3].clone()]
+    );
+    assert_eq!(read.saved_at, 42);
+    assert_eq!(fake.changes(), changes, "nothing written");
+
+    fake.shelves().failing = Some("closed".into());
+    assert_eq!(done(tab.back_up(&backup)), Err(NotSaved::Unread));
+    let every = BackupFile::new(&settings, 42, records).holding_every_session();
+    let (raw, backed) = done(tab.back_up(&every)).expect("written");
+    assert_eq!(backed.sessions, 4);
+    let read = crate::persist::backup::read_backup(&raw).expect("a backup");
+    assert_eq!(read.sessions, sessions.to_vec(), "what the app holds");
+}
+
 /// The history may have changed as another tab tells of a change or leaves
 /// its stamp, or as an older build writes the history kept whole: each is
 /// said once, until it changes again.

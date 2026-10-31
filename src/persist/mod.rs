@@ -23,6 +23,8 @@ pub mod memory;
 pub mod record;
 #[cfg(feature = "web")]
 mod web;
+#[cfg(feature = "native-runtime")]
+mod worker;
 
 #[cfg(all(test, feature = "native-runtime"))]
 pub(crate) use desktop::tests::TempDir;
@@ -89,17 +91,28 @@ pub trait Store {
     fn mark_backup(&self, at: u64);
     /// Whether this build can hand the user a backup file at all.
     fn saves_backups(&self) -> bool;
-    /// Hand `contents` to the user as a file called `name`, outside the
+    /// Hand `backup` to the user as a file called `name`, outside the
     /// store, somewhere they can reach it: a download in a browser, a file
     /// in Downloads on a computer or an Android phone, one in the Files app
-    /// on an iPhone. Says what became of it, in words for the user, or why
-    /// it could not go.
-    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving;
+    /// on an iPhone. It holds every session the store holds, each as it is
+    /// stored, written a session at a time where the store can
+    /// ([`backup::BackupFile`]). Says what became of it, in words for the
+    /// user, or why it could not go: where the store could not read all it
+    /// holds, nothing went, and the backup is wanted again holding every
+    /// session the app does ([`backup::NotSaved::Unread`]).
+    fn save_backup(&self, name: &str, backup: backup::BackupFile) -> BackupSaving;
     /// Whether a backup file this store says it saved is known to be
     /// saved. A browser hands a download over and hears no more of it:
     /// blocked or turned down, it says nothing.
     fn confirms_backups(&self) -> bool {
         true
+    }
+    /// Whether the history has grown past what the platform's own backup of
+    /// the app takes, or nearly: then only a backup file the user saves
+    /// keeps all of it, should the device be lost or replaced. Android
+    /// backs up no app of more than 25 MB at all.
+    fn outgrows_device_backup(&self) -> bool {
+        false
     }
     /// Whether a backup file this store saves is kept inside the app, and
     /// deleted with it, until the user moves it out: and if so, how they
@@ -154,6 +167,10 @@ pub trait Store {
     fn history_news(&self) -> Option<Pending<()>> {
         None
     }
+    /// Wait, a moment at most, for every change asked of the history so
+    /// far to be made: as the app closes, where the store makes them on a
+    /// thread of its own, which the app's going would cut short.
+    fn flush_history(&self) {}
 }
 
 /// A session of groups or a contest run, as it is marked open while it runs
@@ -319,20 +336,25 @@ pub enum SetAside {
 /// for what each kept so far.
 pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<CutOff>>>>;
 
-/// A backup file on its way: saved already, or still being saved where only
-/// the platform's own thread can save it, as on Android.
-pub type BackupSaving = Pin<Box<dyn Future<Output = Result<String, String>>>>;
+/// A backup file on its way: saved already, as a browser hands one over, or
+/// still being written on the history's own thread, as on a computer or a
+/// phone.
+pub type BackupSaving = Pin<Box<dyn Future<Output = Result<String, backup::NotSaved>>>>;
 
-/// A backup file saved, or not, already: everywhere but Android.
-#[cfg_attr(all(target_os = "android", not(test)), allow(dead_code))]
-fn saved_now(result: Result<String, String>) -> BackupSaving {
+/// A backup file saved, or not, already: as a test's store hands one over.
+#[cfg(test)]
+fn saved_now(result: Result<String, backup::NotSaved>) -> BackupSaving {
     Box::pin(std::future::ready(result))
 }
 
-/// What the user is told of a backup file saved as `place`.
+/// What the user is told of a backup file saved as `place`, holding what
+/// `backed` says it holds: the sessions it could not, where any.
 #[cfg(any(feature = "native-runtime", test))]
-fn saved_as(place: &str) -> String {
-    format!("Backup saved as {place}.")
+fn saved_as(place: &str, backed: backup::BackedUp) -> String {
+    match backed.told() {
+        Some(told) => format!("Backup saved as {place}. {told}"),
+        None => format!("Backup saved as {place}."),
+    }
 }
 
 /// Why settings were not stored: those stored could not be read, nor set
@@ -444,11 +466,36 @@ pub fn default_store() -> Rc<dyn Store> {
     }
 }
 
+/// Start reading the history as the app starts, on a thread of its own, so
+/// that the app's window comes up meanwhile and opens on it: the store the
+/// app opens takes what was read ([`default_store`]). A browser has its
+/// own, which the page waits on before the app starts ([`web::preload`]).
+#[cfg(feature = "native-runtime")]
+pub fn preload() {
+    desktop::preload();
+}
+
 /// The store a computer or phone keeps, its files under `root` and no
-/// backups: for a test of the app on the files themselves.
+/// backups: for a test of the app on the files themselves, which are read
+/// and written then and there.
 #[cfg(all(test, feature = "native-runtime"))]
 pub fn files_at(root: &std::path::Path) -> Rc<dyn Store> {
     Rc::new(desktop::DesktopStore::at(root))
+}
+
+/// The same, read and written on a thread of their own, as the app's are.
+#[cfg(all(test, feature = "native-runtime"))]
+pub fn files_on_worker_at(root: &std::path::Path) -> Rc<dyn Store> {
+    Rc::new(desktop::DesktopStore::on_worker_at(root))
+}
+
+/// The same, saving backup files into `folder`.
+#[cfg(all(test, feature = "native-runtime"))]
+pub fn files_on_worker_backing_up(
+    root: &std::path::Path,
+    folder: &std::path::Path,
+) -> Rc<dyn Store> {
+    Rc::new(desktop::DesktopStore::on_worker_at(root).with_backup_folder(folder))
 }
 
 /// How the auto-level run for `settings` stands.

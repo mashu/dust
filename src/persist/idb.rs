@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cw_core::SessionResult;
 
+use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
 use super::record::{
     self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, read_record,
@@ -724,6 +725,34 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         ids.into_iter()
             .filter(|id| gone.contains(&id.name()))
             .collect()
+    }
+
+    /// `backup` whole, with every record the database holds, deleted ones
+    /// left out, each as it is stored ([`BackupFile::write`]); or, where it
+    /// cannot be listed, with what the app holds alone
+    /// ([`BackupFile::write_unlisted`]). A session the app holds that the
+    /// database holds as deleted stays out, as another tab may have deleted
+    /// it since the app last looked: restoring the backup would bring it
+    /// back. Nothing is noted as looked at: the app has not taken this up.
+    #[cfg_attr(not(feature = "web"), allow(dead_code))]
+    pub(super) async fn back_up(
+        &self,
+        backup: &BackupFile,
+    ) -> Result<(String, BackedUp), NotSaved> {
+        let mut out = Vec::new();
+        let backed = match self.glue.list().await {
+            Ok(listed) => {
+                let gone: BTreeSet<RecordId> = listed
+                    .deleted
+                    .iter()
+                    .filter_map(|name| RecordId::parse(name))
+                    .collect();
+                let stored = self.read(live_ids(&listed)).await;
+                backup.write(&mut out, stored, |id| gone.contains(&id))?
+            }
+            Err(_) => backup.write_unlisted(&mut out)?,
+        };
+        Ok((String::from_utf8(out).unwrap_or_default(), backed))
     }
 
     /// Whether the history may have changed since this copy last looked:

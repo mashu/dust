@@ -15,12 +15,13 @@ use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
+use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::idb::{BrowserHistory, Script};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
 use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
-    over_stored, read_settings_from, saved_now,
+    over_stored, read_settings_from,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -499,16 +500,39 @@ impl Store for WebStore {
     /// A browser says nothing of a download it blocks, or one the user
     /// turns down, so the file is told of as handed over, not as saved
     /// ([`Store::confirms_backups`]).
-    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
-        saved_now(
-            download(name, contents)
+    ///
+    /// A browser hands a file over whole, so the file is written whole: from
+    /// the database, a record at a time as each is stored
+    /// ([`BrowserHistory::back_up`]); or from the history the page storage
+    /// keeps whole, where it keeps it this visit. Where neither can be
+    /// read, as where the browser blocks the site's storage, the file holds
+    /// what the app does, once the app has given every session it holds
+    /// ([`NotSaved::Unread`]). A session deleted in the page storage is
+    /// gone from the app as soon as it is deleted, here or, taken up first,
+    /// in another tab.
+    fn save_backup(&self, name: &str, backup: BackupFile) -> BackupSaving {
+        let written: Pending<Result<(String, BackedUp), NotSaved>> = match &self.history {
+            History::Database(database) => {
+                let database = Rc::clone(database);
+                Box::pin(async move { database.back_up(&backup).await })
+            }
+            History::Page { whole, .. } => done(backup.whole(whole.records(), |_| false)),
+        };
+        let name = name.to_owned();
+        Box::pin(async move {
+            let (contents, backed) = written.await?;
+            download(&name, &contents)
                 .map(|()| {
-                    format!(
+                    let handed = format!(
                         "Backup handed to your browser to save as {name}: look for it in your downloads."
-                    )
+                    );
+                    match backed.told() {
+                        Some(told) => format!("{handed} {told}"),
+                        None => handed,
+                    }
                 })
-                .ok_or_else(|| "this browser would not hand over the file".into()),
-        )
+                .ok_or_else(|| NotSaved::Failed("this browser would not hand over the file".into()))
+        })
     }
 
     fn confirms_backups(&self) -> bool {

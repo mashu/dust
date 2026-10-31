@@ -26,21 +26,30 @@
 //! write into each other's: each takes up the records and tombstones the
 //! other leaves ([`HistoryFiles::listing`]).
 //!
+//! The app reads and writes them on a thread of their own
+//! ([`super::worker`]), and asks nothing of them on its own but whether
+//! they changed elsewhere ([`Watch`]).
+//!
 //! An older build never looks in `history/`. It keeps its history whole, in
 //! `sessions.json`, which the move reads once and leaves as it was, and
 //! whatever an older build stores there after the move is taken up here
 //! ([`legacy::imported`]).
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use cw_core::SessionResult;
 use flate2::read::GzDecoder;
 
+use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::desktop::{
     DELETED, SESSIONS, copy_aside, move_aside, place_whole, shown, sync_dir, write_whole,
 };
@@ -71,6 +80,13 @@ const OLD_TEMPORARY: Duration = Duration::from_secs(60 * 60);
 /// have its name already ([`RecordId::bumped`]).
 const BUMPS: u64 = 64;
 
+/// How many records it takes for the history to be read on more than one
+/// thread as it loads ([`read_each`]): fewer are read as fast on one.
+const READ_APART_FROM: usize = 512;
+
+/// How many threads at most read the history as it loads.
+const READERS: usize = 4;
+
 /// The history as files under one folder.
 pub(super) struct HistoryFiles {
     /// The store's folder, where an older build keeps the history whole.
@@ -78,12 +94,32 @@ pub(super) struct HistoryFiles {
     /// `history/` in it.
     dir: PathBuf,
     /// What the folders looked like when this copy last looked
-    /// ([`Self::changed`]).
-    seen: Cell<Option<Stamps>>,
+    /// ([`Watch::changed`]).
+    watch: Watch,
     /// The key of each record read so far, by its id: what an older
     /// build's deletions are told apart by, without reading every record
     /// again each time one is taken up.
     keys: RefCell<HashMap<RecordId, SessionKey>>,
+    /// The files are the worker's ([`super::worker`]): every look at them,
+    /// and every write, is made on its thread and on no other.
+    on_worker: bool,
+    /// How many bytes the sessions stored hold, as of the last read and
+    /// every change since: what the app asks, on its own thread, of how
+    /// large the history has grown ([`Self::size`]).
+    size: Arc<AtomicU64>,
+}
+
+/// Whether the history changed since this copy last looked, here or in the
+/// history kept whole: what the folders looked like then. Shared by the
+/// thread that reads and writes the files, which notes each change it made
+/// itself as none, and the app's own, which asks
+/// ([`super::Store::history_changed`]): that takes a look at when each
+/// folder last changed, and none at what is in it.
+#[derive(Clone)]
+pub(super) struct Watch {
+    root: PathBuf,
+    dir: PathBuf,
+    seen: Arc<Mutex<Option<Stamps>>>,
 }
 
 /// What a look at the folders saw: when each was last changed, and the
@@ -144,9 +180,50 @@ impl HistoryFiles {
         Self {
             root: root.to_path_buf(),
             dir: root.join(HISTORY),
-            seen: Cell::new(None),
+            watch: Watch {
+                root: root.to_path_buf(),
+                dir: root.join(HISTORY),
+                seen: Arc::new(Mutex::new(None)),
+            },
             keys: RefCell::new(HashMap::new()),
+            on_worker: false,
+            size: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// How many bytes the sessions stored hold, kept up to date as the
+    /// history is read and changed, for the app's own thread to ask.
+    pub(super) fn size(&self) -> Arc<AtomicU64> {
+        self.size.clone()
+    }
+
+    /// The store's folder.
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// What tells whether the history changed elsewhere, for the app's own
+    /// thread to ask while the files are the worker's.
+    pub(super) fn watch(&self) -> Watch {
+        self.watch.clone()
+    }
+
+    /// From here on the files are the worker's: looked at and written on
+    /// its thread alone ([`super::worker::THREAD`]).
+    pub(super) fn keep_to_worker(&mut self) {
+        self.on_worker = true;
+    }
+
+    /// Every look at the files, and every write, is made on the worker's
+    /// thread, once they are the worker's: on a phone, any other thread
+    /// that reaches them is one the app's taps wait on.
+    fn on_its_thread(&self) {
+        debug_assert!(
+            !self.on_worker || thread::current().name() == Some(super::worker::THREAD),
+            "the history's files were reached from {:?}, not from {}",
+            thread::current().name(),
+            super::worker::THREAD
+        );
     }
 
     fn records(&self) -> PathBuf {
@@ -167,6 +244,7 @@ impl HistoryFiles {
     /// build keeps in a way this one would harm is read, and nothing is
     /// written to it, not even to tidy up.
     pub(super) fn load(&self) -> HistoryLoad {
+        self.on_its_thread();
         let mut load = HistoryLoad::default();
         // How the history is kept, once moved, and whether this build may
         // write to it at all.
@@ -202,7 +280,7 @@ impl HistoryFiles {
             }
         };
         let mut unlinked = false;
-        let mut keys = self.keys.borrow_mut();
+        let mut live = Vec::with_capacity(listing.records.len());
         for &id in &listing.records {
             if listing.gone.contains(&id) {
                 // Deleted, and the record left behind: a deletion cut short.
@@ -211,8 +289,15 @@ impl HistoryFiles {
                 }
                 continue;
             }
-            let raw = self.raw_record(id, &listing.packed);
-            match raw.as_deref().and_then(read_record) {
+            live.push(id);
+        }
+        let read = read_each(&self.records(), &live, &listing.packed);
+        let size = read.iter().map(|(_, bytes)| *bytes).sum();
+        self.size.store(size, Ordering::Relaxed);
+        let mut keys = self.keys.borrow_mut();
+        load.sessions.reserve(live.len());
+        for (id, (session, _)) in live.into_iter().zip(read) {
+            match session {
                 Some(session) => {
                     keys.insert(id, SessionKey::of(&session));
                     load.sessions.push((id, session));
@@ -252,6 +337,7 @@ impl HistoryFiles {
     /// tombstones are made is told of as made, though a record they delete
     /// is left until the next read.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
+        self.on_its_thread();
         match self.gate() {
             Ok(Gate::Open(_) | Gate::Unmoved) => {}
             Ok(Gate::Newer) => return HistorySaved::Newer,
@@ -344,8 +430,13 @@ impl HistoryFiles {
         // failed, the app would show the session as kept, with nothing to
         // undo, until the next read took it away.
         for (id, _) in &change.forget {
-            if let Err(err) = remove_if_there(&records.join(file_name(*id))) {
-                eprintln!("a deleted session's record stays until the next read: {err}");
+            let path = records.join(file_name(*id));
+            let held = fs::metadata(&path).map_or(0, |meta| meta.len());
+            match remove_if_there(&path) {
+                Ok(()) => self.shrunk(held),
+                Err(err) => {
+                    eprintln!("a deleted session's record stays until the next read: {err}");
+                }
             }
             self.keys.borrow_mut().remove(id);
         }
@@ -367,6 +458,8 @@ impl HistoryFiles {
                 Ok(_) => id = id.bumped(),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {
                     place_whole(&self.records(), &name, record.json.as_bytes())?;
+                    self.size
+                        .fetch_add(record.json.len() as u64, Ordering::Relaxed);
                     return Ok(id);
                 }
                 Err(err) => return Err(err),
@@ -378,10 +471,19 @@ impl HistoryFiles {
         )))
     }
 
+    /// `bytes` fewer stored, as a record goes: never fewer than none.
+    fn shrunk(&self, bytes: u64) {
+        self.size
+            .update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                held.saturating_sub(bytes)
+            });
+    }
+
     /// Every record there is, deleted ones left out, once whatever an older
     /// build stored since has been taken up. None where the history cannot
     /// be listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
+        self.on_its_thread();
         if let Ok(Gate::Open(layout)) = self.gate()
             && self.legacy_changed(&layout)
             && let Some(live) = self.live_keys()
@@ -396,6 +498,7 @@ impl HistoryFiles {
     /// The records `ids`, as they are stored, each that can be read: one
     /// that cannot comes back as its id.
     pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
+        self.on_its_thread();
         let packed = self.packed().unwrap_or_default();
         ids.iter()
             .map(|&id| {
@@ -406,36 +509,51 @@ impl HistoryFiles {
             .collect()
     }
 
+    /// Write a backup to `out`: `backup`, with every record stored here,
+    /// deleted ones left out, each as it is stored and read from its file
+    /// as it is written, in the order of the history
+    /// ([`BackupFile::write`]). However long the history, no more of it is
+    /// held than a record at a time.
+    ///
+    /// A history that cannot be listed, or a record in it that cannot be
+    /// read, is no reason to fail: the backup is wanted again holding what
+    /// the app does ([`NotSaved::Unread`]), and then holds that.
+    pub(super) fn stream_backup(
+        &self,
+        backup: &BackupFile,
+        out: &mut dyn Write,
+    ) -> Result<BackedUp, NotSaved> {
+        self.on_its_thread();
+        let listing = match self.listing_now() {
+            Ok(listing) => listing,
+            Err(err) => {
+                eprintln!("could not list the history to back it up: {err}");
+                return backup.write_unlisted(out);
+            }
+        };
+        let records = self.records();
+        let stored = listing.records.difference(&listing.gone).map(|&id| {
+            raw_at(&records, id, &listing.packed)
+                .map(|json| Record { id, json })
+                .ok_or(id)
+        });
+        backup.write(out, stored, |id| listing.gone.contains(&id))
+    }
+
     /// Which of `ids` were deleted by hand. One whose tombstone cannot be
     /// looked for is taken as not deleted: missing is never deleted.
     pub(super) fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
+        self.on_its_thread();
         ids.iter()
             .copied()
             .filter(|id| fs::symlink_metadata(self.tombstones().join(file_name(*id))).is_ok())
             .collect()
     }
 
-    /// Whether anything changed since this copy last looked, here or in
-    /// the history kept whole.
-    pub(super) fn changed(&self) -> bool {
-        let now = self.stamps();
-        self.seen.replace(Some(now)) != Some(now)
-    }
-
-    fn stamps(&self) -> Stamps {
-        let modified = |dir: &Path| fs::metadata(dir).and_then(|meta| meta.modified()).ok();
-        Stamps {
-            records: modified(&self.records()),
-            packs: modified(&self.dir.join(PACKS)),
-            tombstones: modified(&self.tombstones()),
-            legacy: fingerprint_of(&self.root.join(SESSIONS)).ok().flatten(),
-        }
-    }
-
     /// Note the folders as they are now: what this copy did is no change
     /// for it to take up.
     fn restamp(&self) {
-        self.seen.set(Some(self.stamps()));
+        self.watch.restamp();
     }
 
     /// The gate `layout.json` sets. One that does not read is set aside
@@ -470,10 +588,7 @@ impl HistoryFiles {
     /// What is stored for `id`, loose, or else in a pack: none where it
     /// cannot be read.
     fn raw_record(&self, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<String> {
-        match fs::read_to_string(self.records().join(file_name(id))) {
-            Ok(raw) => Some(raw),
-            Err(_) => packed.get(&id).cloned(),
-        }
+        raw_at(&self.records(), id, packed)
     }
 
     /// Every record a later build packed together, and what each holds,
@@ -849,6 +964,92 @@ impl HistoryFiles {
     }
 }
 
+impl Watch {
+    /// Whether anything changed since this copy last looked, here or in
+    /// the history kept whole: noted as seen, so it is told once.
+    pub(super) fn changed(&self) -> bool {
+        let now = self.stamps();
+        self.seen().replace(now) != Some(now)
+    }
+
+    /// Note the folders as they are now: what this copy did is no change
+    /// for it to take up.
+    fn restamp(&self) {
+        let now = self.stamps();
+        *self.seen() = Some(now);
+    }
+
+    fn seen(&self) -> std::sync::MutexGuard<'_, Option<Stamps>> {
+        // What was seen is a value whole, whatever stopped while it was
+        // held: at worst a change is taken up once more.
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn stamps(&self) -> Stamps {
+        let modified = |dir: &Path| fs::metadata(dir).and_then(|meta| meta.modified()).ok();
+        Stamps {
+            records: modified(&self.dir.join(RECORDS)),
+            packs: modified(&self.dir.join(PACKS)),
+            tombstones: modified(&self.dir.join(TOMBSTONES)),
+            legacy: fingerprint_of(&self.root.join(SESSIONS)).ok().flatten(),
+        }
+    }
+}
+
+/// What is stored for `id` in `records`, loose, or else in a pack: none
+/// where it cannot be read.
+fn raw_at(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<String> {
+    match fs::read_to_string(records.join(file_name(id))) {
+        Ok(raw) => Some(raw),
+        Err(_) => packed.get(&id).cloned(),
+    }
+}
+
+/// Each of `ids`, read from `records` or else from `packed`, and scored as
+/// it reads ([`read_record`]), in their order, beside how many bytes are
+/// stored of it: none for one that cannot be read. A long history is read
+/// on as many as [`READERS`] threads at once, a part each, as it is read
+/// whole at every launch.
+fn read_each(
+    records: &Path,
+    ids: &[RecordId],
+    packed: &BTreeMap<RecordId, String>,
+) -> Vec<(Option<SessionResult>, u64)> {
+    let one = |id: &RecordId| match raw_at(records, *id, packed) {
+        Some(raw) => (read_record(&raw), raw.len() as u64),
+        None => (None, 0),
+    };
+    let threads = thread::available_parallelism()
+        .map_or(1, NonZeroUsize::get)
+        .min(READERS);
+    if threads < 2 || ids.len() < READ_APART_FROM {
+        return ids.iter().map(one).collect();
+    }
+    let part = ids.len().div_ceil(threads);
+    thread::scope(|scope| {
+        let reading: Vec<_> = ids
+            .chunks(part)
+            .map(|ids| {
+                let started = thread::Builder::new()
+                    .name("dust-history-read".into())
+                    .spawn_scoped(scope, move || ids.iter().map(one).collect::<Vec<_>>());
+                (ids, started)
+            })
+            .collect();
+        // A part whose thread would not start, or stopped short, is read
+        // here instead.
+        reading
+            .into_iter()
+            .flat_map(|(ids, started)| {
+                started
+                    .ok()
+                    .and_then(|reader| reader.join().ok())
+                    .unwrap_or_else(|| ids.iter().map(one).collect())
+            })
+            .collect()
+    })
+}
+
 /// Whether `change` restores many sessions at once, and so is journaled
 /// while it runs ([`HistoryChange::restore`]).
 fn restores_many(change: &HistoryChange) -> bool {
@@ -1000,11 +1201,71 @@ mod tests {
     use crate::persist::desktop::tests::TempDir;
     use crate::persist::record::{records_for_blob, scored};
     use crate::persist::tests::session;
+    use crate::persist::worker::{HistoryJobs, wait};
+    use std::cell::Cell;
 
     const DAY: u64 = 86_400_000;
 
-    /// A history in a scratch folder of its own.
-    fn history(name: &str) -> (TempDir, HistoryFiles) {
+    thread_local! {
+        /// This test reaches the files through a worker of their own, as
+        /// the app does ([`on_the_worker`]), rather than then and there.
+        static ON_WORKER: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The history in a folder, as this test reaches it: then and there,
+    /// or through a worker of its own ([`ON_WORKER`]), each answer waited
+    /// for.
+    struct Files(HistoryJobs);
+
+    impl Files {
+        fn at(root: &Path) -> Self {
+            let files = HistoryFiles::at(root);
+            Self(if ON_WORKER.get() {
+                HistoryJobs::on_worker(files)
+            } else {
+                HistoryJobs::inline(files)
+            })
+        }
+
+        fn load(&self) -> HistoryLoad {
+            self.0.load()
+        }
+
+        fn apply(&self, change: &HistoryChange) -> HistorySaved {
+            wait(self.0.apply(change.clone()))
+        }
+
+        fn listing(&self) -> Option<Vec<RecordId>> {
+            wait(self.0.listing())
+        }
+
+        fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
+            wait(self.0.read(ids.to_vec()))
+        }
+
+        fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
+            wait(self.0.forgotten(ids.to_vec()))
+        }
+
+        fn changed(&self) -> bool {
+            self.0.changed()
+        }
+
+        fn bytes(&self) -> u64 {
+            self.0.bytes()
+        }
+    }
+
+    /// A history in a scratch folder of its own, as this test reaches it.
+    fn history(name: &str) -> (TempDir, Files) {
+        let dir = TempDir::new(name);
+        let files = Files::at(&dir.0);
+        (dir, files)
+    }
+
+    /// A history in a scratch folder of its own, its insides reached then
+    /// and there.
+    fn raw_history(name: &str) -> (TempDir, HistoryFiles) {
         let dir = TempDir::new(name);
         let files = HistoryFiles::at(&dir.0);
         (dir, files)
@@ -1135,7 +1396,7 @@ mod tests {
             [LAYOUT_FILE, RECORDS],
             "nothing left beside it"
         );
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(read.sessions, [(kept.id, session)]);
         assert!(read.notices.is_empty());
     }
@@ -1237,7 +1498,7 @@ mod tests {
         assert_eq!(read.sessions.len(), 1);
         assert_eq!(read.unread, [unread]);
         assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
-        let again = HistoryFiles::at(&dir.0).load();
+        let again = Files::at(&dir.0).load();
         assert_eq!(again.unread, [unread], "still known");
         assert!(again.notices.is_empty(), "told of once");
         assert_eq!(
@@ -1411,7 +1672,7 @@ mod tests {
         assert!(stuck.exists(), "left for now");
         assert_eq!(files.listing(), Some(vec![two.id]));
         assert_eq!(files.forgotten(&[one.id, two.id]), [one.id]);
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(ids(&read), [two.id]);
         assert!(
             read.unread.is_empty() && read.notices.is_empty(),
@@ -1448,7 +1709,7 @@ mod tests {
         assert!(matches!(saved, HistorySaved::Failed(_)), "{saved:?}");
         assert!(names(&tombstones).is_empty(), "{:?}", names(&tombstones));
         assert_eq!(files.listing(), Some(vec![one.id, two.id]));
-        assert_eq!(ids(&HistoryFiles::at(&dir.0).load()), [one.id, two.id]);
+        assert_eq!(ids(&Files::at(&dir.0).load()), [one.id, two.id]);
     }
 
     /// A session put back whose record was never taken away, as a deletion
@@ -1488,13 +1749,38 @@ mod tests {
         assert_eq!(ids(&files.load()), [one.id]);
     }
 
+    /// The history knows how large it has grown, as it is read and as each
+    /// change is made, without a look at the disk for it: what tells the
+    /// app that Android's own backup is about to leave it out.
+    #[test]
+    fn the_history_knows_how_large_it_has_grown() {
+        let (dir, files) = history("size");
+        files.load();
+        assert_eq!(files.bytes(), 0);
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        let both = (one.json.len() + two.json.len()) as u64;
+        assert_eq!(files.bytes(), both);
+        files.apply(&put(std::slice::from_ref(&one)));
+        assert_eq!(files.bytes(), both, "nothing written twice");
+        files.apply(&forget(&[(&one, &first)]));
+        assert_eq!(files.bytes(), two.json.len() as u64);
+        // Read again, by another copy too, it is what the records hold.
+        assert_eq!(files.load().sessions.len(), 1);
+        assert_eq!(files.bytes(), two.json.len() as u64);
+        let other = Files::at(&dir.0);
+        other.load();
+        assert_eq!(other.bytes(), two.json.len() as u64);
+    }
+
     /// Two copies on one folder each take up what the other stored and
     /// deleted, and are told the folder changed when it did, and not when
     /// they changed it themselves.
     #[test]
     fn two_copies_on_one_folder_take_up_each_others_changes() {
         let dir = TempDir::new("two-copies");
-        let (here, there) = (HistoryFiles::at(&dir.0), HistoryFiles::at(&dir.0));
+        let (here, there) = (Files::at(&dir.0), Files::at(&dir.0));
         here.load();
         there.load();
         let first = finished(1_000);
@@ -1516,7 +1802,7 @@ mod tests {
     /// in another copy is left to it.
     #[test]
     fn a_restore_cut_short_is_told_of() {
-        let (dir, files) = history("cut-short");
+        let (dir, files) = raw_history("cut-short");
         files.load();
         let restored: Vec<Record> = (1..=3).map(|n| record(&finished(n * 1_000))).collect();
         let journal = files.begin_journal(&restore(&restored)).expect("a journal");
@@ -1560,7 +1846,7 @@ mod tests {
         );
         assert!(journals(&dir).is_empty(), "{:?}", journals(&dir));
         fs::remove_dir(records.join(file_name(restored[1].id))).unwrap();
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert!(read.notices.is_empty(), "{:?}", read.notices);
         assert_eq!(stamps(&read), [1_000]);
         // Restored again, the rest is stored, each session once.
@@ -1575,7 +1861,7 @@ mod tests {
     /// as it was asked to, and not what it was putting back.
     #[test]
     fn a_restore_cut_short_counts_what_it_left_deleted_as_done() {
-        let (dir, files) = history("cut-short-deleted");
+        let (dir, files) = raw_history("cut-short-deleted");
         files.load();
         let sessions: Vec<SessionResult> = (1..=4).map(|n| finished(n * 1_000)).collect();
         let restored: Vec<Record> = sessions.iter().map(record).collect();
@@ -1673,7 +1959,7 @@ mod tests {
             .set_modified(SystemTime::now() - 2 * OLD_TEMPORARY)
             .unwrap();
         let before = everything(&dir.0);
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(ids(&read), [two.id]);
         assert_eq!(read.notices, [HistoryNotice::Newer]);
         assert!(!read.complete);
@@ -1694,7 +1980,7 @@ mod tests {
         let now = crate::time::now_ms();
         let old = finished(now - 10 * DAY);
         keep_whole(&dir, std::slice::from_ref(&old));
-        HistoryFiles::at(&dir.0).load();
+        Files::at(&dir.0).load();
         let path = dir.0.join(HISTORY).join(LAYOUT_FILE);
         let read_layout =
             || -> serde_json::Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
@@ -1706,7 +1992,7 @@ mod tests {
         // and another, taken up as the history is next listed.
         let (first, second) = (finished(now + 60_000), finished(now + 120_000));
         keep_whole(&dir, &[old.clone(), first.clone()]);
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         let read = files.load();
         assert!(read.complete && read.notices.is_empty());
         assert_eq!(stamps(&read), [old.timestamp, first.timestamp]);
@@ -1734,7 +2020,7 @@ mod tests {
         keep_whole(&dir, &whole);
         let gone = Deleted::of(&finished(1), 77);
         fs::write(dir.0.join(DELETED), serde_json::to_vec(&[gone]).unwrap()).unwrap();
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         let read = files.load();
         assert!(read.complete);
         assert!(read.set_aside.is_empty() && read.notices.is_empty());
@@ -1761,7 +2047,7 @@ mod tests {
             fingerprint_of(&dir.0.join(SESSIONS)).unwrap()
         );
         let before = everything(&dir.0);
-        let again = HistoryFiles::at(&dir.0).load();
+        let again = Files::at(&dir.0).load();
         assert_eq!(again.sessions, read.sessions);
         assert_eq!(everything(&dir.0), before, "made once");
     }
@@ -1772,12 +2058,12 @@ mod tests {
     fn a_migration_cut_short_runs_again_to_the_same_records() {
         let dir = TempDir::new("move-again");
         keep_whole(&dir, &[finished(5), finished(3), finished(9)]);
-        HistoryFiles::at(&dir.0).load();
+        Files::at(&dir.0).load();
         let moved = everything(&dir.0.join(HISTORY).join(RECORDS));
         // Cut short: one record and the layout never reached the disk.
         fs::remove_file(dir.0.join(HISTORY).join(LAYOUT_FILE)).unwrap();
         fs::remove_file(&moved[1].0).unwrap();
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(stamps(&read), [5, 3, 9]);
         assert_eq!(everything(&dir.0.join(HISTORY).join(RECORDS)), moved);
         assert!(dir.0.join(HISTORY).join(LAYOUT_FILE).exists());
@@ -1792,7 +2078,7 @@ mod tests {
         fs::create_dir_all(&dir.0).unwrap();
         let damaged = "{\"this\": \"is not a history\"";
         fs::write(dir.0.join(SESSIONS), damaged).unwrap();
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert!(read.sessions.is_empty() && read.complete);
         let [SetAside::History { kept: Some(kept) }] = read.set_aside.as_slice() else {
             panic!("{:?}", read.set_aside);
@@ -1801,14 +2087,14 @@ mod tests {
         assert_eq!(fs::read_to_string(kept).unwrap(), damaged);
         assert!(!dir.0.join(SESSIONS).exists());
         assert!(names(&dir.0.join(HISTORY).join(RECORDS)).is_empty());
-        assert!(HistoryFiles::at(&dir.0).load().set_aside.is_empty(), "once");
+        assert!(Files::at(&dir.0).load().set_aside.is_empty(), "once");
 
         let dir = TempDir::new("move-part-unreadable");
         fs::create_dir_all(&dir.0).unwrap();
         let good = |at| serde_json::to_string(&finished(at)).unwrap();
         let raw = format!("[{},{{\"date\":\"nonsense\"}},{}]", good(1), good(2));
         fs::write(dir.0.join(SESSIONS), &raw).unwrap();
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(stamps(&read), [1, 2]);
         let [
             SetAside::Sessions {
@@ -1833,7 +2119,7 @@ mod tests {
     fn a_history_that_cannot_be_read_now_is_migrated_later() {
         let dir = TempDir::new("move-later");
         fs::create_dir_all(dir.0.join(SESSIONS)).unwrap();
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         let read = files.load();
         assert!(!read.complete);
         assert!(
@@ -1849,7 +2135,7 @@ mod tests {
         );
         fs::remove_dir(dir.0.join(SESSIONS)).unwrap();
         keep_whole(&dir, &[finished(1_000), finished(2_000)]);
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert!(read.complete && read.notices.is_empty());
         assert_eq!(stamps(&read), [1_000, 2_000, 9_000]);
     }
@@ -1870,7 +2156,7 @@ mod tests {
                 .map(|name| fs::read(dir.0.join(name)).unwrap())
         };
         let before = older(&dir);
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         let read = files.load();
         files.apply(&put(&[record(&finished(3_000))]));
         let (id, first) = &read.sessions[0];
@@ -1879,7 +2165,7 @@ mod tests {
             json: serde_json::to_string(first).unwrap(),
         };
         files.apply(&forget(&[(&first_record, first)]));
-        HistoryFiles::at(&dir.0).load();
+        Files::at(&dir.0).load();
         assert_eq!(older(&dir), before);
     }
 
@@ -1892,12 +2178,12 @@ mod tests {
         let now = crate::time::now_ms();
         let old = [finished(now - 10 * DAY), finished(now - 9 * DAY)];
         keep_whole(&dir, &old);
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         files.load();
         // An older build, still open, stores a session.
         let first = finished(now + 60_000);
         keep_whole(&dir, &[old[0].clone(), old[1].clone(), first.clone()]);
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(
             stamps(&read),
             [old[0].timestamp, old[1].timestamp, first.timestamp]
@@ -1933,7 +2219,7 @@ mod tests {
         let now = crate::time::now_ms();
         let kept = [finished(now - 10 * DAY), finished(now - 9 * DAY)];
         keep_whole(&dir, &kept);
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         let read = files.load();
         let (id, first) = &read.sessions[0];
         let first_record = Record {
@@ -1943,7 +2229,7 @@ mod tests {
         files.apply(&forget(&[(&first_record, first)]));
         let let_go = finished(now - 30 * DAY);
         keep_whole(&dir, &[let_go, kept[0].clone(), kept[1].clone()]);
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(stamps(&read), [kept[1].timestamp]);
     }
 
@@ -1955,15 +2241,15 @@ mod tests {
         let now = crate::time::now_ms();
         let old = finished(now - 10 * DAY);
         keep_whole(&dir, std::slice::from_ref(&old));
-        HistoryFiles::at(&dir.0).load();
+        Files::at(&dir.0).load();
         let (first, second) = (finished(now + 60_000), finished(now + 120_000));
         keep_whole(&dir, &[old.clone(), first.clone()]);
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         let read = files.load();
         assert_eq!(stamps(&read), [old.timestamp, first.timestamp]);
         // Stored again by the older build, with another: the first once.
         keep_whole(&dir, &[old.clone(), first.clone(), second.clone()]);
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(
             stamps(&read),
             [old.timestamp, first.timestamp, second.timestamp]
@@ -1976,7 +2262,7 @@ mod tests {
         };
         files.apply(&forget(&[(&taken, &first)]));
         keep_whole(&dir, &[old.clone(), first, second.clone()]);
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         assert_eq!(stamps(&read), [old.timestamp, second.timestamp]);
     }
 
@@ -1996,7 +2282,7 @@ mod tests {
             serde_json::to_vec(std::slice::from_ref(&before)).unwrap(),
         )
         .unwrap();
-        let read = HistoryFiles::at(&dir.0).load();
+        let read = Files::at(&dir.0).load();
         let second_id = read.sessions[1].0;
         // The older build deletes the second.
         let after = Deleted::of(&second, now);
@@ -2006,7 +2292,7 @@ mod tests {
             serde_json::to_vec(&[before, after.clone()]).unwrap(),
         )
         .unwrap();
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         let read = files.load();
         assert_eq!(stamps(&read), [first.timestamp]);
         assert_eq!(files.forgotten(&[second_id]), [second_id]);
@@ -2021,7 +2307,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(held, after);
-        assert_eq!(stamps(&HistoryFiles::at(&dir.0).load()), [first.timestamp]);
+        assert_eq!(stamps(&Files::at(&dir.0).load()), [first.timestamp]);
     }
 
     /// A layout that does not read, damaged where it lies, is set aside,
@@ -2032,7 +2318,7 @@ mod tests {
         let now = crate::time::now_ms();
         let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
         keep_whole(&dir, &[first.clone(), second.clone()]);
-        let files = HistoryFiles::at(&dir.0);
+        let files = Files::at(&dir.0);
         let moved = files.load();
         // Since the move: an older build stored two sessions, taken up
         // here, and the first moved and the last taken up were deleted here.
@@ -2051,7 +2337,7 @@ mod tests {
         assert_eq!(read.sessions.len(), 2);
         let records = everything(&dir.0.join(HISTORY).join(RECORDS));
         fs::write(dir.0.join(HISTORY).join(LAYOUT_FILE), "{ damaged").unwrap();
-        let again = HistoryFiles::at(&dir.0).load();
+        let again = Files::at(&dir.0).load();
         assert!(again.complete);
         assert_eq!(again.sessions, read.sessions, "none twice, none back");
         assert_eq!(everything(&dir.0.join(HISTORY).join(RECORDS)), records);
@@ -2120,5 +2406,56 @@ mod tests {
         assert_eq!(files.listing(), Some(vec![two.id, three.id]));
         assert_eq!(files.forgotten(&[one.id]), [one.id]);
         assert_eq!(fs::read(&packed).unwrap(), before, "never written");
+    }
+
+    /// Each test of the files that reaches them as the app does, made
+    /// again with the files on a worker of their own, as the app has them:
+    /// each answer the same, and every look and write on the worker's
+    /// thread ([`HistoryFiles::on_its_thread`]).
+    macro_rules! on_the_worker_too {
+        ($($(#[$cfg:meta])* $test:ident,)*) => {
+            mod on_the_worker {
+                $(
+                    $(#[$cfg])*
+                    #[test]
+                    fn $test() {
+                        super::ON_WORKER.set(true);
+                        super::$test();
+                    }
+                )*
+            }
+        };
+    }
+
+    on_the_worker_too! {
+        a_session_is_one_file_written_whole,
+        a_record_is_never_written_over,
+        history_reads_in_the_order_it_was_kept,
+        old_temporary_files_are_cleared,
+        a_record_this_build_cannot_read_is_left_in_place_and_told_of_once,
+        a_later_build_reads_what_this_one_could_not,
+        a_deletion_is_a_tombstone_beside_the_history,
+        a_record_and_its_tombstone_read_as_deleted,
+        an_empty_tombstone_still_deletes,
+        a_deletion_is_made_once_its_tombstones_are,
+        #[cfg(unix)]
+        a_deletion_that_cannot_be_made_durable_deletes_nothing,
+        a_session_put_back_whose_record_stayed_is_one_record,
+        the_history_knows_how_large_it_has_grown,
+        two_copies_on_one_folder_take_up_each_others_changes,
+        a_restore_that_fails_is_not_told_of_as_cut_short,
+        a_store_from_a_newer_incompatible_layout_is_only_read,
+        a_later_compatible_layout_keeps_what_it_added,
+        a_history_file_becomes_records_once,
+        a_migration_cut_short_runs_again_to_the_same_records,
+        an_unreadable_history_file_is_set_aside_and_not_migrated,
+        a_history_that_cannot_be_read_now_is_migrated_later,
+        the_old_history_file_is_left_for_older_builds,
+        sessions_an_older_build_added_after_the_move_are_taken_up,
+        sessions_from_before_the_move_are_never_brought_back,
+        a_session_imported_once_is_never_imported_again,
+        a_deletion_an_older_build_made_after_the_move_is_honoured,
+        a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
+        a_pack_and_a_loose_copy_of_one_record_read_as_one,
     }
 }

@@ -72,7 +72,9 @@ pub(super) fn read_history(raw: &str) -> Option<ReadHistory> {
 }
 
 /// The sessions of a stored history that still parse ([`read_history`]),
-/// where nothing is ever written over it: a backup file.
+/// where nothing is ever written over it: a backup file, as Dust 0.16 read
+/// one ([`super::backup::read_backup_as_0_16_2`]).
+#[cfg(test)]
 pub(super) fn parse_sessions(raw: &str) -> Option<Vec<SessionResult>> {
     read_history(raw).map(|read| read.sessions)
 }
@@ -750,6 +752,13 @@ impl<S: Aside> BlobHistory<S> {
         let held = self.current();
         self.seen.set(Some(self.look()));
         (!self.held.get()).then(|| held.into_iter().map(|(record, _)| record.id).collect())
+    }
+
+    /// Every record there is, as the history holds it, in order: what a
+    /// backup holds. None where the history cannot be read.
+    pub(super) fn records(&self) -> Option<Vec<Record>> {
+        let held = self.current();
+        (!self.held.get()).then(|| held.into_iter().map(|(record, _)| record).collect())
     }
 
     /// The records `ids`, each that is there.

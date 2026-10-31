@@ -17,7 +17,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::ContestEntry;
 use crate::history::{StoredHistory, settle_or_spawn};
 use crate::persist::backup::{
-    Backup, Filled, backup_name, filled_in, merge_sessions, write_backup,
+    Backup, BackupFile, Filled, NotSaved, backup_name, filled_in, merge_sessions,
 };
 use crate::persist::record::{HistoryChange, HistoryLoad, Record, RecordId, read_record};
 use crate::persist::{
@@ -811,6 +811,17 @@ impl AppCtx {
         }
     }
 
+    /// As the app closes: wait, a moment at most, for the store to make
+    /// every change asked of the history, and take up there and then what
+    /// became of each, rather than leave it to tasks the app's going cuts
+    /// short. A session kept as the app closes is stored, and its mark
+    /// goes, before the app does; one the store is still making is kept
+    /// by its mark, for the next launch.
+    pub fn flush_history(self) {
+        self.app().store.flush_history();
+        crate::history::settle_waiting();
+    }
+
     /// Try again, in [`RETRY_MS`], to store what the store has yet to take:
     /// one try waiting at a time.
     fn retry_later(self) {
@@ -1011,37 +1022,79 @@ impl AppCtx {
     /// and the card say goes with the app until it is moved out
     /// ([`Store::backups_inside_app`]).
     ///
-    /// It holds every session here, those the store has yet to take too.
+    /// It holds every session the store holds, each as stored, and those
+    /// here it has yet to take: the store writes it a session at a time
+    /// ([`BackupFile`]), so a history of any length is never held whole to
+    /// be backed up. A store that cannot read all it holds, its history
+    /// unlisted or a session in it unread, saves nothing and says so; the
+    /// backup is then saved holding every session here as well, and holds
+    /// what the app shows, as it did before stores were read a session at
+    /// a time. It is how the sessions only the app holds are kept safe.
     pub fn save_backup(self) {
         self.sync_with_store(move || self.save_backup_now());
     }
 
     fn save_backup_now(self) {
         let at = now_ms();
-        let contents = write_backup(&self.settings.peek(), &self.sessions.peek(), at);
+        let backup = {
+            let history = self.sessions.peek();
+            let unsaved = history
+                .unsaved()
+                .iter()
+                .filter_map(|id| history.record(*id))
+                .collect();
+            BackupFile::new(&self.settings.peek(), at, unsaved)
+                .beside_unread(history.unread().clone())
+        };
         let name = backup_name(&crate::time::local_date_string());
-        let saving = self.app().store.save_backup_file(&name, &contents);
-        dioxus::core::spawn_forever(async move {
-            match saving.await {
-                Ok(said) => {
-                    let store = self.app().store;
-                    store.mark_backup(at);
-                    let mut last_backup = self.last_backup;
-                    last_backup.set(Some(at));
-                    // Kept inside the app, it is no backup until moved out.
-                    let said = match store.backups_inside_app() {
-                        Some(how) => format!(
-                            "{said} It goes if Dust is deleted: move it out {how} to keep it."
-                        ),
-                        None => said,
-                    };
-                    self.toasts.show(said);
-                }
-                Err(why) => self
-                    .toasts
-                    .show(format!("The backup could not be saved: {why}.")),
+        let saving = self.app().store.save_backup(&name, backup);
+        settle_or_spawn(saving, move |saved| match saved {
+            // Only now is the whole history copied for it.
+            Err(NotSaved::Unread) => {
+                let every = self.backup_of_every_session(at);
+                let saving = self.app().store.save_backup(&name, every);
+                settle_or_spawn(saving, move |saved| self.backup_saved(at, saved));
             }
+            saved => self.backup_saved(at, saved),
         });
+    }
+
+    /// A backup saved at `at` that holds every session here, each as this
+    /// build writes it: for a store that could not read all it holds.
+    fn backup_of_every_session(self, at: u64) -> BackupFile {
+        let history = self.sessions.peek();
+        let every = history
+            .ids()
+            .iter()
+            .filter_map(|id| history.record(*id))
+            .collect();
+        BackupFile::new(&self.settings.peek(), at, every)
+            .beside_unread(history.unread().clone())
+            .holding_every_session()
+    }
+
+    /// Tell of the backup asked for at `at` as `saved` says, and remember
+    /// it once it is saved.
+    fn backup_saved(self, at: u64, saved: Result<String, NotSaved>) {
+        match saved {
+            Ok(said) => {
+                let store = self.app().store;
+                store.mark_backup(at);
+                let mut last_backup = self.last_backup;
+                last_backup.set(Some(at));
+                // Kept inside the app, it is no backup until moved out.
+                let said = match store.backups_inside_app() {
+                    Some(how) => {
+                        format!("{said} It goes if Dust is deleted: move it out {how} to keep it.")
+                    }
+                    None => said,
+                };
+                self.toasts.show(said);
+            }
+            Err(not) => self
+                .toasts
+                .show(format!("The backup could not be saved: {}.", not.why())),
+        }
     }
 
     /// Put back what `backup` holds: every session of it not already here,
@@ -1062,17 +1115,22 @@ impl AppCtx {
         // As of when it was saved, or now, if a clock set ahead says later.
         let saved_at = backup.saved_at.min(now_ms());
         let at = now_ms();
-        let (backed_up, merged) = {
-            let history = self.sessions.peek();
-            (
-                covers_up_to(&backup.sessions, &history, saved_at),
-                merge_sessions(&history, backup.sessions),
-            )
-        };
         // What it adds was deleted by hand, maybe; it is wanted back now.
         let mut change = HistoryChange {
             restore: true,
             ..HistoryChange::default()
+        };
+        let (backed_up, merged, filled_ids) = {
+            let history = self.sessions.peek();
+            let backed_up = covers_up_to(&backup.sessions, &history, saved_at);
+            let merged = merge_sessions(&history, backup.sessions);
+            // Each it fills in by its record, where it is now.
+            let filled_ids: Vec<Option<RecordId>> = merged
+                .filled
+                .iter()
+                .map(|fill| history.id_at(fill.at))
+                .collect();
+            (backed_up, merged, filled_ids)
         };
         let mut added = Vec::new();
         for session in merged.added {
@@ -1086,32 +1144,31 @@ impl AppCtx {
             change.put.push(record);
         }
         let mut filled = Vec::new();
-        {
-            let history = self.sessions.peek();
-            for Filled { was, now } in merged.filled {
-                let Some(was_id) = history
-                    .ids_of(&SessionKey::of(&was))
-                    .iter()
-                    .copied()
-                    .find(|id| history.get(*id) == Some(&was))
-                else {
-                    continue;
-                };
-                let Some(record) = Record::of(&now, |json| RecordId::beside(was_id, json)) else {
-                    continue;
-                };
-                change.unforget.push(record.id);
-                change.forget.push((was_id, Deleted::of(&was, at)));
-                filled.push(FilledIn {
-                    id: record.id,
-                    now,
-                    was_id,
-                    was,
-                });
-                change.put.push(record);
-            }
+        for (Filled { was, now, .. }, was_id) in merged.filled.into_iter().zip(filled_ids) {
+            let Some(was_id) = was_id else {
+                continue;
+            };
+            let Some(record) = Record::of(&now, |json| RecordId::beside(was_id, json)) else {
+                continue;
+            };
+            change.unforget.push(record.id);
+            change.forget.push((was_id, Deleted::of(&was, at)));
+            filled.push(FilledIn {
+                id: record.id,
+                now,
+                was_id,
+                was,
+            });
+            change.put.push(record);
         }
         let brought = !added.is_empty() || !filled.is_empty();
+        if brought {
+            // A restore of thousands of sessions takes a moment to store.
+            self.toasts.show(format!(
+                "Restoring {}…",
+                counted(added.len() + filled.len(), "session")
+            ));
+        }
         let restored_at = backup.saved_at;
         let restored_settings = backup.settings;
         self.change_history(change, move |saved| {
@@ -2117,6 +2174,49 @@ mod tests {
         assert_eq!(days(&backup.sessions), [1, 2]);
     }
 
+    /// A store that cannot be listed still gets a backup saved: one of
+    /// every session here, those it has yet to take among them, as a
+    /// backup is how they are kept safe meanwhile. Saving one used to fail,
+    /// saying the history stored here could not be read.
+    #[test]
+    fn a_backup_holds_every_session_here_where_the_store_cannot_be_listed() {
+        let store = holding([1, 2]);
+        let a = Tab::on(&store);
+        store.full.set(true);
+        a.finish(day(3));
+        store.unlistable.set(true);
+        a.act(AppCtx::save_backup);
+        let files = store.backup_files.borrow().clone();
+        assert_eq!(files.len(), 1, "one file, saved once");
+        let (name, contents) = &files[0];
+        let backup = crate::persist::backup::read_backup(contents).expect("a backup");
+        assert_eq!(days(&backup.sessions), [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            format!("Backup saved as {name}, in your downloads.")
+        );
+        assert_eq!(store.last_backup(), Some(backup.saved_at));
+    }
+
+    /// So does a browser's page storage the browser will not let the site
+    /// at, as where the user blocks a site's data: the sessions finished
+    /// since are kept only here, and the backup holds them with the rest.
+    #[test]
+    fn a_backup_holds_every_session_here_where_page_storage_is_blocked() {
+        let shelf = PageShelf::default();
+        shelf.keep(&[day(1), day(2)]);
+        let store = Rc::new(MemoryStore::in_page(&shelf));
+        let a = Tab::on(&store);
+        shelf.block(true);
+        a.finish(day(3));
+        assert_eq!(days(&shelf.sessions()), [1, 2], "not stored");
+        a.act(AppCtx::save_backup);
+        let files = store.backup_files.borrow().clone();
+        let (_, contents) = files.last().expect("a backup file");
+        let backup = crate::persist::backup::read_backup(contents).expect("a backup");
+        assert_eq!(days(&backup.sessions), [1, 2, 3]);
+    }
+
     /// What reading the store set aside, as it could not read it, is told
     /// of: what the launch set aside at once, and what a later read set
     /// aside once it has. It used to go without a word, the settings back
@@ -2546,6 +2646,164 @@ mod tests {
             2,
             "one record a session, and nothing beside"
         );
+    }
+
+    /// The history written on a thread of its own, as the app writes it: a
+    /// session kept shows at once, its mark held until the thread has
+    /// stored it; and the app, closing, waits for the thread and takes up
+    /// what it did, so the session is stored and its mark gone before the
+    /// app is, and the next launch has nothing cut off to tell of. A
+    /// deletion is told of once it is made, and only then.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_session_kept_as_the_app_closes_is_stored_before_it_goes() {
+        let dir = crate::persist::TempDir::new("closing-on-the-worker");
+        let tab = Tab::on_store(crate::persist::files_on_worker_at(&dir.0));
+        let marks = || {
+            std::fs::read_dir(dir.0.join("open"))
+                .map(|marks| marks.count())
+                .unwrap_or(0)
+        };
+        // Marked as a session is, its end held with its mark before it is
+        // kept.
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(1),
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.finish(day(1));
+        assert_eq!(tab.shown(), [1], "shown at once");
+        assert!(marks() > 0, "held until the thread has stored it");
+        tab.act(AppCtx::flush_history);
+        assert_eq!(marks(), 0, "stored, and its mark gone");
+        let next = crate::persist::files_at(&dir.0);
+        let mut cut = next.take_cut_off();
+        let asked = &mut std::task::Context::from_waker(std::task::Waker::noop());
+        assert_eq!(
+            cut.as_mut().poll(asked),
+            std::task::Poll::Ready(Vec::new()),
+            "nothing cut off"
+        );
+        assert_eq!(Tab::on_store(next).shown(), [1]);
+
+        tab.finish(day(2));
+        tab.act(AppCtx::flush_history);
+        tab.delete(1);
+        assert_eq!(tab.shown(), [2]);
+        assert_eq!(tab.toast(), None, "not told of before it is made");
+        tab.act(AppCtx::flush_history);
+        let toast = tab.toast().expect("told");
+        assert_eq!(toast.text, "1 session deleted");
+        assert_eq!(Tab::on_store(crate::persist::files_at(&dir.0)).shown(), [2]);
+    }
+
+    /// The one backup file saved in `folder`, read.
+    #[cfg(feature = "native-runtime")]
+    fn the_backup_in(folder: &TempDir) -> crate::persist::backup::Backup {
+        let saved: Vec<std::path::PathBuf> = std::fs::read_dir(&folder.0)
+            .expect("a folder")
+            .map(|entry| entry.expect("an entry").path())
+            .collect();
+        assert_eq!(saved.len(), 1, "{saved:?}");
+        let raw = std::fs::read_to_string(&saved[0]).expect("a file");
+        crate::persist::backup::read_backup(&raw).expect("a backup")
+    }
+
+    /// A session deleted is in no backup saved right after, though the
+    /// history is written on a thread of its own, and the backup asked for
+    /// before the session was stored, or its deletion heard of as made: the
+    /// thread makes each change in the order it was asked for, the
+    /// deletion before the backup. Restoring the backup would bring the
+    /// session back.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_session_deleted_is_in_no_backup_saved_right_after() {
+        let dir = TempDir::new("deleted-then-backed-up");
+        let folder = TempDir::new("deleted-then-backed-up-folder");
+        let tab = Tab::on_store(crate::persist::files_on_worker_backing_up(
+            &dir.0, &folder.0,
+        ));
+        tab.finish(day(1));
+        tab.finish(day(2));
+        tab.delete(1);
+        tab.act(AppCtx::save_backup);
+        // The changes, and the look the backup waits on; then the backup.
+        tab.act(AppCtx::flush_history);
+        tab.act(AppCtx::flush_history);
+        assert_eq!(days(&the_backup_in(&folder).sessions), [2]);
+        let toast = tab.toast().expect("told");
+        assert!(toast.text.starts_with("Backup saved as "), "{}", toast.text);
+        assert_eq!(Tab::on_store(crate::persist::files_at(&dir.0)).shown(), [2]);
+    }
+
+    /// Files that cannot be listed, as the backup is written on the
+    /// history's own thread, still give a backup of every session shown,
+    /// the one they would not take among them: the thread saves nothing of
+    /// its own, and the app saves what it holds instead.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_backup_holds_every_session_shown_where_the_files_cannot_be_listed() {
+        let dir = TempDir::new("unlisted-then-backed-up");
+        let folder = TempDir::new("unlisted-then-backed-up-folder");
+        let tab = Tab::on_store(crate::persist::files_on_worker_backing_up(
+            &dir.0, &folder.0,
+        ));
+        tab.finish(day(1));
+        tab.finish(day(2));
+        tab.act(AppCtx::flush_history);
+        // The folder of sessions is a file now, which cannot be listed nor
+        // take a session, whoever runs the tests: root too.
+        let sessions = dir.0.join("history").join("sessions");
+        std::fs::rename(&sessions, dir.0.join("history").join("moved")).unwrap();
+        std::fs::write(&sessions, "").unwrap();
+        tab.finish(day(3));
+        tab.act(AppCtx::save_backup);
+        // The session not taken, and the look; the backup the thread could
+        // not write; the backup of what the app holds.
+        for _ in 0..3 {
+            tab.act(AppCtx::flush_history);
+        }
+        assert_eq!(tab.shown(), [1, 2, 3]);
+        assert_eq!(
+            tab.act(|ctx| ctx.sessions.peek().unsaved().len()),
+            1,
+            "the third is only here"
+        );
+        assert_eq!(days(&the_backup_in(&folder).sessions), [1, 2, 3]);
+        let toast = tab.toast().expect("told");
+        assert!(toast.text.starts_with("Backup saved as "), "{}", toast.text);
+    }
+
+    /// A session stored whose file cannot be read as the backup is
+    /// written, though it read as the app started, goes in as the app
+    /// holds it. It used to be left out, and told of as damaged.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_session_whose_file_cannot_be_read_is_backed_up_as_shown() {
+        let dir = TempDir::new("unread-then-backed-up");
+        let folder = TempDir::new("unread-then-backed-up-folder");
+        let tab = Tab::on_store(crate::persist::files_on_worker_backing_up(
+            &dir.0, &folder.0,
+        ));
+        tab.finish(day(1));
+        tab.finish(day(2));
+        tab.act(AppCtx::flush_history);
+        // Its file is a folder now: listed, and not read, by root too.
+        let first = dir
+            .0
+            .join("history")
+            .join("sessions")
+            .join(format!("{}.json", tab.id_of(1)));
+        std::fs::remove_file(&first).unwrap();
+        std::fs::create_dir(&first).unwrap();
+        tab.act(AppCtx::save_backup);
+        for _ in 0..3 {
+            tab.act(AppCtx::flush_history);
+        }
+        assert_eq!(days(&the_backup_in(&folder).sessions), [1, 2]);
+        let toast = tab.toast().expect("told");
+        assert!(!toast.text.contains("could not go in it"), "{}", toast.text);
     }
 
     /// Settings the store would not take stay as they were set, and are
