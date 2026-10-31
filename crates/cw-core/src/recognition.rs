@@ -1,18 +1,22 @@
 //! Per-character timing: how soon a character's key went in after its sound
-//! went to the audio output, in every mode, and how fast that counts as.
-//! The design of record is docs/recognition.md.
+//! went to the audio output, in every mode, and how fast that counts as;
+//! and, for a group copied once it had ended, how long you paused before
+//! each of its keys (its copy time). The design of record is
+//! docs/recognition.md.
 //!
 //! What is kept of a group is raw: when each of its characters ended and
 //! when each position of the answer first held its character
-//! ([`CharTimes`]). The rule ([`recognise`]) is applied when the history is
-//! read, so a better rule reads the whole of it again.
+//! ([`CharTimes`]). The rules ([`recognise`], [`copy_times`]) are applied
+//! when the history is read, so a better rule reads the whole of it again.
+//! A group is timed one way or the other, never both.
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::session::MonoMs;
 
-/// The longest a recognition time says: a character typed later than this
-/// after it sounded is timed as this, as slow as the bands go.
+/// The longest a recognition or copy time says: a character typed later
+/// than this after it sounded, or after the key before it, is timed as
+/// this, as slow as the bands go.
 pub const RECOGNITION_MAX_MS: u32 = 3_000;
 
 /// The quickest a key can answer a sound: sooner, and it was a guess, or a
@@ -36,11 +40,12 @@ pub const KEEPING_UP_MS: u32 = 100;
 pub const ALONG_FLOOR_MS: u32 = 400;
 
 /// The fewest timed tries of a character for its recognition time to be put
-/// in a band: fewer, and one slow key moves the median too far.
+/// in a band, or its copy time to go by: fewer, and one slow key moves the
+/// median too far.
 pub const RECOGNITION_MIN_TRIES: u32 = 8;
 
-/// How many of a character's latest timed tries its recognition time is the
-/// median of: recent enough to show it getting faster.
+/// How many of a character's latest timed tries its recognition time, or
+/// its copy time, is the median of: recent enough to show it getting faster.
 pub const RECOGNITION_WINDOW: usize = 40;
 
 /// The bands' edges are kept between these.
@@ -271,12 +276,13 @@ impl CharTimes {
         }
     }
 
-    /// Whether the rule could read a time from these at all: a key to time,
-    /// and, for more than one character, the box open as it was sent. What
-    /// it could not is not kept, as it would cost a browser's store room for
-    /// nothing.
+    /// Whether the rules could read a time from these at all: a key to time.
+    /// With the box shut, a group of more than one character has no
+    /// recognition time but has a copy time ([`copy_times`]), read from the
+    /// same keys. What has no key is not kept, as it would cost a browser's
+    /// store room for nothing.
     pub fn can_be_timed(&self) -> bool {
-        (self.box_open || self.ends.len() == 1) && self.keys.iter().any(Option::is_some)
+        self.keys.iter().any(Option::is_some)
     }
 }
 
@@ -369,6 +375,59 @@ pub fn typed_along(times: &CharTimes) -> bool {
             .copied()
             .flatten()
             .is_some_and(|first| first <= by)
+}
+
+/// Whether a group of more than one character was copied after it ended
+/// rather than typed along: its first key has a moment, and is later than
+/// [`typed_along`] allows, or the box was shut. Its characters get a copy
+/// time ([`copy_times`]) and never a recognition time; a group of one
+/// character never gets one.
+pub fn copied_after(times: &CharTimes) -> bool {
+    times.ends.len() > 1 && times.keys.first().copied().flatten().is_some() && !typed_along(times)
+}
+
+/// How long you paused before each character's key as you copied `sent`,
+/// typed `received`, once its group had ended (docs/recognition.md, Copy
+/// time): the first from the group's end as heard (its last character's
+/// end and the reported delay), each later one from the key before it.
+/// None where the rule says nothing, and everywhere unless
+/// [`copied_after`]:
+///
+/// 1. typed right, in its place ([`lined_up`]), and not as a correction;
+/// 2. after the first, the position before it keyed, and not a
+///    correction: a slip put right there holds the putting right;
+/// 3. its key after the moment it is timed from.
+///
+/// A pause past [`RECOGNITION_MAX_MS`] counts as that. It holds your
+/// typing, and for the first character your start: it is no recognition,
+/// and has no bands.
+pub fn copy_times(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>> {
+    let sent: Vec<char> = sent.chars().collect();
+    let typed: Vec<char> = received.chars().collect();
+    let mut out = vec![None; sent.len()];
+    if sent.is_empty() || times.ends.len() != sent.len() || !copied_after(times) {
+        return out;
+    }
+    let keyed = |at: usize| times.keys.get(at).copied().flatten();
+    let corrected = |at: usize| times.corrected.contains(&at);
+    let heard = times.ends[sent.len() - 1].saturating_add(times.latency_ms);
+    for (at, time) in out.iter_mut().enumerate().take(lined_up(&sent, &typed)) {
+        if typed[at] != sent[at] || corrected(at) {
+            continue;
+        }
+        let Some(key) = keyed(at) else {
+            continue;
+        };
+        let from = match at.checked_sub(1) {
+            None => Some(heard),
+            Some(before) if corrected(before) => None,
+            Some(before) => keyed(before),
+        };
+        if let Some(from) = from.filter(|from| key > *from) {
+            *time = Some((key - from).min(RECOGNITION_MAX_MS));
+        }
+    }
+    out
 }
 
 /// How long after a group had ended, its last character gone to the
@@ -521,6 +580,19 @@ pub enum Recognition {
         instant: bool,
     },
     /// Timed this many times, too few to put in a band: the median so far.
+    Provisional { ms: f64, tries: u32 },
+    /// Never timed.
+    Untimed,
+}
+
+/// How long you pause before keying a character as you copy a group once it
+/// has ended, as far as it has been timed ([`copy_times`]). No bands: it
+/// holds your typing as well.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CopyTime {
+    /// Timed enough to go by: the median of its latest tries.
+    Timed { ms: f64 },
+    /// Timed this many times, too few to go by: the median so far.
     Provisional { ms: f64, tries: u32 },
     /// Never timed.
     Untimed,
@@ -915,6 +987,199 @@ mod tests {
                 serde_json::from_str(&format!(r#"{{"times":{odd}}}"#)).expect("still loads");
             assert_eq!(read.times, None, "{odd}");
         }
+    }
+
+    /// `KMR` copied after it ended: each later letter timed from the key
+    /// before it, the first from the group's end as heard. None of it is
+    /// recognised.
+    #[test]
+    fn copied_after_each_letter_is_timed_from_the_key_before() {
+        let copied = times(&[Some(1_400), Some(1_600), Some(1_850)], true);
+        assert!(copied_after(&copied));
+        assert_eq!(
+            copy_times("KMR", "KMR", &copied),
+            [Some(400), Some(200), Some(250)]
+        );
+        assert_eq!(recognise("KMR", "KMR", &copied), [None, None, None]);
+        // Heard 40 ms after it went out: the first pause is from then.
+        let delayed = CharTimes {
+            latency_ms: 40,
+            ..copied
+        };
+        assert_eq!(
+            copy_times("KMR", "KMR", &delayed),
+            [Some(360), Some(200), Some(250)]
+        );
+    }
+
+    /// A group is recognised or copied, never both: the first key in by
+    /// the typed-along deadline (its last character's end and the keeping-up
+    /// slack) times it as recognised, a millisecond later as copied.
+    #[test]
+    fn a_group_is_recognised_or_copied_never_both() {
+        let along = times(&[Some(1_100), Some(1_300), Some(1_500)], true);
+        assert_eq!(recognise("KMR", "KMR", &along)[0], Some(800));
+        assert_eq!(copy_times("KMR", "KMR", &along), [None, None, None]);
+        let after = times(&[Some(1_101), Some(1_300), Some(1_500)], true);
+        assert_eq!(recognise("KMR", "KMR", &after), [None, None, None]);
+        assert_eq!(
+            copy_times("KMR", "KMR", &after),
+            [Some(101), Some(199), Some(200)]
+        );
+        // Typed along, falling behind: recognised where it kept up (M slow,
+        // but K was in before M reached you), and R, behind M, untimed:
+        // never copied.
+        let behind = times(&[Some(550), Some(1_500), Some(1_700)], true);
+        assert_eq!(
+            recognise("KMR", "KMR", &behind),
+            [Some(250), Some(800), None]
+        );
+        assert_eq!(copy_times("KMR", "KMR", &behind), [None, None, None]);
+        // `ET` at 25 WPM: the along floor decides.
+        let et = |first: u32| CharTimes {
+            ends: vec![48, 336],
+            keys: vec![Some(first), Some(first + 251)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        };
+        assert_eq!(recognise("ET", "ET", &et(548)), [Some(500), None]);
+        assert_eq!(copy_times("ET", "ET", &et(548)), [None, None]);
+        assert_eq!(recognise("ET", "ET", &et(549)), [None, None]);
+        assert_eq!(copy_times("ET", "ET", &et(549)), [Some(213), Some(251)]);
+    }
+
+    /// A group of one character has a recognition time, never a copy time,
+    /// whether the box was open or shut.
+    #[test]
+    fn a_group_of_one_character_has_recognition_only() {
+        for open in [true, false] {
+            let one = CharTimes {
+                ends: vec![300],
+                keys: vec![Some(1_300)],
+                corrected: Vec::new(),
+                latency_ms: 0,
+                box_open: open,
+            };
+            assert!(!copied_after(&one));
+            assert_eq!(copy_times("K", "K", &one), [None]);
+            assert_eq!(recognise("K", "K", &one), [Some(1_000)]);
+        }
+    }
+
+    /// With the box shut, a group of more than one character is copied
+    /// after it ended, whenever its first key came: a key before the group
+    /// was heard to its end says nothing of the first, and the one after it
+    /// is timed from it all the same.
+    #[test]
+    fn with_the_box_shut_a_group_is_copied() {
+        let shut = times(&[Some(1_050), Some(1_300), Some(1_500)], false);
+        assert!(copied_after(&shut));
+        assert_eq!(
+            copy_times("KMR", "KMR", &shut),
+            [Some(50), Some(250), Some(200)]
+        );
+        assert_eq!(recognise("KMR", "KMR", &shut), [None, None, None]);
+        let early = times(&[Some(990), Some(1_300), Some(1_500)], false);
+        assert_eq!(
+            copy_times("KMR", "KMR", &early),
+            [None, Some(310), Some(200)]
+        );
+        let delayed = CharTimes {
+            latency_ms: 200,
+            ..times(&[Some(1_100), Some(1_300), Some(1_500)], false)
+        };
+        assert_eq!(
+            copy_times("KMR", "KMR", &delayed),
+            [None, Some(200), Some(200)]
+        );
+    }
+
+    /// Only letters copied right, in their place, and not as a slip put
+    /// right are timed; nor the letter after one put right, whose pause
+    /// holds the putting right.
+    #[test]
+    fn only_letters_copied_right_in_their_place_are_timed() {
+        let keys = [Some(1_400), Some(1_600), Some(1_850)];
+        let copied = times(&keys, true);
+        assert_eq!(
+            copy_times("KMR", "KXR", &copied),
+            [Some(400), None, Some(250)]
+        );
+        let fixed = |at: usize| CharTimes {
+            corrected: vec![at],
+            ..times(&keys, true)
+        };
+        assert_eq!(copy_times("KMR", "KMR", &fixed(1)), [Some(400), None, None]);
+        assert_eq!(copy_times("KMR", "KMR", &fixed(0)), [None, None, Some(250)]);
+        let short = times(&[Some(1_400), Some(1_600)], true);
+        assert_eq!(copy_times("KMR", "KR", &short), [Some(400), None, None]);
+        assert_eq!(copy_times("KMM", "KM", &short), [Some(400), None, None]);
+        let long = times(&[Some(1_500), Some(1_700), Some(1_950), Some(2_100)], true);
+        assert_eq!(
+            copy_times("KMR", "KMRE", &long),
+            [Some(500), Some(200), Some(250)]
+        );
+    }
+
+    /// A pause is timed only between two keys with moments, in order.
+    #[test]
+    fn a_copy_gap_needs_two_keys_in_order() {
+        let first_unknown = times(&[None, Some(1_600), Some(1_850)], true);
+        assert!(!copied_after(&first_unknown), "neither kind");
+        assert_eq!(copy_times("KMR", "KMR", &first_unknown), [None, None, None]);
+        assert_eq!(recognise("KMR", "KMR", &first_unknown), [None, None, None]);
+        let together = times(&[Some(1_400), Some(1_400), Some(1_850)], true);
+        assert_eq!(
+            copy_times("KMR", "KMR", &together),
+            [Some(400), None, Some(450)]
+        );
+        let out_of_order = times(&[Some(1_500), Some(1_400), Some(1_950)], true);
+        assert_eq!(
+            copy_times("KMR", "KMR", &out_of_order),
+            [Some(500), None, Some(550)]
+        );
+    }
+
+    /// A pause past the cap counts as the cap.
+    #[test]
+    fn a_copy_gap_past_the_cap_counts_as_the_cap() {
+        let slow = times(&[Some(1_500), Some(5_000), Some(5_100)], true);
+        assert_eq!(
+            copy_times("KMR", "KMR", &slow),
+            [Some(500), Some(RECOGNITION_MAX_MS), Some(100)]
+        );
+    }
+
+    /// Ends that do not fit what was sent say nothing.
+    #[test]
+    fn ends_that_do_not_fit_say_nothing() {
+        let odd = CharTimes {
+            ends: vec![300],
+            ..times(&[Some(1_400), Some(1_600), Some(1_850)], true)
+        };
+        assert_eq!(copy_times("KMR", "KMR", &odd), [None, None, None]);
+        assert_eq!(copy_times("", "", &odd), Vec::<Option<u32>>::new());
+    }
+
+    /// A group with a key is kept whether the box was open or shut, for its
+    /// copy time; one with no key is not. Shut, it reads back as kept.
+    #[test]
+    fn a_group_with_a_key_is_kept_with_the_box_shut() {
+        let shut = times(&[None, Some(1_300), None], false);
+        assert!(shut.can_be_timed());
+        assert!(!times(&[None, None, None], false).can_be_timed());
+        assert!(!times(&[None, None, None], true).can_be_timed());
+        #[derive(Deserialize)]
+        struct Holder {
+            #[serde(default, deserialize_with = "lenient_char_times")]
+            times: Option<CharTimes>,
+        }
+        let json = serde_json::to_string(&shut).expect("serialize");
+        assert!(json.contains(r#""boxOpen":false"#), "{json}");
+        let read: Holder =
+            serde_json::from_str(&format!(r#"{{"times":{json}}}"#)).expect("a save loads");
+        assert_eq!(read.times, Some(shut));
     }
 
     #[test]

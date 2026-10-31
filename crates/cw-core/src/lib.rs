@@ -93,10 +93,10 @@ pub use pool::{
     compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
 };
 pub use recognition::{
-    ALONG_FLOOR_MS, CharTimes, KEEPING_UP_MS, KeyLog, Keys, REACTION_MIN_MS,
+    ALONG_FLOOR_MS, CharTimes, CopyTime, KEEPING_UP_MS, KeyLog, Keys, REACTION_MIN_MS,
     RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES,
     RECOGNITION_WINDOW, Recognition, RecognitionBand, RecognitionBands, RecognitionEdge,
-    answer_chars, first_key_late_ms, recognise, typed_along,
+    answer_chars, copied_after, copy_times, first_key_late_ms, recognise, typed_along,
 };
 pub use rng::{Rng, SplitMix64};
 pub use sampling::{
@@ -131,11 +131,11 @@ pub use stats::{
     AccuracyPoint, BUILDING_MIN_ACCURACY, BigramCell, BigramHeatmap, CharTally,
     CharacterDiagnostic, ConfusionEntry, EARLIER_TRIES, GROUP_START_BIGRAM_TOKEN,
     HARD_PAIR_MIN_TRIES, HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS,
-    MasteryStatus, MistakeStats, RECENT_TRIES, SamplingRow, SessionHistoryRow, SessionRecognition,
-    SessionUntimed, accuracy_chart, best_accuracy, character_diagnostics, group_length_forecast,
-    history_order, history_row, mastered_count, mistake_stats, overall_accuracy, practised_modes,
-    sampling_rows, session_history, session_recognition, session_untimed, span_history,
-    speed_forecast, speed_history,
+    MasteryStatus, MistakeStats, RECENT_TRIES, SamplingRow, SessionCopy, SessionHistoryRow,
+    SessionRecognition, SessionUntimed, accuracy_chart, best_accuracy, character_diagnostics,
+    group_length_forecast, history_order, history_row, mastered_count, mistake_stats,
+    overall_accuracy, practised_modes, sampling_rows, session_copy, session_history,
+    session_recognition, session_untimed, span_history, speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

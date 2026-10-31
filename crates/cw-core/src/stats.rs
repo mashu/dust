@@ -10,8 +10,8 @@ use crate::morse::LCWO_SEQUENCE;
 use crate::numeric::median;
 use crate::pool::compute_char_pool;
 use crate::recognition::{
-    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Recognition, RecognitionBands, first_key_late_ms,
-    recognise, typed_along,
+    CopyTime, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Recognition, RecognitionBands,
+    copied_after, copy_times, recognise,
 };
 use crate::sampling::{
     CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
@@ -98,6 +98,14 @@ pub struct CharacterDiagnostic {
     pub recognition_ms: Option<f64>,
     /// How many tries of it have been timed.
     pub recognition_tries: u32,
+    /// How long you pause before its key as you copy a group once it has
+    /// ended, in milliseconds: the median of its latest
+    /// [`RECOGNITION_WINDOW`] copy-timed tries, once any is
+    /// ([`crate::copy_times`] says which are). Apart from its recognition
+    /// time, never averaged with it.
+    pub copy_ms: Option<f64>,
+    /// How many tries of it have been copy-timed.
+    pub copy_tries: u32,
 }
 
 impl CharacterDiagnostic {
@@ -125,6 +133,20 @@ impl CharacterDiagnostic {
                 tries: self.recognition_tries,
             },
             None => Recognition::Untimed,
+        }
+    }
+
+    /// How long you pause before keying it as you copy a group once it has
+    /// ended: to go by once [`RECOGNITION_MIN_TRIES`] tries are timed, the
+    /// median so far before that. No bands: it holds your typing as well.
+    pub fn copy_time(&self) -> CopyTime {
+        match self.copy_ms {
+            Some(ms) if self.copy_tries >= RECOGNITION_MIN_TRIES => CopyTime::Timed { ms },
+            Some(ms) => CopyTime::Provisional {
+                ms,
+                tries: self.copy_tries,
+            },
+            None => CopyTime::Untimed,
         }
     }
 
@@ -421,40 +443,89 @@ pub fn best_accuracy(sessions: &[SessionResult]) -> Option<f64> {
         .reduce(f64::max)
 }
 
-/// Each character of `session` the rule times (docs/recognition.md), with
-/// its time in milliseconds: its latest group first.
-fn timed_chars(session: &SessionResult) -> impl Iterator<Item = (char, u32)> + '_ {
+/// How a character was timed: recognised, keyed along as its group sounded,
+/// or copied, keyed once its group had ended. A group is timed one way or
+/// the other, never both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Took {
+    Recognised(u32),
+    Copied(u32),
+}
+
+/// Each character of `session` the rules time (docs/recognition.md), with
+/// its time in milliseconds and which kind it is: its latest group first.
+/// A contest run's are recognised only: a token's first key there comes
+/// after typing the one before it, and a call's after a pile-up.
+fn timed_chars(session: &SessionResult) -> impl Iterator<Item = (char, Took)> + '_ {
+    let contest = session.char_set_mode == CharSetMode::Contest;
     session
         .groups
         .iter()
         .zip(&session.group_timings)
         .rev()
         .filter_map(|(group, timing)| Some((group, timing.char_times.as_ref()?)))
-        .flat_map(|(group, times)| {
-            let recognised = recognise(&group.sent, &group.received, times);
+        .flat_map(move |(group, times)| {
+            let took: Vec<Option<Took>> = if copied_after(times) {
+                if contest {
+                    Vec::new()
+                } else {
+                    copy_times(&group.sent, &group.received, times)
+                        .into_iter()
+                        .map(|took| took.map(Took::Copied))
+                        .collect()
+                }
+            } else {
+                recognise(&group.sent, &group.received, times)
+                    .into_iter()
+                    .map(|took| took.map(Took::Recognised))
+                    .collect()
+            };
             group
                 .sent
                 .chars()
-                .zip(recognised)
+                .zip(took)
                 .filter_map(|(ch, took)| Some((ch.to_ascii_uppercase(), took?)))
         })
 }
 
-/// Each character's timed tries in `sessions`, every mode's: how many there
-/// are, and the latest [`RECOGNITION_WINDOW`] of them, in milliseconds,
-/// read newest session first.
-fn recognition_times(sessions: &[SessionResult]) -> BTreeMap<char, (u32, Vec<f64>)> {
-    let mut newest_first: Vec<&SessionResult> = sessions.iter().collect();
-    newest_first.sort_by_key(|session| std::cmp::Reverse(session.timestamp));
-    let mut times: BTreeMap<char, (u32, Vec<f64>)> = BTreeMap::new();
-    for (ch, took) in newest_first.into_iter().flat_map(timed_chars) {
-        let (tries, latest) = times.entry(ch).or_default();
-        *tries += 1;
-        if latest.len() < RECOGNITION_WINDOW {
-            latest.push(f64::from(took));
+/// A character's timed tries of one kind: how many there are, and the
+/// latest [`RECOGNITION_WINDOW`] of them, in milliseconds, newest first.
+#[derive(Clone, Debug, Default)]
+struct Tries {
+    count: u32,
+    latest: Vec<f64>,
+}
+
+impl Tries {
+    fn push(&mut self, ms: u32) {
+        self.count += 1;
+        if self.latest.len() < RECOGNITION_WINDOW {
+            self.latest.push(f64::from(ms));
         }
     }
-    times
+}
+
+/// A character's recognised and copied tries, kept apart.
+#[derive(Clone, Debug, Default)]
+struct LetterTries {
+    recognised: Tries,
+    copied: Tries,
+}
+
+/// Each character's timed tries in `sessions`, every mode's, of each kind,
+/// read newest session first.
+fn letter_tries(sessions: &[SessionResult]) -> BTreeMap<char, LetterTries> {
+    let mut newest_first: Vec<&SessionResult> = sessions.iter().collect();
+    newest_first.sort_by_key(|session| std::cmp::Reverse(session.timestamp));
+    let mut tries: BTreeMap<char, LetterTries> = BTreeMap::new();
+    for (ch, took) in newest_first.into_iter().flat_map(timed_chars) {
+        let letter = tries.entry(ch).or_default();
+        match took {
+            Took::Recognised(ms) => letter.recognised.push(ms),
+            Took::Copied(ms) => letter.copied.push(ms),
+        }
+    }
+    tries
 }
 
 /// How fast a session's characters were recognised: the median of those
@@ -465,12 +536,38 @@ pub struct SessionRecognition {
     pub timed: usize,
 }
 
-/// `session`'s recognition, if any of its characters was timed.
+/// `session`'s recognition, if any of its characters was recognised.
 pub fn session_recognition(session: &SessionResult) -> Option<SessionRecognition> {
     let times: Vec<f64> = timed_chars(session)
-        .map(|(_, took)| f64::from(took))
+        .filter_map(|(_, took)| match took {
+            Took::Recognised(ms) => Some(f64::from(ms)),
+            Took::Copied(_) => None,
+        })
         .collect();
     Some(SessionRecognition {
+        median_ms: median(&times)?,
+        timed: times.len(),
+    })
+}
+
+/// How long a session's characters copied after their group had ended were
+/// paused over: the median of their copy times, and how many there were.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SessionCopy {
+    pub median_ms: f64,
+    pub timed: usize,
+}
+
+/// `session`'s copy time, if any of its characters was copied after its
+/// group had ended and timed so.
+pub fn session_copy(session: &SessionResult) -> Option<SessionCopy> {
+    let times: Vec<f64> = timed_chars(session)
+        .filter_map(|(_, took)| match took {
+            Took::Copied(ms) => Some(f64::from(ms)),
+            Took::Recognised(_) => None,
+        })
+        .collect();
+    Some(SessionCopy {
         median_ms: median(&times)?,
         timed: times.len(),
     })
@@ -484,18 +581,15 @@ pub struct SessionUntimed {
     /// Groups answered, and the characters sent in them.
     pub groups: usize,
     pub chars: usize,
-    /// Characters the rule timed.
+    /// Characters recognised, keyed along ([`crate::recognise`]).
     pub timed: usize,
+    /// Characters copied after their group had ended, and copy-timed
+    /// ([`crate::copy_times`]).
+    pub copied: usize,
     /// Groups whose first send the audio held up on its way, or that went
     /// out again from the start, heard in part: when their characters
     /// reached you is not known.
     pub held_up: usize,
-    /// Groups of more than one character, the box open, whose first key
-    /// came too late for them to have been typed along ([`typed_along`]).
-    pub typed_after: usize,
-    /// How long after each of those had ended its first key came: the
-    /// median, in milliseconds.
-    pub first_key_late_ms: Option<f64>,
     /// Groups of more than one character heard again before they were
     /// answered, with no key to time before the next send began.
     pub keyed_in_repeat: usize,
@@ -503,32 +597,26 @@ pub struct SessionUntimed {
 
 /// `session`'s [`SessionUntimed`].
 pub fn session_untimed(session: &SessionResult) -> SessionUntimed {
-    let mut late = Vec::new();
     let mut untimed = SessionUntimed {
         groups: session.groups.len(),
         chars: session.groups.iter().map(|g| g.sent.chars().count()).sum(),
-        timed: timed_chars(session).count(),
         ..SessionUntimed::default()
     };
+    for (_, took) in timed_chars(session) {
+        match took {
+            Took::Recognised(_) => untimed.timed += 1,
+            Took::Copied(_) => untimed.copied += 1,
+        }
+    }
     for (group, timing) in session.groups.iter().zip(&session.group_timings) {
         let longer = group.sent.chars().count() > 1;
         if matches!(timing.untimed, Some(Untimed::HeldUp | Untimed::SentAgain)) {
             untimed.held_up += 1;
         }
-        match &timing.char_times {
-            Some(times) if longer && times.box_open && !typed_along(times) => {
-                if let Some(ms) = first_key_late_ms(times) {
-                    untimed.typed_after += 1;
-                    late.push(ms as f64);
-                }
-            }
-            None if longer && timing.untimed.is_none() && timing.sends > 1 => {
-                untimed.keyed_in_repeat += 1;
-            }
-            _ => {}
+        if timing.char_times.is_none() && longer && timing.untimed.is_none() && timing.sends > 1 {
+            untimed.keyed_in_repeat += 1;
         }
     }
-    untimed.first_key_late_ms = median(&late);
     untimed
 }
 
@@ -593,7 +681,7 @@ fn letter_tallies(sessions: &[SessionResult]) -> Vec<LetterTally> {
 }
 
 pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnostic> {
-    let mut recognised = recognition_times(sessions);
+    let mut timed = letter_tries(sessions);
     let mut out: Vec<CharacterDiagnostic> = letter_tallies(sessions)
         .into_iter()
         .map(|tally| {
@@ -601,8 +689,7 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
             let status = classify_mastery(accuracy01, tally.total);
             let letter = tally.letter;
             let (recent, earlier) = trend(tally.by_session).unzip();
-            let (recognition_tries, latest) = recognised.remove(&letter).unwrap_or_default();
-            let recognition_ms = median(&latest);
+            let tries = timed.remove(&letter).unwrap_or_default();
             CharacterDiagnostic {
                 letter,
                 accuracy_pct: accuracy01 * 100.0,
@@ -614,8 +701,10 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
                 earlier_pct: earlier.map(|(pct, _)| pct),
                 recent_tries: recent.map_or(0, |(_, tries)| tries),
                 earlier_tries: earlier.map_or(0, |(_, tries)| tries),
-                recognition_ms,
-                recognition_tries,
+                recognition_ms: median(&tries.recognised.latest),
+                recognition_tries: tries.recognised.count,
+                copy_ms: median(&tries.copied.latest),
+                copy_tries: tries.copied.count,
             }
         })
         .collect();
@@ -1438,9 +1527,8 @@ mod tests {
                 groups: 6,
                 chars: 12,
                 timed: 3,
+                copied: 4,
                 held_up: 2,
-                typed_after: 2,
-                first_key_late_ms: Some(600.0),
                 keyed_in_repeat: 1,
             }
         );
@@ -1449,9 +1537,139 @@ mod tests {
         assert_eq!(session_untimed(&session).held_up, 1);
         // With nothing kept, nothing to say.
         let plain = session_untimed(&plain("2026-09-02", 2, &[("KM", "KM")]));
+        assert_eq!((plain.timed, plain.copied), (0, 0));
+    }
+
+    /// `KM` copied after it ended, 900 ms after the group did and M 200 ms
+    /// after K: ends at 300 and 700 ms, keys at 1600 and 1800.
+    fn copied_km() -> CharTimes {
+        CharTimes {
+            ends: vec![300, 700],
+            keys: vec![Some(1_600), Some(1_800)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        }
+    }
+
+    /// `groups` groups of `KM`, each copied after it ended.
+    fn copied_session(date: &str, timestamp: u64, groups: usize) -> SessionResult {
+        let mut session = plain(date, timestamp, &vec![("KM", "KM"); groups]);
+        for timing in &mut session.group_timings {
+            timing.char_times = Some(copied_km());
+        }
+        session
+    }
+
+    /// A character's copy time is kept apart from its recognition time,
+    /// never averaged with it: K recognised in 300 ms on its own and copied
+    /// after a 900 ms pause in `KM` reads 300 and 900, not 600. To go by
+    /// from eight tries on, as a recognition time is put in a band.
+    #[test]
+    fn copy_time_is_kept_apart_from_recognition() {
+        let mut alone = plain("2026-09-01", 1, &[("K", "K"); 8]);
+        for timing in &mut alone.group_timings {
+            timing.char_times = Some(keyed_after(300));
+        }
+        let history = [alone, copied_session("2026-09-02", 2, 8)];
+        let letter = |history: &[SessionResult], ch: char| {
+            character_diagnostics(history)
+                .into_iter()
+                .find(|d| d.letter == ch)
+                .expect("a letter")
+        };
+        let k = letter(&history, 'K');
+        assert_eq!((k.recognition_ms, k.recognition_tries), (Some(300.0), 8));
+        assert_eq!((k.copy_ms, k.copy_tries), (Some(900.0), 8));
+        assert_eq!(k.copy_time(), CopyTime::Timed { ms: 900.0 });
+        let m = letter(&history, 'M');
+        assert_eq!((m.recognition_ms, m.recognition_tries), (None, 0));
+        assert_eq!((m.copy_ms, m.copy_tries), (Some(200.0), 8));
         assert_eq!(
-            (plain.timed, plain.typed_after, plain.first_key_late_ms),
-            (0, 0, None)
+            m.recognition(RecognitionBands::default()),
+            Recognition::Untimed
+        );
+        let few = [copied_session("2026-09-02", 2, 7)];
+        assert_eq!(
+            letter(&few, 'M').copy_time(),
+            CopyTime::Provisional {
+                ms: 200.0,
+                tries: 7
+            }
+        );
+        assert_eq!(
+            letter(&[plain("2026-09-03", 3, &[("M", "M")])], 'M').copy_time(),
+            CopyTime::Untimed
+        );
+    }
+
+    /// A session's copy time is the median of its copied letters; a session
+    /// typed along has none, and one copied has no recognition time.
+    #[test]
+    fn session_copy_is_the_median_of_its_copied_letters() {
+        let copied = copied_session("2026-09-01", 1, 8);
+        assert_eq!(
+            session_copy(&copied),
+            Some(SessionCopy {
+                median_ms: 550.0,
+                timed: 16
+            })
+        );
+        assert_eq!(session_recognition(&copied), None);
+        let untimed = session_untimed(&copied);
+        assert_eq!((untimed.timed, untimed.copied), (0, 16));
+        let mut along = plain("2026-09-02", 2, &[("KM", "KM")]);
+        along.group_timings[0].char_times = Some(CharTimes {
+            keys: vec![Some(550), Some(900)],
+            ..copied_km()
+        });
+        assert_eq!(session_copy(&along), None);
+        assert_eq!(
+            session_recognition(&along),
+            Some(SessionRecognition {
+                median_ms: 225.0,
+                timed: 2
+            })
+        );
+    }
+
+    /// A contest run is timed by recognition only: a token's first key there
+    /// comes after typing the one before it. Another mode's copied letters
+    /// are copy-timed.
+    #[test]
+    fn a_contest_run_has_no_copy_time() {
+        for (mode, tries) in [(CharSetMode::Contest, 0), (CharSetMode::Callsign, 1)] {
+            let mut run = copied_session("2026-09-01", 1, 1);
+            run.char_set_mode = mode;
+            let history = [run];
+            let diagnostics = character_diagnostics(&history);
+            for ch in ['K', 'M'] {
+                let letter = diagnostics
+                    .iter()
+                    .find(|d| d.letter == ch)
+                    .expect("a letter");
+                assert_eq!(letter.copy_tries, tries, "{mode:?} {ch}");
+            }
+            assert_eq!(session_copy(&history[0]).is_some(), tries > 0, "{mode:?}");
+        }
+    }
+
+    /// A group saved by 0.16, typed after it ended, reads with its copy
+    /// times: they are read from what was kept then.
+    #[test]
+    fn a_timing_saved_by_0_16_reads_with_copy_times() {
+        let saved: SessionTiming = serde_json::from_str(
+            r#"{"timeToCompleteMs":400.0,"sends":1,"charTimes":{"ends":[250,500],"keys":[900,1050],"latencyMs":0,"boxOpen":true}}"#,
+        )
+        .expect("a 0.16 save reads");
+        let mut session = plain("2026-09-01", 1, &[("KM", "KM")]);
+        session.group_timings = vec![saved];
+        assert_eq!(
+            session_copy(&session),
+            Some(SessionCopy {
+                median_ms: 275.0,
+                timed: 2
+            })
         );
     }
 
