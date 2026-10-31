@@ -131,7 +131,7 @@ const KEY_ALONG = `((wpm, reactMs, after, firstMs, gapMs) => {
   const MORSE = {'.-':'A','-...':'B','-.-.':'C','-..':'D','.':'E','..-.':'F','--.':'G','....':'H','..':'I','.---':'J','-.-':'K','.-..':'L','--':'M','-.':'N','---':'O','.--.':'P','--.-':'Q','.-.':'R','...':'S','-':'T','..-':'U','...-':'V','.--':'W','-..-':'X','-.--':'Y','--..':'Z','-----':'0','.----':'1','..---':'2','...--':'3','....-':'4','.....':'5','-....':'6','--...':'7','---..':'8','----.':'9','.-.-.-':'.','--..--':',','..--..':'?','-..-.':'/','-...-':'=','.-.-.':'+','-....-':'-'};
   const dit = 1.2 / wpm;
   const keyed = A.keyed = [];
-  let scanned = 0, on = false, onAt = 0, offAt = 0, elements = '', heard = [], groupEnd = null, copying = null;
+  let scanned = 0, on = false, onAt = 0, offAt = 0, elements = '', heard = [], groupEnd = null, copying = null, deafUntil = 0;
   const box = () => document.querySelector('input.answer:not(.locked)');
   const type = text => {
     const field = box();
@@ -152,6 +152,15 @@ const KEY_ALONG = `((wpm, reactMs, after, firstMs, gapMs) => {
       let peak = 0;
       for (let i = scanned; i < scanned + step; i++) peak = Math.max(peak, Math.abs(A.buf[i]));
       const t = scanned / A.sr;
+      if (t < deafUntil) {
+        // A group just answered, sent again and still dying away: never the
+        // next group's.
+        on = false;
+        elements = '';
+        groupEnd = null;
+        scanned += step;
+        continue;
+      }
       if (!on && peak > 0.02) {
         on = true;
         onAt = t;
@@ -184,8 +193,16 @@ const KEY_ALONG = `((wpm, reactMs, after, firstMs, gapMs) => {
           keyed.push({ ch, typed: type(ch) });
           copying.at = now + gapMs / 1000;
         } else {
+          // Whatever was heard since, a group sent again for some of it
+          // unheard, is that group's: dropped, and the ear deaf until it
+          // has stopped, short of when the next group could sound.
           enter();
           copying = null;
+          heard = [];
+          elements = '';
+          groupEnd = null;
+          on = false;
+          deafUntil = now + 0.3;
         }
       }
       return;

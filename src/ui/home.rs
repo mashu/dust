@@ -465,7 +465,7 @@ pub fn Home(
                     div {
                         div { style: "font-weight: 700;", "Lock typing while sending is on" }
                         p { class: "muted", style: "margin: 0.15rem 0 0;",
-                            "It was the default before Dust 0.16. While it is on, a group longer than one character is typed only after it has been sent, so its characters get a copy time but never a recognition time."
+                            "It was the default before Dust 0.16. While it is on, a group longer than one character is typed only after it has been sent, so its characters get a copy time but never a recognition time, and none at all when each group is sent more than once (Sends per group above 1×)."
                         }
                         div { class: "row", style: "margin-top: 0.6rem;",
                             button {

@@ -470,7 +470,7 @@ pub fn session_shape() -> Element {
             }
             dt { "Lock typing while sending" }
             dd {
-                "Keeps you copying by ear rather than typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters get a copy time but no recognition time (Stats → Letters)."
+                "Keeps you copying by ear rather than typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters get a copy time but no recognition time, and none at all when a group is sent more than once (Stats → Letters)."
             }
             dt { "Key · Key speed" }
             dd { "How your [ and ] paddles key, and how fast: straight, iambic A or B, or Ultimatic." }

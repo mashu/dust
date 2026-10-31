@@ -469,7 +469,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                 }
                 Switch {
                     title: "Lock typing while sending",
-                    description: "Keeps you copying by ear instead of typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters get a copy time but no recognition time: turn it off and key each one as you hear it to time how fast you recognise it.",
+                    description: "Keeps you copying by ear instead of typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters get a copy time but no recognition time, and none at all when a group is sent more than once: turn it off and key each one as you hear it to time how fast you recognise it.",
                     checked: s.lock_input,
                     onchange: move |on| settings.write().playback.lock_input_during_group_playback = on,
                 }

@@ -131,7 +131,9 @@ impl<T: Copy> Keys<T> {
 /// where another was, or again where one was taken out at the end, is a
 /// correction, and keeps the moment its position was first keyed; one put
 /// in inside the text is a correction keyed now. An edit inside the text
-/// moves what follows it, moments and all, and the end with it.
+/// moves what follows it, moments and all, and the end with it; one that
+/// only takes characters out makes the character now after the cut a
+/// correction, as no pause is to be timed across a slip put right.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeyLog {
     held: Vec<Held>,
@@ -189,6 +191,12 @@ impl KeyLog {
             });
         }
         held.extend_from_slice(&old[old_end..]);
+        // Taken out inside with nothing typed in its place: what now
+        // follows the cut is a correction, as a slip taken out and typed
+        // again at the end is, so no pause is timed across it.
+        if inside && new_end == prefix && !replaced.is_empty() {
+            held[prefix].corrected = true;
+        }
         // An edit at the end types over what was taken out there, or takes
         // out more; one inside moves the end with what follows it.
         let typed = new_end - prefix;
@@ -241,7 +249,9 @@ pub struct CharTimes {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corrected: Vec<usize>,
     /// The delay the device reports from its output to the ear. It decides
-    /// only whether you were keeping up, and is never added to a time.
+    /// whether you were keeping up, and is never added to a recognition
+    /// time; a copy time's first letter is timed from the group's end and
+    /// it ([`copy_times`]).
     pub latency_ms: u32,
     /// Whether the box took keys while the sending went on.
     pub box_open: bool,
@@ -987,6 +997,33 @@ mod tests {
                 serde_json::from_str(&format!(r#"{{"times":{odd}}}"#)).expect("still loads");
             assert_eq!(read.times, None, "{odd}");
         }
+    }
+
+    /// A stray letter taken out inside the text, nothing typed in its place,
+    /// makes the letter now after the cut a correction: no pause is timed
+    /// across the slip put right, as one taken out and typed again at the end
+    /// is not.
+    #[test]
+    fn a_letter_taken_out_inside_leaves_what_follows_a_correction() {
+        let mut log = KeyLog::default();
+        log.typed(answer_chars("K"), at(1_400));
+        log.typed(answer_chars("KX"), at(1_500));
+        log.typed(answer_chars("KXM"), at(1_700));
+        log.typed(answer_chars("KXMR"), at(1_850));
+        log.typed(answer_chars("KMR"), at(1_900));
+        assert_eq!(
+            keys(&log),
+            (vec![Some(1_400), Some(1_700), Some(1_850)], vec![1])
+        );
+        let times = CharTimes::of(
+            0,
+            &[300, 700, 1_000],
+            &log.keys().map(|at| at.0),
+            None,
+            0,
+            true,
+        );
+        assert_eq!(copy_times("KMR", "KMR", &times), [Some(400), None, None]);
     }
 
     /// `KMR` copied after it ended: each later letter timed from the key

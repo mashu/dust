@@ -590,8 +590,8 @@ pub struct SessionUntimed {
     /// out again from the start, heard in part: when their characters
     /// reached you is not known.
     pub held_up: usize,
-    /// Groups of more than one character heard again before they were
-    /// answered, with no key to time before the next send began.
+    /// Groups heard again before they were answered, with no key to time
+    /// before the next send began.
     pub keyed_in_repeat: usize,
 }
 
@@ -608,12 +608,11 @@ pub fn session_untimed(session: &SessionResult) -> SessionUntimed {
             Took::Copied(_) => untimed.copied += 1,
         }
     }
-    for (group, timing) in session.groups.iter().zip(&session.group_timings) {
-        let longer = group.sent.chars().count() > 1;
+    for timing in &session.group_timings {
         if matches!(timing.untimed, Some(Untimed::HeldUp | Untimed::SentAgain)) {
             untimed.held_up += 1;
         }
-        if timing.char_times.is_none() && longer && timing.untimed.is_none() && timing.sends > 1 {
+        if timing.char_times.is_none() && timing.untimed.is_none() && timing.sends > 1 {
             untimed.keyed_in_repeat += 1;
         }
     }
@@ -1538,6 +1537,10 @@ mod tests {
         // With nothing kept, nothing to say.
         let plain = session_untimed(&plain("2026-09-02", 2, &[("KM", "KM")]));
         assert_eq!((plain.timed, plain.copied), (0, 0));
+        // A group of one character keyed only once sent again, the same.
+        let mut twice = super::tests::plain("2026-09-03", 3, &[("K", "K")]);
+        twice.group_timings[0].sends = 2;
+        assert_eq!(session_untimed(&twice).keyed_in_repeat, 1);
     }
 
     /// `KM` copied after it ended, 900 ms after the group did and M 200 ms

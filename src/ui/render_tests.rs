@@ -1492,14 +1492,24 @@ fn results_with_nothing_timed_say_why() {
     assert!(!html.contains("before it ends"), "{html}");
     assert!(!html.contains("Lock typing"), "{html}");
 
-    // The lock is no reason for groups of one character.
+    // The lock is no reason for groups of one character sent once.
     let mut ones = crate::testing::stored_session("2026-10-22", &[("K", "K"), ("M", "M")]);
     ones.group_timings
         .iter_mut()
         .for_each(|t| t.char_times = None);
-    let html = results_of(ones, true);
+    let html = results_of(ones.clone(), true);
     assert!(html.contains("Nothing was timed"), "{html}");
     assert!(!html.contains("Lock typing"), "{html}");
+    // Sent twice, keyed only once the box opened after the last send, it is.
+    for timing in &mut ones.group_timings {
+        timing.sends = 2;
+    }
+    let html = results_of(ones, true);
+    assert!(
+        html.contains("Nothing was timed: Lock typing while sending was on"),
+        "{html}"
+    );
+    assert!(html.contains(r#"id="btn-turn-off-lock-typing""#), "{html}");
 }
 
 /// Typed after each group was sent, every letter has a copy time: the
@@ -1563,12 +1573,19 @@ fn results_say_when_the_sound_was_held_up() {
         ),
         "{html}"
     );
-    // In fewer than half, held up says nothing: here the group not held
-    // up was copied after, two of six characters timed, a third.
+    // In fewer than half, held up is not the reason given.
     held.group_timings[1].untimed = None;
+    let html = results_of(held.clone(), true);
+    assert!(html.contains(r#"id="untimed-hint""#), "{html}");
+    assert!(!html.contains("held up"), "{html}");
+    assert!(
+        html.contains("Nothing was timed: a character is timed only when you key it yourself"),
+        "{html}"
+    );
+    // With the group not held up copied after, a third is timed: nothing
+    // to say, and its copy time shown.
     held.group_timings[1].char_times = kept;
     let html = results_of(held, true);
-    assert!(!html.contains("held up"), "{html}");
     assert!(!html.contains("untimed-hint"), "{html}");
     assert!(html.contains(r#"id="kpi-copy""#), "{html}");
 }

@@ -126,11 +126,7 @@ fn untimed_hint(result: &SessionResult, lock_on: bool) -> Option<(String, bool)>
         1 => format!("Only 1 of {} characters was timed", untimed.chars),
         timed => format!("Only {timed} of {} characters were timed", untimed.chars),
     };
-    let longer = result
-        .groups
-        .iter()
-        .any(|group| group.sent.chars().count() > 1);
-    if result.typing_locked && longer && untimed.keyed_in_repeat > 0 {
+    if result.typing_locked && untimed.keyed_in_repeat > 0 {
         let now = if lock_on {
             "Turn it off and key each group before it is sent again, or send each group once (Sends per group 1×)."
         } else {

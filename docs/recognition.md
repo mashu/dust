@@ -25,7 +25,8 @@ the speaker or headphones its key went in:
   text is a **correction** (`KeyLog`): it is no recognition of its own, but
   its place keeps the moment it was first keyed, which still says whether
   you were keeping up, so putting a slip right costs the characters around
-  it nothing. Text typed for you (the guided setup's Show me) has no moment.
+  it nothing. A character taken out inside the text, with nothing typed in
+  its place, makes the one now after the cut a correction too. Text typed for you (the guided setup's Show me) has no moment.
 
 Nothing is polled for it and nothing waits on it: each key reads the clock
 once and the box's `KeyLog` takes the moment as the text changes; each
@@ -52,9 +53,10 @@ mixing rule versions:
   clock; `null` where it cannot be: typed for you, before the send began, or
   after it was sent again.
 - `corrected` — the positions holding a correction; left out when none do.
-- `latencyMs` — the delay the device reports after the output. Used only to
-  decide whether you were keeping up (below), never added to or taken off a
-  time. Android reports none worth reading (its cpal host stamps the playback
+- `latencyMs` — the delay the device reports after the output. Never added
+  to or taken off a recognition time: it decides only whether you were
+  keeping up (below). It is taken off the first letter's copy time (Copy
+  time, below). Android reports none worth reading (its cpal host stamps the playback
   on another clock than the callback), so it counts as nothing there.
 - `boxOpen` — whether the box took keys while the group was sent; with it
   shut, a group of more than one character can only have a copy time.
