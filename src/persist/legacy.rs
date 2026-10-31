@@ -437,9 +437,9 @@ impl Gate {
 
 #[cfg_attr(feature = "web", allow(dead_code))]
 impl Layout {
-    /// The layout as it is written.
-    pub(super) fn written(&self) -> Vec<u8> {
-        serde_json::to_vec_pretty(self).unwrap_or_default()
+    /// The layout as it is written: pretty, as a file somebody may open.
+    pub(super) fn written(&self) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec_pretty(self)
     }
 }
 

@@ -546,12 +546,15 @@ impl HistoryFiles {
         let deleted = legacy_deleted(&self.root);
         let (records, layout) =
             legacy::moved(&sessions, fingerprint, &deleted, crate::time::now_ms());
-        let gone = ids_in(&self.tombstones()).map_err(|err| err.to_string())?;
-        for record in records.iter().filter(|record| !gone.contains(&record.id)) {
-            self.place_record(record).map_err(|err| err.to_string())?;
+        for record in self.not_moved_yet(records).map_err(|err| err.to_string())? {
+            self.place_record(&record).map_err(|err| err.to_string())?;
         }
         sync_if_there(&self.records()).map_err(|err| err.to_string())?;
-        write_whole(&self.dir, LAYOUT_FILE, &layout.written()).map_err(|err| err.to_string())?;
+        layout
+            .written()
+            .map_err(io::Error::other)
+            .and_then(|raw| write_whole(&self.dir, LAYOUT_FILE, &raw))
+            .map_err(|err| err.to_string())?;
         Ok(layout)
     }
 
@@ -589,10 +592,53 @@ impl HistoryFiles {
         if !change.is_empty() && self.apply(&change).kept().is_none() {
             return None;
         }
-        if let Err(err) = write_whole(&self.dir, LAYOUT_FILE, &next.written()) {
+        let noted = next
+            .written()
+            .map_err(io::Error::other)
+            .and_then(|raw| write_whole(&self.dir, LAYOUT_FILE, &raw));
+        if let Err(err) = noted {
             eprintln!("could not note what was taken up of an older build's history: {err}");
         }
         Some(change)
+    }
+
+    /// Of `moved`, the records a move makes, those to write: all of them
+    /// on a first move. A move made again, as one whose layout no longer
+    /// reads is, finds records already here: a session deleted since stays
+    /// deleted, and one taken up from an older build since, under the name
+    /// it was taken up by, is not written a second time under another.
+    fn not_moved_yet(&self, moved: Vec<Record>) -> io::Result<Vec<Record>> {
+        let (here, gone) = (ids_in(&self.records())?, ids_in(&self.tombstones())?);
+        if here.is_empty() && gone.is_empty() {
+            return Ok(moved);
+        }
+        let gone_keys = self.tombstoned_keys();
+        let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
+        // What each record here under a name the move does not give holds:
+        // a session that needs no record of the move's.
+        let mut elsewhere: HashMap<String, usize> = HashMap::new();
+        for id in here.difference(&names) {
+            if let Ok(json) = fs::read_to_string(self.records().join(file_name(*id))) {
+                *elsewhere.entry(json).or_default() += 1;
+            }
+        }
+        Ok(moved
+            .into_iter()
+            .filter(|record| {
+                if here.contains(&record.id) {
+                    return true;
+                }
+                if gone.contains(&record.id) {
+                    return false;
+                }
+                if let Some(count) = elsewhere.get_mut(&record.json).filter(|count| **count > 0) {
+                    *count -= 1;
+                    return false;
+                }
+                !serde_json::from_str::<KeyOnly>(&record.json)
+                    .is_ok_and(|key| gone_keys.contains(&SessionKey::new(key.timestamp, key.date)))
+            })
+            .collect())
     }
 
     /// The key of every session deleted here that its tombstone names.
@@ -1651,13 +1697,31 @@ mod tests {
     #[test]
     fn a_layout_that_does_not_read_is_set_aside_and_the_move_made_again() {
         let dir = TempDir::new("layout-damaged");
-        keep_whole(&dir, &[finished(1_000), finished(2_000)]);
-        let read = HistoryFiles::at(&dir.0).load();
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
+        keep_whole(&dir, &[first.clone(), second.clone()]);
+        let files = HistoryFiles::at(&dir.0);
+        let moved = files.load();
+        // Since the move: an older build stored two sessions, taken up
+        // here, and the first moved and the last taken up were deleted here.
+        let (third, fourth) = (finished(now + 60_000), finished(now + 120_000));
+        keep_whole(&dir, &[first.clone(), second, third, fourth.clone()]);
+        let taken = files.load();
+        assert_eq!(taken.sessions.len(), 4);
+        let as_stored = |(id, session): &(RecordId, SessionResult)| Record {
+            id: *id,
+            json: serde_json::to_string(session).unwrap(),
+        };
+        let (moved_first, taken_last) =
+            (as_stored(&moved.sessions[0]), as_stored(&taken.sessions[3]));
+        files.apply(&forget(&[(&moved_first, &first), (&taken_last, &fourth)]));
+        let read = files.load();
+        assert_eq!(read.sessions.len(), 2);
         let records = everything(&dir.0.join(HISTORY).join(RECORDS));
         fs::write(dir.0.join(HISTORY).join(LAYOUT_FILE), "{ damaged").unwrap();
         let again = HistoryFiles::at(&dir.0).load();
         assert!(again.complete);
-        assert_eq!(again.sessions, read.sessions);
+        assert_eq!(again.sessions, read.sessions, "none twice, none back");
         assert_eq!(everything(&dir.0.join(HISTORY).join(RECORDS)), records);
         let aside: Vec<String> = names(&dir.0.join(HISTORY))
             .into_iter()
