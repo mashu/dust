@@ -40,6 +40,41 @@ pub const STRETCH_SEC: f64 = 0.1;
 /// time.
 const CATCH_UP_MOST_SEC: f64 = 2.0;
 
+/// How far past what the browser has taken a change is made, at least:
+/// past whatever it is already rendering, so the stretch taken back has
+/// not begun to be played. A stream fallen behind picks up there too.
+pub const CHANGE_MARGIN_SEC: f64 = 0.03;
+
+/// How far past a device buffer a change is made, on a device whose audio
+/// thread renders more in one go than [`CHANGE_MARGIN_SEC`] covers.
+const CHANGE_MARGIN_SLACK_SEC: f64 = 0.02;
+
+/// The furthest past what was taken a change is ever made: how much later
+/// than it could a change is heard, at most.
+const CHANGE_MARGIN_MOST_SEC: f64 = 0.15;
+
+/// How far past what the browser has taken a change is made, on a browser
+/// that reports `base_latency_sec` (seconds; nothing reported is none).
+///
+/// The browser's clock moves on a device buffer at a time, about its base
+/// latency, whenever its audio thread wakes, and it can do so between a
+/// change made and the stretch it starts handed over. Made less than a
+/// buffer past what was taken, a change, a send's start above all, is then
+/// behind the clock before it reaches the browser, and the stream skips
+/// it: the send's first character unheard, and the group sent again and
+/// untimed. A phone's or a tablet's browser renders 40 ms and more in one
+/// go, where a computer's renders 10; there the change is made a buffer
+/// and the slack past what was taken, which only has it heard that much
+/// later.
+pub fn change_margin(base_latency_sec: f64) -> f64 {
+    let base = if base_latency_sec.is_finite() {
+        base_latency_sec.max(0.0)
+    } else {
+        0.0
+    };
+    (base + CHANGE_MARGIN_SLACK_SEC).clamp(CHANGE_MARGIN_SEC, CHANGE_MARGIN_MOST_SEC)
+}
+
 /// The mixer, run ahead of a clock: what it has rendered, still to play,
 /// each stretch with the node `N` it was handed over as. Everything is
 /// counted in samples from the clock's moment the stream started at, so
@@ -852,7 +887,7 @@ mod tests {
 
     /// How far past what the browser has taken its stream makes a change,
     /// and picks up after falling behind.
-    const MARGIN: f64 = 0.03;
+    const MARGIN: f64 = super::CHANGE_MARGIN_SEC;
 
     /// A send made the margin past what the clock has taken, `taken`, the
     /// stream rendered a good way ahead of it; then topped up with the
@@ -864,13 +899,23 @@ mod tests {
         taken: f64,
         step: f64,
     ) -> (Browser, f64, Missed) {
-        let mut stream = ReceiverStream::new(mixer(settings), 0.0, MARGIN);
+        sent_with_margin_then_topped_up(settings, MARGIN, taken, step)
+    }
+
+    /// [`sent_then_topped_up`], the send made `margin` past what was taken.
+    fn sent_with_margin_then_topped_up(
+        settings: &TrainingSettings,
+        margin: f64,
+        taken: f64,
+        step: f64,
+    ) -> (Browser, f64, Missed) {
+        let mut stream = ReceiverStream::new(mixer(settings), 0.0, margin);
         let mut browser = Browser::default();
         stream
             .render_ahead(0.0, 0.5, |starts, samples| browser.play(starts, samples))
             .expect("played");
-        let (made, taken_back) = stream.change_at(taken + MARGIN, |mixer, swept| {
-            mixer.start(send(settings, "TEST", taken + MARGIN), swept);
+        let (made, taken_back) = stream.change_at(taken + margin, |mixer, swept| {
+            mixer.start(send(settings, "TEST", taken + margin), swept);
         });
         browser.take_back(taken_back);
         let lookahead = stream.mixer().lookahead_sec();
@@ -942,6 +987,43 @@ mod tests {
             (until - picked_up).abs() < 1e-4,
             "to where the stream picked up, {picked_up}: {until}"
         );
+    }
+
+    /// A browser whose audio thread renders a whole device buffer in one
+    /// go, as a phone's or a tablet's does, 40 ms and more, steps its clock
+    /// on by as much at once: past the bare margin, between a send made and
+    /// the top-up after it. Made the margin its base latency asks for
+    /// ([`super::change_margin`]), the send is still ahead of such a step,
+    /// and none of it goes unheard; a computer's 10 ms buffer keeps the
+    /// bare margin, and no device has a change made more than the most
+    /// past what was taken.
+    #[test]
+    fn a_send_made_the_margin_a_device_buffer_asks_for_survives_its_step() {
+        let settings = settings();
+        for buffer in [0.01, 0.0213, 0.04, 0.064, 0.1] {
+            let margin = super::change_margin(buffer);
+            assert!(margin >= MARGIN && margin > buffer, "{buffer}: {margin}");
+            // A whole buffer, rendered at once just as the send was made.
+            let (_, _, sent) = sent_with_margin_then_topped_up(&settings, margin, 0.2, buffer);
+            assert!(
+                !sent.is_set(),
+                "a {buffer} s buffer, made {margin} on: {:?}",
+                sent.span()
+            );
+            // The bare margin loses a buffer's step past it.
+            if buffer > MARGIN {
+                let (_, _, bare) = sent_then_topped_up(&settings, 0.2, buffer);
+                assert!(bare.is_set(), "{buffer}: the bare margin held");
+            }
+        }
+        assert_eq!(super::change_margin(0.0), MARGIN, "none reported");
+        assert_eq!(super::change_margin(f64::NAN), MARGIN, "nonsense reported");
+        assert_eq!(super::change_margin(-1.0), MARGIN);
+        assert!(
+            (super::change_margin(0.01) - MARGIN).abs() < 1e-12,
+            "a computer's"
+        );
+        assert!((super::change_margin(5.0) - 0.15).abs() < 1e-12, "at most");
     }
 
     /// A change is rendered its lead past what the browser has taken, not

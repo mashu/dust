@@ -68,7 +68,12 @@ clock to report, from what each send has played against the wall clock at
 every callback. A send held up is also said on standard error (`audio
 output: a send was held up on its way…`), which a desktop build started
 from a terminal shows: on the screen the group only goes untimed, and the
-results say why. Keys after a group's second send began are `null`: it was
+results say why. A browser's stream that falls behind its clock skips some
+of a send, and what follows the skip plays on its planned time: a skip that
+lost a character (half a dit of one or more) leaves the first send untimed,
+as `"heldUp"`, and sends the group again; one in the quiet before the first
+character or after the last, or a sliver of an onset, costs nothing, and
+the group is timed as ever. Keys after a group's second send began are `null`: it was
 heard twice. A contest call or exchange token keeps the same record (see
 Contest, below). The record is read leniently: a shape this build does not
 know reads as untimed, never as a lost session.

@@ -128,6 +128,29 @@ jobs:
           test -f site/privacy/index.html
           ls -lh site site/assets
 
+      # The regression check for characters keyed along and left untimed,
+      # in a real browser: the site just built, served under its base path,
+      # a group session keyed along by ear in headless Chromium with Lock
+      # typing while sending off, and every character keyed right timed on
+      # Results and in the browser's database
+      # (scripts/browser-timing-check.cjs; src/timing_tests.rs runs the same
+      # in the app's test harness).
+      - name: Key a session along in a browser
+        env:
+          PLAYWRIGHT_VERSION: "1.63.0"
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/playwright"
+          mkdir -p "$tools"
+          npm install --prefix "$tools" --no-save --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}"
+          "$tools/node_modules/.bin/playwright" install --with-deps chromium
+          repo="${GITHUB_REPOSITORY##*/}"
+          base="$repo"
+          if [[ "$repo" == *.github.io ]]; then
+            base=""
+          fi
+          NODE_PATH="$tools/node_modules" node scripts/browser-timing-check.cjs site "$base"
+
       - name: Upload Pages artifact
         if: inputs.upload
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

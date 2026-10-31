@@ -62,14 +62,16 @@ pub enum SessionEvent {
     /// Some of the send of the group playing went unheard, `from_sec` to
     /// `until_sec` after its first sample: the browser fell so far behind
     /// its audio clock that it skipped it. Said as soon as it is found,
-    /// before the send ends, which is held up as well, and again should
-    /// more of it go. A skip that lost a character makes the send no
-    /// hearing of the group, however it ends, and once it ends the group is
-    /// sent again ([`MAX_SENT_AGAIN`] times at most), with no count down
-    /// and the box as it is while the group is sent: just the lost send,
-    /// once the group has been heard whole, or else from the start. One
-    /// that lost none, in the quiet around the characters or a sliver of
-    /// an onset, changes nothing.
+    /// before the send ends, and again should more of it go. A skip that
+    /// lost a character makes the send no hearing of the group, however it
+    /// ends, and a first send so cannot be timed from, as one held up
+    /// cannot; once it ends the group is sent again ([`MAX_SENT_AGAIN`]
+    /// times at most), with no count down and the box as it is while the
+    /// group is sent: just the lost send, once the group has been heard
+    /// whole, or else from the start. One that lost none, in the quiet
+    /// around the characters or a sliver of an onset, changes nothing: what
+    /// follows a skip plays on its planned time, so every character it
+    /// sent is timed as ever.
     PlaybackMissed {
         index: usize,
         from_sec: f64,
@@ -373,6 +375,12 @@ impl<S: GroupSource> SessionMachine<S> {
                     .sending
                     .as_ref()
                     .is_none_or(|send| send.loses_characters(from_sec, until_sec));
+                // Characters of it unheard, a first send is no origin to
+                // time the group from, however late the news: answered, or
+                // paused, before a poll found the skip.
+                if lost {
+                    self.session.note_held_up(index);
+                }
                 if self.playing_index() == Some(index) && lost {
                     // No hearing, however it ends: cut by a pause, typed
                     // along, or sent again.
@@ -2169,7 +2177,6 @@ mod tests {
         let lost = m.apply(missed(0, 0.1, 0.28), MonoMs(300));
         assert!(lost.is_empty(), "the send plays on: {lost:?}");
         assert!(!m.session().view().again, "not yet sent again");
-        let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(520));
         let again = m.apply(ended(0), MonoMs(520));
         assert_eq!(m.phase(), SessionPhase::RepeatGap { index: 0 });
         let (_, gap_ms) = timer(&again);
@@ -2270,10 +2277,6 @@ mod tests {
         let _ = fire(&mut m, &gap, second);
         let _ = m.apply(km_started(second), MonoMs(second));
         let _ = m.apply(missed(0, 0.1, 0.4), MonoMs(second + 400));
-        let _ = m.apply(
-            SessionEvent::PlaybackHeldUp { index: 0 },
-            MonoMs(second + 500),
-        );
         let again = m.apply(ended(0), MonoMs(second + 500));
         assert_eq!(m.phase(), SessionPhase::RepeatGap { index: 0 });
         let view = m.session().view();
@@ -2345,7 +2348,6 @@ mod tests {
             let _ = m.apply(km_started(3_000), MonoMs(3_000));
             let _ = m.apply(typed(0, "K"), MonoMs(3_350));
             let _ = m.apply(missed(0, 0.1, 0.4), MonoMs(3_400));
-            let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(3_500));
             let again = m.apply(ended(0), MonoMs(3_500));
             assert_eq!(m.phase(), SessionPhase::RepeatGap { index: 0 });
             let view = m.session().view();
@@ -2405,8 +2407,10 @@ mod tests {
 
     /// A skip that lost no character — in the quiet before the first, or
     /// after the last, or a sliver of an onset — sends nothing again: the
-    /// group is answered as ever, the send heard. One across a character
-    /// still sends it again.
+    /// group is answered as ever, the send heard, and timed as ever, as
+    /// what follows a skip plays on its planned time. One across a
+    /// character still sends it again, and its first send is no origin to
+    /// time it from.
     #[test]
     fn a_skip_that_lost_no_character_is_no_resend() {
         let skipped = |from_sec: f64, until_sec: f64| {
@@ -2421,7 +2425,6 @@ mod tests {
             };
             let _ = m.apply(SessionEvent::PlaybackStarted { index: 0, start }, MonoMs(0));
             let _ = m.apply(missed(0, from_sec, until_sec), MonoMs(950));
-            let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(1_000));
             let _ = m.apply(ended(0), MonoMs(1_000));
             m
         };
@@ -2442,8 +2445,8 @@ mod tests {
             let timing = &m.session().result(2_000, "2026-10-30".into()).group_timings[0];
             assert_eq!(
                 (timing.sends, timing.time_to_complete_ms, timing.untimed),
-                (1, 300.0, Some(Untimed::HeldUp)),
-                "{skip}: heard, but held up"
+                (1, 300.0, None),
+                "{skip}: heard, and its send trusted"
             );
         }
         let m = skipped(0.30, 0.45);
@@ -2451,6 +2454,110 @@ mod tests {
             m.phase(),
             SessionPhase::RepeatGap { index: 0 },
             "across a character"
+        );
+    }
+
+    /// A skip across a character of a group's first send leaves the group
+    /// untimed, the audio having said only what it skipped, never that the
+    /// send was held up: some of its characters went unheard, so it is no
+    /// origin to time them from, however the group goes on.
+    #[test]
+    fn a_skip_across_a_character_leaves_the_first_send_untimed() {
+        let mut m = start_with(settings(1, false, 10.0), script(&["KM"], 1));
+        let _ = m.apply(km_started(0), MonoMs(0));
+        let _ = m.apply(missed(0, 0.1, 0.4), MonoMs(400));
+        let again = m.apply(ended(0), MonoMs(500));
+        assert_eq!(m.phase(), SessionPhase::RepeatGap { index: 0 });
+        let _ = fire(&mut m, &again, 2_000);
+        let _ = m.apply(km_started(2_000), MonoMs(2_000));
+        let _ = m.apply(ended(0), MonoMs(2_500));
+        assert_eq!(m.phase(), SessionPhase::AwaitingAnswer { index: 0 });
+        let keys = Keys {
+            at: vec![Some(MonoMs(2_600)), Some(MonoMs(2_800))],
+            corrected: Vec::new(),
+        };
+        let _ = m.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+                keys,
+            },
+            MonoMs(2_800),
+        );
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(2_800));
+        let timing = &m.session().result(3_000, "2026-10-31".into()).group_timings[0];
+        assert_eq!(
+            (timing.untimed, timing.char_times.is_none()),
+            (Some(Untimed::HeldUp), true),
+            "{timing:?}"
+        );
+    }
+
+    /// A skip that lost a character, found only once the group was answered
+    /// along its first send — the page busy, its keys handled before the
+    /// poll that found the skip — still leaves the group untimed: its first
+    /// send is no origin to time it from, however late the news.
+    #[test]
+    fn a_lossy_skip_told_after_the_answer_still_untimes_the_group() {
+        // Two groups, so the session is still under way when the news
+        // comes.
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM", "KM"], 1));
+        let _ = m.apply(km_started(0), MonoMs(0));
+        let keys = Keys {
+            at: vec![Some(MonoMs(450)), Some(MonoMs(650))],
+            corrected: Vec::new(),
+        };
+        let _ = m.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+                keys,
+            },
+            MonoMs(650),
+        );
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(650));
+        assert_ne!(m.phase(), SessionPhase::Playing { index: 0 }, "answered");
+        let _ = m.apply(missed(0, 0.1, 0.4), MonoMs(660));
+        let timing = &m.session().result(1_000, "2026-10-31".into()).group_timings[0];
+        assert_eq!(
+            (timing.untimed, timing.char_times.is_none()),
+            (Some(Untimed::HeldUp), true),
+            "{timing:?}"
+        );
+    }
+
+    /// The same skip found only once the session had paused — the page
+    /// stalled long enough to be taken for away — the answer typed in full
+    /// along the send: resumed, the answer confirms itself, untimed.
+    #[test]
+    fn a_lossy_skip_told_after_a_pause_still_untimes_the_group() {
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM", "KM"], 1));
+        let _ = m.apply(km_started(0), MonoMs(0));
+        let keys = Keys {
+            at: vec![Some(MonoMs(450)), Some(MonoMs(650))],
+            corrected: Vec::new(),
+        };
+        let _ = m.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+                keys,
+            },
+            MonoMs(650),
+        );
+        let _ = m.apply(SessionEvent::Pause, MonoMs(700));
+        let _ = m.apply(missed(0, 0.1, 0.4), MonoMs(2_800));
+        let auto = m.apply(SessionEvent::Resume, MonoMs(9_000));
+        let _ = fire(&mut m, &auto, 9_000 + u64::from(AUTO_CONFIRM_DELAY_MS));
+        assert_eq!(m.phase(), SessionPhase::InterGroupGap { next: 1 });
+        let timing = &m
+            .session()
+            .result(10_000, "2026-10-31".into())
+            .group_timings[0];
+        assert_eq!(
+            (timing.untimed, timing.char_times.is_none()),
+            (Some(Untimed::HeldUp), true),
+            "{timing:?}"
         );
     }
 
@@ -2464,7 +2571,6 @@ mod tests {
         let lost = |m: &mut SessionMachine<Script>, at: u64| {
             let _ = m.apply(km_started(at), MonoMs(at));
             let _ = m.apply(missed(0, 0.1, 0.4), MonoMs(at + 400));
-            let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(at + 500));
             m.apply(ended(0), MonoMs(at + 500))
         };
         let plays = |effects: &[SessionEffect]| {

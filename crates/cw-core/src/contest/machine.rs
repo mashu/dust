@@ -162,9 +162,10 @@ pub enum ContestEvent {
     },
     /// Some of a turn's sound went unheard, `from_sec` to `until_sec` into
     /// it: the browser fell so far behind its audio clock that it skipped
-    /// it. Said as soon as it is found, before the turn ends, which is held
-    /// up as well. A caller's send any of which it skipped is heard no more
-    /// than one sent under your message is.
+    /// it. Said as soon as it is found, before the turn ends, and nothing
+    /// heard in the turn is timed from, as nothing in one held up is. A
+    /// caller's send any of which it skipped is heard no more than one sent
+    /// under your message is.
     TurnMissed {
         id: u64,
         from_sec: f64,

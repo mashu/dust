@@ -13,7 +13,7 @@ use web_sys::{
 
 use super::{page_is_hidden, reported_latency};
 use crate::audio::mixer::{Mixer, Swept};
-use crate::audio::stream::{Missed, ReceiverStream, Taken};
+use crate::audio::stream::{Missed, ReceiverStream, Taken, change_margin};
 
 /// How far past what the browser has taken the receiver is kept rendered.
 /// Enough to ride over a busy main thread; a change made sooner than this
@@ -25,10 +25,6 @@ const STREAM_LEAD_SEC: f64 = 0.5;
 const STREAM_LEAD_HIDDEN_SEC: f64 = 2.5;
 /// How often the stream is topped up.
 const STREAM_TICK_MS: u32 = 100;
-/// How far past the browser's clock, beyond its base latency, a change is
-/// made: past whatever it is already rendering, so the stretch taken back
-/// has not begun to be played. A stream fallen behind picks up there too.
-const CHANGE_MARGIN_SEC: f64 = 0.03;
 /// How far past what the browser has taken a change renders at once, the
 /// rest left to the next tick: a click that starts a band and a send is two
 /// changes, and each takes back whatever the one before it rendered.
@@ -46,16 +42,21 @@ struct StreamState {
     stream: ReceiverStream<AudioBufferSourceNode>,
     /// Stretches stopped short by a change, connected until they are over.
     stopped: Vec<(AudioBufferSourceNode, f64)>,
+    /// How far past what the browser has taken a change is made
+    /// ([`change_margin`]), for the device buffer the context reports.
+    margin: f64,
 }
 
 impl MixerStream {
     /// Stream `mixer` into `into`, starting now.
     pub fn start(ctx: &AudioContext, into: &GainNode, mixer: Mixer) -> Self {
+        let margin = change_margin(reported_latency(ctx, "baseLatency"));
         let state = Rc::new(RefCell::new(StreamState {
             ctx: ctx.clone(),
             into: into.clone(),
-            stream: ReceiverStream::new(mixer, ctx.current_time(), CHANGE_MARGIN_SEC),
+            stream: ReceiverStream::new(mixer, ctx.current_time(), margin),
             stopped: Vec::new(),
+            margin,
         }));
         let ticking = Rc::clone(&state);
         let ticker = Interval::new(STREAM_TICK_MS, move || {
@@ -174,7 +175,7 @@ impl StreamState {
     }
 
     fn soonest(&self) -> f64 {
-        self.taken() + CHANGE_MARGIN_SEC
+        self.taken() + self.margin
     }
 
     /// Run the mixer on, should the clock have taken all that was rendered

@@ -138,10 +138,14 @@ fading, all in Rust ([`src/audio/stream.rs`](../src/audio/stream.rs)). A
 browser plays only what it is handed ahead of time, so the mixer is run
 half a second ahead of its clock, a tenth of a second at a time, each
 stretch scheduled as a buffer, with a copy of the mixer kept from the start
-of each. A send, a stop, a new band or an RF gain moved is made 30 ms past
-the browser's clock and its base latency: the stretch that moment falls in
-is played again from its copy up to there, sample for sample as it was,
-and the rest made anew. The graph left is the volume, the soft limiter and
+of each. A send, a stop, a new band or an RF gain moved is made past the
+browser's clock and its base latency by a margin: 30 ms, or the base
+latency and 20 ms more where that is longer (at most 150 ms), as a phone's
+or a tablet's browser renders a device buffer of 40 ms and more in one go,
+and its clock steps on by as much at once; made short of it, a send's start
+could fall behind the clock before it reached the browser, and be skipped.
+The stretch that moment falls in is played again from its copy up to
+there, sample for sample as it was, and the rest made anew. The graph left is the volume, the soft limiter and
 the paddle's sidetone. On iPhone Safari the page takes the playback audio
 session the first time something is about to be heard, so the Ring/Silent
 switch does not mute it.
