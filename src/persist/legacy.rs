@@ -633,8 +633,10 @@ impl<S: Aside> BlobHistory<S> {
     /// Make `change` to the history, and say what became of it.
     ///
     /// Deletions are remembered before the history is written without
-    /// them, and forgotten again if it cannot be. A session deleted is not
-    /// stored again unless the change undoes its deletion.
+    /// them, and forgotten again if it cannot be; a record the change takes
+    /// out for another of its key is not remembered as deleted at all. A
+    /// session deleted is not stored again unless the change undoes its
+    /// deletion.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
         let mut held = self.current();
         if self.held.get() {
@@ -702,7 +704,18 @@ impl<S: Aside> BlobHistory<S> {
             if let Some(at) = at {
                 held.remove(at);
             }
-            if !deleted.contains(gone) {
+        }
+        // A deletion is remembered by its session's key, so one taken out
+        // for another of the same key, as a restore fills a session in and
+        // its Undo puts it back as it was, is no deletion: remembered, it
+        // would read as deleted with the session in its place, which every
+        // tab would then let go for good should it go missing in passing.
+        let live: HashSet<SessionKey> = held
+            .iter()
+            .map(|(_, session)| SessionKey::of(session))
+            .collect();
+        for (_, gone) in &change.forget {
+            if !live.contains(&gone.key()) && !deleted.contains(gone) {
                 deleted.push(gone.clone());
             }
         }
@@ -1412,6 +1425,90 @@ mod tests {
         here.apply(&again);
         here.apply(&again);
         assert_eq!(here.listing(), Some(vec![stale.id, newer.id]));
+    }
+
+    /// The deletions the history kept whole remembers, as older builds
+    /// read them.
+    fn remembered(shelf: &Shelf) -> Vec<Deleted> {
+        shelf
+            .get("deleted")
+            .unwrap()
+            .map(|raw| serde_json::from_str(&raw).unwrap())
+            .unwrap_or_default()
+    }
+
+    /// A session a restore fills in is taken out for the one filled in,
+    /// and that one for the first again as Undo puts it back: neither is
+    /// remembered as deleted, as the deletions are remembered by key, and
+    /// a session of that key is kept all along. Another tab takes the one
+    /// in its place for kept, and stores it again should it go missing in
+    /// passing. The one taken out used to be remembered as deleted by hand,
+    /// so the session kept in its place read as deleted wherever it went
+    /// missing, and was let go for good.
+    #[test]
+    fn a_session_filled_in_is_not_remembered_as_deleted() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let (here, there) = (whole_on(&shelf), whole_on(&shelf));
+        let mut now = crate::testing::stored_run("2026-10-02", &[("K5XYZ", "214", "K5XYZ", "214")]);
+        now.timestamp = 2_000;
+        let was = SessionResult {
+            contest: None,
+            ..now.clone()
+        };
+        here.load();
+        let one = next_after(&was, None);
+        here.apply(&HistoryChange {
+            put: vec![one.clone()],
+            ..HistoryChange::default()
+        });
+        there.load();
+        let filled = Record::of(&now, |json| RecordId::beside(one.id, json)).unwrap();
+        let fill = HistoryChange {
+            put: vec![filled.clone()],
+            forget: vec![(one.id, Deleted::of(&was, 7))],
+            unforget: vec![filled.id],
+            restore: true,
+        };
+        assert_eq!(here.apply(&fill), HistorySaved::Stored { kept: 1 });
+        assert_eq!(here.listing(), Some(vec![filled.id]));
+        assert_eq!(remembered(&shelf), [], "nothing deleted by hand");
+        let theirs = there.listing().expect("a listing");
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(there.forgotten(&theirs), [], "kept, for another tab too");
+        // Lost in passing, and stored again by the other tab: taken.
+        let again = there
+            .read(&theirs)
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        shelf.set("history", "[]");
+        let stored = there.apply(&HistoryChange {
+            put: again,
+            ..HistoryChange::default()
+        });
+        assert_eq!(stored, HistorySaved::Stored { kept: 1 });
+        assert_eq!(here.listing(), Some(vec![filled.id]));
+
+        // Undone: the session as it was is back in its place, and nothing
+        // is remembered as deleted still.
+        let undo = HistoryChange {
+            put: vec![one.clone()],
+            forget: vec![(filled.id, Deleted::of(&now, 8))],
+            unforget: vec![one.id],
+            ..HistoryChange::default()
+        };
+        assert_eq!(here.apply(&undo), HistorySaved::Stored { kept: 1 });
+        assert_eq!(here.listing(), Some(vec![one.id]));
+        assert_eq!(remembered(&shelf), []);
+        assert_eq!(here.forgotten(&[one.id]), []);
+        // Deleted by hand, it is remembered, as ever.
+        let gone = Deleted::of(&was, 9);
+        here.apply(&HistoryChange {
+            forget: vec![(one.id, gone.clone())],
+            ..HistoryChange::default()
+        });
+        assert_eq!(remembered(&shelf), [gone]);
+        assert_eq!(here.forgotten(&[one.id]), [one.id]);
     }
 
     /// A history kept whole is kept to its room, the newest that fit, as it

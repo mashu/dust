@@ -16,7 +16,9 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
 use crate::history::{StoredHistory, settle_or_spawn};
-use crate::persist::backup::{Backup, Filled, backup_name, merge_sessions, write_backup};
+use crate::persist::backup::{
+    Backup, Filled, backup_name, filled_in, merge_sessions, write_backup,
+};
 use crate::persist::record::{HistoryChange, HistoryLoad, Record, RecordId, read_record};
 use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
@@ -658,6 +660,8 @@ impl AppCtx {
                     None => history.mark_unread(record.id),
                 }
             }
+            // Each arrived that stands for a session here already.
+            let mut claimed = vec![false; arrived.len()];
             for id in missing {
                 if history.unsaved().contains(&id) {
                     continue;
@@ -670,9 +674,17 @@ impl AppCtx {
                     continue;
                 };
                 // The same session listed under another name, as a browser's
-                // page storage may name one anew: taken up by that name,
-                // not stored a second time.
-                if arrived.iter().any(|(_, session)| session == here) {
+                // page storage may name one anew, or filled in by a restore
+                // elsewhere, or put back as it was by its Undo, where the
+                // store remembers no deletion of what it took the place of:
+                // taken up by that name, not stored a second time.
+                let alike = |at: usize| !claimed[at] && arrived[at].1 == *here;
+                let filled = |at: usize| !claimed[at] && filled_in(&arrived[at].1, here);
+                let same = (0..arrived.len())
+                    .find(|&at| alike(at))
+                    .or_else(|| (0..arrived.len()).find(|&at| filled(at)));
+                if let Some(at) = same {
+                    claimed[at] = true;
                     history.remove(id);
                 } else {
                     // Lost in passing: stored again.
@@ -1604,7 +1616,7 @@ impl Toasts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persist::memory::MemoryStore;
+    use crate::persist::memory::{MemoryStore, PageShelf};
 
     /// A copy of the app — a tab, or a window — on `store`, which other
     /// copies may share, opened on what it holds.
@@ -1615,11 +1627,15 @@ mod tests {
 
     impl Tab {
         fn on(store: &Rc<MemoryStore>) -> Self {
+            Self::on_store(store.clone())
+        }
+
+        /// A copy of the app on `store`, whatever store it is.
+        fn on_store(store: Rc<dyn Store>) -> Self {
             let dom = VirtualDom::new(|| rsx! {});
-            let app = AppState::with(crate::audio::fake::Recorder::new().factory(), store.clone());
-            let ctx = dom.in_scope(ScopeId::ROOT, || {
-                AppCtx::new(app, store.load_settings(), store.load_history())
-            });
+            let (settings, history) = (store.load_settings(), store.load_history());
+            let app = AppState::with(crate::audio::fake::Recorder::new().factory(), store);
+            let ctx = dom.in_scope(ScopeId::ROOT, || AppCtx::new(app, settings, history));
             Self { dom, ctx }
         }
 
@@ -2297,6 +2313,66 @@ mod tests {
         restore_run(&a);
         a.act(AppCtx::undo_restore);
         assert_eq!(store.load_sessions(), [day(1), run(true), day(3)]);
+    }
+
+    /// A browser that keeps the history whole in its page storage
+    /// remembers deletions by key, so a session a restore filled in, and
+    /// the one its Undo put back, is not remembered as deleted: another tab
+    /// takes up the session in its place once, and stores it again should
+    /// it go missing in passing. The one taken out for it used to be
+    /// remembered as deleted by hand, under the key of the session kept in
+    /// its place, and a tab that found that one missing let it go for good.
+    #[test]
+    fn a_session_filled_in_in_page_storage_is_never_taken_for_deleted() {
+        let run = |log: bool| {
+            let mut run =
+                crate::testing::stored_run("2026-10-02", &[("K5XYZ", "214", "K5XYZ", "214")]);
+            run.timestamp = stamp(2);
+            if !log {
+                run.contest = None;
+            }
+            run
+        };
+        let shelf = PageShelf::default();
+        shelf.keep(&[day(1), run(false)]);
+        let (a, b) = (
+            Tab::on(&Rc::new(MemoryStore::in_page(&shelf))),
+            Tab::on(&Rc::new(MemoryStore::in_page(&shelf))),
+        );
+        let logged = |tab: &Tab| tab.act(|ctx| ctx.sessions.peek()[1].contest.is_some());
+        a.act(|ctx| {
+            ctx.restore_backup(Backup {
+                saved_at: 0,
+                settings: None,
+                sessions: vec![run(true)],
+            })
+        });
+        assert_eq!(a.toast().expect("told").text, "Filled in 1 session.");
+        assert_eq!(days(&shelf.sessions()), [1, 2]);
+        assert!(shelf.sessions()[1].contest.is_some(), "filled in");
+        assert_eq!(shelf.deleted(), [], "nothing deleted by hand");
+        b.sync();
+        assert_eq!(b.shown(), [1, 2], "taken up once");
+        assert!(logged(&b));
+        // Lost in passing, as tabs writing the history whole lose what
+        // another stored: stored again.
+        shelf.lose(stamp(2));
+        b.sync();
+        assert_eq!(days(&shelf.sessions()), [1, 2]);
+        assert!(shelf.sessions()[1].contest.is_some());
+        assert_eq!(b.shown(), [1, 2]);
+
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&shelf.sessions()), [1, 2]);
+        assert!(shelf.sessions()[1].contest.is_none(), "as it was");
+        assert_eq!(shelf.deleted(), [], "nothing deleted by hand");
+        b.sync();
+        assert_eq!(b.shown(), [1, 2], "taken up once");
+        assert!(!logged(&b));
+        shelf.lose(stamp(2));
+        a.sync();
+        assert_eq!(days(&shelf.sessions()), [1, 2], "stored again");
+        assert_eq!(a.shown(), [1, 2]);
     }
 
     /// A store that cannot be listed for now still takes the sessions

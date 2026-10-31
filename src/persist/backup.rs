@@ -241,6 +241,17 @@ pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -
     merged
 }
 
+/// Whether `one` and `other` are one session, the one filled in from the
+/// other as a restore fills a session in ([`merge_sessions`]), whichever of
+/// them it was: what a copy of the app holds of a session another copy
+/// filled in since, or put back as it was by undoing the restore.
+pub fn filled_in(one: &SessionResult, other: &SessionResult) -> bool {
+    let fills = |kept: &SessionResult, restored: &SessionResult| {
+        (kept.contest.is_none() && restored.contest.is_some()) || dropped_char_times(kept, restored)
+    };
+    SessionKey::of(one) == SessionKey::of(other) && (fills(one, other) || fills(other, one))
+}
+
 /// Whether `restored`, the same groups as `kept`, holds per-character
 /// records `kept` has not: an older version drops them.
 fn dropped_char_times(kept: &SessionResult, restored: &SessionResult) -> bool {
@@ -474,6 +485,55 @@ mod tests {
         assert_eq!(
             merged.sessions[0].group_timings[1].char_times,
             Some(times(700))
+        );
+    }
+
+    /// A session and itself filled in are one session, whichever of them is
+    /// held and whichever found, as a restore filled it in or its Undo put
+    /// it back as it was. Sessions that hold anything else apart, or
+    /// finished at another moment, are two, and so are two alike in
+    /// everything, which are told apart otherwise.
+    #[test]
+    fn a_session_and_itself_filled_in_are_one() {
+        let run = |timestamp: u64, log: bool| {
+            let qso = [("K5XYZ", "214", "K5XYZ", "214")];
+            let mut run = crate::testing::stored_run("2026-10-10", &qso);
+            run.timestamp = timestamp;
+            if !log {
+                run.contest = None;
+            }
+            run
+        };
+        assert!(filled_in(&run(10, false), &run(10, true)));
+        assert!(filled_in(&run(10, true), &run(10, false)));
+        assert!(
+            !filled_in(&run(10, false), &run(20, true)),
+            "another moment"
+        );
+        assert!(!filled_in(&run(10, true), &run(10, true)), "alike");
+        let times = |key: u32| cw_core::CharTimes {
+            ends: vec![300],
+            keys: vec![Some(key)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        };
+        let session = |sent: &[(&str, &str)], kept: Option<u32>| {
+            let mut session = crate::testing::stored_session("2026-10-10", sent);
+            session.timestamp = 10;
+            session.group_timings[0].char_times = kept.map(times);
+            session
+        };
+        let both = [("K", "K"), ("M", "M")];
+        assert!(filled_in(&session(&both, None), &session(&both, Some(700))));
+        assert!(filled_in(&session(&both, Some(700)), &session(&both, None)));
+        assert!(
+            !filled_in(&session(&both, Some(700)), &session(&both, Some(900))),
+            "each its own"
+        );
+        assert!(
+            !filled_in(&session(&both[..1], None), &session(&both, Some(700))),
+            "other groups"
         );
     }
 

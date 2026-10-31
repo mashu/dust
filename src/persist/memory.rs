@@ -6,7 +6,9 @@
 //! failing, unlisted, slow to answer, short of room as a browser's page
 //! storage is, or losing a record from under the app. Beside it is the
 //! history as an older build keeps it whole, which it moves and takes up as
-//! the files do ([`super::legacy`]).
+//! the files do ([`super::legacy`]). Or else it keeps the history whole in
+//! a browser's page storage, as a browser does where its database will not
+//! open ([`MemoryStore::in_page`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::btree_map::Entry;
@@ -16,7 +18,9 @@ use std::task::{Poll, Waker};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::legacy::{self, Fingerprint, Layout, read_history};
+use super::legacy::{
+    self, Aside, BlobHistory, BlobKeys, Fingerprint, Layout, parse_sessions, read_history,
+};
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done, read_record,
     records_for_blob,
@@ -103,6 +107,88 @@ pub struct MemoryStore {
     marked: RefCell<Option<OpenSession>>,
     /// Another copy of the app is running the session marked open.
     pub open_elsewhere: Cell<bool>,
+    /// The history kept whole in a browser's page storage, through this
+    /// copy's own adapter to it, as each tab has its own: none, where the
+    /// history is kept by record here ([`Self::in_page`]).
+    page: Option<BlobHistory<PageShelf>>,
+}
+
+/// A browser's page storage, as far as the history kept whole goes: what
+/// every tab of a site shares ([`MemoryStore::in_page`]).
+#[derive(Clone, Default)]
+pub struct PageShelf(Rc<RefCell<BTreeMap<String, String>>>);
+
+/// The keys a browser keeps the history whole under, as a browser's store
+/// names them.
+const PAGE_KEYS: BlobKeys = BlobKeys {
+    history: "dust_sessions",
+    deleted: "dust_deleted",
+    aside: "dust_sessions_unreadable",
+};
+
+impl PageShelf {
+    /// Keep `sessions` as the history, whole, over whatever it held.
+    pub fn keep(&self, sessions: &[SessionResult]) {
+        let raw = serde_json::to_string(sessions).expect("sessions write");
+        self.set(PAGE_KEYS.history, &raw);
+    }
+
+    /// The sessions the history kept whole holds, in its order.
+    pub fn sessions(&self) -> Vec<SessionResult> {
+        self.get(PAGE_KEYS.history)
+            .ok()
+            .flatten()
+            .and_then(|raw| parse_sessions(&raw))
+            .unwrap_or_default()
+    }
+
+    /// The sessions remembered as deleted by hand, by their keys.
+    pub fn deleted(&self) -> Vec<SessionKey> {
+        self.get(PAGE_KEYS.deleted)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<Vec<Deleted>>(&raw).ok())
+            .unwrap_or_default()
+            .iter()
+            .map(Deleted::key)
+            .collect()
+    }
+
+    /// Lose the sessions finished at `timestamp` from the history kept
+    /// whole, the way a tab writing it whole from an older read loses what
+    /// another stored since: nothing remembers them as deleted.
+    pub fn lose(&self, timestamp: u64) {
+        let raw = self
+            .get(PAGE_KEYS.history)
+            .ok()
+            .flatten()
+            .expect("a history");
+        let mut sessions: Vec<serde_json::Value> = serde_json::from_str(&raw).expect("a list");
+        sessions.retain(|session| session["timestamp"] != timestamp);
+        self.set(
+            PAGE_KEYS.history,
+            &serde_json::to_string(&sessions).expect("sessions write"),
+        );
+    }
+}
+
+impl Aside for PageShelf {
+    fn keys(&self) -> Result<Vec<String>, ()> {
+        Ok(self.0.borrow().keys().cloned().collect())
+    }
+
+    fn get(&self, key: &str) -> Result<Option<String>, ()> {
+        Ok(self.0.borrow().get(key).cloned())
+    }
+
+    fn set(&self, key: &str, raw: &str) -> bool {
+        self.0.borrow_mut().insert(key.into(), raw.into());
+        true
+    }
+
+    fn remove(&self, key: &str) {
+        self.0.borrow_mut().remove(key);
+    }
 }
 
 /// A record as this store holds it: what was written for it, and the
@@ -175,7 +261,11 @@ impl Store for MemoryStore {
     }
 
     fn take_set_aside(&self) -> Vec<SetAside> {
-        std::mem::take(&mut self.set_aside.borrow_mut())
+        let mut set_aside = std::mem::take(&mut *self.set_aside.borrow_mut());
+        if let Some(page) = &self.page {
+            set_aside.extend(page.take_set_aside());
+        }
+        set_aside
     }
 
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters {
@@ -242,6 +332,9 @@ impl Store for MemoryStore {
 
     /// The history by record, the move made first, as the files make it.
     fn load_history(&self) -> HistoryLoad {
+        if let Some(page) = &self.page {
+            return page.load();
+        }
         let mut load = HistoryLoad::default();
         if self.unlistable.get() {
             return load;
@@ -277,6 +370,9 @@ impl Store for MemoryStore {
     /// Made at once, or, while changes are deferred, when the test settles
     /// them, in the order they were asked for.
     fn change_history(&self, change: HistoryChange) -> Pending<HistorySaved> {
+        if let Some(page) = &self.page {
+            return done(page.apply(&change));
+        }
         if !self.deferred.get() {
             return done(self.make(&change));
         }
@@ -297,6 +393,9 @@ impl Store for MemoryStore {
     }
 
     fn history_listing(&self) -> Pending<Option<Vec<RecordId>>> {
+        if let Some(page) = &self.page {
+            return done(page.listing());
+        }
         if self.unlistable.get() {
             return done(None);
         }
@@ -314,6 +413,9 @@ impl Store for MemoryStore {
     }
 
     fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+        if let Some(page) = &self.page {
+            return done(page.read(&ids));
+        }
         let records = self.records.borrow();
         done(
             ids.into_iter()
@@ -329,6 +431,9 @@ impl Store for MemoryStore {
     }
 
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
+        if let Some(page) = &self.page {
+            return done(page.forgotten(&ids));
+        }
         let tombstones = self.tombstones.borrow();
         done(
             ids.into_iter()
@@ -341,11 +446,25 @@ impl Store for MemoryStore {
     /// it. Tabs sharing one store share what it last saw, so a test of
     /// tabs syncs each by hand.
     fn history_changed(&self) -> bool {
+        if let Some(page) = &self.page {
+            return page.changed();
+        }
         self.seen_changes.replace(self.changes.get()) != self.changes.get()
     }
 }
 
 impl MemoryStore {
+    /// A copy of the app that keeps the history whole in `shelf`, a
+    /// browser's page storage, which other copies may share, each through
+    /// an adapter of its own, as tabs share a browser's
+    /// ([`legacy::BlobHistory`]); with room for all of it.
+    pub fn in_page(shelf: &PageShelf) -> Self {
+        Self {
+            page: Some(BlobHistory::new(shelf.clone(), PAGE_KEYS, usize::MAX)),
+            ..Self::default()
+        }
+    }
+
     /// The session or run marked open, if any.
     pub fn open(&self) -> Option<OpenSession> {
         self.marked.borrow().clone()
