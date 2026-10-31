@@ -493,7 +493,7 @@ platform gives it:
 
 | Build | Location |
 | --- | --- |
-| Web | `localStorage` for that exact origin (`https://mashu.github.io`, shared with every other Pages site of the account, below; or `localhost:8080` while developing — the two are separate stores) |
+| Web | the browser's storage for that exact origin (`https://mashu.github.io`, shared with every other Pages site of the account, below; or `localhost:8080` while developing — the two are separate stores): the history in the IndexedDB database `dust_history`, the rest in `localStorage` |
 | Linux | `~/.local/share/dust/` (`$XDG_DATA_HOME`) |
 | Windows | `%APPDATA%\dust\`, the roaming application data `dirs` reports |
 | macOS | `~/Library/Application Support/dust/` |
@@ -511,21 +511,26 @@ The phones back it up themselves. The manifest `dx` writes sets no
 phone's settings, the whole files folder, `dust/` included, goes to the
 user's Google account, and comes back on a new phone or a reinstall; setting
 up a new phone straight from the old one copies it too. That is kept on
-purpose, as for most users it is the only copy of the history they have. On
-iOS, iCloud Backup and a backup on a computer take the app container the
+purpose, as for most users it is the only copy of the history they have.
+Auto Backup takes at most 25 MB of an app's data, though, and past that
+backs up none of it. The history is nearly all of Dust's, a few kilobytes a
+session, so once the sessions stored pass 20 MB the Backup card says so,
+and to save a backup file now and then (`Store::outgrows_device_backup`).
+On iOS, iCloud Backup and a backup on a computer take the app container the
 same way. The privacy policy and the Privacy card say all of this, platform
 by platform (`Platform::kept` in `src/ui/privacy.rs`, which a test holds the
 policy to).
 
-A browser keys `localStorage`, its few megabytes of room,
+A browser keys `localStorage`, IndexedDB, the room it gives them,
 `navigator.storage.persist()` and Web Locks by origin, not by path, and a
 Pages project site is a path under `https://<owner>.github.io`. So every
 other project the account publishes on Pages shares Dust's store: one can
-read it, clear it (`localStorage.clear()`, or a user clearing that site's
-data), or fill the room, and then the history keeps fewer of its newest
-sessions (`store_newest_that_fit`) and says so. Dust keeps its side clean:
-every key and lock name it uses starts with `dust_`, and it removes only
-keys of its own, by exact name or by its own prefix, never the rest. Giving
+read it, clear it (`localStorage.clear()`, deleting the database, or a user
+clearing that site's data), or fill the room, and then a session finished
+waits, in the app and in its mark, to be stored until there is room again,
+and the app says so. Dust keeps its side clean: every key, database and
+lock name it uses starts with `dust_`, and it removes only keys of its own,
+by exact name or by its own prefix, never the rest. Giving
 the web app an origin of its own ends the sharing: a custom domain set on
 the Dust repository's own Pages site (a subdomain such as
 `dust.example.org`; one set on the account's user site would carry every
@@ -535,7 +540,7 @@ store, so users move with a backup, and the policy and
 `PRIVACY_POLICY_URL` change with it.
 
 A session or contest run is marked open while it runs, and the mark goes
-once it ends, stored or discarded. Each copy of the app marks its own, a
+once it ends and the store has taken it, or once it is discarded. Each copy of the app marks its own, a
 window or a tab of its own, and holds a lock on it for as long as it runs. A
 copy that stops lets go of its lock, however it stops: closed, crashed,
 killed, reloaded, or rebuilt under `dx serve`. So a mark nobody holds was cut
@@ -544,6 +549,9 @@ session it starts next is over, if the window that was running it stopped
 meanwhile. A mark another window still holds is left to it. Each group
 answered, and each QSO logged, puts in the mark what Exit would keep were
 it pressed then; the history itself is written only once the session ends.
+A session the store has yet to take, for want of room say, rides along in
+every mark after it until it is stored (`OpenSession::unstored`), so a copy
+that stops first leaves it to the next launch all the same.
 A session cut off is kept from its mark as Exit would have kept it, in the
 history and towards its level's run, and the app says that it was. Closing
 the desktop window, or leaving or reloading the page, ends a session there
@@ -561,35 +569,42 @@ under the lock a tab looking for marks holds while it looks; it goes again
 before its lock is let go of. A browser without Web Locks marks nothing,
 rather than take a tab still running for one cut off.
 
-Updating the app does not clear any of it. The storage keys (`dust_settings`,
-`dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
-`dust_asked_about_lock`, `dust_last_backup`, `dust_open_session_*`, `dust_deleted`) and
-file names are not versioned, and settings files from older builds still load
-— new fields fall back to their defaults, and one unreadable field costs only
-that field. A settings file from before the AGC threshold went comes back
+Updating the app does not clear any of it. The `localStorage` keys
+(`dust_settings`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
+`dust_told_of_paddle_keys`, `dust_asked_about_lock`, `dust_last_backup`,
+`dust_open_session_*`, `dust_history_stamp`, and the history older builds
+keep whole, `dust_sessions` and `dust_deleted`), the database `dust_history`
+and the file names are not versioned; the history says how it is kept, in
+`layout.json` or under `layout` in the database (below). Settings files from
+older builds still load — new fields fall back to their defaults, and one
+unreadable field costs only that field. A settings file from before the AGC threshold went comes back
 with a threshold raised under the AGC as the RF gain backed off as far, which
 is how the AGC heard it. A setting a later build added, which this one does
 not read, is kept and written back with the rest, as are the keys a later
 build added to a session, a group, its timing or a counter: a copy of this
-build left open beside a newer one never strips them. A history that
-cannot be read at all is set aside beside the new one rather than written over,
-and if it cannot even be moved, nothing is saved over it until a later read
-of it reads, or sets it aside: a file another program had open for a moment
-holds back no more than the saves made meanwhile. Sessions that cannot be
-read are set aside the same way, and so are settings that do not read at all,
-a `settings.json` edited by hand and left with a stray comma say, before the
-defaults the app opens with are written over them: `settings.unreadable-*.json`
-beside it, or `dust_settings_unreadable` in a browser. The app says what it set
-aside, once, and how to have it back. A set-aside history is a list of
+build left open beside a newer one never strips them. A session is stored
+once, as the build that stored it wrote it, and never written over, so what
+a later build adds to it stays. One this build cannot read, a later build's
+say, is left where it is, and the app says so once; a build that reads it
+shows it. Settings that do not read at all, a `settings.json` edited by hand
+and left with a stray comma say, are set aside before the defaults the app
+opens with are written over them: `settings.unreadable-*.json` beside it, or
+`dust_settings_unreadable` in a browser. So are the sessions of a history
+kept whole, by a build from before records, that do not read as it is moved
+in (below), and such a history that does not read at all; and if one cannot
+even be moved, nothing is saved over it until a later read of it reads, or
+sets it aside: a file another program had open for a moment holds back no
+more than the saves made meanwhile. The app says what it set aside, once,
+and how to have it back. A set-aside history is a list of
 sessions, which **Restore a backup** reads too: mended, or in a later version
 that reads what this one could not, it puts its sessions back and leaves the
 settings alone. On a computer the notice names the file; on a phone or in a
 browser the copy stays in the app's own store, out of reach, and a backup is
-the way back. A browser keeps the newest five copies it set aside,
-`dust_sessions_unreadable`, `_2`, `_3`…, and lets the oldest go first when a
-new one needs the room; a copy with no room beside what it is set aside from
-is moved into that room instead, so a large history that cannot be read never
-holds back every save after it.
+the way back. A browser keeps the newest five copies of a history kept whole
+that it set aside, `dust_sessions_unreadable`, `_2`, `_3`…, and lets the
+oldest go first when a new one needs the room; a copy with no room beside
+what it is set aside from is moved into that room instead, so a large
+history that cannot be read never holds back every save after it.
 
 From contest mode on, a mode added later is written under the name of the
 older mode closest to it, plus a mark only newer builds read, so older builds
@@ -600,13 +615,119 @@ what it does not know, the log, the next time it saves; after an upgrade the
 mark makes it a contest run again, so it leaves the callsign copy speed and
 board, which can shift them a little. A new mode name instead makes every
 older build skip the session as unreadable and lose it on its next save, as
-builds from before Words do with a Words session.
+builds from before Words do with a Words session. A build that keeps the
+history by record loses nothing so: it leaves a session it cannot read where
+it is.
+
+### How the history is kept
+
+The history is kept a record a session, and holds every session until it is
+deleted: there is no count, no budget, and nothing is let go to make room,
+but in a browser that will not open its database (below).
+A record is never written over. Its name says where the session goes in the
+history and what it holds, `<order>-<hash>`: twenty digits from when it
+finished, in milliseconds, raised past the newest where a clock set back
+says earlier, so such a session goes after the newest rather than among
+older ones; then the FNV-1a hash of the record's bytes (`RecordId`,
+`src/persist/record.rs`). Two copies storing one session name it alike, and
+store it once; a restore names each session it adds by when it finished, so
+two copies restoring one backup store each once too.
+
+On a computer or a phone the history is the folder `history/`, beside the
+settings (`src/persist/files.rs`):
+
+- `sessions/<id>.json`: a session, as the build that stored it wrote it.
+- `deleted/<id>.json`: a tombstone. The session of that name was deleted by
+  hand; it holds when and on what day the session finished, and when it was
+  deleted, and nothing else of it.
+- `layout.json`: how the history is kept, `{"layout": 1, "compatible": 1,
+  …}`, and what the move from `sessions.json` took of it, written last.
+- `told.json`: the records this build cannot read and has said so of.
+- `restoring-<n>.json`: held locked while a restore of many sessions stores
+  them, so one Dust stopped under is told of as cut short.
+- `packs/*.jsonl.gz`: older records packed together, gzip, a record a line.
+  No build writes them yet; this one reads them, so it will not miss
+  sessions the build that does packs away.
+
+Every file is written whole or not at all: under a temporary name, flushed
+to the disk, renamed into place, and the folder flushed too. The files are
+read and written on a thread of their own, `dust-history`, one job at a time
+in the order asked (`src/persist/worker.rs`), so a long history never holds
+the window up. It starts reading the history as the app starts, before the
+window or webview is up, and the app waits for it as it closes, three
+seconds at most, so a session kept as the window closes is stored before it
+goes. A change that fails is tried twice more there, within half a second,
+before the app is told. One that still fails, or that the disk has no room
+for, leaves the session in the app and in its mark, and it is tried again
+with the next change, as the app comes back into sight, and every minute
+until it is stored.
+
+In a browser the history is the IndexedDB database `dust_history`
+(`src/persist/idb.rs`, `src/persist/idb.js`), whose keys and values are all
+text, so what a build writes comes back byte for byte: the stores `sessions`
+and `deleted`, by record name, as the folders above, and `meta`, which holds
+`layout` and `told`. Each change is one transaction, whole or not at all; a
+browser that has no room for one keeps none of it, and the app says the
+browser is full. The database is opened, and the history read 2,000 records
+at a time, while the page's boot screen shows, before the app starts. A
+newer Dust that opens it in another tab closes it under this one, which then
+asks to be reloaded before it stores anything; a database a newer Dust keeps
+is only read.
+
+Two windows or tabs on one history take no lock between them, and need none:
+neither ever writes over what the other stored. Each takes up what the other
+stored or deleted by listing the records and tombstones there are, as a
+screen that shows the history opens and as the window comes back into
+sight. A computer or a phone sees whether to by when the folders last
+changed, and a browser tab is told by the others as each change is made,
+over a `BroadcastChannel` named `dust_history`, and by `dust_history_stamp`,
+which a tab that was asleep finds as it wakes. A record missing with no
+tombstone was lost in passing, not deleted, and a copy that holds it stores
+it again: only a deletion by hand deletes. Tombstones are kept for good,
+with no count and no age past which they go, so a copy left open on the
+history from before, or an older build's copy of it, never brings a deleted
+session back: only Undo, or restoring a backup that holds it, does.
+
+The first time a build that keeps records opens, it moves the history kept
+whole, `sessions.json` or `dust_sessions`, in: each session a record, named
+from its place in that history, so two copies moving one history name each
+session alike. On a computer or a phone the records go in first and
+`layout.json` last, so a move cut short is made again, writing no session
+twice; in a browser the whole move is one transaction, which two tabs opening
+at once make only once. Sessions that do not read are set aside, as above,
+and not moved. Where the history kept whole cannot be read just then,
+nothing is moved, the app says so, and the move is made at the next launch.
+
+The history kept whole is left byte for byte as it was, and so are
+`deleted.json`, `dust_deleted` and the copies set aside: they are where a
+build from before records still keeps its history. Such a build never looks
+in `history/` or the database. It opens the history as it was at the move,
+stores its sessions there, up to its own 500, and remembers its deletions
+beside it, but it cannot delete or write over a record. A build that keeps
+records takes up, once, each session an older build stores there that
+finished no earlier than a day before the move and is neither here already
+nor deleted here, and makes here each deletion the older build made since.
+Going back to an older build shows the history as it was at the update,
+plus what it stores, and loses nothing kept since: the records stay for the
+next update. A history kept by a newer Dust in a way this build cannot
+write, one whose `compatible` is past its own, is only read, and the app
+says to update Dust.
+
+Where a browser will not open its database, or answers nothing for five
+seconds, or will not take the move, the history is kept for that visit as
+builds before records kept it: whole, in `dust_sessions`, to a budget of
+3,000,000 characters (`HISTORY_BUDGET`, `src/persist/legacy.rs`). Should it
+outgrow that, the newest sessions that fit are kept and the oldest let go
+(`store_newest_that_fit`), as before. The app says all this at every launch
+that falls back, and to save a backup; the database is left as it is, and
+tried again at the next visit, which takes up what the visit stored as it
+takes up an older build's sessions.
 
 ### Backups
 
-A browser clears `localStorage` along with cookies when someone clears a
-site's data, and Safari clears it by itself after seven days without a visit,
-unless the site is on the home screen. So **Stats → History** has a Backup
+A browser clears `localStorage` and IndexedDB along with cookies when
+someone clears a site's data, and Safari clears both by itself after seven
+days without a visit, unless the site is on the home screen. So **Stats → History** has a Backup
 card:
 
 - **Save a backup** writes `dust-backup-<date>.json`, the settings and the
@@ -615,11 +736,19 @@ card:
   - desktop builds put it in Downloads (or Documents, or home), never over
     an earlier one;
   - Android adds it to the shared Downloads folder through the media store,
-    which takes no permission from Android 10 on; before that it goes to the
-    app's own folder on the shared storage, `Android/data/<package>/files/Download`;
+    which takes no permission from Android 10 on, writing it to the app's
+    cache first and copying that in; before that it goes to the app's own
+    folder on the shared storage, `Android/data/<package>/files/Download`;
   - iOS puts it in the app's Documents folder, which the Info.plist keys in
     `Dioxus.toml` (`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`)
     show in the Files app under On My iPhone, Dust.
+
+  A computer or a phone writes it a session at a time, on the history's own
+  thread, each as it is stored, so a history of any length is never held
+  whole to be backed up; a browser writes it from its database the same
+  way, but whole, to hand it over. Where the store cannot read its own
+  history, the file holds every session the app shows instead. A session
+  deleted never goes in one.
 
   The app's own folders, on iOS and on Android before 10, are deleted with
   the app, and the backup in them with the store it backs up: such a file is
@@ -633,13 +762,17 @@ card:
   **Paddles on the keys right of P**), which a backup from a phone has no
   say in on a computer; the card says so before, and the message after, when they
   differed. Undo, in the message that follows,
-  puts both back as they were: what the restore added taken out, what it
-  filled in as it was, and what the history let go to make room for it back,
-  while whatever another window kept or deleted meanwhile stands. A file that is not a backup, or far too large
-  to be one, is refused, and the card says why. A session or a setting the
+  puts both back as they were: what the restore added taken out, and what it
+  filled in as it was, while whatever another window kept or deleted
+  meanwhile stands. A file that is not a backup, or larger than 1 GB, is
+  refused, and the card says why. One past 50 MB takes a while to read, and
+  the card says so as it reads it; in a browser that says it has less
+  room left for the site than the file holds, the card says so first, as a
+  restore that does not fit stores none of it. A session or a setting the
   file can no longer read is left out, as when the store is read. A backup
   saved by any build restores on any other: the web app's on a phone, a
-  phone's on a computer.
+  phone's on a computer. A build from before records takes one of up to
+  50 MB, and keeps the newest 500 sessions of it.
 - After ten sessions without a backup the card says so, and its Save button
   stands out. When the last one was saved is kept under `dust_last_backup`,
   or in `last_backup.txt`. A restored backup counts as the last one only when
@@ -662,12 +795,12 @@ storage (`navigator.storage.persist()`) rather than clear it to make room.
 Chrome decides by itself; Firefox asks once. That guards against the browser,
 not against someone clearing the site's data: only a backup does.
 
-The history keeps your newest 500 sessions, newest as they were stored, in
-the order they finished, whatever the clock said: a session stamped by a clock
-set back is not the first to go. A browser also gives each site only
-a few megabytes; should the history outgrow that — hundreds of sessions of
-hundreds of groups, or long contest runs, which take more room — the newest
-that fit are kept, and the app says so.
+The history keeps every session you finish, in the order they finished,
+whatever the clock said: a session stamped by a clock set back goes after
+the newest, not among older ones. A browser gives a site only so much room,
+which other Pages sites of the account share; where it has none left, a
+session finished is kept in the app and in its mark until there is, and the
+app says so.
 
 Sessions can be deleted under **Stats → History**: one from its own row, or
 several with **Select**, all of them included. Deleting everything asks once
@@ -676,17 +809,13 @@ few seconds. Deleting a session takes it out of every stat, the calendar,
 the streak and the score board, and out of what the sampler learns from; the
 level you have reached stays where it is.
 
-Two windows or tabs on one store each store what changed in them, laid over
-what the other stored. They store without a lock between them, so one can
-write over a session the other stored a moment before; that window's next
-store puts it back. A session is taken for deleted only when it was deleted
-by hand: each deletion is remembered for 90 days, the newest thousand, in
-`deleted.json`, or `dust_deleted` in a browser, and so is taken out again
-wherever another window still holds it. Undo, or a restore that brings the
-session back, forgets it. A session the history let go for want of room is
-kept by a window that still holds it, and let go again as it stores. A
-deletion made by a build from before this, which remembered none, can come
-back from a window that still held the session.
+Two windows or tabs on one store each store what changed in them, and take
+up what the other stored or deleted (above). A session is taken for deleted
+only when it was deleted by hand: each deletion is remembered for good, by a
+tombstone, and so is taken out again wherever another window still holds the
+session. Undo, or a restore that brings the session back, forgets it. A
+deletion made by a build from before deletions were remembered at all can
+come back from a window that still held the session.
 
 **Stats → Scores** is the score board: the sessions kept on this device,
 ranked by what they earned a group, with gold, silver and bronze for the top

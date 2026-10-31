@@ -23,7 +23,9 @@ description = "Dust — CW Morse group trainer (desktop and WebAssembly)"
 cw-core = { path = "crates/cw-core" }
 dioxus = "0.7.10"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# `raw_value`: a backup's sessions are each read from where they lie in the
+# file, rather than from a copy of the whole of it (src/persist/backup.rs).
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # Web / WASM
@@ -47,9 +49,11 @@ web-sys = { version = "0.3", optional = true, features = [
     "AudioBufferSourceNode",
     "AudioScheduledSourceNode",
     "Storage",
-    # Backups: a file handed over as a download, and the ask to keep the store.
+    # Backups: a file handed over as a download, and the ask to keep the store;
+    # a file chosen to restore, read a slice at a time.
     "Blob",
     "BlobPropertyBag",
+    "File",
     "HtmlAnchorElement",
     "HtmlElement",
     "Navigator",
@@ -69,6 +73,9 @@ web-sys = { version = "0.3", optional = true, features = [
 # Linux / desktop
 cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
+# Records a later build packs together, read (src/persist/files.rs). The
+# Rust backend, so no C library is built for any target.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"], optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt", "sync"] }
 
 # Linux desktop: the window menu is asked for through GTK, which the webview
@@ -155,7 +162,7 @@ mobile = ["dioxus/mobile", "native-runtime", "native-audio"]
 # toolchain, since cpal on Android pulls the NDK C++ build for oboe.
 mobile-silent = ["dioxus/mobile", "native-runtime", "silent-audio"]
 # Storage and timers shared by every non-wasm build.
-native-runtime = ["dep:dirs", "dep:tokio"]
+native-runtime = ["dep:dirs", "dep:flate2", "dep:tokio"]
 # cpal output: ALSA/CoreAudio/WASAPI on desktop, AAudio through oboe on Android.
 native-audio = ["dep:cpal"]
 # Plays nothing, but keeps a session's timing so the rest of the app is usable.

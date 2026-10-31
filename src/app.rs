@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::refocus_run;
 use crate::keep_awake::use_keep_awake;
 use crate::page_closed::use_end_on_close;
-use crate::page_hidden::{APP_HIDDEN, use_page_hidden};
+use crate::page_hidden::{APP_HIDDEN, APP_SHOWN, use_page_hidden, use_page_shown};
 use crate::routes::Route;
 use crate::session_runtime::finish_run;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
@@ -105,8 +105,8 @@ pub fn App() -> Element {
     // whole app with a player that records instead of one that needs a device.
     let ctx = use_context_provider(|| {
         let app = try_consume_context::<AppState>().unwrap_or_else(AppState::new);
-        let (settings, sessions) = (app.store.load_settings(), app.store.load_sessions());
-        AppCtx::new(app, settings, sessions)
+        let (settings, history) = (app.store.load_settings(), app.store.load_history());
+        AppCtx::new(app, settings, history)
     });
     let AppCtx {
         screen,
@@ -124,6 +124,13 @@ pub fn App() -> Element {
     // A session or run is kept as the app is closed, where the platform
     // says it is closing.
     use_end_on_close(ctx);
+    // Back in sight, the history takes up what another copy of the app
+    // stored or deleted meanwhile, and what the store had no room for is
+    // tried again.
+    use_page_shown(APP_SHOWN, move || {
+        ctx.store_unsaved();
+        ctx.take_up_changes();
+    });
     // Back on a phone, or in a browser, goes back through the app's screens
     // rather than out of it (src/system_back.rs).
     #[cfg(any(test, feature = "web", target_os = "android"))]
@@ -1008,12 +1015,11 @@ mod ui_tests {
             drop(ui);
             // Its mark, as it was held while the history was stored.
             store.mark_open(Some(OpenSession {
-                started_at: kept[0].timestamp,
-                run: false,
                 so_far: Some(Box::new(crate::persist::SoFar {
                     result: kept[0].clone(),
                     settings: None,
                 })),
+                ..OpenSession::starting(false, kept[0].timestamp)
             }));
 
             let (mut ui, _recorder) = Ui::launch(store.clone());
@@ -1021,6 +1027,76 @@ mod ui_tests {
             assert_eq!(store.load_sessions().len(), 1, "kept once");
             assert_eq!(store.open(), None);
             drop(ui);
+        });
+    }
+
+    /// A session finished and kept, but not stored yet, rides in the mark
+    /// the app holds: the next launch keeps it as it was kept, once, and
+    /// moves no level for it again, as its level's run counted it as it
+    /// ended. It says that it was kept, and the mark goes once it is stored.
+    #[test]
+    fn an_unstored_session_kept_at_cut_off_moves_no_level_again() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.auto_level.auto_adjust_level = true;
+            settings.auto_level.auto_adjust_above_threshold_count = 1;
+            settings.auto_level.auto_adjust_threshold = 50.0;
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.save_settings(&settings);
+            store.mark_tutorial_done();
+            store.mark_asked_about_lock();
+            let key = cw_core::CountersKey::of(&settings);
+            let mut kept = stored_session("2026-10-02", &[("KM", "KM")]);
+            kept.timestamp = crate::time::now_ms() - 60_000;
+            store.mark_open(Some(OpenSession {
+                unstored: vec![kept.clone()],
+                over: true,
+                ..OpenSession::starting(false, kept.timestamp)
+            }));
+
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
+            assert_eq!(store.load_sessions().len(), 1, "kept");
+            assert_eq!(store.load_sessions()[0].groups, kept.groups);
+            assert_eq!(
+                ui.with_app(|ctx| ctx.settings.peek().curriculum.level),
+                settings.curriculum.level,
+                "no level moved again"
+            );
+            assert_eq!(
+                store.load_auto_counters(&key),
+                cw_core::AutoLevelCounters::default(),
+                "nor counted again"
+            );
+            assert!(
+                ui.has("Dust closed before your last session was saved. It is kept now."),
+                "{}",
+                ui.html()
+            );
+            assert_eq!(store.open(), None, "stored, so no longer marked");
+            drop(ui);
+            let (_ui, _recorder) = Ui::launch(store.clone());
+            assert_eq!(store.load_sessions().len(), 1, "kept once");
+        });
+    }
+
+    /// A session the store had no room for is stored as the page comes back
+    /// into sight, once the store has room, and its mark goes then: the
+    /// learner is likely to have made room while away.
+    #[test]
+    fn a_session_waiting_for_room_is_stored_as_the_page_comes_back() {
+        run(|| async {
+            let (mut ui, recorder) = awaiting_answer(short_session()).await;
+            ui.store.full.set(true);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
+            assert!(ui.store.load_sessions().is_empty());
+            assert!(ui.store.open().is_some(), "held by its mark");
+            ui.store.full.set(false);
+            ui.with_app(|_| crate::page_hidden::show_page());
+            assert_eq!(ui.store.load_sessions().len(), 1);
+            assert_eq!(ui.store.open(), None);
         });
     }
 
@@ -1102,11 +1178,7 @@ mod ui_tests {
             store.mark_tutorial_done();
             store.save_settings(&short_session());
             let started_at = crate::time::now_ms();
-            store.mark_open(Some(OpenSession {
-                started_at,
-                run: false,
-                so_far: None,
-            }));
+            store.mark_open(Some(OpenSession::starting(false, started_at)));
             let (mut ui, _recorder) = Ui::launch(store.clone());
             ui.advance(20).await;
             assert_eq!(ui.screen(), "home");
@@ -1120,11 +1192,7 @@ mod ui_tests {
             assert!(!ui.has("was cut off"));
 
             // Another window is running one as this copy opens.
-            store.mark_open(Some(OpenSession {
-                started_at,
-                run: true,
-                so_far: None,
-            }));
+            store.mark_open(Some(OpenSession::starting(true, started_at)));
             store.open_elsewhere.set(true);
             let (mut ui, _recorder) = Ui::launch(store.clone());
             ui.advance(20).await;
@@ -1302,11 +1370,7 @@ mod ui_tests {
             let store = std::rc::Rc::new(MemoryStore::default());
             store.mark_tutorial_done();
             store.save_settings(&short_session());
-            store.mark_open(Some(OpenSession {
-                started_at: crate::time::now_ms(),
-                run: false,
-                so_far: None,
-            }));
+            store.mark_open(Some(OpenSession::starting(false, crate::time::now_ms())));
             let (mut ui, _recorder) = Ui::launch(store);
             ui.advance(20).await;
             assert!(ui.has("was cut off"));

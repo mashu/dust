@@ -26,6 +26,9 @@ pub fn use_end_on_close(ctx: AppCtx) {
         // settings effect would store them only after this: a closed
         // desktop window is gone by then, and a page left may be.
         store_settings_now(ctx);
+        // The history is written on a thread of its own, which the app's
+        // going would cut short: what the end kept is waited for.
+        ctx.flush_history();
     });
     listen_closed(on_closed);
 }

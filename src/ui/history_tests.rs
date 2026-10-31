@@ -7,7 +7,7 @@
 use cw_core::{CharSetMode, SessionHistoryRow, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
-use crate::persist::Store;
+use crate::persist::record::RecordId;
 use crate::testing::{Ui, run, stored_run, stored_session, test_settings};
 use crate::ui::figures::History;
 use crate::ui::stats::StatsView;
@@ -210,7 +210,7 @@ fn the_undo_toast_waits_then_the_deletion_stands() {
 fn a_store_that_cannot_take_the_change_keeps_every_session() {
     run(|| async {
         let (mut ui, _recorder) = open_history(&history());
-        ui.store.held.set(true);
+        *ui.store.failing.borrow_mut() = Some("the disk is full".into());
         ui.click("history-delete-0");
         assert!(ui.has("Nothing was deleted"));
         assert!(ui.has("2026-10-01"));
@@ -434,7 +434,9 @@ fn a_long_history_makes_only_the_rows_it_shows() {
                 let history = history.peek().clone();
                 // Found made already, or none at all.
                 history
-                    .figure("history rows", shown, |_| Vec::<SessionHistoryRow>::new())
+                    .figure("history rows", shown, |_| {
+                        Vec::<(SessionHistoryRow, RecordId)>::new()
+                    })
                     .len()
             })
         };

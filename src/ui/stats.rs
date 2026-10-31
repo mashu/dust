@@ -8,7 +8,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::state::SessionPick;
+use crate::persist::record::RecordId;
 use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
@@ -414,9 +414,9 @@ pub fn StatsView(
     /// The history, shared: read where it is kept, never copied.
     #[props(into)]
     sessions: History,
-    /// Where deleting sessions from the history goes. Without it the history
-    /// is only shown.
-    on_delete: Option<EventHandler<Vec<SessionPick>>>,
+    /// Where deleting sessions from the history goes, each by its record.
+    /// Without it the history is only shown.
+    on_delete: Option<EventHandler<Vec<RecordId>>>,
     /// Saving and restoring backups, on the History tab.
     backups: Option<Backups>,
 ) -> Element {
