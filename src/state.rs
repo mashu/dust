@@ -233,7 +233,7 @@ impl AppCtx {
                 )
                 .collect();
             let stored_settings = CopyValue::new(settings.clone().clamp());
-            Self {
+            let ctx = Self {
                 screen: Signal::new(Screen::Home),
                 settings: Signal::new(settings),
                 sessions: Signal::new(StoredHistory::from_load(history)),
@@ -260,7 +260,9 @@ impl AppCtx {
                 retrying: CopyValue::new(false),
                 settings_unsaved: CopyValue::new(false),
                 app: CopyValue::new(app),
-            }
+            };
+            ctx.hear_history_news();
+            ctx
         })
     }
 
@@ -709,6 +711,28 @@ impl AppCtx {
         if self.app().store.history_changed() {
             self.sync_with_store(|| {});
         }
+    }
+
+    /// Take up each change another copy of the app tells of as it tells of
+    /// it, where the store hears of them ([`Store::history_news`]): a tab
+    /// left showing the history beside another shows what the other stores
+    /// and deletes, without waiting for a screen to open.
+    fn hear_history_news(self) {
+        let store = self.app().store;
+        let Some(first) = store.history_news() else {
+            return;
+        };
+        spawn_forever(async move {
+            let mut news = first;
+            loop {
+                news.await;
+                self.take_up_changes();
+                match store.history_news() {
+                    Some(next) => news = next,
+                    None => return,
+                }
+            }
+        });
     }
 
     /// Make `change` to the history in the store, with every session here
@@ -1687,6 +1711,11 @@ mod tests {
         fn notices(&self) -> Vec<Notice> {
             self.act(|ctx| ctx.notices.peek().clone())
         }
+
+        /// Run whatever this copy's tasks are ready to do.
+        fn pump(&mut self) {
+            self.dom.process_events();
+        }
     }
 
     fn stamp(day: u64) -> u64 {
@@ -1754,6 +1783,28 @@ mod tests {
         assert_eq!(days(&store.load_sessions()), [1, 3, 5, 6]);
         b.sync();
         assert_eq!(b.shown(), [1, 3, 5, 6]);
+    }
+
+    /// A tab that hears of the changes other tabs make, as a browser's tabs
+    /// tell each other, takes each up as it is told of it: what another
+    /// stores or deletes shows at once, with no screen opened for it.
+    #[test]
+    fn a_change_another_tab_tells_of_is_taken_up_at_once() {
+        let store = holding([1]);
+        let theirs = Tab::on(&store);
+        store.hears_news.set(true);
+        let mut ours = Tab::on(&store);
+        ours.pump();
+        theirs.finish(day(2));
+        ours.pump();
+        assert_eq!(ours.shown(), [1], "not told yet");
+        store.tell_news();
+        ours.pump();
+        assert_eq!(ours.shown(), [1, 2]);
+        theirs.delete(2);
+        store.tell_news();
+        ours.pump();
+        assert_eq!(ours.shown(), [1]);
     }
 
     /// A record missing from the store, which no tombstone says was deleted,

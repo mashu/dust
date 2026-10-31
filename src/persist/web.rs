@@ -623,4 +623,14 @@ impl Store for WebStore {
             History::Page { whole, .. } => whole.changed(),
         }
     }
+
+    /// Another tab's word of each change, as the database's channel gives
+    /// it; none from the page storage, which is looked at again as the
+    /// history is shown, as before.
+    fn history_news(&self) -> Option<Pending<()>> {
+        match &self.history {
+            History::Database(database) => Some(database.news()),
+            History::Page { .. } => None,
+        }
+    }
 }

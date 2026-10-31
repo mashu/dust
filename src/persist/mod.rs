@@ -146,6 +146,14 @@ pub trait Store {
     /// Whether the history may have changed, elsewhere, since this copy
     /// last read or listed it: whether it is worth listing again.
     fn history_changed(&self) -> bool;
+    /// A wait that ends as another copy of the app tells of a change it
+    /// made to the history, so that a screen showing it takes the change up
+    /// at once. None where no copy tells, as only a browser's tabs do: the
+    /// history is looked at again as a screen that shows it opens, and as
+    /// the page comes back into sight.
+    fn history_news(&self) -> Option<Pending<()>> {
+        None
+    }
 }
 
 /// A session of groups or a contest run, as it is marked open while it runs

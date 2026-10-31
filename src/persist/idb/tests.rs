@@ -329,6 +329,10 @@ impl Glue for Fake {
         self.db.borrow().news
     }
 
+    fn next_news(&self) -> Pending<()> {
+        Box::pin(std::future::pending())
+    }
+
     fn legacy_len(&self, key: &str) -> Result<Option<u64>, ()> {
         if self.page.0.unreadable.get() {
             return Err(());

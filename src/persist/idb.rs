@@ -183,6 +183,8 @@ pub(super) trait Glue {
     fn stamp(&self) -> Option<String>;
     /// How many changes other tabs have told of, this visit.
     fn news(&self) -> u64;
+    /// A wait that ends as another tab tells of a change.
+    fn next_news(&self) -> Pending<()>;
     /// How long the page storage's `key` is, in the browser's characters,
     /// the units of UTF-16: none where it holds nothing; `Err` where it
     /// cannot be read.
@@ -734,6 +736,12 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         told || self.legacy_changed()
     }
 
+    /// A wait that ends as another tab tells of a change it made.
+    #[cfg_attr(not(feature = "web"), allow(dead_code))]
+    pub(super) fn news(&self) -> Pending<()> {
+        self.glue.next_news()
+    }
+
     fn looking(&self) -> Looked {
         (self.glue.stamp(), self.glue.news())
     }
@@ -1150,6 +1158,18 @@ mod script {
 
         fn news(&self) -> u64 {
             self.now("news", &[]).as_f64().unwrap_or(0.0) as u64
+        }
+
+        fn next_news(&self) -> Pending<()> {
+            let waiting = self.now("nextNews", &[]);
+            Box::pin(async move {
+                if let Ok(promise) = waiting.dyn_into::<js_sys::Promise>() {
+                    let _ = JsFuture::from(promise).await;
+                } else {
+                    // A script that cannot tell of changes tells of none.
+                    std::future::pending::<()>().await;
+                }
+            })
         }
 
         fn legacy_len(&self, key: &str) -> Result<Option<u64>, ()> {
