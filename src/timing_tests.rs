@@ -16,6 +16,7 @@
 use std::rc::Rc;
 
 use cw_core::{SessionPhase, SessionResult, TrainingSettings};
+use dioxus::prelude::ReadableExt;
 
 use crate::audio::fake::Recorder;
 use crate::persist::Store;
@@ -281,6 +282,22 @@ fn turned_off_from_home_the_next_session_keyed_along_is_timed() {
                 .lock_input_during_group_playback
         }));
         let keyed = key_along(&mut ui, &recorder, By::Keyboard, 250).await;
+        every_character_timed(&ui, keyed);
+    });
+}
+
+/// A browser's stream that skips a sliver of every send, as one whose audio
+/// clock comes in bursts does: no character of any send is lost, and what
+/// follows a skip plays on its planned time, so every character keyed
+/// along is timed.
+#[test]
+fn a_sliver_skipped_from_every_send_leaves_every_character_timed() {
+    run(|| async {
+        let (mut ui, recorder) = Ui::app_with_settings(along(4, 3, 20.0));
+        recorder.skip_every.set(Some((0.0, 0.0005)));
+        let keyed = key_along(&mut ui, &recorder, By::Keyboard, 250).await;
+        assert_eq!(keyed, 12);
+        assert_eq!(recorder.texts().len(), 4, "nothing sent again");
         every_character_timed(&ui, keyed);
     });
 }

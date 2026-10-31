@@ -76,9 +76,10 @@ pub enum SendNews<'a> {
     /// Some of its sound went unheard, from and to so many seconds into
     /// it: the browser's stream fell so far behind its clock that it
     /// skipped that much, and none of it reached the ear. Said as soon as
-    /// it is found, before the send ends, and again should more of it go;
-    /// it was held up as well. A native player never skips: what it cannot
-    /// play on time it plays late.
+    /// it is found, before the send ends, and again should more of it go.
+    /// What follows a skip plays on its planned time, so it is no hold-up
+    /// of itself: the session weighs whether it cost a character. A native
+    /// player never skips: what it cannot play on time it plays late.
     Missed { from_sec: f64, until_sec: f64 },
 }
 

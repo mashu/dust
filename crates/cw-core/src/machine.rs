@@ -62,14 +62,16 @@ pub enum SessionEvent {
     /// Some of the send of the group playing went unheard, `from_sec` to
     /// `until_sec` after its first sample: the browser fell so far behind
     /// its audio clock that it skipped it. Said as soon as it is found,
-    /// before the send ends, which is held up as well, and again should
-    /// more of it go. A skip that lost a character makes the send no
-    /// hearing of the group, however it ends, and once it ends the group is
-    /// sent again ([`MAX_SENT_AGAIN`] times at most), with no count down
-    /// and the box as it is while the group is sent: just the lost send,
-    /// once the group has been heard whole, or else from the start. One
-    /// that lost none, in the quiet around the characters or a sliver of
-    /// an onset, changes nothing.
+    /// before the send ends, and again should more of it go. A skip that
+    /// lost a character makes the send no hearing of the group, however it
+    /// ends, and a first send so cannot be timed from, as one held up
+    /// cannot; once it ends the group is sent again ([`MAX_SENT_AGAIN`]
+    /// times at most), with no count down and the box as it is while the
+    /// group is sent: just the lost send, once the group has been heard
+    /// whole, or else from the start. One that lost none, in the quiet
+    /// around the characters or a sliver of an onset, changes nothing: what
+    /// follows a skip plays on its planned time, so every character it
+    /// sent is timed as ever.
     PlaybackMissed {
         index: usize,
         from_sec: f64,
@@ -375,7 +377,9 @@ impl<S: GroupSource> SessionMachine<S> {
                     .is_none_or(|send| send.loses_characters(from_sec, until_sec));
                 if self.playing_index() == Some(index) && lost {
                     // No hearing, however it ends: cut by a pause, typed
-                    // along, or sent again.
+                    // along, or sent again. Characters of it unheard, a
+                    // first send is no origin to time the group from.
+                    self.session.note_held_up(index);
                     self.session.drop_send(index);
                     self.missed = true;
                 }
@@ -2405,8 +2409,10 @@ mod tests {
 
     /// A skip that lost no character — in the quiet before the first, or
     /// after the last, or a sliver of an onset — sends nothing again: the
-    /// group is answered as ever, the send heard. One across a character
-    /// still sends it again.
+    /// group is answered as ever, the send heard, and timed as ever, as
+    /// what follows a skip plays on its planned time. One across a
+    /// character still sends it again, and its first send is no origin to
+    /// time it from.
     #[test]
     fn a_skip_that_lost_no_character_is_no_resend() {
         let skipped = |from_sec: f64, until_sec: f64| {
@@ -2421,7 +2427,6 @@ mod tests {
             };
             let _ = m.apply(SessionEvent::PlaybackStarted { index: 0, start }, MonoMs(0));
             let _ = m.apply(missed(0, from_sec, until_sec), MonoMs(950));
-            let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(1_000));
             let _ = m.apply(ended(0), MonoMs(1_000));
             m
         };
@@ -2442,8 +2447,8 @@ mod tests {
             let timing = &m.session().result(2_000, "2026-10-30".into()).group_timings[0];
             assert_eq!(
                 (timing.sends, timing.time_to_complete_ms, timing.untimed),
-                (1, 300.0, Some(Untimed::HeldUp)),
-                "{skip}: heard, but held up"
+                (1, 300.0, None),
+                "{skip}: heard, and its send trusted"
             );
         }
         let m = skipped(0.30, 0.45);
@@ -2451,6 +2456,42 @@ mod tests {
             m.phase(),
             SessionPhase::RepeatGap { index: 0 },
             "across a character"
+        );
+    }
+
+    /// A skip across a character of a group's first send leaves the group
+    /// untimed, the audio having said only what it skipped, never that the
+    /// send was held up: some of its characters went unheard, so it is no
+    /// origin to time them from, however the group goes on.
+    #[test]
+    fn a_skip_across_a_character_leaves_the_first_send_untimed() {
+        let mut m = start_with(settings(1, false, 10.0), script(&["KM"], 1));
+        let _ = m.apply(km_started(0), MonoMs(0));
+        let _ = m.apply(missed(0, 0.1, 0.4), MonoMs(400));
+        let again = m.apply(ended(0), MonoMs(500));
+        assert_eq!(m.phase(), SessionPhase::RepeatGap { index: 0 });
+        let _ = fire(&mut m, &again, 2_000);
+        let _ = m.apply(km_started(2_000), MonoMs(2_000));
+        let _ = m.apply(ended(0), MonoMs(2_500));
+        assert_eq!(m.phase(), SessionPhase::AwaitingAnswer { index: 0 });
+        let keys = Keys {
+            at: vec![Some(MonoMs(2_600)), Some(MonoMs(2_800))],
+            corrected: Vec::new(),
+        };
+        let _ = m.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+                keys,
+            },
+            MonoMs(2_800),
+        );
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(2_800));
+        let timing = &m.session().result(3_000, "2026-10-31".into()).group_timings[0];
+        assert_eq!(
+            (timing.untimed, timing.char_times.is_none()),
+            (Some(Untimed::HeldUp), true),
+            "{timing:?}"
         );
     }
 

@@ -2056,8 +2056,8 @@ mod tests {
     }
 
     /// A sliver of a send skipped, too short to lose any of its elements,
-    /// sends nothing again: the answer window opens after the one send.
-    /// Held up on its way all the same, the group is untimed.
+    /// sends nothing again: the answer window opens after the one send, and
+    /// the group is timed as ever.
     #[test]
     fn a_sliver_skipped_is_no_resend() {
         run(|| async {
@@ -2078,10 +2078,9 @@ mod tests {
                 .clone()
                 .and_then(Finished::kept)
                 .expect("a result");
-            assert_eq!(
-                result.group_timings[0].untimed,
-                Some(cw_core::Untimed::HeldUp)
-            );
+            // Nothing of its characters went unheard, and what follows a
+            // skip plays on its planned time: it is timed as ever.
+            assert_eq!(result.group_timings[0].untimed, None);
         });
     }
 

@@ -64,14 +64,15 @@ pub struct WaitFlags {
     pub played_ms: Option<u32>,
     /// The backend found the sound fall behind the wall clock as it played,
     /// by more than [`LATE_MS`]: held up on its way. A backend with no
-    /// audio clock to report watches for that itself; one whose stream can
-    /// fall behind its own clock, and skip some of the sound, says so here
-    /// too, as that clock does not.
+    /// audio clock to report watches for that itself.
     pub late: bool,
     /// Some of the sound went unheard, from and to so many seconds into it:
     /// the stream it plays in fell behind its clock and skipped that much,
     /// which the clock does not say. Only the browser's stream skips; a
-    /// native one plays everything, late.
+    /// native one plays everything, late. No hold-up of itself: what
+    /// follows a skip plays on its planned time, so the characters it
+    /// missed are the session's to weigh ([`cw_core::SendStart::loses_characters`]),
+    /// and those it did not keep their time.
     pub missed: Option<(f64, f64)>,
 }
 
@@ -291,13 +292,14 @@ impl PlaybackWait {
         let grace_ms = STALL_GRACE_MS.saturating_add(heard_after_ms);
         let mut waited = 0u32;
         let mut polled_at = mono_ms();
-        // Parked, or found late by the backend, at any poll.
+        // Parked, or found late by the backend, at any poll. A skip is
+        // told as missed, not as held up: the session weighs it.
         let mut held = false;
         // What it was last told went unheard.
         let mut told = None;
         loop {
             let flags = self.signal.poll();
-            held |= flags.suspended || flags.late || flags.missed.is_some();
+            held |= flags.suspended || flags.late;
             if flags.missed != told
                 && let Some((from, until)) = flags.missed
             {
@@ -680,7 +682,9 @@ mod tests {
 
     /// A send some of whose sound its stream skipped says what of it went
     /// unheard as soon as a poll finds it, before it ends, and again only
-    /// when more of it goes; it was held up as well, however it ends.
+    /// when more of it goes. That alone is no hold-up: what follows a skip
+    /// plays on its planned time, and whether the skip cost a character is
+    /// the session's to weigh.
     #[test]
     fn a_send_skipped_in_part_says_what_went_unheard_as_soon_as_it_is_found() {
         let at = |played: u32, missed: Option<(f64, f64)>| WaitFlags {
@@ -715,7 +719,7 @@ mod tests {
             waited,
             Waited {
                 outcome: PlaybackOutcome::Completed,
-                held_up: true,
+                held_up: false,
             }
         );
     }

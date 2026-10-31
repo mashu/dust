@@ -99,8 +99,9 @@ impl PlaybackSignal for WebSignal {
     fn poll(&self) -> WaitFlags {
         // Its clock says how far behind the app's it fell, but not whether
         // the stream kept up with that clock: one that fell behind it
-        // skipped some of the send, which went unheard, and so was held up
-        // on its way too.
+        // skipped some of the send, which went unheard. What follows a skip
+        // plays on its planned time, so the skip is told as such, not as a
+        // hold-up: whether it cost any character is the session's to weigh.
         let missed = self
             .watch
             .missed()
@@ -120,7 +121,7 @@ impl PlaybackSignal for WebSignal {
                 self.started_at,
                 self.timing.latency_sec,
             )),
-            late: missed.is_some(),
+            late: false,
             missed,
         }
     }
