@@ -1451,7 +1451,8 @@ fn results_with_nothing_timed_say_why() {
     let html = results_of(locked.clone(), true);
     assert!(html.contains("none timed"), "{html}");
     for shown in [
-        "Nothing was timed: Lock typing while sending was on, so the box opened only after each group's last send",
+        // The page writes the apostrophe as an entity.
+        "Nothing was timed: Lock typing while sending was on, so the box opened only after each group&#39;s last send",
         "Turn it off and key each group before it is sent again",
         r#"id="btn-turn-off-lock-typing""#,
         "Turn off Lock typing",
