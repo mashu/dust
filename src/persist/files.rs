@@ -1258,8 +1258,9 @@ mod tests {
     }
 
     /// A deletion is a tombstone beside the history, by the record's
-    /// name, holding what tells the session apart; undone, the session is
-    /// back where it was.
+    /// name, holding what tells the session apart, and one there already,
+    /// with what a later build added to it, is never written over; undone,
+    /// the session is back where it was.
     #[test]
     fn a_deletion_is_a_tombstone_beside_the_history() {
         let (dir, files) = history("tombstone");
@@ -1282,6 +1283,17 @@ mod tests {
         assert_eq!(held, Deleted::of(&first, 7));
         assert_eq!(ids(&files.load()), [two.id]);
         assert_eq!(files.forgotten(&[one.id, two.id]), [one.id]);
+        // A later build wrote more into it, and this one deletes the
+        // session again, as another copy that still held it would.
+        let mut later = serde_json::to_value(Deleted::of(&first, 5)).unwrap();
+        later["reason"] = "later".into();
+        let later = serde_json::to_vec(&later).unwrap();
+        fs::write(tombstones.join(file_name(one.id)), &later).unwrap();
+        assert_eq!(
+            files.apply(&forget(&[(&one, &first)])),
+            HistorySaved::Stored { kept: 0 }
+        );
+        assert_eq!(fs::read(tombstones.join(file_name(one.id))).unwrap(), later);
         // Stored again without undoing it: still deleted.
         files.apply(&put(std::slice::from_ref(&one)));
         assert_eq!(ids(&files.load()), [two.id]);
@@ -1531,6 +1543,46 @@ mod tests {
             HistorySaved::Newer
         );
         assert_eq!(everything(&dir.0), before, "nothing written");
+    }
+
+    /// A layout a later build wrote, in a way this one may still write to,
+    /// keeps all it holds as this one notes what it took up: its own
+    /// number, and what this one does not know.
+    #[test]
+    fn a_later_compatible_layout_keeps_what_it_added() {
+        let dir = TempDir::new("layout-later");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        HistoryFiles::at(&dir.0).load();
+        let path = dir.0.join(HISTORY).join(LAYOUT_FILE);
+        let read_layout =
+            || -> serde_json::Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
+        let mut later = read_layout();
+        later["layout"] = 2.into();
+        later["shards"] = serde_json::json!([1]);
+        fs::write(&path, serde_json::to_vec(&later).unwrap()).unwrap();
+        // An older build stores a session, taken up at the next launch,
+        // and another, taken up as the history is next listed.
+        let (first, second) = (finished(now + 60_000), finished(now + 120_000));
+        keep_whole(&dir, &[old.clone(), first.clone()]);
+        let files = HistoryFiles::at(&dir.0);
+        let read = files.load();
+        assert!(read.complete && read.notices.is_empty());
+        assert_eq!(stamps(&read), [old.timestamp, first.timestamp]);
+        keep_whole(&dir, &[old.clone(), first.clone(), second.clone()]);
+        assert_eq!(files.listing().map(|ids| ids.len()), Some(3));
+        let noted = read_layout();
+        assert_eq!(noted["layout"], 2);
+        assert_eq!(noted["compatible"], 1);
+        assert_eq!(noted["shards"], serde_json::json!([1]));
+        assert_eq!(noted["migratedAt"], later["migratedAt"]);
+        let taken: Vec<SessionKey> = serde_json::from_value(noted["importedKeys"].clone()).unwrap();
+        assert_eq!(
+            taken,
+            [&old, &first, &second].map(SessionKey::of),
+            "what was taken up, noted"
+        );
     }
 
     /// The history an older build kept whole becomes records, once, in its

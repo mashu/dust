@@ -1222,6 +1222,47 @@ mod tests {
         assert_eq!(saved, HistorySaved::Stored { kept: 0 });
     }
 
+    /// A layout says whether this build may write to the history by
+    /// `compatible` alone: a later layout this build may write to opens,
+    /// as it was written, what it added carried along; one it would harm
+    /// is only read, whatever else it holds; and one without `compatible`,
+    /// or that is no layout at all, does not read. None stored is a history
+    /// not moved yet.
+    #[test]
+    fn a_layout_says_whether_this_build_may_write() {
+        let gate = |raw: &str| Gate::of(Some(raw.as_bytes()));
+        assert_eq!(Gate::of(None), Gate::Unmoved);
+        let Gate::Open(later) = gate(r#"{"layout":2,"compatible":1,"migratedAt":5,"shards":[1]}"#)
+        else {
+            panic!("a later layout this build may write to");
+        };
+        assert_eq!((later.layout, later.compatible), (2, 1));
+        assert_eq!(later.migrated_at, 5);
+        assert_eq!(later.legacy, None);
+        assert!(later.imported_keys.is_empty());
+        assert_eq!(later.unread.get("shards"), Some(&serde_json::json!([1])));
+        let written: serde_json::Value = serde_json::from_slice(&later.written().unwrap()).unwrap();
+        assert_eq!(written["layout"], 2);
+        assert_eq!(written["shards"], serde_json::json!([1]));
+        // Read by what it says of itself, whatever the rest.
+        assert_eq!(gate(r#"{"layout":3,"compatible":2}"#), Gate::Newer);
+        assert_eq!(
+            gate(r#"{"compatible":7,"migratedAt":"later"}"#),
+            Gate::Newer
+        );
+        for unread in [
+            r#"{"layout":1,"migratedAt":5}"#,
+            r#"{"layout":1,"compatible":"1","migratedAt":5}"#,
+            r#"{"layout":1,"compatible":1}"#,
+            "[1]",
+            "null",
+            "",
+            "{ damaged",
+        ] {
+            assert_eq!(gate(unread), Gate::Unread, "{unread}");
+        }
+    }
+
     /// A browser's history kept whole, by the record API, on `shelf`.
     fn whole_on(shelf: &Shelf) -> BlobHistory<&Shelf> {
         let keys = BlobKeys {
