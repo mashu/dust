@@ -705,10 +705,10 @@ pub(super) mod tests {
     use cw_core::SessionResult;
 
     /// A scratch directory that cleans up after itself.
-    pub(in crate::persist) struct TempDir(pub(in crate::persist) PathBuf);
+    pub(crate) struct TempDir(pub(crate) PathBuf);
 
     impl TempDir {
-        pub(in crate::persist) fn new(name: &str) -> Self {
+        pub(crate) fn new(name: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir()
@@ -716,11 +716,42 @@ pub(super) mod tests {
             let _ = fs::remove_dir_all(&path);
             Self(path)
         }
+
+        /// Whether a folder's permissions, taken away, hold whoever runs
+        /// the tests to them: they hold no one running as root, who may
+        /// write wherever they like, so a test of a folder that will not
+        /// take a change has nothing to try there.
+        #[cfg(unix)]
+        pub(crate) fn permissions_hold() -> bool {
+            use std::os::unix::fs::PermissionsExt;
+            let probe = Self::new("permissions");
+            fs::create_dir_all(&probe.0).unwrap();
+            fs::set_permissions(&probe.0, fs::Permissions::from_mode(0o555)).unwrap();
+            let held = fs::write(probe.0.join("probe"), "").is_err();
+            fs::set_permissions(&probe.0, fs::Permissions::from_mode(0o755)).unwrap();
+            held
+        }
     }
 
     impl Drop for TempDir {
         fn drop(&mut self) {
+            // A test that took a folder's permissions away, and failed
+            // before it gave them back, still leaves nothing behind.
+            #[cfg(unix)]
+            given_back(&self.0);
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Give back the permissions of `dir`, and of every folder in it.
+    #[cfg(unix)]
+    fn given_back(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                given_back(&entry.path());
+            }
         }
     }
 

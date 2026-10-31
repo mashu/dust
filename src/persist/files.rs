@@ -246,6 +246,11 @@ impl HistoryFiles {
     /// back, or one beside what was filling it in. A restore of many at
     /// once is journaled while it runs, so the next to read the history can
     /// say it was cut short.
+    ///
+    /// What is said of it is what the history holds after it, as the app
+    /// takes it: a change told of as failed deleted nothing, and one whose
+    /// tombstones are made is told of as made, though a record they delete
+    /// is left until the next read.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
         match self.gate() {
             Ok(Gate::Open(_) | Gate::Unmoved) => {}
@@ -283,12 +288,21 @@ impl HistoryFiles {
         }
         let undone: HashSet<RecordId> = change.unforget.iter().copied().collect();
         for record in &change.put {
+            let undoing = undone.contains(&record.id);
             // One deleted already stays deleted, unless this change undoes
             // that.
-            if !undone.contains(&record.id) && tombstones.join(file_name(record.id)).exists() {
+            if !undoing && tombstones.join(file_name(record.id)).exists() {
                 continue;
             }
-            let id = self.place_record(record)?;
+            // One put back whose record was never taken away, as a deletion
+            // whose record would not go leaves it (below), is back as it
+            // was stored, by its own name: not stored a second time beside
+            // itself, where this build writes it otherwise.
+            let id = if undoing && records.join(file_name(record.id)).exists() {
+                record.id
+            } else {
+                self.place_record(record)?
+            };
             if let Ok(key) = serde_json::from_str::<KeyOnly>(&record.json) {
                 self.keys
                     .borrow_mut()
@@ -301,19 +315,44 @@ impl HistoryFiles {
         if change.forget.is_empty() {
             return Ok(());
         }
-        for (id, deleted) in &change.forget {
-            let name = file_name(*id);
-            // One there already may hold what a later build added to it.
-            if !tombstones.join(&name).exists() {
-                place_whole(&tombstones, &name, &serde_json::to_vec(deleted)?)?;
+        // The tombstones are the deletion: none of them stays unless all
+        // of them do.
+        let mut placed = Vec::new();
+        let marked = (|| {
+            for (id, deleted) in &change.forget {
+                let name = file_name(*id);
+                // One there already may hold what a later build added to
+                // it.
+                if !tombstones.join(&name).exists() {
+                    place_whole(&tombstones, &name, &serde_json::to_vec(deleted)?)?;
+                    placed.push(name);
+                }
             }
+            sync_dir(&tombstones)
+        })();
+        if let Err(err) = marked {
+            for name in placed {
+                let _ = fs::remove_file(tombstones.join(name));
+            }
+            let _ = sync_if_there(&tombstones);
+            return Err(err);
         }
-        sync_dir(&tombstones)?;
+        // Made, from here: a record beside its tombstone reads as deleted,
+        // and the next read takes it away ([`Self::load`]). So a record
+        // that will not go now, as one held open elsewhere will not on
+        // Windows, leaves the change made, and says so; were it told of as
+        // failed, the app would show the session as kept, with nothing to
+        // undo, until the next read took it away.
         for (id, _) in &change.forget {
-            remove_if_there(&records.join(file_name(*id)))?;
+            if let Err(err) = remove_if_there(&records.join(file_name(*id))) {
+                eprintln!("a deleted session's record stays until the next read: {err}");
+            }
             self.keys.borrow_mut().remove(id);
         }
-        sync_if_there(&records)
+        if let Err(err) = sync_if_there(&records) {
+            eprintln!("could not make the deleted sessions' going durable: {err}");
+        }
+        Ok(())
     }
 
     /// Store `record` under its name, or, where other bytes have that name
@@ -1346,6 +1385,107 @@ mod tests {
         assert_eq!(files.listing(), Some(Vec::new()));
         assert_eq!(files.forgotten(&[one.id, two.id]), [one.id, two.id]);
         assert!(files.load().sessions.is_empty());
+    }
+
+    /// A deletion is made once its tombstones are: a record that will not
+    /// be taken away yet, as one held open elsewhere will not on Windows,
+    /// leaves the change made, not failed, and the session reads as
+    /// deleted, here, to another copy and at the next read. Told of as
+    /// failed, the app showed the session as kept, with nothing to undo,
+    /// until the next read let it go.
+    #[test]
+    fn a_deletion_is_made_once_its_tombstones_are() {
+        let (dir, files) = history("record-stays");
+        files.load();
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        // Where the record is, something that cannot be taken away as one.
+        let stuck = dir.0.join(HISTORY).join(RECORDS).join(file_name(one.id));
+        fs::remove_file(&stuck).unwrap();
+        fs::create_dir_all(stuck.join("held")).unwrap();
+        assert_eq!(
+            files.apply(&forget(&[(&one, &first)])),
+            HistorySaved::Stored { kept: 0 }
+        );
+        assert!(stuck.exists(), "left for now");
+        assert_eq!(files.listing(), Some(vec![two.id]));
+        assert_eq!(files.forgotten(&[one.id, two.id]), [one.id]);
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(ids(&read), [two.id]);
+        assert!(
+            read.unread.is_empty() && read.notices.is_empty(),
+            "{read:?}"
+        );
+    }
+
+    /// A deletion whose tombstones cannot all be made durable deletes
+    /// nothing: those it placed are taken away again, and it is told of as
+    /// failed, so the app, which puts the sessions back, shows what the
+    /// history holds. Those placed used to stay, and the sessions the app
+    /// put back went from it at the next read.
+    #[cfg(unix)]
+    #[test]
+    fn a_deletion_that_cannot_be_made_durable_deletes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        if !TempDir::permissions_hold() {
+            eprintln!("skipped: a folder's permissions do not hold whoever runs this");
+            return;
+        }
+        let (dir, files) = history("unmarked");
+        files.load();
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::create_dir_all(&tombstones).unwrap();
+        // Tombstones go in, but the folder cannot be opened to make them
+        // durable.
+        let mode = |mode| fs::set_permissions(&tombstones, fs::Permissions::from_mode(mode));
+        mode(0o300).unwrap();
+        let saved = files.apply(&forget(&[(&one, &first), (&two, &second)]));
+        mode(0o755).unwrap();
+        assert!(matches!(saved, HistorySaved::Failed(_)), "{saved:?}");
+        assert!(names(&tombstones).is_empty(), "{:?}", names(&tombstones));
+        assert_eq!(files.listing(), Some(vec![one.id, two.id]));
+        assert_eq!(ids(&HistoryFiles::at(&dir.0).load()), [one.id, two.id]);
+    }
+
+    /// A session put back whose record was never taken away, as a deletion
+    /// whose record would not go leaves it, is back as it was stored, under
+    /// its own name, though the app writes it otherwise now: one record,
+    /// not two of one session.
+    #[test]
+    fn a_session_put_back_whose_record_stayed_is_one_record() {
+        let (dir, files) = history("put-back-stayed");
+        files.load();
+        let first = finished(1_000);
+        let one = record(&first);
+        files.apply(&put(std::slice::from_ref(&one)));
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::create_dir_all(&tombstones).unwrap();
+        fs::write(
+            tombstones.join(file_name(one.id)),
+            serde_json::to_vec(&Deleted::of(&first, 7)).unwrap(),
+        )
+        .unwrap();
+        let undo = HistoryChange {
+            put: vec![Record {
+                id: one.id,
+                json: serde_json::to_string_pretty(&first).unwrap(),
+            }],
+            unforget: vec![one.id],
+            ..HistoryChange::default()
+        };
+        assert_eq!(files.apply(&undo), HistorySaved::Stored { kept: 1 });
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        assert_eq!(names(&records), [file_name(one.id)]);
+        assert_eq!(
+            fs::read_to_string(records.join(file_name(one.id))).unwrap(),
+            one.json
+        );
+        assert!(names(&tombstones).is_empty());
+        assert_eq!(ids(&files.load()), [one.id]);
     }
 
     /// Two copies on one folder each take up what the other stored and

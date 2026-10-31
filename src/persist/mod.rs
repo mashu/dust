@@ -21,6 +21,9 @@ pub mod record;
 #[cfg(feature = "web")]
 mod web;
 
+#[cfg(all(test, feature = "native-runtime"))]
+pub(crate) use desktop::tests::TempDir;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -426,6 +429,13 @@ pub fn default_store() -> Rc<dyn Store> {
     {
         Rc::new(desktop::DesktopStore::new())
     }
+}
+
+/// The store a computer or phone keeps, its files under `root` and no
+/// backups: for a test of the app on the files themselves.
+#[cfg(all(test, feature = "native-runtime"))]
+pub fn files_at(root: &std::path::Path) -> Rc<dyn Store> {
+    Rc::new(desktop::DesktopStore::at(root))
 }
 
 /// How the auto-level run for `settings` stands.

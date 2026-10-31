@@ -1616,6 +1616,8 @@ impl Toasts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(unix, feature = "native-runtime"))]
+    use crate::persist::TempDir;
     use crate::persist::memory::{MemoryStore, PageShelf};
 
     /// A copy of the app — a tab, or a window — on `store`, which other
@@ -2450,6 +2452,49 @@ mod tests {
         b.sync();
         assert_eq!(b.shown(), [2, 4, 5]);
         assert_eq!(store.tombstone(a.id_of(4)), None);
+    }
+
+    /// A deletion the files have made, though its record cannot be taken
+    /// away yet, as one held open elsewhere cannot be on Windows, is told
+    /// of as made, with Undo, and the next launch agrees; Undo puts the
+    /// session back, and the next launch agrees with that too. It used to
+    /// be told of as nothing deleted, and the session, shown as kept with
+    /// nothing to undo, went at the next launch.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_deletion_made_is_told_of_as_made_though_its_record_stays_a_while() {
+        use std::os::unix::fs::PermissionsExt;
+        if !TempDir::permissions_hold() {
+            eprintln!("skipped: a folder's permissions do not hold whoever runs this");
+            return;
+        }
+        let dir = TempDir::new("record-stays");
+        let files = || crate::persist::files_at(&dir.0);
+        let tab = Tab::on_store(files());
+        tab.finish(day(1));
+        tab.finish(day(2));
+        let records = dir.0.join("history").join("sessions");
+        let held = |mode| {
+            std::fs::set_permissions(&records, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let launched = || Tab::on_store(files()).shown();
+        // Its records can be read, and none taken away.
+        held(0o555);
+        tab.delete(1);
+        let toast = tab.toast().expect("told");
+        assert_eq!(toast.text, "1 session deleted");
+        assert_eq!(toast.action, Some(ToastAction::UndoDelete));
+        assert_eq!(tab.shown(), [2]);
+        assert_eq!(launched(), [2]);
+        tab.act(AppCtx::undo_delete);
+        assert_eq!(tab.shown(), [1, 2]);
+        assert_eq!(launched(), [1, 2]);
+        held(0o755);
+        assert_eq!(
+            std::fs::read_dir(&records).unwrap().count(),
+            2,
+            "one record a session, and nothing beside"
+        );
     }
 
     /// Settings the store would not take stay as they were set, and are
