@@ -4,14 +4,18 @@
 //! How such a history is read, what of it that does not read is set aside,
 //! and, in a browser, how much of it is kept for the room there is. Older
 //! builds still read and write it, and the move to records reads it once
-//! and leaves it as it was for them.
+//! and leaves it as it was for them ([`moved`]), then takes up whatever an
+//! older build stores there after it ([`imported`]).
+
+use std::collections::{HashMap, HashSet};
 
 use cw_core::SessionResult;
 use serde::Deserialize;
 
 #[cfg(any(feature = "web", test))]
 use super::HistorySaved;
-use super::record;
+use super::record::{self, HistoryChange, RecordId};
+use super::{Deleted, SessionKey};
 
 /// How much of the site's storage the history may take, in characters.
 /// Browsers give a site about five million; the rest is left for the
@@ -298,6 +302,218 @@ fn newest_that_fit(sessions: &[SessionResult], budget: usize) -> (String, usize)
     let kept = parts.len();
     parts.reverse();
     (format!("[{}]", parts.join(",")), kept)
+}
+
+/// The layout of the history this build writes: records and tombstones
+/// beside them ([`super::record`]).
+#[cfg_attr(feature = "web", allow(dead_code))]
+pub(super) const LAYOUT: u64 = 1;
+
+/// The oldest layout a build has to know to write to a history: a later
+/// build that keeps it so that this one would harm it says so by raising
+/// it, and this one then only reads ([`Gate::Newer`]).
+#[cfg_attr(feature = "web", allow(dead_code))]
+pub(super) const COMPATIBLE: u64 = 1;
+
+/// How long before the move a session may have finished and still be one
+/// an older build stored after it: one finished a day before the move,
+/// stored by a copy left open since, is still taken up.
+#[cfg_attr(feature = "web", allow(dead_code))]
+const MOVE_SLACK_MS: u64 = 86_400_000;
+
+/// How the history is kept, and what the move from the history kept whole
+/// took of it: `layout.json` beside the records, written last, so that a
+/// move cut short is made again.
+///
+/// Whatever a later build adds to it is carried along as it was read.
+#[cfg_attr(feature = "web", allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Layout {
+    /// The layout written ([`LAYOUT`]).
+    pub(super) layout: u64,
+    /// The oldest layout a build has to know to write to it
+    /// ([`COMPATIBLE`]).
+    pub(super) compatible: u64,
+    /// When the history kept whole was moved, in milliseconds since the
+    /// epoch.
+    pub(super) migrated_at: u64,
+    /// The history kept whole, as it was when last taken up: none when
+    /// there was none.
+    #[serde(default)]
+    pub(super) legacy: Option<Fingerprint>,
+    /// Every session taken up from the history kept whole, by key: none of
+    /// them is ever taken up again, though an older build keeps it there.
+    #[serde(default)]
+    pub(super) imported_keys: Vec<SessionKey>,
+    /// When the latest deletion taken up from an older build was made: one
+    /// made after it is made here too.
+    #[serde(default)]
+    pub(super) deleted_seen: u64,
+    /// What a later build added.
+    #[serde(flatten)]
+    pub(super) unread: serde_json::Map<String, serde_json::Value>,
+}
+
+/// What tells one state of the history kept whole from another without
+/// reading it: its length, and when it was last written (on a computer or
+/// a phone, in nanoseconds since the epoch).
+#[cfg_attr(feature = "web", allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct Fingerprint {
+    pub(super) len: u64,
+    pub(super) mtime: u64,
+}
+
+/// Whether, and how, this build may write to a history.
+#[cfg_attr(feature = "web", allow(dead_code))]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Gate {
+    /// Moved, in a layout this build writes.
+    Open(Layout),
+    /// Not moved yet: there is no layout. Records are still read and
+    /// written; the move is made when it can be.
+    Unmoved,
+    /// Kept by a newer build, in a way this one would harm: read, and
+    /// written by nothing.
+    Newer,
+    /// There is a layout, and it does not read: a file damaged where it
+    /// lies. It is set aside, and the move made again, which writes nothing
+    /// twice.
+    Unread,
+}
+
+#[cfg_attr(feature = "web", allow(dead_code))]
+impl Gate {
+    /// The gate a layout stored as `raw` sets, or none being stored.
+    ///
+    /// A later layout is judged by `compatible` alone, read before the
+    /// rest: whatever else a later build wrote, this one need not read to
+    /// know it may not write.
+    pub(super) fn of(raw: Option<&[u8]>) -> Self {
+        let Some(raw) = raw else {
+            return Self::Unmoved;
+        };
+        let Ok(serde_json::Value::Object(held)) = serde_json::from_slice(raw) else {
+            return Self::Unread;
+        };
+        match held.get("compatible").and_then(serde_json::Value::as_u64) {
+            Some(compatible) if compatible > COMPATIBLE => Self::Newer,
+            Some(_) => serde_json::from_value(serde_json::Value::Object(held))
+                .map_or(Self::Unread, Self::Open),
+            None => Self::Unread,
+        }
+    }
+}
+
+#[cfg_attr(feature = "web", allow(dead_code))]
+impl Layout {
+    /// The layout as it is written.
+    pub(super) fn written(&self) -> Vec<u8> {
+        serde_json::to_vec_pretty(self).unwrap_or_default()
+    }
+}
+
+/// The latest deletion `deleted` holds, as a watermark: none, as nought.
+#[cfg_attr(feature = "web", allow(dead_code))]
+fn latest(deleted: &[Deleted]) -> u64 {
+    deleted.iter().map(|gone| gone.at).max().unwrap_or(0)
+}
+
+/// The move from a history kept whole: each of `sessions`, oldest first,
+/// as a record ([`record::records_for_blob`]), and the layout to write once
+/// every record is, `now`. `fingerprint` is the history kept whole as it
+/// was read, and `deleted` the deletions it remembers, already done to it.
+#[cfg_attr(feature = "web", allow(dead_code))]
+pub(super) fn moved(
+    sessions: &[SessionResult],
+    fingerprint: Option<Fingerprint>,
+    deleted: &[Deleted],
+    now: u64,
+) -> (Vec<record::Record>, Layout) {
+    let mut keys: Vec<SessionKey> = Vec::with_capacity(sessions.len());
+    let mut seen = HashSet::new();
+    for key in sessions.iter().map(SessionKey::of) {
+        if seen.insert(key.clone()) {
+            keys.push(key);
+        }
+    }
+    let layout = Layout {
+        layout: LAYOUT,
+        compatible: COMPATIBLE,
+        migrated_at: now,
+        legacy: fingerprint,
+        imported_keys: keys,
+        deleted_seen: latest(deleted),
+        unread: serde_json::Map::new(),
+    };
+    (record::records_for_blob(sessions), layout)
+}
+
+/// What to take up of a history kept whole that an older build changed
+/// since the move: `sessions`, what it holds now, as `fingerprint`, and
+/// `deleted`, the deletions it remembers. `live` is every record here by
+/// its session's key, and `gone` the key of every one deleted here.
+///
+/// A session is taken up once, where it finished after the move, less a
+/// day, and is neither here already nor deleted here: only one an older
+/// build finished since, or a copy of it left open stored since. One from
+/// before, which an older copy brings back as it stores the history it
+/// held, is never taken up again, nor one deleted here. Each goes where it
+/// finished ([`RecordId::placed`]).
+///
+/// A deletion the older build made since is made here too, of every
+/// record with its key, as it would have been there.
+///
+/// The change and the layout to write once it is made, or none where
+/// there is nothing new.
+#[cfg_attr(feature = "web", allow(dead_code))]
+pub(super) fn imported(
+    layout: &Layout,
+    fingerprint: Option<Fingerprint>,
+    sessions: &[SessionResult],
+    deleted: &[Deleted],
+    live: &HashMap<SessionKey, Vec<RecordId>>,
+    gone: &HashSet<SessionKey>,
+) -> Option<(HistoryChange, Layout)> {
+    if fingerprint == layout.legacy {
+        return None;
+    }
+    let taken: HashSet<&SessionKey> = layout.imported_keys.iter().collect();
+    let since = layout.migrated_at.saturating_sub(MOVE_SLACK_MS);
+    let mut change = HistoryChange::default();
+    let mut put = HashSet::new();
+    let mut keys = Vec::new();
+    for session in sessions {
+        let key = SessionKey::of(session);
+        let new = session.timestamp > since
+            && !taken.contains(&key)
+            && !gone.contains(&key)
+            && !live.contains_key(&key);
+        let Some(record) = new
+            .then(|| record::Record::of(session, |json| RecordId::placed(session.timestamp, json)))
+            .flatten()
+        else {
+            continue;
+        };
+        // Sessions alike in everything are one session from elsewhere.
+        if put.insert(record.id) {
+            change.put.push(record);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    for gone in deleted.iter().filter(|gone| gone.at > layout.deleted_seen) {
+        for id in live.get(&gone.key()).into_iter().flatten() {
+            change.forget.push((*id, gone.clone()));
+        }
+    }
+    let mut next = layout.clone();
+    next.legacy = fingerprint;
+    next.imported_keys.extend(keys);
+    next.deleted_seen = layout.deleted_seen.max(latest(deleted));
+    Some((change, next))
 }
 
 #[cfg(test)]

@@ -19,9 +19,9 @@ const TUTORIAL: &str = "tutorial_done.txt";
 const TOLD_OF_PADDLE_KEYS: &str = "told_of_paddle_keys.txt";
 const ASKED_ABOUT_LOCK: &str = "asked_about_lock.txt";
 const SETTINGS: &str = "settings.json";
-const SESSIONS: &str = "sessions.json";
+pub(super) const SESSIONS: &str = "sessions.json";
 /// The sessions deleted by hand ([`Deleted`]).
-const DELETED: &str = "deleted.json";
+pub(super) const DELETED: &str = "deleted.json";
 const COUNTERS: &str = "auto_adjust.json";
 const LAST_BACKUP: &str = "last_backup.txt";
 /// The sessions and runs marked open ([`Store::mark_open`]): each copy of
@@ -143,49 +143,24 @@ impl DesktopStore {
     }
 
     /// Move a file that cannot be read, `stem`.json at `path`, out of the
-    /// way of the next save, keeping it beside the new one to be recovered,
-    /// and say where it went: nowhere, when it could not be moved.
+    /// way of the next save ([`move_aside`]).
     fn set_aside(&self, path: &Path, stem: &str) -> Option<String> {
-        let name = aside_name(&self.root, stem);
-        match fs::rename(path, self.root.join(&name)) {
-            Ok(()) => Some(name),
-            Err(err) => {
-                eprintln!("could not set aside {stem}.json, which could not be read: {err}");
-                None
-            }
-        }
+        move_aside(&self.root, path, stem)
     }
 
-    /// Where the user can find `name`, a file of the store's, in words for
-    /// them: on a computer. A phone keeps the store inside the app, where no
-    /// file manager reaches.
+    /// Where the user can find `name`, a file of the store's ([`shown`]).
     fn shown(&self, name: &str) -> Option<String> {
-        let reachable = !cfg!(any(target_os = "android", target_os = "ios"));
-        reachable.then(|| self.root.join(name).display().to_string())
+        shown(&self.root, name)
     }
 
     /// Keep `unread`, the `count` sessions of the history that could not be
     /// read, in a file of their own beside it before the next save leaves
-    /// them out — unless a file set aside before holds them already. If they
-    /// cannot be kept, nothing is to be written over the history.
+    /// them out ([`copy_aside`]). If they cannot be kept, nothing is to be
+    /// written over the history.
     fn keep_aside(&self, unread: &[u8], count: usize) {
-        let kept = fs::read_dir(&self.root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("sessions.unreadable-")
-                    && fs::read(entry.path()).is_ok_and(|kept| kept == unread)
-            });
-        if kept {
-            return;
-        }
-        let name = aside_name(&self.root, "sessions");
-        match self.write(&name, unread) {
-            Ok(()) => self.set_aside.borrow_mut().push(SetAside::Sessions {
+        match copy_aside(&self.root, unread) {
+            Ok(None) => {}
+            Ok(Some(name)) => self.set_aside.borrow_mut().push(SetAside::Sessions {
                 count,
                 kept: self.shown(&name),
             }),
@@ -195,6 +170,51 @@ impl DesktopStore {
             }
         }
     }
+}
+
+/// Move a file in `root` that cannot be read, `stem`.json at `path`, out of
+/// the way of the next save, keeping it beside the new one to be recovered,
+/// and say what it is called now: nothing, when it could not be moved.
+pub(super) fn move_aside(root: &Path, path: &Path, stem: &str) -> Option<String> {
+    let name = aside_name(root, stem);
+    match fs::rename(path, root.join(&name)) {
+        Ok(()) => Some(name),
+        Err(err) => {
+            eprintln!("could not set aside {stem}.json, which could not be read: {err}");
+            None
+        }
+    }
+}
+
+/// Where the user can find `name`, a file of the store's in `root`, in
+/// words for them: on a computer. A phone keeps the store inside the app,
+/// where no file manager reaches.
+pub(super) fn shown(root: &Path, name: &str) -> Option<String> {
+    let reachable = !cfg!(any(target_os = "android", target_os = "ios"));
+    reachable.then(|| root.join(name).display().to_string())
+}
+
+/// Keep `unread`, sessions of the history in `root` that could not be
+/// read, in a file of their own beside it, and say what it is called:
+/// nothing, where a file set aside before holds them already.
+pub(super) fn copy_aside(root: &Path, unread: &[u8]) -> io::Result<Option<String>> {
+    let kept = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("sessions.unreadable-")
+                && fs::read(entry.path()).is_ok_and(|kept| kept == unread)
+        });
+    if kept {
+        return Ok(None);
+    }
+    let name = aside_name(root, "sessions");
+    write_whole(root, &name, unread)?;
+    Ok(Some(name))
 }
 
 /// A name in `dir` no file has yet for one set aside from `stem`.json:
@@ -234,6 +254,14 @@ fn read_counters(raw: &[u8]) -> (Counters, bool) {
 /// name is this process's own, so two copies of the app running at once
 /// cannot write into each other's.
 pub(super) fn write_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    place_whole(dir, name, bytes)?;
+    sync_dir(dir)
+}
+
+/// Write `name` in `dir` whole or not at all, as [`write_whole`] does, but
+/// leave the folder's own record of the name to the caller to make durable
+/// ([`sync_dir`]): once for many files written together.
+pub(super) fn place_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     static WRITES: AtomicU64 = AtomicU64::new(0);
     fs::create_dir_all(dir)?;
     let path = dir.join(name);
@@ -246,8 +274,7 @@ pub(super) fn write_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()
         let mut file = fs::File::create(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&tmp, &path)?;
-        sync_dir(dir)
+        fs::rename(&tmp, &path)
     })();
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -304,13 +331,13 @@ pub(super) fn free_name(folder: &Path, name: &str) -> String {
 
 /// Make a rename in `dir` as durable as the data it names.
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
+pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
 
 /// Windows cannot open a directory to flush it; its renames are journalled.
 #[cfg(not(unix))]
-fn sync_dir(_: &Path) -> io::Result<()> {
+pub(super) fn sync_dir(_: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -720,16 +747,16 @@ fn under_data_dir(data: Option<PathBuf>) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::persist::MAX_SESSIONS;
     use crate::persist::tests::{every_setting_moved, session};
 
     /// A scratch directory that cleans up after itself.
-    struct TempDir(PathBuf);
+    pub(in crate::persist) struct TempDir(pub(in crate::persist) PathBuf);
 
     impl TempDir {
-        fn new(name: &str) -> Self {
+        pub(in crate::persist) fn new(name: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir()

@@ -12,6 +12,8 @@ mod android;
 pub mod backup;
 #[cfg(feature = "native-runtime")]
 mod desktop;
+#[cfg(feature = "native-runtime")]
+mod files;
 mod legacy;
 #[cfg(test)]
 pub mod memory;
@@ -265,11 +267,12 @@ fn saved_as(place: &str) -> String {
 #[cfg(any(feature = "web", feature = "native-runtime"))]
 const SETTINGS_HELD: &str = "the settings stored could not be read, so they were left as they are";
 
-/// What became of a history handed to [`Store::save_sessions`].
+/// What became of a history handed to [`Store::save_sessions`], or of a
+/// change made to one by record ([`record::HistoryChange`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistorySaved {
     /// Stored: the newest `kept` sessions, which is all of them up to
-    /// [`MAX_SESSIONS`].
+    /// [`MAX_SESSIONS`]. Of a change, `kept` is how many records it stored.
     Stored { kept: usize },
     /// Stored, but the store had room for only the newest `kept`. Only a
     /// browser runs out of room: files are kept to the count alone. `runs`
@@ -281,6 +284,14 @@ pub enum HistorySaved {
     /// out of the way, when it was last read, so it is kept as it is rather
     /// than written over.
     Held,
+    /// Not stored: the store has no room left. The session is kept here,
+    /// in the app, until it has.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Full,
+    /// Not stored: a newer Dust keeps the history here in a way this one
+    /// would harm, so it writes nothing to it ([`record::NEWER_LAYOUT`]).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Newer,
     /// Not stored, for the reason given.
     Failed(String),
 }
@@ -291,7 +302,7 @@ impl HistorySaved {
     pub fn kept(&self) -> Option<usize> {
         match self {
             Self::Stored { kept } | Self::Squeezed { kept, .. } => Some(*kept),
-            Self::Held | Self::Failed(_) => None,
+            Self::Held | Self::Full | Self::Newer | Self::Failed(_) => None,
         }
     }
 
@@ -313,6 +324,15 @@ impl HistorySaved {
                 "Your saved history could not be read, so it was left as it is and this session was not saved."
                     .into(),
             ),
+            Self::Full => Some(
+                if cfg!(feature = "web") {
+                    "This browser has no room left for this site: this session is kept here until there is. Save a backup to keep it safe."
+                } else {
+                    "This device has no room left: this session is kept here until there is. Save a backup to keep it safe."
+                }
+                .into(),
+            ),
+            Self::Newer => Some(record::NEWER_LAYOUT.into()),
             Self::Failed(reason) => Some(format!("This session could not be saved: {reason}")),
         }
     }
@@ -495,13 +515,20 @@ pub fn merge_settings(
 }
 
 /// What tells one session of the history from another: when it finished,
-/// and on what day.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// and on what day. Written as `[timestamp, "date"]`, as the move to
+/// records lists the sessions it took ([`legacy::Layout`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SessionKey(u64, String);
 
 impl SessionKey {
     pub fn of(session: &SessionResult) -> Self {
         Self(session.timestamp, session.date.clone())
+    }
+
+    /// The key of a session finished at `timestamp`, on `date`.
+    #[cfg_attr(feature = "web", allow(dead_code))]
+    pub fn new(timestamp: u64, date: String) -> Self {
+        Self(timestamp, date)
     }
 }
 
@@ -1133,6 +1160,17 @@ pub(crate) mod tests {
             HistorySaved::Failed("disk full".into())
                 .problem()
                 .is_some_and(|text| text.ends_with("disk full"))
+        );
+        // A full store keeps the session in the app, and says so.
+        assert_eq!(HistorySaved::Full.kept(), None);
+        let full = HistorySaved::Full.problem().expect("told");
+        assert!(full.contains("no room left"), "{full}");
+        assert!(full.contains("kept here until there is"), "{full}");
+        assert!(full.ends_with("Save a backup to keep it safe."), "{full}");
+        assert_eq!(HistorySaved::Newer.kept(), None);
+        assert_eq!(
+            HistorySaved::Newer.problem().as_deref(),
+            Some(record::NEWER_LAYOUT)
         );
     }
 

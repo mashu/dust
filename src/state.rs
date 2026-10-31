@@ -1073,6 +1073,11 @@ fn why_not_stored(saved: &HistorySaved) -> Option<String> {
         HistorySaved::Held => {
             Some("your saved history could not be read, so it was left as it is".into())
         }
+        HistorySaved::Full => Some("there is no room left to save the change".into()),
+        HistorySaved::Newer => Some(
+            "a newer version of Dust changed how history is kept here; update Dust to change it"
+                .into(),
+        ),
         HistorySaved::Failed(reason) => Some(reason.clone()),
     }
 }

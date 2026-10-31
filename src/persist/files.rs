@@ -1,0 +1,1612 @@
+//! The history as files, one a record ([`super::record`]), under `history/`
+//! in the store's folder:
+//!
+//! - `sessions/<id>.json`: a session, as the build that stored it wrote it,
+//!   never written over.
+//! - `deleted/<id>.json`: a tombstone. The record of the same name was
+//!   deleted by hand, and is gone, or goes as the history is next read.
+//!   What it holds ([`Deleted`]) tells the session apart by when and on
+//!   what day it finished; one that is empty, or does not read, deletes it
+//!   all the same.
+//! - `layout.json`: how the history is kept, and what the move from the
+//!   history kept whole took of it ([`Layout`]). The move writes it last.
+//! - `told.json`: the records this build could not read, and has said so.
+//! - `restoring-<n>.json`: the records a change of many sessions at once
+//!   is storing, held locked while it does: one left unlocked was cut
+//!   short.
+//!
+//! Every file is written whole or not at all ([`place_whole`]), so two
+//! copies of the app on one folder, which take no lock between them, never
+//! write into each other's: each takes up the records and tombstones the
+//! other leaves ([`HistoryFiles::listing`]).
+//!
+//! An older build never looks in `history/`. It keeps its history whole, in
+//! `sessions.json`, which the move reads once and leaves as it was, and
+//! whatever an older build stores there after the move is taken up here
+//! ([`legacy::imported`]).
+
+// The app moves onto records after this: until then only tests use them.
+#![cfg_attr(not(test), allow(dead_code))]
+
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use cw_core::SessionResult;
+
+use super::desktop::{
+    DELETED, SESSIONS, copy_aside, move_aside, place_whole, shown, sync_dir, write_whole,
+};
+use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
+use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, read_record};
+use super::{Deleted, HistorySaved, SessionKey, SetAside};
+
+/// The folder of the history, in the store's.
+const HISTORY: &str = "history";
+/// The records, in the history's folder.
+const RECORDS: &str = "sessions";
+/// The tombstones, in the history's folder.
+const TOMBSTONES: &str = "deleted";
+const LAYOUT_FILE: &str = "layout.json";
+const TOLD: &str = "told.json";
+/// What a change of many sessions at once is called while it runs:
+/// `restoring-<n>.json`.
+const JOURNAL_PREFIX: &str = "restoring-";
+
+/// How old a temporary file a write left behind has to be to be cleared:
+/// far older than any write takes, so none still being written goes.
+const OLD_TEMPORARY: Duration = Duration::from_secs(60 * 60);
+
+/// How many names past its own a record is tried under, where other bytes
+/// have its name already ([`RecordId::bumped`]).
+const BUMPS: u64 = 64;
+
+/// The history as files under one folder.
+pub(super) struct HistoryFiles {
+    /// The store's folder, where an older build keeps the history whole.
+    root: PathBuf,
+    /// `history/` in it.
+    dir: PathBuf,
+    /// What the folders looked like when this copy last looked
+    /// ([`Self::changed`]).
+    seen: Cell<Option<Stamps>>,
+    /// The key of each record read so far, by its id: what an older
+    /// build's deletions are told apart by, without reading every record
+    /// again each time one is taken up.
+    keys: RefCell<HashMap<RecordId, SessionKey>>,
+}
+
+/// What a look at the folders saw: when each was last changed, and the
+/// history kept whole as it stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Stamps {
+    records: Option<SystemTime>,
+    tombstones: Option<SystemTime>,
+    legacy: Option<Fingerprint>,
+}
+
+/// What the history's folders hold.
+struct Listing {
+    /// Every record, in order.
+    records: BTreeSet<RecordId>,
+    /// Every tombstone.
+    gone: BTreeSet<RecordId>,
+}
+
+/// A change of many sessions at once, as it runs: its journal, held
+/// locked until the change is made.
+struct Journal {
+    path: PathBuf,
+    /// Held for as long as the change runs.
+    _lock: fs::File,
+}
+
+/// What a journal says: the records its change set out to store.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Journaled {
+    #[serde(default)]
+    ids: Vec<String>,
+}
+
+/// The key a record's session finished at, read without the rest of it.
+#[derive(serde::Deserialize)]
+struct KeyOnly {
+    timestamp: u64,
+    date: String,
+}
+
+impl HistoryFiles {
+    /// The history in the store's folder `root`.
+    pub(super) fn at(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            dir: root.join(HISTORY),
+            seen: Cell::new(None),
+            keys: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn records(&self) -> PathBuf {
+        self.dir.join(RECORDS)
+    }
+
+    fn tombstones(&self) -> PathBuf {
+        self.dir.join(TOMBSTONES)
+    }
+
+    /// Read the whole history: making the move from a history kept whole
+    /// first, where none was made, and taking up what an older build stored
+    /// there since, where one was.
+    ///
+    /// A record and its tombstone read as deleted, and the deletion cut
+    /// short is finished. A record this build cannot read is left where it
+    /// is, and told of once ([`HistoryNotice::Unread`]). A history a newer
+    /// build keeps in a way this one would harm is read, and nothing is
+    /// written to it, not even to tidy up.
+    pub(super) fn load(&self) -> HistoryLoad {
+        let mut load = HistoryLoad::default();
+        // How the history is kept, once moved, and whether this build may
+        // write to it at all.
+        let (layout, writable) = match self.gate() {
+            Ok(Gate::Open(layout)) => (Some(layout), true),
+            Ok(Gate::Unmoved) => match self.migrate(&mut load) {
+                Ok(layout) => (Some(layout), true),
+                Err(why) => {
+                    load.notices.push(HistoryNotice::MovePending(why));
+                    (None, true)
+                }
+            },
+            Ok(Gate::Newer) => {
+                load.notices.push(HistoryNotice::Newer);
+                (None, false)
+            }
+            Ok(Gate::Unread) => (None, false),
+            Err(err) => {
+                eprintln!("could not read how the history is kept: {err}");
+                (None, false)
+            }
+        };
+        if writable {
+            self.clear_temporaries();
+            load.notices.extend(self.journals_cut_short());
+        }
+        let listing = match self.listing_now() {
+            Ok(listing) => listing,
+            Err(err) => {
+                eprintln!("could not list the history: {err}");
+                self.restamp();
+                return load;
+            }
+        };
+        let mut unlinked = false;
+        let mut keys = self.keys.borrow_mut();
+        for &id in &listing.records {
+            if listing.gone.contains(&id) {
+                // Deleted, and the record left behind: a deletion cut short.
+                if writable {
+                    unlinked |= fs::remove_file(self.records().join(file_name(id))).is_ok();
+                }
+                continue;
+            }
+            match self.read_session(id) {
+                Some(session) => {
+                    keys.insert(id, SessionKey::of(&session));
+                    load.sessions.push((id, session));
+                }
+                None => load.unread.push(id),
+            }
+        }
+        drop(keys);
+        if unlinked {
+            let _ = sync_dir(&self.records());
+        }
+        if let Some(count) = self.tell(&load.unread, writable) {
+            load.notices.push(HistoryNotice::Unread { count });
+        }
+        if let Some(layout) = &layout {
+            let live = keyed(load.sessions.iter().map(|(id, session)| (*id, session)));
+            if let Some(change) = self.import(layout, &live) {
+                taken_up(&mut load.sessions, &change);
+            }
+        }
+        load.complete = layout.is_some();
+        self.restamp();
+        load
+    }
+
+    /// Make `change`, and say what became of it.
+    ///
+    /// Deletions undone come first, then the records, then the deletions,
+    /// each step made durable before the next: a change cut short never
+    /// loses a session, though it may leave one deleted that was being put
+    /// back, or one beside what was filling it in. A change of many at once
+    /// is journaled while it runs, so the next to read the history can say
+    /// it was cut short.
+    pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
+        match self.gate() {
+            Ok(Gate::Open(_) | Gate::Unmoved) => {}
+            Ok(Gate::Newer) => return HistorySaved::Newer,
+            Ok(Gate::Unread) => {
+                return HistorySaved::Failed("how the history is kept could not be read.".into());
+            }
+            Err(err) => return saved_or_not(Err(err)),
+        }
+        let journal = if change.put.len() > 1 {
+            match self.begin_journal(&change.put) {
+                Ok(journal) => Some(journal),
+                Err(err) => return saved_or_not(Err(err)),
+            }
+        } else {
+            None
+        };
+        let made = self.make(change);
+        if made.is_ok()
+            && let Some(journal) = journal
+        {
+            end_journal(journal, &self.dir);
+        }
+        self.restamp();
+        saved_or_not(made.map(|()| change.put.len()))
+    }
+
+    fn make(&self, change: &HistoryChange) -> io::Result<()> {
+        let (records, tombstones) = (self.records(), self.tombstones());
+        for &id in &change.unforget {
+            remove_if_there(&tombstones.join(file_name(id)))?;
+        }
+        if !change.unforget.is_empty() {
+            sync_if_there(&tombstones)?;
+        }
+        let undone: HashSet<RecordId> = change.unforget.iter().copied().collect();
+        for record in &change.put {
+            // One deleted already stays deleted, unless this change undoes
+            // that.
+            if !undone.contains(&record.id) && tombstones.join(file_name(record.id)).exists() {
+                continue;
+            }
+            let id = self.place_record(record)?;
+            if let Ok(key) = serde_json::from_str::<KeyOnly>(&record.json) {
+                self.keys
+                    .borrow_mut()
+                    .insert(id, SessionKey::new(key.timestamp, key.date));
+            }
+        }
+        if !change.put.is_empty() {
+            sync_if_there(&records)?;
+        }
+        if change.forget.is_empty() {
+            return Ok(());
+        }
+        for (id, deleted) in &change.forget {
+            let name = file_name(*id);
+            // One there already may hold what a later build added to it.
+            if !tombstones.join(&name).exists() {
+                place_whole(&tombstones, &name, &serde_json::to_vec(deleted)?)?;
+            }
+        }
+        sync_dir(&tombstones)?;
+        for (id, _) in &change.forget {
+            remove_if_there(&records.join(file_name(*id)))?;
+            self.keys.borrow_mut().remove(id);
+        }
+        sync_if_there(&records)
+    }
+
+    /// Store `record` under its name, or, where other bytes have that name
+    /// already, the next free one: no record is ever written over. The
+    /// name it is stored under.
+    fn place_record(&self, record: &Record) -> io::Result<RecordId> {
+        let mut id = record.id;
+        for _ in 0..BUMPS {
+            let name = file_name(id);
+            match fs::read(self.records().join(&name)) {
+                Ok(held) if held == record.json.as_bytes() => return Ok(id),
+                Ok(_) => id = id.bumped(),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    place_whole(&self.records(), &name, record.json.as_bytes())?;
+                    return Ok(id);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(io::Error::other(format!(
+            "no name was free for the session stored as {}",
+            record.id
+        )))
+    }
+
+    /// Every record there is, deleted ones left out, once whatever an older
+    /// build stored since has been taken up. None where the history cannot
+    /// be listed.
+    pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
+        if let Ok(Gate::Open(layout)) = self.gate()
+            && self.legacy_changed(&layout)
+            && let Some(live) = self.live_keys()
+        {
+            self.import(&layout, &live);
+        }
+        let listing = self.listing_now().ok()?;
+        self.restamp();
+        Some(listing.records.difference(&listing.gone).copied().collect())
+    }
+
+    /// The records `ids`, as they are stored, each that can be read: one
+    /// that cannot comes back as its id.
+    pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
+        ids.iter()
+            .map(|&id| {
+                fs::read_to_string(self.records().join(file_name(id)))
+                    .map(|json| Record { id, json })
+                    .map_err(|_| id)
+            })
+            .collect()
+    }
+
+    /// Which of `ids` were deleted by hand. One whose tombstone cannot be
+    /// looked for is taken as not deleted: missing is never deleted.
+    pub(super) fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
+        ids.iter()
+            .copied()
+            .filter(|id| fs::symlink_metadata(self.tombstones().join(file_name(*id))).is_ok())
+            .collect()
+    }
+
+    /// Whether anything changed since this copy last looked, here or in
+    /// the history kept whole.
+    pub(super) fn changed(&self) -> bool {
+        let now = self.stamps();
+        self.seen.replace(Some(now)) != Some(now)
+    }
+
+    fn stamps(&self) -> Stamps {
+        let modified = |dir: &Path| fs::metadata(dir).and_then(|meta| meta.modified()).ok();
+        Stamps {
+            records: modified(&self.records()),
+            tombstones: modified(&self.tombstones()),
+            legacy: fingerprint_of(&self.root.join(SESSIONS)).ok().flatten(),
+        }
+    }
+
+    /// Note the folders as they are now: what this copy did is no change
+    /// for it to take up.
+    fn restamp(&self) {
+        self.seen.set(Some(self.stamps()));
+    }
+
+    /// The gate `layout.json` sets. One that does not read is set aside
+    /// and the move made again; one that cannot be set aside holds every
+    /// write back.
+    fn gate(&self) -> io::Result<Gate> {
+        let path = self.dir.join(LAYOUT_FILE);
+        match fs::read(&path) {
+            Ok(raw) => match Gate::of(Some(&raw)) {
+                Gate::Unread if move_aside(&self.dir, &path, "layout").is_some() => {
+                    Ok(Gate::Unmoved)
+                }
+                gate => Ok(gate),
+            },
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Gate::Unmoved),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Every record and tombstone there is.
+    fn listing_now(&self) -> io::Result<Listing> {
+        Ok(Listing {
+            records: ids_in(&self.records())?,
+            gone: ids_in(&self.tombstones())?,
+        })
+    }
+
+    /// The session stored as `id`, if it reads.
+    fn read_session(&self, id: RecordId) -> Option<SessionResult> {
+        let raw = fs::read_to_string(self.records().join(file_name(id))).ok()?;
+        read_record(&raw)
+    }
+
+    /// Every record there is by its session's key: those read before as
+    /// they were read, the rest read now for their keys alone.
+    fn live_keys(&self) -> Option<HashMap<SessionKey, Vec<RecordId>>> {
+        let listing = self.listing_now().ok()?;
+        let mut keys = self.keys.borrow_mut();
+        let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
+        for id in listing.records.difference(&listing.gone) {
+            let key = match keys.get(id) {
+                Some(key) => key.clone(),
+                None => {
+                    let Some(key) = fs::read(self.records().join(file_name(*id)))
+                        .ok()
+                        .and_then(|raw| serde_json::from_slice::<KeyOnly>(&raw).ok())
+                        .map(|key| SessionKey::new(key.timestamp, key.date))
+                    else {
+                        continue;
+                    };
+                    keys.insert(*id, key.clone());
+                    key
+                }
+            };
+            live.entry(key).or_default().push(*id);
+        }
+        Some(live)
+    }
+
+    /// Whether the history kept whole changed since it was last taken up.
+    fn legacy_changed(&self, layout: &Layout) -> bool {
+        fingerprint_of(&self.root.join(SESSIONS)).is_ok_and(|now| now != layout.legacy)
+    }
+
+    /// Make the move from the history kept whole, `sessions.json`, and say
+    /// how the history is kept now, or why the move cannot be made yet.
+    ///
+    /// What does not read is set aside first, as a history kept whole
+    /// always was: a file that is no list is moved out of the way, and the
+    /// sessions that do not read are copied out beside it. Every session
+    /// that reads becomes a record, and the layout is written last, so a
+    /// move cut short is made again, to the same records. The file itself
+    /// is never written: older builds keep their history in it.
+    fn migrate(&self, load: &mut HistoryLoad) -> Result<Layout, String> {
+        let path = self.root.join(SESSIONS);
+        let (raw, mut fingerprint) = match read_with_fingerprint(&path) {
+            Ok(Some((raw, fingerprint))) => (Some(raw), Some(fingerprint)),
+            Ok(None) => (None, None),
+            Err(err) => return Err(err.to_string()),
+        };
+        let read = raw
+            .as_deref()
+            .map(|raw| std::str::from_utf8(raw).ok().and_then(read_history));
+        let sessions = match read {
+            None => Vec::new(),
+            Some(None) => {
+                let moved = move_aside(&self.root, &path, "sessions");
+                if moved.is_some() {
+                    fingerprint = None;
+                }
+                let kept = moved.as_deref().unwrap_or(SESSIONS);
+                load.set_aside.push(SetAside::History {
+                    kept: shown(&self.root, kept),
+                });
+                Vec::new()
+            }
+            Some(Some(read)) => {
+                if let Some(unread) = read.unread_json() {
+                    let copied = copy_aside(&self.root, unread.as_bytes())
+                        .map_err(|err| format!("the sessions that do not read: {err}"))?;
+                    if let Some(name) = copied {
+                        load.set_aside.push(SetAside::Sessions {
+                            count: read.unread.len(),
+                            kept: shown(&self.root, &name),
+                        });
+                    }
+                }
+                read.sessions
+            }
+        };
+        let deleted = legacy_deleted(&self.root);
+        let (records, layout) =
+            legacy::moved(&sessions, fingerprint, &deleted, crate::time::now_ms());
+        let gone = ids_in(&self.tombstones()).map_err(|err| err.to_string())?;
+        for record in records.iter().filter(|record| !gone.contains(&record.id)) {
+            self.place_record(record).map_err(|err| err.to_string())?;
+        }
+        sync_if_there(&self.records()).map_err(|err| err.to_string())?;
+        write_whole(&self.dir, LAYOUT_FILE, &layout.written()).map_err(|err| err.to_string())?;
+        Ok(layout)
+    }
+
+    /// Take up what an older build stored in, or deleted from, the history
+    /// kept whole since it was last taken up, `live` being every record
+    /// here by key ([`legacy::imported`]), and hand back what was made of
+    /// it. Nothing, where nothing changed there, or what changed cannot be
+    /// read or made now: it is tried again the next time.
+    fn import(
+        &self,
+        layout: &Layout,
+        live: &HashMap<SessionKey, Vec<RecordId>>,
+    ) -> Option<HistoryChange> {
+        if !self.legacy_changed(layout) {
+            return None;
+        }
+        let (sessions, fingerprint) = match read_with_fingerprint(&self.root.join(SESSIONS)) {
+            Ok(Some((raw, fingerprint))) => {
+                let read = std::str::from_utf8(&raw).ok().and_then(read_history);
+                (
+                    read.map(|read| read.sessions).unwrap_or_default(),
+                    Some(fingerprint),
+                )
+            }
+            Ok(None) => (Vec::new(), None),
+            Err(err) => {
+                eprintln!("could not read the history an older build keeps: {err}");
+                return None;
+            }
+        };
+        let deleted = legacy_deleted(&self.root);
+        let gone = self.tombstoned_keys();
+        let (change, next) =
+            legacy::imported(layout, fingerprint, &sessions, &deleted, live, &gone)?;
+        if !change.is_empty() && self.apply(&change).kept().is_none() {
+            return None;
+        }
+        if let Err(err) = write_whole(&self.dir, LAYOUT_FILE, &next.written()) {
+            eprintln!("could not note what was taken up of an older build's history: {err}");
+        }
+        Some(change)
+    }
+
+    /// The key of every session deleted here that its tombstone names.
+    fn tombstoned_keys(&self) -> HashSet<SessionKey> {
+        let Ok(gone) = ids_in(&self.tombstones()) else {
+            return HashSet::new();
+        };
+        gone.into_iter()
+            .filter_map(|id| {
+                let raw = fs::read(self.tombstones().join(file_name(id))).ok()?;
+                serde_json::from_slice::<Deleted>(&raw)
+                    .ok()
+                    .map(|gone| gone.key())
+            })
+            .collect()
+    }
+
+    /// Say how many of `unread`, the records this build cannot read, are
+    /// new to it: none, once each has been told of. `writable` is whether
+    /// what was told may be noted, so it is told of once.
+    fn tell(&self, unread: &[RecordId], writable: bool) -> Option<usize> {
+        let path = self.dir.join(TOLD);
+        let told: HashSet<String> = fs::read(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_default();
+        let new = unread
+            .iter()
+            .filter(|id| !told.contains(&id.name()))
+            .count();
+        if new == 0 {
+            return None;
+        }
+        if writable {
+            let names: Vec<String> = unread.iter().map(|id| id.name()).collect();
+            if let Ok(raw) = serde_json::to_vec(&names) {
+                let _ = write_whole(&self.dir, TOLD, &raw);
+            }
+        }
+        Some(new)
+    }
+
+    /// Clear what writes cut short left behind: temporary files no write
+    /// still running could own.
+    fn clear_temporaries(&self) {
+        let now = SystemTime::now();
+        for dir in [self.dir.clone(), self.records(), self.tombstones()] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let old = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .is_ok_and(|at| now.duration_since(at).is_ok_and(|age| age > OLD_TEMPORARY));
+                if name.starts_with('.') && name.ends_with(".tmp") && old {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    /// Start a change of `put`, many sessions at once: its journal, locked.
+    fn begin_journal(&self, put: &[Record]) -> io::Result<Journal> {
+        fs::create_dir_all(&self.dir)?;
+        let name = format!("{JOURNAL_PREFIX}{:016x}.json", crate::time::seed_rng());
+        // A temporary name, as any write has, cleared like one if the
+        // change stops before the journal is placed.
+        let making = self.dir.join(format!(".{name}.tmp"));
+        let mut lock = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&making)?;
+        let journaled = Journaled {
+            ids: put.iter().map(|record| record.id.name()).collect(),
+        };
+        let placed = (|| {
+            lock.try_lock().map_err(io::Error::other)?;
+            lock.write_all(&serde_json::to_vec(&journaled)?)?;
+            lock.sync_all()?;
+            let path = self.dir.join(&name);
+            fs::rename(&making, &path)?;
+            sync_dir(&self.dir)?;
+            Ok(path)
+        })();
+        match placed {
+            Ok(path) => Ok(Journal { path, _lock: lock }),
+            Err(err) => {
+                let _ = fs::remove_file(&making);
+                Err(err)
+            }
+        }
+    }
+
+    /// Every change of many sessions at once that was cut short, told of
+    /// once: its journal is there, and nothing holds it.
+    fn journals_cut_short(&self) -> Vec<HistoryNotice> {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut notices = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !(name.starts_with(JOURNAL_PREFIX) && name.ends_with(".json")) {
+                continue;
+            }
+            let Ok(mut file) = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(entry.path())
+            else {
+                continue;
+            };
+            // Held: another copy is making its change now.
+            if file.try_lock().is_err() {
+                continue;
+            }
+            let mut raw = Vec::new();
+            let journaled: Journaled = file
+                .read_to_end(&mut raw)
+                .ok()
+                .and_then(|_| serde_json::from_slice(&raw).ok())
+                .unwrap_or_default();
+            let meant: Vec<RecordId> = journaled
+                .ids
+                .iter()
+                .filter_map(|name| RecordId::parse(name))
+                .collect();
+            let stored = meant
+                .iter()
+                .filter(|id| self.records().join(file_name(**id)).exists())
+                .count();
+            if stored < meant.len() {
+                notices.push(HistoryNotice::CutShort {
+                    meant: meant.len(),
+                    stored,
+                });
+            }
+            let _ = fs::remove_file(entry.path());
+        }
+        if !notices.is_empty() {
+            let _ = sync_dir(&self.dir);
+        }
+        notices
+    }
+}
+
+/// The change made whole: its journal gone, and let go of.
+fn end_journal(journal: Journal, dir: &Path) {
+    let _ = fs::remove_file(&journal.path);
+    let _ = sync_dir(dir);
+}
+
+/// What became of a change, in the store's words: stored, `put` sessions
+/// of it, or why not. A full disk is a full store.
+fn saved_or_not(made: io::Result<usize>) -> HistorySaved {
+    match made {
+        Ok(put) => HistorySaved::Stored { kept: put },
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+            ) =>
+        {
+            HistorySaved::Full
+        }
+        Err(err) => HistorySaved::Failed(err.to_string()),
+    }
+}
+
+/// The file record `id` is kept in.
+fn file_name(id: RecordId) -> String {
+    format!("{}.json", id.name())
+}
+
+/// Every record named in `dir`, in order: none where there is no `dir`
+/// yet. Anything else in it is left alone.
+fn ids_in(dir: &Path) -> io::Result<BTreeSet<RecordId>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(err) => return Err(err),
+    };
+    let mut ids = BTreeSet::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        if let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(RecordId::parse)
+        {
+            ids.insert(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Remove `path`, which may be gone already.
+fn remove_if_there(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+        _ => Ok(()),
+    }
+}
+
+/// Make what was done in `dir` durable, where there is a `dir`.
+fn sync_if_there(dir: &Path) -> io::Result<()> {
+    match sync_dir(dir) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+        _ => Ok(()),
+    }
+}
+
+/// What tells the file at `path` as it stands from another state of it:
+/// none, where there is no file.
+fn fingerprint_of(path: &Path) -> io::Result<Option<Fingerprint>> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some(fingerprint(&meta))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn fingerprint(meta: &fs::Metadata) -> Fingerprint {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or(0, |since| {
+            u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+        });
+    Fingerprint {
+        len: meta.len(),
+        mtime,
+    }
+}
+
+/// The file at `path`, and what told it apart as it was read: none, where
+/// there is no file.
+fn read_with_fingerprint(path: &Path) -> io::Result<Option<(Vec<u8>, Fingerprint)>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let meta = file.metadata()?;
+    let mut raw = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.read_to_end(&mut raw)?;
+    Ok(Some((raw, fingerprint(&meta))))
+}
+
+/// The deletions an older build remembers: none, where they cannot be
+/// read, which costs a session it deleted staying here, never one lost.
+fn legacy_deleted(root: &Path) -> Vec<Deleted> {
+    fs::read(root.join(DELETED))
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Every record of `sessions` by its session's key.
+fn keyed<'a>(
+    sessions: impl Iterator<Item = (RecordId, &'a SessionResult)>,
+) -> HashMap<SessionKey, Vec<RecordId>> {
+    let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
+    for (id, session) in sessions {
+        live.entry(SessionKey::of(session)).or_default().push(id);
+    }
+    live
+}
+
+/// `sessions`, in the order of their records, with `change`, made, made to
+/// them too.
+fn taken_up(sessions: &mut Vec<(RecordId, SessionResult)>, change: &HistoryChange) {
+    let forgotten: HashSet<RecordId> = change.forget.iter().map(|(id, _)| *id).collect();
+    sessions.retain(|(id, _)| !forgotten.contains(id));
+    for record in &change.put {
+        let Some(session) = read_record(&record.json) else {
+            continue;
+        };
+        if let Err(at) = sessions.binary_search_by_key(&record.id, |(id, _)| *id) {
+            sessions.insert(at, (record.id, session));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persist::desktop::tests::TempDir;
+    use crate::persist::record::{records_for_blob, scored};
+    use crate::persist::tests::session;
+
+    const DAY: u64 = 86_400_000;
+
+    /// A history in a scratch folder of its own.
+    fn history(name: &str) -> (TempDir, HistoryFiles) {
+        let dir = TempDir::new(name);
+        let files = HistoryFiles::at(&dir.0);
+        (dir, files)
+    }
+
+    /// A session finished at `at`, on a day of its own, scored as this
+    /// build scores it, as every session it stores is.
+    fn finished(at: u64) -> SessionResult {
+        scored(SessionResult {
+            timestamp: at,
+            ..session(&format!("day {at}"))
+        })
+    }
+
+    /// `session` as a session just finished here stores it.
+    fn record(session: &SessionResult) -> Record {
+        Record::of(session, |json| {
+            RecordId::next(session.timestamp, None, json)
+        })
+        .expect("a record")
+    }
+
+    fn put(records: &[Record]) -> HistoryChange {
+        HistoryChange {
+            put: records.to_vec(),
+            ..HistoryChange::default()
+        }
+    }
+
+    fn forget(records: &[(&Record, &SessionResult)]) -> HistoryChange {
+        HistoryChange {
+            forget: records
+                .iter()
+                .map(|(record, session)| (record.id, Deleted::of(session, 7)))
+                .collect(),
+            ..HistoryChange::default()
+        }
+    }
+
+    /// The names in `dir`, in order: none where there is no `dir`.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    fn stamps(load: &HistoryLoad) -> Vec<u64> {
+        load.sessions
+            .iter()
+            .map(|(_, session)| session.timestamp)
+            .collect()
+    }
+
+    fn ids(load: &HistoryLoad) -> Vec<RecordId> {
+        load.sessions.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// Write the history an older build keeps whole in `dir`.
+    fn keep_whole(dir: &TempDir, sessions: &[SessionResult]) {
+        fs::create_dir_all(&dir.0).unwrap();
+        fs::write(dir.0.join(SESSIONS), serde_json::to_vec(sessions).unwrap()).unwrap();
+    }
+
+    /// Every file under `dir` and what it holds, by path.
+    fn everything(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut found = Vec::new();
+        let mut look = vec![dir.to_path_buf()];
+        while let Some(dir) = look.pop() {
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    look.push(path);
+                } else {
+                    let held = fs::read(&path).unwrap();
+                    found.push((path, held));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// A session is one file, holding exactly what was written for it,
+    /// and nothing is left beside it.
+    #[test]
+    fn a_session_is_one_file_written_whole() {
+        let (dir, files) = history("one-file");
+        let opened = files.load();
+        assert!(opened.complete);
+        assert!(opened.sessions.is_empty());
+        let session = finished(1_790_000_000_000);
+        let kept = record(&session);
+        assert_eq!(
+            files.apply(&put(std::slice::from_ref(&kept))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        assert_eq!(names(&records), [file_name(kept.id)]);
+        assert_eq!(
+            fs::read(records.join(file_name(kept.id))).unwrap(),
+            kept.json.as_bytes()
+        );
+        assert_eq!(
+            names(&dir.0.join(HISTORY)),
+            [LAYOUT_FILE, RECORDS],
+            "nothing left beside it"
+        );
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(read.sessions, [(kept.id, session)]);
+        assert!(read.notices.is_empty());
+    }
+
+    /// A record is never written over: the same bytes again are written
+    /// not at all, and other bytes under its name go under the next one.
+    #[test]
+    fn a_record_is_never_written_over() {
+        let (dir, files) = history("never-over");
+        files.load();
+        let first = finished(1_000);
+        let kept = record(&first);
+        files.apply(&put(std::slice::from_ref(&kept)));
+        files.apply(&put(std::slice::from_ref(&kept)));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        assert_eq!(names(&records), [file_name(kept.id)], "once");
+        // Other bytes with its name: damaged where they lie, or alike in
+        // their place and their hash.
+        let other = Record {
+            id: kept.id,
+            json: serde_json::to_string(&finished(1_000_000)).unwrap(),
+        };
+        assert_eq!(
+            files.apply(&put(std::slice::from_ref(&other))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        assert_eq!(
+            names(&records),
+            [file_name(kept.id), file_name(kept.id.bumped())]
+        );
+        assert_eq!(
+            fs::read_to_string(records.join(file_name(kept.id))).unwrap(),
+            kept.json,
+            "the first as it was"
+        );
+        assert_eq!(files.load().sessions.len(), 2, "and both kept");
+    }
+
+    /// The history reads in the order of its records, however they were
+    /// stored: where each finished, and one a clock set back stamped after
+    /// the one it finished after.
+    #[test]
+    fn history_reads_in_the_order_it_was_kept() {
+        let (_dir, files) = history("in-order");
+        files.load();
+        let kept = records_for_blob(&[finished(5), finished(3), finished(9)]);
+        let restored = finished(6);
+        let placed = Record::of(&restored, |json| RecordId::placed(6, json)).unwrap();
+        let change = put(&[kept[2].clone(), placed, kept[1].clone(), kept[0].clone()]);
+        assert_eq!(files.apply(&change), HistorySaved::Stored { kept: 4 });
+        assert_eq!(stamps(&files.load()), [5, 3, 6, 9]);
+        let listed = files.listing().expect("a listing");
+        assert_eq!(listed, ids(&files.load()));
+    }
+
+    /// What a write cut short left behind long ago is cleared as the
+    /// history is read; one still being written, and whatever else is in
+    /// the folders, is left be.
+    #[test]
+    fn old_temporary_files_are_cleared() {
+        let (dir, files) = history("temporaries");
+        files.load();
+        let kept = record(&finished(1_000));
+        files.apply(&put(std::slice::from_ref(&kept)));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let old = records.join(".x.json.1.2.tmp");
+        let fresh = records.join(".y.json.1.3.tmp");
+        let other = records.join("notes.txt");
+        for path in [&old, &fresh, &other] {
+            fs::write(path, "half").unwrap();
+        }
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::now() - 2 * OLD_TEMPORARY)
+            .unwrap();
+        let read = files.load();
+        assert_eq!(read.sessions.len(), 1);
+        assert!(!old.exists(), "cleared");
+        assert!(fresh.exists() && other.exists(), "left be");
+    }
+
+    /// A record this build cannot read — a newer build's, say — is left
+    /// where it is as it is, and the user is told of it once.
+    #[test]
+    fn a_record_this_build_cannot_read_is_left_in_place_and_told_of_once() {
+        let (dir, files) = history("unread");
+        files.load();
+        files.apply(&put(&[record(&finished(1_000))]));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let unread = RecordId {
+            order: 2_000_000,
+            nonce: 1,
+        };
+        let raw = r#"{"date":5,"laterKey":true}"#;
+        fs::write(records.join(file_name(unread)), raw).unwrap();
+        let read = files.load();
+        assert_eq!(read.sessions.len(), 1);
+        assert_eq!(read.unread, [unread]);
+        assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
+        let again = HistoryFiles::at(&dir.0).load();
+        assert_eq!(again.unread, [unread], "still known");
+        assert!(again.notices.is_empty(), "told of once");
+        assert_eq!(
+            fs::read_to_string(records.join(file_name(unread))).unwrap(),
+            raw
+        );
+        // One more is told of on its own.
+        let another = RecordId {
+            order: 3_000_000,
+            nonce: 1,
+        };
+        fs::write(records.join(file_name(another)), "[").unwrap();
+        let read = files.load();
+        assert_eq!(read.unread, [unread, another]);
+        assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
+    }
+
+    /// What this build could not read stays as it was through every change
+    /// made beside it, and is handed over as it was, so a build that reads
+    /// it has it whole; one that could not be read for a moment reads once
+    /// it can.
+    #[test]
+    fn a_later_build_reads_what_this_one_could_not() {
+        let (dir, files) = history("later");
+        files.load();
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::create_dir_all(&records).unwrap();
+        let later = RecordId {
+            order: 2_000_000,
+            nonce: 9,
+        };
+        let raw = r#"{"v":2,"date":"2026-10-30","laterShape":{"groups":[1,2]}}"#;
+        fs::write(records.join(file_name(later)), raw).unwrap();
+        let first = finished(1_000);
+        let kept = record(&first);
+        files.apply(&put(std::slice::from_ref(&kept)));
+        files.apply(&forget(&[(&kept, &first)]));
+        assert_eq!(files.load().unread, [later]);
+        assert_eq!(
+            files.read(&[later]),
+            [Ok(Record {
+                id: later,
+                json: raw.to_string()
+            })]
+        );
+        // One that cannot be read for a moment, as a file another program
+        // has open: read once it can be.
+        let busy = record(&finished(3_000));
+        fs::create_dir(records.join(file_name(busy.id))).unwrap();
+        assert!(files.load().unread.contains(&busy.id));
+        assert_eq!(files.read(&[busy.id]), [Err(busy.id)]);
+        fs::remove_dir(records.join(file_name(busy.id))).unwrap();
+        fs::write(records.join(file_name(busy.id)), &busy.json).unwrap();
+        let read = files.load();
+        assert_eq!(read.unread, [later]);
+        assert_eq!(stamps(&read), [3_000]);
+    }
+
+    /// A deletion is a tombstone beside the history, by the record's
+    /// name, holding what tells the session apart; undone, the session is
+    /// back where it was.
+    #[test]
+    fn a_deletion_is_a_tombstone_beside_the_history() {
+        let (dir, files) = history("tombstone");
+        files.load();
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        assert_eq!(
+            files.apply(&forget(&[(&one, &first)])),
+            HistorySaved::Stored { kept: 0 }
+        );
+        let (records, tombstones) = (
+            dir.0.join(HISTORY).join(RECORDS),
+            dir.0.join(HISTORY).join(TOMBSTONES),
+        );
+        assert_eq!(names(&records), [file_name(two.id)]);
+        assert_eq!(names(&tombstones), [file_name(one.id)]);
+        let held: Deleted =
+            serde_json::from_slice(&fs::read(tombstones.join(file_name(one.id))).unwrap()).unwrap();
+        assert_eq!(held, Deleted::of(&first, 7));
+        assert_eq!(ids(&files.load()), [two.id]);
+        assert_eq!(files.forgotten(&[one.id, two.id]), [one.id]);
+        // Stored again without undoing it: still deleted.
+        files.apply(&put(std::slice::from_ref(&one)));
+        assert_eq!(ids(&files.load()), [two.id]);
+        // Undone: back where it was.
+        let undo = HistoryChange {
+            put: vec![one.clone()],
+            unforget: vec![one.id],
+            ..HistoryChange::default()
+        };
+        assert_eq!(files.apply(&undo), HistorySaved::Stored { kept: 1 });
+        assert_eq!(ids(&files.load()), [one.id, two.id]);
+        assert!(names(&tombstones).is_empty());
+        assert!(files.forgotten(&[one.id]).is_empty());
+    }
+
+    /// A record beside its tombstone, as a deletion cut short leaves it,
+    /// reads as deleted, and the deletion is finished.
+    #[test]
+    fn a_record_and_its_tombstone_read_as_deleted() {
+        let (dir, files) = history("cut-deletion");
+        files.load();
+        let first = finished(1_000);
+        let one = record(&first);
+        files.apply(&put(std::slice::from_ref(&one)));
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::create_dir_all(&tombstones).unwrap();
+        fs::write(
+            tombstones.join(file_name(one.id)),
+            serde_json::to_vec(&Deleted::of(&first, 7)).unwrap(),
+        )
+        .unwrap();
+        assert!(files.load().sessions.is_empty());
+        assert!(names(&dir.0.join(HISTORY).join(RECORDS)).is_empty());
+        assert_eq!(files.listing(), Some(Vec::new()));
+    }
+
+    /// A tombstone that holds nothing, or nothing that reads, deletes its
+    /// record all the same.
+    #[test]
+    fn an_empty_tombstone_still_deletes() {
+        let (dir, files) = history("empty-tombstone");
+        files.load();
+        let one = record(&finished(1_000));
+        let two = record(&finished(2_000));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::create_dir_all(&tombstones).unwrap();
+        fs::write(tombstones.join(file_name(one.id)), "").unwrap();
+        fs::write(tombstones.join(file_name(two.id)), "{ not").unwrap();
+        assert_eq!(files.listing(), Some(Vec::new()));
+        assert_eq!(files.forgotten(&[one.id, two.id]), [one.id, two.id]);
+        assert!(files.load().sessions.is_empty());
+    }
+
+    /// Two copies on one folder each take up what the other stored and
+    /// deleted, and are told the folder changed when it did, and not when
+    /// they changed it themselves.
+    #[test]
+    fn two_copies_on_one_folder_take_up_each_others_changes() {
+        let dir = TempDir::new("two-copies");
+        let (here, there) = (HistoryFiles::at(&dir.0), HistoryFiles::at(&dir.0));
+        here.load();
+        there.load();
+        let first = finished(1_000);
+        let one = record(&first);
+        here.apply(&put(std::slice::from_ref(&one)));
+        assert!(!here.changed(), "its own change");
+        assert!(there.changed());
+        assert_eq!(there.listing(), Some(vec![one.id]));
+        assert!(!there.changed(), "taken up");
+        assert_eq!(there.read(&[one.id]), [Ok(one.clone())]);
+        there.apply(&forget(&[(&one, &first)]));
+        assert!(here.changed());
+        assert_eq!(here.listing(), Some(Vec::new()));
+        assert_eq!(here.forgotten(&[one.id]), [one.id]);
+    }
+
+    /// A change of many sessions at once that stops before it is done is
+    /// told of by the next to read the history, once; one still running
+    /// in another copy is left to it.
+    #[test]
+    fn a_restore_cut_short_is_told_of() {
+        let (dir, files) = history("cut-short");
+        files.load();
+        let restored: Vec<Record> = (1..=3).map(|n| record(&finished(n * 1_000))).collect();
+        let journal = files.begin_journal(&restored).expect("a journal");
+        files.place_record(&restored[0]).unwrap();
+        // Another copy reads the history while this one stores.
+        let other = HistoryFiles::at(&dir.0).load();
+        assert!(other.notices.is_empty(), "still running");
+        // And this one stops.
+        drop(journal);
+        let next = HistoryFiles::at(&dir.0).load();
+        assert_eq!(
+            next.notices,
+            [HistoryNotice::CutShort {
+                meant: 3,
+                stored: 1
+            }]
+        );
+        assert!(HistoryFiles::at(&dir.0).load().notices.is_empty(), "once");
+        // Made whole, a change leaves no journal behind.
+        assert_eq!(
+            files.apply(&put(&restored)),
+            HistorySaved::Stored { kept: 3 }
+        );
+        assert!(
+            !names(&dir.0.join(HISTORY))
+                .iter()
+                .any(|name| name.contains(JOURNAL_PREFIX)),
+            "{:?}",
+            names(&dir.0.join(HISTORY))
+        );
+        assert_eq!(files.load().sessions.len(), 3);
+    }
+
+    /// A history a newer build keeps in a way this one would harm is read,
+    /// and nothing is written to it, not even to tidy it.
+    #[test]
+    fn a_store_from_a_newer_incompatible_layout_is_only_read() {
+        let (dir, files) = history("newer");
+        files.load();
+        let first = finished(1_000);
+        let (one, two) = (record(&first), record(&finished(2_000)));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        let layout = dir.0.join(HISTORY).join(LAYOUT_FILE);
+        let newer = r#"{"layout":3,"compatible":2,"migratedAt":1,"shards":[1]}"#;
+        fs::write(&layout, newer).unwrap();
+        // A deletion cut short, and a write left behind long ago.
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::create_dir_all(&tombstones).unwrap();
+        fs::write(tombstones.join(file_name(one.id)), "").unwrap();
+        let old = dir.0.join(HISTORY).join(".x.tmp");
+        fs::write(&old, "half").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::now() - 2 * OLD_TEMPORARY)
+            .unwrap();
+        let before = everything(&dir.0);
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(ids(&read), [two.id]);
+        assert_eq!(read.notices, [HistoryNotice::Newer]);
+        assert!(!read.complete);
+        let third = record(&finished(3_000));
+        assert_eq!(
+            files.apply(&put(std::slice::from_ref(&third))),
+            HistorySaved::Newer
+        );
+        assert_eq!(everything(&dir.0), before, "nothing written");
+    }
+
+    /// The history an older build kept whole becomes records, once, in its
+    /// order; the move notes what it took, and is not made again.
+    #[test]
+    fn a_history_file_becomes_records_once() {
+        let dir = TempDir::new("moved");
+        let whole = [finished(5), finished(3), finished(9)];
+        keep_whole(&dir, &whole);
+        let gone = Deleted::of(&finished(1), 77);
+        fs::write(dir.0.join(DELETED), serde_json::to_vec(&[gone]).unwrap()).unwrap();
+        let files = HistoryFiles::at(&dir.0);
+        let read = files.load();
+        assert!(read.complete);
+        assert!(read.set_aside.is_empty() && read.notices.is_empty());
+        let records = records_for_blob(&whole);
+        assert_eq!(
+            read.sessions,
+            records
+                .iter()
+                .map(|record| record.id)
+                .zip(whole.iter().cloned())
+                .collect::<Vec<_>>()
+        );
+        let layout: Layout =
+            serde_json::from_slice(&fs::read(dir.0.join(HISTORY).join(LAYOUT_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(
+            (layout.layout, layout.compatible),
+            (legacy::LAYOUT, legacy::COMPATIBLE)
+        );
+        assert_eq!(layout.imported_keys.len(), 3);
+        assert_eq!(layout.deleted_seen, 77);
+        assert_eq!(
+            layout.legacy,
+            fingerprint_of(&dir.0.join(SESSIONS)).unwrap()
+        );
+        let before = everything(&dir.0);
+        let again = HistoryFiles::at(&dir.0).load();
+        assert_eq!(again.sessions, read.sessions);
+        assert_eq!(everything(&dir.0), before, "made once");
+    }
+
+    /// A move cut short, before its layout was written, is made again to
+    /// the same records, byte for byte.
+    #[test]
+    fn a_migration_cut_short_runs_again_to_the_same_records() {
+        let dir = TempDir::new("move-again");
+        keep_whole(&dir, &[finished(5), finished(3), finished(9)]);
+        HistoryFiles::at(&dir.0).load();
+        let moved = everything(&dir.0.join(HISTORY).join(RECORDS));
+        // Cut short: one record and the layout never reached the disk.
+        fs::remove_file(dir.0.join(HISTORY).join(LAYOUT_FILE)).unwrap();
+        fs::remove_file(&moved[1].0).unwrap();
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(stamps(&read), [5, 3, 9]);
+        assert_eq!(everything(&dir.0.join(HISTORY).join(RECORDS)), moved);
+        assert!(dir.0.join(HISTORY).join(LAYOUT_FILE).exists());
+    }
+
+    /// A history file that is no list at all is set aside as it always
+    /// was, and nothing is made of it; one only some of whose sessions do
+    /// not read has those copied aside, and the rest moved.
+    #[test]
+    fn an_unreadable_history_file_is_set_aside_and_not_migrated() {
+        let dir = TempDir::new("move-unreadable");
+        fs::create_dir_all(&dir.0).unwrap();
+        let damaged = "{\"this\": \"is not a history\"";
+        fs::write(dir.0.join(SESSIONS), damaged).unwrap();
+        let read = HistoryFiles::at(&dir.0).load();
+        assert!(read.sessions.is_empty() && read.complete);
+        let [SetAside::History { kept: Some(kept) }] = read.set_aside.as_slice() else {
+            panic!("{:?}", read.set_aside);
+        };
+        assert!(kept.contains("sessions.unreadable-"), "{kept}");
+        assert_eq!(fs::read_to_string(kept).unwrap(), damaged);
+        assert!(!dir.0.join(SESSIONS).exists());
+        assert!(names(&dir.0.join(HISTORY).join(RECORDS)).is_empty());
+        assert!(HistoryFiles::at(&dir.0).load().set_aside.is_empty(), "once");
+
+        let dir = TempDir::new("move-part-unreadable");
+        fs::create_dir_all(&dir.0).unwrap();
+        let good = |at| serde_json::to_string(&finished(at)).unwrap();
+        let raw = format!("[{},{{\"date\":\"nonsense\"}},{}]", good(1), good(2));
+        fs::write(dir.0.join(SESSIONS), &raw).unwrap();
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(stamps(&read), [1, 2]);
+        let [
+            SetAside::Sessions {
+                count: 1,
+                kept: Some(kept),
+            },
+        ] = read.set_aside.as_slice()
+        else {
+            panic!("{:?}", read.set_aside);
+        };
+        assert_eq!(
+            fs::read_to_string(kept).unwrap(),
+            r#"[{"date":"nonsense"}]"#
+        );
+        assert_eq!(fs::read_to_string(dir.0.join(SESSIONS)).unwrap(), raw);
+    }
+
+    /// A history file that cannot be read for now leaves the move for the
+    /// next launch, and says so; sessions are stored all the same, and the
+    /// move made later takes up both.
+    #[test]
+    fn a_history_that_cannot_be_read_now_is_migrated_later() {
+        let dir = TempDir::new("move-later");
+        fs::create_dir_all(dir.0.join(SESSIONS)).unwrap();
+        let files = HistoryFiles::at(&dir.0);
+        let read = files.load();
+        assert!(!read.complete);
+        assert!(
+            matches!(read.notices.as_slice(), [HistoryNotice::MovePending(_)]),
+            "{:?}",
+            read.notices
+        );
+        assert!(!dir.0.join(HISTORY).join(LAYOUT_FILE).exists());
+        let new = record(&finished(9_000));
+        assert_eq!(
+            files.apply(&put(std::slice::from_ref(&new))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        fs::remove_dir(dir.0.join(SESSIONS)).unwrap();
+        keep_whole(&dir, &[finished(1_000), finished(2_000)]);
+        let read = HistoryFiles::at(&dir.0).load();
+        assert!(read.complete && read.notices.is_empty());
+        assert_eq!(stamps(&read), [1_000, 2_000, 9_000]);
+    }
+
+    /// What an older build keeps — its history, its deletions, and what it
+    /// set aside — is left as it was, byte for byte, by the move and every
+    /// change after it.
+    #[test]
+    fn the_old_history_file_is_left_for_older_builds() {
+        let dir = TempDir::new("left-for-older");
+        let whole = [finished(1_000), finished(2_000)];
+        keep_whole(&dir, &whole);
+        let deleted = serde_json::to_vec(&[Deleted::of(&finished(1), 5)]).unwrap();
+        fs::write(dir.0.join(DELETED), &deleted).unwrap();
+        fs::write(dir.0.join("sessions.unreadable-1.json"), "[{}]").unwrap();
+        let older = |dir: &TempDir| {
+            [SESSIONS, DELETED, "sessions.unreadable-1.json"]
+                .map(|name| fs::read(dir.0.join(name)).unwrap())
+        };
+        let before = older(&dir);
+        let files = HistoryFiles::at(&dir.0);
+        let read = files.load();
+        files.apply(&put(&[record(&finished(3_000))]));
+        let (id, first) = &read.sessions[0];
+        let first_record = Record {
+            id: *id,
+            json: serde_json::to_string(first).unwrap(),
+        };
+        files.apply(&forget(&[(&first_record, first)]));
+        HistoryFiles::at(&dir.0).load();
+        assert_eq!(older(&dir), before);
+    }
+
+    /// Sessions an older build stores in the history it keeps whole, after
+    /// the move, are taken up: at the next launch, and as the history is
+    /// next listed.
+    #[test]
+    fn sessions_an_older_build_added_after_the_move_are_taken_up() {
+        let dir = TempDir::new("older-added");
+        let now = crate::time::now_ms();
+        let old = [finished(now - 10 * DAY), finished(now - 9 * DAY)];
+        keep_whole(&dir, &old);
+        let files = HistoryFiles::at(&dir.0);
+        files.load();
+        // An older build, still open, stores a session.
+        let first = finished(now + 60_000);
+        keep_whole(&dir, &[old[0].clone(), old[1].clone(), first.clone()]);
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(
+            stamps(&read),
+            [old[0].timestamp, old[1].timestamp, first.timestamp]
+        );
+        let placed = Record::of(&first, |json| RecordId::placed(first.timestamp, json)).unwrap();
+        assert_eq!(read.sessions[2].0, placed.id);
+        // And another, taken up as the history is next listed.
+        let second = finished(now + 120_000);
+        keep_whole(
+            &dir,
+            &[old[0].clone(), old[1].clone(), first, second.clone()],
+        );
+        assert!(files.changed());
+        let listed = files.listing().expect("a listing");
+        assert_eq!(listed.len(), 4);
+        let taken = listed.last().copied().expect("the newest");
+        assert_eq!(
+            files
+                .read(&[taken])
+                .pop()
+                .and_then(Result::ok)
+                .and_then(|record| read_record(&record.json)),
+            Some(second)
+        );
+    }
+
+    /// A session from before the move that an older copy writes back, as
+    /// one left open stores the history it held, is never brought back:
+    /// neither one it let go long ago, nor one deleted here since.
+    #[test]
+    fn sessions_from_before_the_move_are_never_brought_back() {
+        let dir = TempDir::new("never-back");
+        let now = crate::time::now_ms();
+        let kept = [finished(now - 10 * DAY), finished(now - 9 * DAY)];
+        keep_whole(&dir, &kept);
+        let files = HistoryFiles::at(&dir.0);
+        let read = files.load();
+        let (id, first) = &read.sessions[0];
+        let first_record = Record {
+            id: *id,
+            json: serde_json::to_string(first).unwrap(),
+        };
+        files.apply(&forget(&[(&first_record, first)]));
+        let let_go = finished(now - 30 * DAY);
+        keep_whole(&dir, &[let_go, kept[0].clone(), kept[1].clone()]);
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(stamps(&read), [kept[1].timestamp]);
+    }
+
+    /// A session taken up from an older build is taken up once: not again
+    /// however often the older build stores it, nor once deleted here.
+    #[test]
+    fn a_session_imported_once_is_never_imported_again() {
+        let dir = TempDir::new("imported-once");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        HistoryFiles::at(&dir.0).load();
+        let (first, second) = (finished(now + 60_000), finished(now + 120_000));
+        keep_whole(&dir, &[old.clone(), first.clone()]);
+        let files = HistoryFiles::at(&dir.0);
+        let read = files.load();
+        assert_eq!(stamps(&read), [old.timestamp, first.timestamp]);
+        // Stored again by the older build, with another: the first once.
+        keep_whole(&dir, &[old.clone(), first.clone(), second.clone()]);
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(
+            stamps(&read),
+            [old.timestamp, first.timestamp, second.timestamp]
+        );
+        // Deleted here, and stored again there: still deleted.
+        let (id, _) = &read.sessions[1];
+        let taken = Record {
+            id: *id,
+            json: serde_json::to_string(&first).unwrap(),
+        };
+        files.apply(&forget(&[(&taken, &first)]));
+        keep_whole(&dir, &[old.clone(), first, second.clone()]);
+        let read = HistoryFiles::at(&dir.0).load();
+        assert_eq!(stamps(&read), [old.timestamp, second.timestamp]);
+    }
+
+    /// A session an older build deletes after the move is deleted here too;
+    /// a deletion it made before is not made again, of a session restored
+    /// here since.
+    #[test]
+    fn a_deletion_an_older_build_made_after_the_move_is_honoured() {
+        let dir = TempDir::new("older-deleted");
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 10 * DAY), finished(now - 9 * DAY));
+        keep_whole(&dir, &[first.clone(), second.clone()]);
+        // Deleted before the move, and since restored: kept.
+        let before = Deleted::of(&first, now - 20 * DAY);
+        fs::write(
+            dir.0.join(DELETED),
+            serde_json::to_vec(std::slice::from_ref(&before)).unwrap(),
+        )
+        .unwrap();
+        let read = HistoryFiles::at(&dir.0).load();
+        let second_id = read.sessions[1].0;
+        // The older build deletes the second.
+        let after = Deleted::of(&second, now);
+        keep_whole(&dir, std::slice::from_ref(&first));
+        fs::write(
+            dir.0.join(DELETED),
+            serde_json::to_vec(&[before, after.clone()]).unwrap(),
+        )
+        .unwrap();
+        let files = HistoryFiles::at(&dir.0);
+        let read = files.load();
+        assert_eq!(stamps(&read), [first.timestamp]);
+        assert_eq!(files.forgotten(&[second_id]), [second_id]);
+        let held: Deleted = serde_json::from_slice(
+            &fs::read(
+                dir.0
+                    .join(HISTORY)
+                    .join(TOMBSTONES)
+                    .join(file_name(second_id)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(held, after);
+        assert_eq!(stamps(&HistoryFiles::at(&dir.0).load()), [first.timestamp]);
+    }
+
+    /// A layout that does not read, damaged where it lies, is set aside,
+    /// and the move made again writes nothing twice.
+    #[test]
+    fn a_layout_that_does_not_read_is_set_aside_and_the_move_made_again() {
+        let dir = TempDir::new("layout-damaged");
+        keep_whole(&dir, &[finished(1_000), finished(2_000)]);
+        let read = HistoryFiles::at(&dir.0).load();
+        let records = everything(&dir.0.join(HISTORY).join(RECORDS));
+        fs::write(dir.0.join(HISTORY).join(LAYOUT_FILE), "{ damaged").unwrap();
+        let again = HistoryFiles::at(&dir.0).load();
+        assert!(again.complete);
+        assert_eq!(again.sessions, read.sessions);
+        assert_eq!(everything(&dir.0.join(HISTORY).join(RECORDS)), records);
+        let aside: Vec<String> = names(&dir.0.join(HISTORY))
+            .into_iter()
+            .filter(|name| name.starts_with("layout.unreadable-"))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.0.join(HISTORY).join(&aside[0])).unwrap(),
+            "{ damaged"
+        );
+    }
+}
