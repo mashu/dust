@@ -9,6 +9,7 @@ use std::sync::{Mutex, PoisonError};
 
 use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 
+use super::backup::{BackedUp, BackupFile};
 use super::files::HistoryFiles;
 use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
@@ -312,14 +313,9 @@ pub(super) fn write_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()
 /// leave the folder's own record of the name to the caller to make durable
 /// ([`sync_dir`]): once for many files written together.
 pub(super) fn place_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-    static WRITES: AtomicU64 = AtomicU64::new(0);
     fs::create_dir_all(dir)?;
     let path = dir.join(name);
-    let tmp = dir.join(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        WRITES.fetch_add(1, Ordering::Relaxed)
-    ));
+    let tmp = temporary(dir, name);
     let written = (|| {
         let mut file = fs::File::create(&tmp)?;
         file.write_all(bytes)?;
@@ -330,6 +326,56 @@ pub(super) fn place_whole(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()
         let _ = fs::remove_file(&tmp);
     }
     written
+}
+
+/// Where `name` in `dir` is written before it takes its name: a name of
+/// this process's own, and of this write's, so two copies of the app
+/// running at once never write into each other's.
+fn temporary(dir: &Path, name: &str) -> PathBuf {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// Save a file in `folder` as `name`, or as the first name free after it
+/// ([`free_name`]), written a piece at a time by `write`, and say what it
+/// is called, and what `write` said of it.
+///
+/// It is written as [`write_whole`] writes a file, into a file of its own
+/// beside it, made durable, and only then named: a file cut short, by a
+/// full disk or the app stopping, leaves none that is half of one, and
+/// nothing is ever written over. However large it is, no more of it than
+/// a buffer's worth is held at a time.
+pub(super) fn save_streamed<T>(
+    folder: &Path,
+    name: &str,
+    write: impl FnOnce(&mut dyn Write) -> io::Result<T>,
+) -> io::Result<(String, T)> {
+    fs::create_dir_all(folder)?;
+    let name = free_name(folder, name);
+    let tmp = temporary(folder, &name);
+    let written = (|| {
+        let mut out = io::BufWriter::new(fs::File::create(&tmp)?);
+        let said = write(&mut out)?;
+        out.into_inner()
+            .map_err(io::IntoInnerError::into_error)?
+            .sync_all()?;
+        fs::rename(&tmp, folder.join(&name))?;
+        Ok(said)
+    })();
+    match written {
+        Ok(said) => {
+            sync_dir(folder)?;
+            Ok((name, said))
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
 }
 
 /// Where backup files go. On a computer: Downloads, or failing that
@@ -506,12 +552,32 @@ impl Store for DesktopStore {
         self.backups_inside
     }
 
-    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
+    /// Written on the history's own thread, a session at a time as each
+    /// is read from its file: however long the history, it is never held
+    /// whole, here or on the way to Android's Downloads.
+    fn save_backup(&self, name: &str, backup: BackupFile) -> BackupSaving {
+        let name = name.to_string();
         #[cfg(all(target_os = "android", not(test)))]
-        let saving = super::android::save_backup(name.to_string(), contents.to_string());
+        let saving = self.history.ask(move |files| {
+            super::android::save_backup(&name, |out| files.stream_backup(&backup, out))
+        });
         #[cfg(not(all(target_os = "android", not(test))))]
-        let saving = super::saved_now(self.save_in_folder(name, contents));
-        Box::pin(async move { saving.await.map(|place| super::saved_as(&place)) })
+        let saving = {
+            let Some(folder) = self.backup_folder.clone() else {
+                return Box::pin(std::future::ready(Err(
+                    "there is no folder to put it in".into()
+                )));
+            };
+            self.history.ask(move |files| {
+                save_in_folder(&folder, &name, |out| files.stream_backup(&backup, out))
+            })
+        };
+        Box::pin(async move {
+            saving
+                .await
+                .unwrap_or_else(|| Err("the history's files could not be reached".into()))
+                .map(|(place, backed)| super::saved_as(&place, backed))
+        })
     }
 
     /// Written unsynced: it is only a mark, and no group waits on it. Each
@@ -665,22 +731,21 @@ impl DesktopStore {
     }
 }
 
-impl DesktopStore {
-    /// Save a backup file in the backup folder, and say where it went.
-    #[cfg_attr(all(target_os = "android", not(test)), allow(dead_code))]
-    fn save_in_folder(&self, name: &str, contents: &str) -> Result<String, String> {
-        let folder = self
-            .backup_folder
-            .as_deref()
-            .ok_or("there is no folder to put it in")?;
-        let name = free_name(folder, name);
-        write_whole(folder, &name, contents.as_bytes()).map_err(|err| err.to_string())?;
-        if cfg!(target_os = "ios") {
-            Ok(format!("{name}, in the Files app, in Dust's folder"))
-        } else {
-            Ok(folder.join(name).display().to_string())
-        }
-    }
+/// Save a backup file in `folder`, written by `write` ([`save_streamed`]),
+/// and say where it went, in words for the user, and what it holds.
+#[cfg_attr(all(target_os = "android", not(test)), allow(dead_code))]
+fn save_in_folder(
+    folder: &Path,
+    name: &str,
+    write: impl FnOnce(&mut dyn Write) -> io::Result<BackedUp>,
+) -> Result<(String, BackedUp), String> {
+    let (name, backed) = save_streamed(folder, name, write).map_err(|err| err.to_string())?;
+    let place = if cfg!(target_os = "ios") {
+        format!("{name}, in the Files app, in Dust's folder")
+    } else {
+        folder.join(name).display().to_string()
+    };
+    Ok((place, backed))
 }
 
 /// The package an Android process runs: the first entry of
@@ -774,8 +839,10 @@ fn under_data_dir(data: Option<PathBuf>) -> PathBuf {
 pub(super) mod tests {
     use super::*;
     use crate::persist::Deleted;
+    use crate::persist::backup::{read_backup, read_backup_as_0_16_2, write_backup};
     use crate::persist::record::{RecordId, records_for_blob};
     use crate::persist::tests::{every_setting_moved, session};
+    use crate::persist::worker::wait;
     use cw_core::SessionResult;
 
     /// A scratch directory that cleans up after itself.
@@ -1511,44 +1578,156 @@ pub(super) mod tests {
     fn a_backup_is_a_new_file_in_the_backup_folder() {
         let (dir, store) = store("backup");
         let folder = TempDir::new("backup-folder");
+        let settings = every_setting_moved();
+        let backup = || BackupFile::new(&settings, 7, Vec::new());
         assert!(!store.saves_backups(), "a store with no folder saves none");
-        assert!(store.save_in_folder("b.json", "{}").is_err());
+        assert!(now(store.save_backup("b.json", backup())).is_err());
         let store = store.with_backup_folder(folder.0.clone());
         assert!(store.saves_backups());
-        let first = store.save_in_folder("dust-backup-2026-10-19.json", "one");
-        let second = store.save_in_folder("dust-backup-2026-10-19.json", "two");
-        assert_eq!(
-            first,
-            Ok(folder
-                .0
-                .join("dust-backup-2026-10-19.json")
-                .display()
-                .to_string())
-        );
-        assert_eq!(
-            second,
-            Ok(folder
-                .0
-                .join("dust-backup-2026-10-19-2.json")
-                .display()
-                .to_string())
-        );
-        assert_eq!(
-            fs::read_to_string(folder.0.join("dust-backup-2026-10-19.json")).unwrap(),
-            "one"
-        );
+        store_sessions(&store, &[session("2026-10-19")]);
+        let first = now(store.save_backup("dust-backup-2026-10-19.json", backup()));
+        let second = now(store.save_backup("dust-backup-2026-10-19.json", backup()));
+        let saved = |name: &str| {
+            Ok(format!(
+                "Backup saved as {}.",
+                folder.0.join(name).display()
+            ))
+        };
+        assert_eq!(first, saved("dust-backup-2026-10-19.json"));
+        assert_eq!(second, saved("dust-backup-2026-10-19-2.json"));
         assert_eq!(
             files(&folder),
             [
                 "dust-backup-2026-10-19-2.json",
                 "dust-backup-2026-10-19.json"
-            ]
+            ],
+            "and nothing half written beside them"
         );
+        let read =
+            read_backup(&fs::read_to_string(folder.0.join("dust-backup-2026-10-19.json")).unwrap())
+                .expect("a backup");
+        assert_eq!(read.settings, Some(settings.clone()));
+        assert_eq!(read.sessions.len(), 1);
+        assert_eq!(read.saved_at, 7);
 
         assert_eq!(store.last_backup(), None);
         store.mark_backup(1_790_000_000_000);
         assert_eq!(store.last_backup(), Some(1_790_000_000_000));
-        assert_eq!(files(&dir), [LAST_BACKUP]);
+        assert_eq!(files(&dir), ["history", LAST_BACKUP]);
+    }
+
+    /// A backup written a session at a time from the records, those the
+    /// store has yet to take in their places among them, is byte for byte
+    /// the backup written whole of the same history, which every version of
+    /// Dust reads; Dust 0.16 reads it as this one does.
+    #[test]
+    fn a_streamed_backup_reads_back_as_the_whole_one() {
+        let (_dir, store) = store("streamed");
+        let folder = TempDir::new("streamed-folder");
+        let store = store.with_backup_folder(folder.0.clone());
+        let settings = every_setting_moved();
+        let mut history: Vec<SessionResult> = (1..=5)
+            .map(|day| SessionResult {
+                timestamp: day * 86_400_000,
+                ..session(&format!("2026-10-{day:02}"))
+            })
+            .collect();
+        history[2].contest = Some(cw_core::ContestLog(
+            serde_json::json!({ "later": [1, 2.5] }),
+        ));
+        let records = records_for_blob(&history);
+        // The third, and the last, are here and not stored yet.
+        now(store.change_history(HistoryChange {
+            put: [0, 1, 3].map(|at| records[at].clone()).into(),
+            ..HistoryChange::default()
+        }));
+        assert_eq!(stored(&store).len(), 3);
+        let unsaved = vec![records[4].clone(), records[2].clone()];
+        let at = 1_790_000_000_000;
+        now(store.save_backup("b.json", BackupFile::new(&settings, at, unsaved))).expect("saved");
+        let written = fs::read_to_string(folder.0.join("b.json")).unwrap();
+        assert_eq!(written, write_backup(&settings, &history, at));
+        let read = read_backup(&written).expect("a backup");
+        assert_eq!(read_backup_as_0_16_2(&written), Ok(read.clone()));
+        assert_eq!(read.sessions.len(), 5);
+        assert_eq!(read.settings, Some(settings));
+    }
+
+    /// A session stored that this build cannot read, saved by a newer
+    /// Dust say, goes into a backup as it is stored, so a build that reads
+    /// it restores it whole; one damaged where it lies, that is not even
+    /// JSON, cannot, and the user is told. A session stored and still to
+    /// be heard of as stored is in it once.
+    #[test]
+    fn a_backup_carries_a_record_this_build_cannot_read_as_it_is() {
+        let (dir, store) = store("unread-backed-up");
+        let folder = TempDir::new("unread-folder");
+        let store = store.with_backup_folder(folder.0.clone());
+        let first = SessionResult {
+            timestamp: 86_400_000,
+            ..session("2026-10-01")
+        };
+        let records = records_for_blob(std::slice::from_ref(&first));
+        now(store.change_history(HistoryChange {
+            put: records.clone(),
+            ..HistoryChange::default()
+        }));
+        let sessions = dir.0.join("history").join("sessions");
+        let later = r#"{"date":5,"laterShape":{"groups":[1,2]}}"#;
+        let (newer, damaged) = (
+            RecordId {
+                order: 2_000_000_000,
+                nonce: 1,
+            },
+            RecordId {
+                order: 3_000_000_000,
+                nonce: 1,
+            },
+        );
+        fs::write(sessions.join(format!("{newer}.json")), later).unwrap();
+        fs::write(sessions.join(format!("{damaged}.json")), "{ half").unwrap();
+        let said = now(store.save_backup(
+            "b.json",
+            BackupFile::new(&every_setting_moved(), 9, records),
+        ))
+        .expect("saved");
+        assert!(
+            said.ends_with("1 session stored here is damaged, and could not go in it."),
+            "{said}"
+        );
+        let written = fs::read_to_string(folder.0.join("b.json")).unwrap();
+        assert!(written.contains(later), "{written}");
+        assert!(!written.contains("{ half"), "{written}");
+        let read = read_backup(&written).expect("a backup");
+        assert_eq!(read.sessions.len(), 1, "once, and what this build reads");
+        assert_eq!(read.sessions[0].date, first.date);
+        assert_eq!(read_backup_as_0_16_2(&written), Ok(read));
+    }
+
+    /// The app's store saves a backup on the history's own thread: the
+    /// same file, said of in the same words.
+    #[test]
+    fn a_backup_is_written_on_the_historys_own_thread() {
+        let dir = TempDir::new("backup-on-worker");
+        let folder = TempDir::new("backup-on-worker-folder");
+        let store = DesktopStore::on_worker_at(dir.0.clone()).with_backup_folder(folder.0.clone());
+        store.load_history();
+        let history = [session("2026-10-01")];
+        wait(store.change_history(HistoryChange {
+            put: records_for_blob(&history),
+            ..HistoryChange::default()
+        }));
+        let settings = every_setting_moved();
+        let said = wait(store.save_backup("b.json", BackupFile::new(&settings, 3, Vec::new())));
+        assert_eq!(
+            said,
+            Ok(format!(
+                "Backup saved as {}.",
+                folder.0.join("b.json").display()
+            ))
+        );
+        let written = fs::read_to_string(folder.0.join("b.json")).unwrap();
+        assert_eq!(written, write_backup(&settings, &history, 3));
     }
 
     #[test]

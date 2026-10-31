@@ -48,6 +48,7 @@ use std::time::{Duration, SystemTime};
 use cw_core::SessionResult;
 use flate2::read::GzDecoder;
 
+use super::backup::{BackedUp, BackupFile};
 use super::desktop::{
     DELETED, SESSIONS, copy_aside, move_aside, place_whole, shown, sync_dir, write_whole,
 };
@@ -477,6 +478,27 @@ impl HistoryFiles {
                     .ok_or(id)
             })
             .collect()
+    }
+
+    /// Write a backup to `out`: `backup`, with every record stored here,
+    /// deleted ones left out, each as it is stored and read from its file
+    /// as it is written, in the order of the history
+    /// ([`BackupFile::write`]). However long the history, no more of it is
+    /// held than a record at a time.
+    pub(super) fn stream_backup(
+        &self,
+        backup: &BackupFile,
+        out: &mut dyn Write,
+    ) -> io::Result<BackedUp> {
+        self.on_its_thread();
+        let listing = self.listing_now()?;
+        let records = self.records();
+        let stored = listing.records.difference(&listing.gone).map(|&id| {
+            raw_at(&records, id, &listing.packed)
+                .map(|json| Record { id, json })
+                .ok_or(id)
+        });
+        backup.write(out, stored)
     }
 
     /// Which of `ids` were deleted by hand. One whose tombstone cannot be

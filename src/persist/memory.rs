@@ -18,6 +18,7 @@ use std::task::{Poll, Waker};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
+use super::backup::BackupFile;
 use super::legacy::{
     self, Aside, BlobHistory, BlobKeys, Fingerprint, Layout, parse_sessions, read_history,
 };
@@ -295,14 +296,37 @@ impl Store for MemoryStore {
         !self.no_backups.get()
     }
 
-    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
+    /// Written whole, from every record held, as a browser writes one.
+    fn save_backup(&self, name: &str, backup: BackupFile) -> BackupSaving {
         if self.no_backups.get() {
             return saved_now(Err("this build has nowhere to put it".into()));
         }
+        let stored = match &self.page {
+            Some(page) => page.records(),
+            None if self.unlistable.get() => None,
+            None => {
+                let tombstones = self.tombstones.borrow();
+                Some(
+                    self.records
+                        .borrow()
+                        .iter()
+                        .filter(|(id, _)| !tombstones.contains_key(id))
+                        .map(|(id, held)| Record {
+                            id: *id,
+                            json: held.json.clone(),
+                        })
+                        .collect(),
+                )
+            }
+        };
+        let Some(stored) = stored else {
+            return saved_now(Err("the history stored here could not be read".into()));
+        };
+        let (contents, backed) = backup.whole(stored.into_iter().map(Ok));
         self.backup_files
             .borrow_mut()
-            .push((name.to_string(), contents.to_string()));
-        saved_now(Ok(saved_as(&format!("{name}, in your downloads"))))
+            .push((name.to_string(), contents));
+        saved_now(Ok(saved_as(&format!("{name}, in your downloads"), backed)))
     }
 
     fn confirms_backups(&self) -> bool {

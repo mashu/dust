@@ -143,6 +143,7 @@ impl StoredHistory {
 
     /// The records of every session finished when and on the day `key`
     /// says.
+    #[cfg(test)]
     pub fn ids_of(&self, key: &SessionKey) -> &[RecordId] {
         self.by_key.get(key).map_or(&[], Vec::as_slice)
     }

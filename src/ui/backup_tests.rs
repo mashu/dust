@@ -310,7 +310,8 @@ fn a_restore_that_only_fills_in_says_so() {
 }
 
 /// A file that is not a backup, or far too large to be one, is refused, and
-/// the card says why.
+/// the card says why. Too large is past a gigabyte: a backup of fifty
+/// megabytes or more, which used to be refused, is a history of years.
 #[test]
 fn a_file_that_is_not_a_backup_is_refused() {
     run(|| async {
@@ -327,10 +328,48 @@ fn a_file_that_is_not_a_backup_is_refused() {
         );
         ui.advance(20).await;
         assert!(ui.has("settings.json is not a Dust backup"));
-        ui.choose_file("file-backup", "film.mkv", "{}", 900_000_000);
+        ui.choose_file("file-backup", "film.mkv", "{}", 1_100_000_000);
         ui.advance(20).await;
         assert!(ui.has("film.mkv is far larger than any backup: nothing was restored."));
         assert_eq!(stored_dates(&ui).len(), 2);
+    });
+}
+
+/// A large backup is read and restored, however large, up to a gigabyte:
+/// the card says, as it reads it, that one so large takes a while, and the
+/// message says the sessions are being restored until they are, then what
+/// was restored, with Undo.
+#[test]
+fn a_large_backup_says_it_takes_a_while_and_restores_all_the_same() {
+    run(|| async {
+        let all = history(5);
+        let store = MemoryStore::default();
+        let mut ui = open(store, &all[..1]);
+        let file = write_backup(&test_settings(), &all, 0);
+        let large = 600_000_000;
+        assert_eq!(
+            super::backup::reading_for("big.json", large),
+            "Reading big.json, 600 MB: a backup this large takes a while to restore."
+        );
+        assert_eq!(
+            super::backup::reading_for("small.json", file.len() as u64),
+            "Reading small.json…"
+        );
+        // The store answers a moment later, as the history's own thread does.
+        ui.store.deferred.set(true);
+        ui.choose_file("file-backup", "big.json", &file, large);
+        ui.advance(20).await;
+        assert!(ui.has("Restoring 4 sessions…"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 1, "not stored yet");
+        ui.store.settle();
+        ui.advance(20).await;
+        assert!(
+            ui.has("Restored 4 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.shows("toast-undo"));
+        assert_eq!(stored_dates(&ui).len(), 5);
     });
 }
 

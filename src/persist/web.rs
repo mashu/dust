@@ -12,6 +12,7 @@ use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
+use super::backup::BackupFile;
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
 use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
 use super::{
@@ -433,13 +434,24 @@ impl Store for WebStore {
     /// A browser says nothing of a download it blocks, or one the user
     /// turns down, so the file is told of as handed over, not as saved
     /// ([`Store::confirms_backups`]).
-    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
+    ///
+    /// The history kept whole is read whole anyway, so the file is written
+    /// whole from it, and handed over as one.
+    fn save_backup(&self, name: &str, backup: BackupFile) -> BackupSaving {
+        let Some(stored) = self.history.records() else {
+            return saved_now(Err("the history stored here could not be read".into()));
+        };
+        let (contents, backed) = backup.whole(stored.into_iter().map(Ok));
         saved_now(
-            download(name, contents)
+            download(name, &contents)
                 .map(|()| {
-                    format!(
+                    let handed = format!(
                         "Backup handed to your browser to save as {name}: look for it in your downloads."
-                    )
+                    );
+                    match backed.told() {
+                        Some(told) => format!("{handed} {told}"),
+                        None => handed,
+                    }
                 })
                 .ok_or_else(|| "this browser would not hand over the file".into()),
         )

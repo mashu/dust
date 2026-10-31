@@ -4,7 +4,9 @@
 
 use dioxus::prelude::*;
 
-use crate::persist::backup::{BACKUP_DUE_AFTER, BACKUP_MAX_BYTES, Backup, read_backup};
+use crate::persist::backup::{
+    BACKUP_DUE_AFTER, BACKUP_LARGE_BYTES, BACKUP_MAX_BYTES, Backup, read_backup_apart,
+};
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::{counted, day_of, short_date};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
@@ -64,8 +66,10 @@ fn on_android() -> bool {
     }
 }
 
-/// The backup a chosen file holds, or why it could not be restored from.
-fn backup_in(file: ChosenFile) -> Result<Backup, String> {
+/// The backup a chosen file holds, or why it could not be restored from:
+/// read on a thread of its own where there is one, as a backup of years of
+/// sessions takes seconds to read.
+async fn backup_in(file: ChosenFile) -> Result<Backup, String> {
     let ChosenFile { name, size, text } = file;
     if size > BACKUP_MAX_BYTES {
         return Err(format!(
@@ -73,7 +77,60 @@ fn backup_in(file: ChosenFile) -> Result<Backup, String> {
         ));
     }
     let text = text.ok_or_else(|| format!("{name} could not be read: nothing was restored."))?;
-    read_backup(&text).map_err(|not| format!("{name} {}: nothing was restored.", not.reason()))
+    read_backup_apart(text)
+        .await
+        .map_err(|not| format!("{name} {}: nothing was restored.", not.reason()))
+}
+
+/// What the card says while `file` is read as a backup.
+fn reading(file: &ChosenFile) -> String {
+    reading_for(&file.name, file.size)
+}
+
+/// What the card says while a file called `name`, of `size` bytes, is read
+/// as a backup: and of a large one, that it takes a while.
+pub(super) fn reading_for(name: &str, size: u64) -> String {
+    if size > BACKUP_LARGE_BYTES {
+        format!(
+            "Reading {name}, {}: a backup this large takes a while to restore.",
+            megabytes(size)
+        )
+    } else {
+        format!("Reading {name}…")
+    }
+}
+
+/// `bytes`, in whole megabytes, rounded up.
+fn megabytes(bytes: u64) -> String {
+    format!("{} MB", bytes.div_ceil(1_000_000))
+}
+
+/// What to say, before a backup of `size` bytes is restored, where this
+/// browser says it has less room left for the site: nothing where it has
+/// room enough, or will not say. A backup that does not fit is not
+/// restored at all, and nothing of it is lost: the file is still there.
+#[cfg(feature = "web")]
+async fn room_for(size: u64) -> Option<String> {
+    use wasm_bindgen::JsValue;
+    let navigator = web_sys::window()?.navigator();
+    // Older browsers have no storage manager at all.
+    if !js_sys::Reflect::has(&navigator, &JsValue::from_str("storage")).unwrap_or(false) {
+        return None;
+    }
+    let asked = navigator.storage().estimate().ok()?;
+    let estimate = wasm_bindgen_futures::JsFuture::from(asked).await.ok()?;
+    let field = |key: &str| {
+        js_sys::Reflect::get(&estimate, &JsValue::from_str(key))
+            .ok()?
+            .as_f64()
+    };
+    let left = (field("quota")? - field("usage")?).max(0.0) as u64;
+    (left < size).then(|| {
+        format!(
+            "This browser says it has room for about {} more for this site: if the backup does not fit, none of it is restored.",
+            megabytes(left)
+        )
+    })
 }
 
 /// Save a backup, or restore one; and when `since` sessions have gone
@@ -85,6 +142,8 @@ pub fn BackupCard(
     since: usize,
 ) -> Element {
     let mut problem = use_signal(|| None::<String>);
+    // What the card says while a chosen file is read.
+    let mut under_way = use_signal(|| None::<String>);
     // Asked once: the browser says where it runs as the page opens.
     let accept = use_hook(backup_accept);
     let Backups {
@@ -165,14 +224,32 @@ pub fn BackupCard(
                     max_bytes: BACKUP_MAX_BYTES,
                     icon: IconName::Upload,
                     label: "Restore a backup",
-                    on_choose: move |file| match backup_in(file) {
-                        Ok(backup) => {
-                            problem.set(None);
-                            on_restore.call(backup);
-                        }
-                        Err(why) => problem.set(Some(why)),
+                    on_choose: move |file: ChosenFile| {
+                        problem.set(None);
+                        under_way.set(Some(reading(&file)));
+                        spawn(async move {
+                            // A browser reads it on the page's own thread:
+                            // what the card says is shown first, with how
+                            // much room the browser says it has.
+                            #[cfg(feature = "web")]
+                            {
+                                if let Some(room) = room_for(file.size).await {
+                                    under_way.set(Some(format!("{} {room}", reading(&file))));
+                                }
+                                crate::time::sleep_ms(crate::time::POLL_MS).await;
+                            }
+                            let read = backup_in(file).await;
+                            under_way.set(None);
+                            match read {
+                                Ok(backup) => on_restore.call(backup),
+                                Err(why) => problem.set(Some(why)),
+                            }
+                        });
                     },
                 }
+            }
+            if let Some(under_way) = under_way() {
+                p { class: "backup-status", role: "status", "{under_way}" }
             }
             if let Some(problem) = problem() {
                 p { class: "backup-problem", role: "alert", "{problem}" }

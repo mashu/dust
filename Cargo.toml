@@ -23,7 +23,9 @@ description = "Dust — CW Morse group trainer (desktop and WebAssembly)"
 cw-core = { path = "crates/cw-core" }
 dioxus = "0.7.10"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# `raw_value`: a backup's sessions are each read from where they lie in the
+# file, rather than from a copy of the whole of it (src/persist/backup.rs).
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # Web / WASM
@@ -47,9 +49,11 @@ web-sys = { version = "0.3", optional = true, features = [
     "AudioBufferSourceNode",
     "AudioScheduledSourceNode",
     "Storage",
-    # Backups: a file handed over as a download, and the ask to keep the store.
+    # Backups: a file handed over as a download, and the ask to keep the store;
+    # a file chosen to restore, read a slice at a time.
     "Blob",
     "BlobPropertyBag",
+    "File",
     "HtmlAnchorElement",
     "HtmlElement",
     "Navigator",

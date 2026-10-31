@@ -88,12 +88,14 @@ pub trait Store {
     fn mark_backup(&self, at: u64);
     /// Whether this build can hand the user a backup file at all.
     fn saves_backups(&self) -> bool;
-    /// Hand `contents` to the user as a file called `name`, outside the
+    /// Hand `backup` to the user as a file called `name`, outside the
     /// store, somewhere they can reach it: a download in a browser, a file
     /// in Downloads on a computer or an Android phone, one in the Files app
-    /// on an iPhone. Says what became of it, in words for the user, or why
-    /// it could not go.
-    fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving;
+    /// on an iPhone. It holds every session the store holds, each as it is
+    /// stored, written a session at a time where the store can
+    /// ([`backup::BackupFile`]). Says what became of it, in words for the
+    /// user, or why it could not go.
+    fn save_backup(&self, name: &str, backup: backup::BackupFile) -> BackupSaving;
     /// Whether a backup file this store says it saved is known to be
     /// saved. A browser hands a download over and hears no more of it:
     /// blocked or turned down, it says nothing.
@@ -314,20 +316,25 @@ pub enum SetAside {
 /// for what each kept so far.
 pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<CutOff>>>>;
 
-/// A backup file on its way: saved already, or still being saved where only
-/// the platform's own thread can save it, as on Android.
+/// A backup file on its way: saved already, as a browser hands one over, or
+/// still being written on the history's own thread, as on a computer or a
+/// phone.
 pub type BackupSaving = Pin<Box<dyn Future<Output = Result<String, String>>>>;
 
-/// A backup file saved, or not, already: everywhere but Android.
-#[cfg_attr(all(target_os = "android", not(test)), allow(dead_code))]
+/// A backup file saved, or not, already: as a browser hands one over.
+#[cfg(any(feature = "web", test))]
 fn saved_now(result: Result<String, String>) -> BackupSaving {
     Box::pin(std::future::ready(result))
 }
 
-/// What the user is told of a backup file saved as `place`.
+/// What the user is told of a backup file saved as `place`, holding what
+/// `backed` says it holds: the sessions it could not, where any.
 #[cfg(any(feature = "native-runtime", test))]
-fn saved_as(place: &str) -> String {
-    format!("Backup saved as {place}.")
+fn saved_as(place: &str, backed: backup::BackedUp) -> String {
+    match backed.told() {
+        Some(told) => format!("Backup saved as {place}. {told}"),
+        None => format!("Backup saved as {place}."),
+    }
 }
 
 /// Why settings were not stored: those stored could not be read, nor set

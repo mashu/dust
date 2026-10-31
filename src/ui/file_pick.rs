@@ -14,6 +14,11 @@
 //! portal, or zenity without one. With neither, nothing opens, and the
 //! renderer hands the input no file, just as for a dialog cancelled: so
 //! when no file comes back and neither is there, the button says why.
+//!
+//! A file may be large, as a backup of years of sessions is: a computer
+//! reads it on a thread of its own, and a browser or a phone's webview a
+//! slice at a time ([`SLICE_BYTES`]), rather than as one string, which may
+//! be more than it hands over at once.
 
 use dioxus::html::FileData;
 use dioxus::prelude::*;
@@ -24,6 +29,10 @@ use crate::ui::widgets::{Icon, IconName};
 
 /// Whether this build chooses files through the webview's own picker.
 const WEBVIEW_PICKER: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// How much of a file a browser or a phone's webview reads at a time:
+/// one larger is read a slice of this at a time.
+const SLICE_BYTES: u64 = 8 << 20;
 
 /// What the button says when no file came back and no file chooser could
 /// have opened.
@@ -106,22 +115,142 @@ pub struct ChosenFile {
     pub text: Option<String>,
 }
 
+/// A piece of a file the phone's own picker chose, as the picker hands it
+/// over ([`picker_script`]): the file whole, or a slice of its text with
+/// more to come, the last of which ends it.
+#[derive(Deserialize)]
+#[cfg_attr(
+    not(any(target_os = "android", target_os = "ios", test)),
+    allow(dead_code)
+)]
+struct Piece {
+    name: String,
+    size: u64,
+    text: Option<String>,
+    #[serde(default)]
+    more: bool,
+}
+
+/// The pieces of files the phone's picker hands over, put together: each
+/// file whole once its last piece comes, then handed on.
+#[derive(Default)]
+#[cfg_attr(
+    not(any(target_os = "android", target_os = "ios", test)),
+    allow(dead_code)
+)]
+struct Pieces(Option<String>);
+
+#[cfg_attr(
+    not(any(target_os = "android", target_os = "ios", test)),
+    allow(dead_code)
+)]
+impl Pieces {
+    /// Take `piece`, and give back the file it ends, if it ends one. A file
+    /// whose last piece could not be read could not be read at all.
+    fn take(&mut self, piece: Piece) -> Option<ChosenFile> {
+        let Piece {
+            name,
+            size,
+            text,
+            more,
+        } = piece;
+        if more {
+            if let Some(text) = text {
+                self.0.get_or_insert_with(String::new).push_str(&text);
+            }
+            return None;
+        }
+        let text = match (self.0.take(), text) {
+            (Some(mut whole), Some(last)) => {
+                whole.push_str(&last);
+                Some(whole)
+            }
+            (Some(_), None) => None,
+            (None, text) => text,
+        };
+        Some(ChosenFile { name, size, text })
+    }
+}
+
 /// Read a file a file input chose, up to `max_bytes`.
 async fn read_chosen(file: FileData, max_bytes: u64) -> ChosenFile {
     let (name, size) = (file.name(), file.size());
     let text = if size > max_bytes {
         None
     } else {
-        file.read_string().await.ok()
+        read_text(&file).await
     };
     ChosenFile { name, size, text }
 }
 
+/// What `file` holds, as text: none where it cannot be read as text. A
+/// computer reads it on a thread of its own, and a browser a slice at a
+/// time where it is large.
+async fn read_text(file: &FileData) -> Option<String> {
+    #[cfg(all(feature = "desktop", not(test)))]
+    if let Some(text) = read_apart(file.path()).await {
+        return text;
+    }
+    #[cfg(all(feature = "web", not(test)))]
+    if file.size() > SLICE_BYTES
+        && let Some(file) = file.inner().downcast_ref::<web_sys::File>()
+    {
+        return read_in_slices(file).await;
+    }
+    file.read_string().await.ok()
+}
+
+/// What the file at `path` holds, as text, read on a thread of its own:
+/// none where no thread would start, for it to be read otherwise.
+#[cfg(all(feature = "desktop", not(test)))]
+async fn read_apart(path: std::path::PathBuf) -> Option<Option<String>> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let (answer, answered) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("dust-file-read".into())
+        .spawn(move || {
+            let _ = answer.send(std::fs::read_to_string(&path).ok());
+        })
+        .ok()?;
+    Some(answered.await.ok().flatten())
+}
+
+/// What `file` holds, as text, read a slice at a time: as one string, a
+/// browser may not read a file of hundreds of megabytes at all. What is no
+/// UTF-8 reads as the mark of a character that could not be read, as a
+/// browser reads text.
+#[cfg(all(feature = "web", not(test)))]
+async fn read_in_slices(file: &web_sys::File) -> Option<String> {
+    let size = file.size();
+    let mut bytes = Vec::with_capacity(size as usize);
+    let mut at = 0.0;
+    while at < size {
+        let end = (at + SLICE_BYTES as f64).min(size);
+        let slice = file.slice_with_f64_and_f64(at, end).ok()?;
+        let read = wasm_bindgen_futures::JsFuture::from(slice.array_buffer())
+            .await
+            .ok()?;
+        let read = js_sys::Uint8Array::new(&read);
+        let from = bytes.len();
+        bytes.resize(from + read.length() as usize, 0);
+        read.copy_to(&mut bytes[from..]);
+        at = end;
+    }
+    Some(
+        String::from_utf8(bytes)
+            .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned()),
+    )
+}
+
 /// The script that has the element `id` open the webview's own file picker
-/// for `accept`, and sends back each file chosen as a [`ChosenFile`]. The
-/// file input it opens is the document body's own, outside the page the
-/// renderer draws, so the renderer leaves its clicks alone. A picker made
-/// before for the same id, by a button drawn before, gives way to this one.
+/// for `accept`, and sends back each file chosen as a [`Piece`]: whole,
+/// or, one larger than [`SLICE_BYTES`], its text a slice at a time, as the
+/// webview may not hand over hundreds of megabytes at once. The file input
+/// it opens is the document body's own, outside the page the renderer
+/// draws, so the renderer leaves its clicks alone. A picker made before for
+/// the same id, by a button drawn before, gives way to this one.
 #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
 fn picker_script(id: &str, accept: &str, max_bytes: u64) -> String {
     format!(
@@ -150,15 +279,37 @@ input.addEventListener("change", () => {{
     if (!file) {{
         return;
     }}
-    const chosen = (text) => dioxus.send({{ name: file.name, size: file.size, text }});
+    const send = (text, more) => dioxus.send({{ name: file.name, size: file.size, text, more }});
     if (file.size > {max_bytes}) {{
-        chosen(null);
+        send(null, false);
         return;
     }}
-    const reader = new FileReader();
-    reader.onload = () => chosen(String(reader.result));
-    reader.onerror = () => chosen(null);
-    reader.readAsText(file);
+    if (file.size <= {SLICE_BYTES}) {{
+        const reader = new FileReader();
+        reader.onload = () => send(String(reader.result), false);
+        reader.onerror = () => send(null, false);
+        reader.readAsText(file);
+        return;
+    }}
+    // A slice at a time, each decoded as it comes: a character cut in two
+    // by a slice's end is decoded whole with the next.
+    const decoder = new TextDecoder();
+    let at = 0;
+    const next = () => {{
+        if (at >= file.size) {{
+            send(decoder.decode(), false);
+            return;
+        }}
+        const reader = new FileReader();
+        reader.onload = () => {{
+            send(decoder.decode(new Uint8Array(reader.result), {{ stream: true }}), true);
+            next();
+        }};
+        reader.onerror = () => send(null, false);
+        reader.readAsArrayBuffer(file.slice(at, at + {SLICE_BYTES}));
+        at += {SLICE_BYTES};
+    }};
+    next();
 }});
 pickers[id] = () => {{
     document.removeEventListener("click", open, true);
@@ -188,8 +339,11 @@ pub fn FileButton(
         use_hook(move || {
             spawn(async move {
                 let mut picker = document::eval(&script);
-                while let Ok(file) = picker.recv::<ChosenFile>().await {
-                    on_choose.call(file);
+                let mut pieces = Pieces::default();
+                while let Ok(piece) = picker.recv::<Piece>().await {
+                    if let Some(file) = pieces.take(piece) {
+                        on_choose.call(file);
+                    }
                 }
             })
         });
@@ -231,7 +385,10 @@ pub fn FileButton(
 
 #[cfg(test)]
 mod tests {
-    use super::{data_dirs, on_path, picker_script, portal_chooses_files};
+    use super::{
+        ChosenFile, Piece, Pieces, SLICE_BYTES, data_dirs, on_path, picker_script,
+        portal_chooses_files,
+    };
     use std::ffi::OsStr;
     use std::fs;
     use std::path::PathBuf;
@@ -332,9 +489,46 @@ mod tests {
         assert!(script.contains("if (file.size > 500)"));
         assert!(script.contains("reader.readAsText(file);"));
         assert!(script.contains("dioxus.send("));
+        // One larger than a slice, a slice at a time.
+        assert!(script.contains(&format!("if (file.size <= {SLICE_BYTES})")));
+        assert!(script.contains("reader.readAsArrayBuffer(file.slice(at, at + "));
+        assert!(script.contains("decoder.decode(new Uint8Array(reader.result), { stream: true })"));
         // Drawn again, it takes over from the picker before.
         let takeover = script.find("pickers[id]();").expect("takes over");
         let made = script.find("document.createElement").expect("makes one");
         assert!(takeover < made, "{script}");
+    }
+
+    /// A file handed over a slice at a time is put together whole, and
+    /// handed on once, as its last slice comes; one whose last slice could
+    /// not be read could not be read at all, and a file whole is handed on
+    /// as it comes.
+    #[test]
+    fn a_large_file_is_put_together_from_its_slices() {
+        let piece = |text: Option<&str>, more| Piece {
+            name: "b.json".into(),
+            size: 9,
+            text: text.map(str::to_string),
+            more,
+        };
+        let chosen = |text: Option<&str>| ChosenFile {
+            name: "b.json".into(),
+            size: 9,
+            text: text.map(str::to_string),
+        };
+        let mut pieces = Pieces::default();
+        assert_eq!(pieces.take(piece(Some("{\"dust"), true)), None);
+        assert_eq!(pieces.take(piece(Some("Backup\":"), true)), None);
+        assert_eq!(
+            pieces.take(piece(Some("1}"), false)),
+            Some(chosen(Some("{\"dustBackup\":1}")))
+        );
+        assert_eq!(
+            pieces.take(piece(Some("[]"), false)),
+            Some(chosen(Some("[]")))
+        );
+        assert_eq!(pieces.take(piece(Some("[1,"), true)), None);
+        assert_eq!(pieces.take(piece(None, false)), Some(chosen(None)));
+        assert_eq!(pieces.take(piece(None, false)), Some(chosen(None)));
     }
 }

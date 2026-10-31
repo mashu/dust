@@ -16,9 +16,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
 use crate::history::{StoredHistory, settle_or_spawn};
-use crate::persist::backup::{
-    Backup, Filled, backup_name, filled_in, merge_sessions, write_backup,
-};
+use crate::persist::backup::{Backup, BackupFile, Filled, backup_name, filled_in, merge_sessions};
 use crate::persist::record::{HistoryChange, HistoryLoad, Record, RecordId, read_record};
 use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
@@ -998,16 +996,27 @@ impl AppCtx {
     /// and the card say goes with the app until it is moved out
     /// ([`Store::backups_inside_app`]).
     ///
-    /// It holds every session here, those the store has yet to take too.
+    /// It holds every session the store holds, each as stored, and those
+    /// here it has yet to take: the store writes it a session at a time
+    /// ([`BackupFile`]), so a history of any length is never held whole to
+    /// be backed up.
     pub fn save_backup(self) {
         self.sync_with_store(move || self.save_backup_now());
     }
 
     fn save_backup_now(self) {
         let at = now_ms();
-        let contents = write_backup(&self.settings.peek(), &self.sessions.peek(), at);
+        let backup = {
+            let history = self.sessions.peek();
+            let unsaved = history
+                .unsaved()
+                .iter()
+                .filter_map(|id| history.record(*id))
+                .collect();
+            BackupFile::new(&self.settings.peek(), at, unsaved)
+        };
         let name = backup_name(&crate::time::local_date_string());
-        let saving = self.app().store.save_backup_file(&name, &contents);
+        let saving = self.app().store.save_backup(&name, backup);
         dioxus::core::spawn_forever(async move {
             match saving.await {
                 Ok(said) => {
@@ -1049,17 +1058,22 @@ impl AppCtx {
         // As of when it was saved, or now, if a clock set ahead says later.
         let saved_at = backup.saved_at.min(now_ms());
         let at = now_ms();
-        let (backed_up, merged) = {
-            let history = self.sessions.peek();
-            (
-                covers_up_to(&backup.sessions, &history, saved_at),
-                merge_sessions(&history, backup.sessions),
-            )
-        };
         // What it adds was deleted by hand, maybe; it is wanted back now.
         let mut change = HistoryChange {
             restore: true,
             ..HistoryChange::default()
+        };
+        let (backed_up, merged, filled_ids) = {
+            let history = self.sessions.peek();
+            let backed_up = covers_up_to(&backup.sessions, &history, saved_at);
+            let merged = merge_sessions(&history, backup.sessions);
+            // Each it fills in by its record, where it is now.
+            let filled_ids: Vec<Option<RecordId>> = merged
+                .filled
+                .iter()
+                .map(|fill| history.id_at(fill.at))
+                .collect();
+            (backed_up, merged, filled_ids)
         };
         let mut added = Vec::new();
         for session in merged.added {
@@ -1073,32 +1087,31 @@ impl AppCtx {
             change.put.push(record);
         }
         let mut filled = Vec::new();
-        {
-            let history = self.sessions.peek();
-            for Filled { was, now } in merged.filled {
-                let Some(was_id) = history
-                    .ids_of(&SessionKey::of(&was))
-                    .iter()
-                    .copied()
-                    .find(|id| history.get(*id) == Some(&was))
-                else {
-                    continue;
-                };
-                let Some(record) = Record::of(&now, |json| RecordId::beside(was_id, json)) else {
-                    continue;
-                };
-                change.unforget.push(record.id);
-                change.forget.push((was_id, Deleted::of(&was, at)));
-                filled.push(FilledIn {
-                    id: record.id,
-                    now,
-                    was_id,
-                    was,
-                });
-                change.put.push(record);
-            }
+        for (Filled { was, now, .. }, was_id) in merged.filled.into_iter().zip(filled_ids) {
+            let Some(was_id) = was_id else {
+                continue;
+            };
+            let Some(record) = Record::of(&now, |json| RecordId::beside(was_id, json)) else {
+                continue;
+            };
+            change.unforget.push(record.id);
+            change.forget.push((was_id, Deleted::of(&was, at)));
+            filled.push(FilledIn {
+                id: record.id,
+                now,
+                was_id,
+                was,
+            });
+            change.put.push(record);
         }
         let brought = !added.is_empty() || !filled.is_empty();
+        if brought {
+            // A restore of thousands of sessions takes a moment to store.
+            self.toasts.show(format!(
+                "Restoring {}…",
+                counted(added.len() + filled.len(), "session")
+            ));
+        }
         let restored_at = backup.saved_at;
         let restored_settings = backup.settings;
         self.change_history(change, move |saved| {

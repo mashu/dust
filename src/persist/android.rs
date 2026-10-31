@@ -6,12 +6,17 @@
 //! without asking for any permission. Before that, writing there takes a
 //! permission the app does not hold, so the file goes to the app's own
 //! folder on the shared storage, which file managers of those versions show.
-//! Either way the work is Java's, on the activity's thread, so the result
-//! comes back later.
+//!
+//! A backup is written on the history's own thread, a session at a time,
+//! and never held whole: into the app's cache first, and from there copied
+//! into Downloads by Android itself, from 10 on; straight into the app's
+//! own folder before that.
 
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
-use dioxus::mobile::wry::prelude::{JNIEnv, JObject, dispatch, jni};
+use dioxus::mobile::wry::prelude::{JNIEnv, JObject, jni};
 use jni::objects::{JString, JValue};
 
 /// The folder Android gives the app for its own files, as the user it runs
@@ -78,8 +83,8 @@ pub fn backups_inside_app() -> bool {
     version.is_ok_and(|version| version < ANDROID_10)
 }
 
-use super::BackupSaving;
-use super::desktop::{free_name, write_whole};
+use super::backup::BackedUp;
+use super::desktop::save_streamed;
 
 /// `Build.VERSION_CODES.Q`, Android 10: the first that adds to Downloads
 /// through the media store.
@@ -87,48 +92,64 @@ const ANDROID_10: i32 = 29;
 /// `Environment.DIRECTORY_DOWNLOADS`.
 const DOWNLOADS: &str = "Download";
 
-/// Save `contents` as `name` where the user can reach it, and say where.
-pub fn save_backup(name: String, contents: String) -> BackupSaving {
-    let (sent, saved) = tokio::sync::oneshot::channel();
-    dispatch(move |env, activity, _webview| {
-        let saved = save(env, activity, &name, contents.as_bytes());
-        // A Java exception left pending would fail every JNI call after it,
-        // the webview's own among them.
-        if env.exception_check().unwrap_or(false) {
-            let _ = env.exception_clear();
-        }
-        let _ = sent.send(saved);
-    });
-    Box::pin(async move {
-        saved
-            .await
-            .unwrap_or_else(|_| Err("the app closed before it was saved".into()))
-    })
+/// Save a backup called `name` where the user can reach it, written a piece
+/// at a time by `write`, and say where, and what `write` said of it.
+///
+/// Done on the thread that asks, the history's own, attached to Java for
+/// it as [`files_dir`] attaches the app's: the media store's work is slow,
+/// and none of it waits on the activity's thread, nor holds the backup in
+/// a Java array, which a long history would not fit.
+pub fn save_backup(
+    name: &str,
+    write: impl FnOnce(&mut dyn Write) -> io::Result<BackedUp>,
+) -> Result<(String, BackedUp), String> {
+    let android = ndk_context::android_context();
+    // Safety: as in `files_dir`.
+    let vm =
+        unsafe { jni::JavaVM::from_raw(android.vm().cast()) }.map_err(|err| err.to_string())?;
+    let mut env = vm.attach_current_thread().map_err(|err| err.to_string())?;
+    // Safety: as in `files_dir`.
+    let activity = unsafe { JObject::from_raw(android.context().cast()) };
+    let saved = save(&mut env, &activity, name, write);
+    // A Java exception left pending would fail every JNI call after it.
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    saved
 }
 
-fn save(env: &mut JNIEnv, activity: &JObject, name: &str, bytes: &[u8]) -> Result<String, String> {
+fn save(
+    env: &mut JNIEnv,
+    activity: &JObject,
+    name: &str,
+    write: impl FnOnce(&mut dyn Write) -> io::Result<BackedUp>,
+) -> Result<(String, BackedUp), String> {
     let version = env
         .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
         .and_then(|value| value.i())
         .map_err(|err| err.to_string())?;
     if version >= ANDROID_10 {
-        let saved = into_downloads(env, activity, name, bytes).map_err(|err| err.to_string())?;
-        return Ok(format!("{saved}, in Downloads"));
+        let cache = cache_dir(env, activity).map_err(|err| err.to_string())?;
+        let (kept, backed) = save_streamed(&cache, name, write).map_err(|err| err.to_string())?;
+        let written = cache.join(kept);
+        let saved = into_downloads(env, activity, name, &written).map_err(|err| err.to_string());
+        // Copied or not, the copy in the cache goes.
+        let _ = fs::remove_file(&written);
+        return saved.map(|saved| (format!("{saved}, in Downloads"), backed));
     }
     let folder = app_downloads(env, activity).map_err(|err| err.to_string())?;
-    let name = free_name(&folder, name);
-    write_whole(&folder, &name, bytes).map_err(|err| err.to_string())?;
-    Ok(folder.join(name).display().to_string())
+    let (name, backed) = save_streamed(&folder, name, write).map_err(|err| err.to_string())?;
+    Ok((folder.join(name).display().to_string(), backed))
 }
 
-/// Add a file to Downloads through the media store, and say what it is
-/// called. One already called `name` is kept; the media store names the
-/// new one apart, `name (1)`.
+/// Add `written`, a file in the app's cache, to Downloads through the media
+/// store as `name`, and say what it is called there. One already called
+/// `name` is kept; the media store names the new one apart, `name (1)`.
 fn into_downloads(
     env: &mut JNIEnv,
     activity: &JObject,
     name: &str,
-    bytes: &[u8],
+    written: &Path,
 ) -> jni::errors::Result<String> {
     let resolver = env
         .call_method(
@@ -172,10 +193,10 @@ fn into_downloads(
     if file.is_null() {
         return Err(jni::errors::Error::NullPtr("the media store made no file"));
     }
-    let written = write_into(env, &resolver, &file, bytes);
-    if written.is_err() {
+    let copied = copy_into(env, &resolver, &file, written);
+    if copied.is_err() {
         // Nothing half written is left in Downloads. A Java exception the
-        // write left pending is cleared first: every call after it would
+        // copy left pending is cleared first: every call after it would
         // fail too.
         let _ = env.exception_clear();
         let _ = env.call_method(
@@ -190,7 +211,7 @@ fn into_downloads(
         );
         let _ = env.exception_clear();
     }
-    written?;
+    copied?;
     // The name the file was given is the one to tell of; the one asked
     // for, should the media store not say.
     let saved = display_name(env, &resolver, &file);
@@ -256,13 +277,14 @@ fn first_string(env: &mut JNIEnv, cursor: &JObject) -> jni::errors::Result<Strin
     Ok(env.get_string(&name)?.into())
 }
 
-/// Write `bytes` into `file`, a file the media store made, and close it,
-/// written or not.
-fn write_into(
+/// Copy `written`, a file of the app's, into `file`, a file the media store
+/// made, by `android.os.FileUtils.copy`, a piece at a time; and close both,
+/// copied or not.
+fn copy_into(
     env: &mut JNIEnv,
     resolver: &JObject,
     file: &JObject,
-    bytes: &[u8],
+    written: &Path,
 ) -> jni::errors::Result<()> {
     let stream = env
         .call_method(
@@ -275,17 +297,51 @@ fn write_into(
     if stream.is_null() {
         return Err(jni::errors::Error::NullPtr("the file could not be opened"));
     }
-    let written = match env.byte_array_from_slice(bytes) {
-        Ok(array) => env
-            .call_method(&stream, "write", "([B)V", &[JValue::Object(&array)])
+    let path = env.new_string(written.to_string_lossy());
+    let input = path.and_then(|path| {
+        env.new_object(
+            "java/io/FileInputStream",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&path)],
+        )
+    });
+    let copied = match &input {
+        Ok(input) => env
+            .call_static_method(
+                "android/os/FileUtils",
+                "copy",
+                "(Ljava/io/InputStream;Ljava/io/OutputStream;)J",
+                &[JValue::Object(input), JValue::Object(&stream)],
+            )
             .map(drop),
-        Err(err) => Err(err),
+        Err(_) => Err(jni::errors::Error::NullPtr("the backup could not be read")),
     };
-    if written.is_err() {
+    if copied.is_err() {
+        let _ = env.exception_clear();
+    }
+    if let Ok(input) = &input {
+        let _ = env.call_method(input, "close", "()V", &[]);
         let _ = env.exception_clear();
     }
     let closed = env.call_method(&stream, "close", "()V", &[]).map(drop);
-    written.and(closed)
+    copied.and(closed)
+}
+
+/// The app's own cache folder: `Context.getCacheDir()`, where Android may
+/// clear what is left, and from which nothing is backed up.
+fn cache_dir(env: &mut JNIEnv, activity: &JObject) -> jni::errors::Result<PathBuf> {
+    let folder = env
+        .call_method(activity, "getCacheDir", "()Ljava/io/File;", &[])?
+        .l()?;
+    if folder.is_null() {
+        return Err(jni::errors::Error::NullPtr("the app has no cache folder"));
+    }
+    let path: JString = env
+        .call_method(&folder, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+        .l()?
+        .into();
+    let path: String = env.get_string(&path)?.into();
+    Ok(PathBuf::from(path))
 }
 
 /// The app's own Downloads folder on the shared storage:
