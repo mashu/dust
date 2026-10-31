@@ -25,6 +25,9 @@ pub struct Backups {
     /// A backup file this build saves is kept inside the app, and deleted
     /// with it, until it is moved out as this says.
     pub inside_app: Option<&'static str>,
+    /// The history has grown past what the device's own backup of the app
+    /// takes ([`crate::persist::Store::outgrows_device_backup`]).
+    pub outgrows_device_backup: bool,
     pub on_save: EventHandler<()>,
     pub on_restore: EventHandler<Backup>,
 }
@@ -35,6 +38,10 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
 } else {
     "if this device's data is lost"
 };
+
+/// What the card says where the history has grown past what Android's own
+/// backup of the app takes, which then backs up none of it.
+const OUTGROWN: &str = "Your history here is past 20 MB, and Android's own backup of an app stops at 25 MB: save a backup file now and then, so a lost or new phone still has every session.";
 
 /// What a restore does: no more, and no less.
 const RESTORING: &str = "adds the sessions missing here and takes its settings, level included, though not this device's volume and paddle keys. Undo, in the message that follows, puts both back";
@@ -151,6 +158,7 @@ pub fn BackupCard(
         can_save,
         confirmed,
         inside_app,
+        outgrows_device_backup,
         on_save,
         on_restore,
     } = backups;
@@ -207,6 +215,9 @@ pub fn BackupCard(
         div { class: if due { "card stack-sm backup-card due" } else { "card stack-sm backup-card" },
             CardHead { icon: IconName::Download, title: "Backup", note: status }
             p { class: "backup-note", "{note}" }
+            if can_save && outgrows_device_backup {
+                p { class: "backup-note", "{OUTGROWN}" }
+            }
             div { class: "backup-actions",
                 if can_save {
                     button {

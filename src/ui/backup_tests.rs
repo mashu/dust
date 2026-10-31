@@ -373,6 +373,30 @@ fn a_large_backup_says_it_takes_a_while_and_restores_all_the_same() {
     });
 }
 
+/// A history past what Android's own backup of the app takes is said so
+/// on the card, which says to save a backup file; one that is not, and an
+/// app with nowhere to save one, say nothing of it.
+#[test]
+fn a_history_past_androids_own_backup_says_to_save_a_backup() {
+    run(|| async {
+        let said = "Android&#39;s own backup of an app stops at 25 MB";
+        let ui = open(MemoryStore::default(), &history(3));
+        assert!(!ui.has(said));
+        let store = MemoryStore::default();
+        store.device_backup_outgrown.set(true);
+        let ui = open(store, &history(3));
+        assert!(
+            ui.has("Your history here is past 20 MB, and Android&#39;s own backup of an app stops at 25 MB: save a backup file now and then"),
+            "{}",
+            ui.html()
+        );
+        let store = MemoryStore::default();
+        store.device_backup_outgrown.set(true);
+        store.no_backups.set(true);
+        assert!(!open(store, &history(3)).has(said));
+    });
+}
+
 /// An app with nowhere to put a file can still restore one, and does not
 /// ask for a backup it cannot make.
 #[test]

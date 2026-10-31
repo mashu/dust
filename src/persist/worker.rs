@@ -18,7 +18,8 @@
 //! looks.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -56,6 +57,8 @@ pub(super) struct HistoryJobs {
     run: Run,
     /// Whether the files changed elsewhere, asked on the app's own thread.
     watch: Watch,
+    /// How many bytes the sessions stored hold, as the files last knew.
+    size: Arc<AtomicU64>,
 }
 
 enum Run {
@@ -93,6 +96,7 @@ impl HistoryJobs {
     pub(super) fn inline(files: HistoryFiles) -> Self {
         Self {
             watch: files.watch(),
+            size: files.size(),
             run: Run::Inline(files),
         }
     }
@@ -100,7 +104,7 @@ impl HistoryJobs {
     /// The files reached on a thread of their own, which takes them; or
     /// then and there, should no thread start.
     pub(super) fn on_worker(files: HistoryFiles) -> Self {
-        let watch = files.watch();
+        let (watch, size) = (files.watch(), files.size());
         let root = files.root().to_path_buf();
         let (jobs, queue) = mpsc::channel::<Job>();
         let started = thread::Builder::new()
@@ -110,6 +114,7 @@ impl HistoryJobs {
             Ok(_) => Self {
                 run: Run::Worker(jobs),
                 watch,
+                size,
             },
             Err(err) => {
                 eprintln!(
@@ -194,6 +199,12 @@ impl HistoryJobs {
     /// asked here, of the folders, and of nothing in them.
     pub(super) fn changed(&self) -> bool {
         self.watch.changed()
+    }
+
+    /// How many bytes the sessions stored hold, as of the last read of the
+    /// history and every change since: asked here, of nothing on the disk.
+    pub(super) fn bytes(&self) -> u64 {
+        self.size.load(Ordering::Relaxed)
     }
 
     /// Do `job` with the files, behind whatever was asked for before: none,

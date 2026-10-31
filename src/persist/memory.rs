@@ -101,6 +101,9 @@ pub struct MemoryStore {
     /// Backup files are kept inside the app, the way an iPhone keeps them,
     /// and moved out as this says.
     pub backups_inside: Cell<Option<&'static str>>,
+    /// The history has grown past what Android's own backup of the app
+    /// takes, the way a long one does there.
+    pub device_backup_outgrown: Cell<bool>,
     /// How many times the store was asked to keep its data.
     pub keep_asks: Cell<u32>,
     /// The session or run marked open, as a copy of the app that stopped
@@ -335,6 +338,10 @@ impl Store for MemoryStore {
 
     fn backups_inside_app(&self) -> Option<&'static str> {
         self.backups_inside.get()
+    }
+
+    fn outgrows_device_backup(&self) -> bool {
+        self.device_backup_outgrown.get()
     }
 
     fn ask_to_keep(&self) {

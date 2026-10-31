@@ -38,6 +38,18 @@ const LAST_BACKUP: &str = "last_backup.txt";
 /// held belongs to a window still running it.
 const OPEN: &str = "open";
 
+/// How large the history may grow before the backup card says Android's
+/// own backup of the app is about to leave it out: 20 MB, short of the
+/// 25 MB past which Android backs up nothing of an app at all.
+const DEVICE_BACKUP_WARN_BYTES: u64 = 20_000_000;
+
+/// Whether a history of `bytes`, on Android or not, is past what Android's
+/// own backup of the app takes, or nearly: only Android's has such a
+/// limit, and an iPhone's iCloud backup none an app need fear.
+fn outgrows_device_backup(bytes: u64, android: bool) -> bool {
+    android && bytes > DEVICE_BACKUP_WARN_BYTES
+}
+
 /// Files under one directory. The directory is a field rather than a global
 /// so a test can point one at a scratch folder.
 pub struct DesktopStore {
@@ -550,6 +562,10 @@ impl Store for DesktopStore {
 
     fn backups_inside_app(&self) -> Option<&'static str> {
         self.backups_inside
+    }
+
+    fn outgrows_device_backup(&self) -> bool {
+        outgrows_device_backup(self.history.bytes(), cfg!(target_os = "android"))
     }
 
     /// Written on the history's own thread, a session at a time as each
@@ -1778,6 +1794,25 @@ pub(super) mod tests {
             android_files_dir_of(10, "dev.dust.morse"),
             PathBuf::from("/data/user/10/dev.dust.morse/files")
         );
+    }
+
+    /// On Android, a history past 20 MB is about to outgrow Android's own
+    /// backup of the app, which takes none of an app past 25 MB; nowhere
+    /// else is there such a limit. The store knows how large its history
+    /// is from the history itself.
+    #[test]
+    fn a_history_past_twenty_megabytes_outgrows_androids_own_backup() {
+        assert!(!outgrows_device_backup(DEVICE_BACKUP_WARN_BYTES, true));
+        assert!(outgrows_device_backup(DEVICE_BACKUP_WARN_BYTES + 1, true));
+        assert!(!outgrows_device_backup(u64::MAX, false));
+        let (_dir, store) = store("outgrown");
+        store.load_history();
+        let history = [session("2026-10-01"), session("2026-10-02")];
+        let records = records_for_blob(&history);
+        store_sessions(&store, &history);
+        let held: usize = records.iter().map(|record| record.json.len()).sum();
+        assert_eq!(store.history.bytes(), held as u64);
+        assert!(!store.outgrows_device_backup(), "not on this platform");
     }
 
     /// With no data folder to be had — no home to find one from — the

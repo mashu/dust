@@ -41,6 +41,7 @@ use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -102,6 +103,10 @@ pub(super) struct HistoryFiles {
     /// The files are the worker's ([`super::worker`]): every look at them,
     /// and every write, is made on its thread and on no other.
     on_worker: bool,
+    /// How many bytes the sessions stored hold, as of the last read and
+    /// every change since: what the app asks, on its own thread, of how
+    /// large the history has grown ([`Self::size`]).
+    size: Arc<AtomicU64>,
 }
 
 /// Whether the history changed since this copy last looked, here or in the
@@ -182,7 +187,14 @@ impl HistoryFiles {
             },
             keys: RefCell::new(HashMap::new()),
             on_worker: false,
+            size: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// How many bytes the sessions stored hold, kept up to date as the
+    /// history is read and changed, for the app's own thread to ask.
+    pub(super) fn size(&self) -> Arc<AtomicU64> {
+        self.size.clone()
     }
 
     /// The store's folder.
@@ -280,9 +292,11 @@ impl HistoryFiles {
             live.push(id);
         }
         let read = read_each(&self.records(), &live, &listing.packed);
+        let size = read.iter().map(|(_, bytes)| *bytes).sum();
+        self.size.store(size, Ordering::Relaxed);
         let mut keys = self.keys.borrow_mut();
         load.sessions.reserve(live.len());
-        for (id, session) in live.into_iter().zip(read) {
+        for (id, (session, _)) in live.into_iter().zip(read) {
             match session {
                 Some(session) => {
                     keys.insert(id, SessionKey::of(&session));
@@ -416,8 +430,13 @@ impl HistoryFiles {
         // failed, the app would show the session as kept, with nothing to
         // undo, until the next read took it away.
         for (id, _) in &change.forget {
-            if let Err(err) = remove_if_there(&records.join(file_name(*id))) {
-                eprintln!("a deleted session's record stays until the next read: {err}");
+            let path = records.join(file_name(*id));
+            let held = fs::metadata(&path).map_or(0, |meta| meta.len());
+            match remove_if_there(&path) {
+                Ok(()) => self.shrunk(held),
+                Err(err) => {
+                    eprintln!("a deleted session's record stays until the next read: {err}");
+                }
             }
             self.keys.borrow_mut().remove(id);
         }
@@ -439,6 +458,8 @@ impl HistoryFiles {
                 Ok(_) => id = id.bumped(),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {
                     place_whole(&self.records(), &name, record.json.as_bytes())?;
+                    self.size
+                        .fetch_add(record.json.len() as u64, Ordering::Relaxed);
                     return Ok(id);
                 }
                 Err(err) => return Err(err),
@@ -448,6 +469,14 @@ impl HistoryFiles {
             "no name was free for the session stored as {}",
             record.id
         )))
+    }
+
+    /// `bytes` fewer stored, as a record goes: never fewer than none.
+    fn shrunk(&self, bytes: u64) {
+        self.size
+            .update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                held.saturating_sub(bytes)
+            });
     }
 
     /// Every record there is, deleted ones left out, once whatever an older
@@ -967,18 +996,18 @@ fn raw_at(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> 
 }
 
 /// Each of `ids`, read from `records` or else from `packed`, and scored as
-/// it reads ([`read_record`]), in their order: none for one that cannot be
-/// read. A long history is read on as many as [`READERS`] threads at once,
-/// a part each, as it is read whole at every launch.
+/// it reads ([`read_record`]), in their order, beside how many bytes are
+/// stored of it: none for one that cannot be read. A long history is read
+/// on as many as [`READERS`] threads at once, a part each, as it is read
+/// whole at every launch.
 fn read_each(
     records: &Path,
     ids: &[RecordId],
     packed: &BTreeMap<RecordId, String>,
-) -> Vec<Option<SessionResult>> {
-    let one = |id: &RecordId| {
-        raw_at(records, *id, packed)
-            .as_deref()
-            .and_then(read_record)
+) -> Vec<(Option<SessionResult>, u64)> {
+    let one = |id: &RecordId| match raw_at(records, *id, packed) {
+        Some(raw) => (read_record(&raw), raw.len() as u64),
+        None => (None, 0),
     };
     let threads = thread::available_parallelism()
         .map_or(1, NonZeroUsize::get)
@@ -1210,6 +1239,10 @@ mod tests {
 
         fn changed(&self) -> bool {
             self.0.changed()
+        }
+
+        fn bytes(&self) -> u64 {
+            self.0.bytes()
         }
     }
 
@@ -1704,6 +1737,31 @@ mod tests {
         );
         assert!(names(&tombstones).is_empty());
         assert_eq!(ids(&files.load()), [one.id]);
+    }
+
+    /// The history knows how large it has grown, as it is read and as each
+    /// change is made, without a look at the disk for it: what tells the
+    /// app that Android's own backup is about to leave it out.
+    #[test]
+    fn the_history_knows_how_large_it_has_grown() {
+        let (dir, files) = history("size");
+        files.load();
+        assert_eq!(files.bytes(), 0);
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        let both = (one.json.len() + two.json.len()) as u64;
+        assert_eq!(files.bytes(), both);
+        files.apply(&put(std::slice::from_ref(&one)));
+        assert_eq!(files.bytes(), both, "nothing written twice");
+        files.apply(&forget(&[(&one, &first)]));
+        assert_eq!(files.bytes(), two.json.len() as u64);
+        // Read again, by another copy too, it is what the records hold.
+        assert_eq!(files.load().sessions.len(), 1);
+        assert_eq!(files.bytes(), two.json.len() as u64);
+        let other = Files::at(&dir.0);
+        other.load();
+        assert_eq!(other.bytes(), two.json.len() as u64);
     }
 
     /// Two copies on one folder each take up what the other stored and
@@ -2373,6 +2431,7 @@ mod tests {
         #[cfg(unix)]
         a_deletion_that_cannot_be_made_durable_deletes_nothing,
         a_session_put_back_whose_record_stayed_is_one_record,
+        the_history_knows_how_large_it_has_grown,
         two_copies_on_one_folder_take_up_each_others_changes,
         a_restore_that_fails_is_not_told_of_as_cut_short,
         a_store_from_a_newer_incompatible_layout_is_only_read,

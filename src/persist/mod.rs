@@ -102,6 +102,13 @@ pub trait Store {
     fn confirms_backups(&self) -> bool {
         true
     }
+    /// Whether the history has grown past what the platform's own backup of
+    /// the app takes, or nearly: then only a backup file the user saves
+    /// keeps all of it, should the device be lost or replaced. Android
+    /// backs up no app of more than 25 MB at all.
+    fn outgrows_device_backup(&self) -> bool {
+        false
+    }
     /// Whether a backup file this store saves is kept inside the app, and
     /// deleted with it, until the user moves it out: and if so, how they
     /// do, in words that follow "move it out". An iPhone keeps it in the
