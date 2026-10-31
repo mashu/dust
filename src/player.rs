@@ -901,7 +901,8 @@ mod tests {
     }
 
     /// A send its stream skipped some of says what of it went unheard as
-    /// soon as that is found, before it ends, and that it was held up.
+    /// soon as that is found, before it ends, and only that: what follows a
+    /// skip plays on its planned time, so it is no hold-up of itself.
     #[test]
     fn a_send_skipped_in_part_says_so_before_it_ends() {
         run(|| async {
@@ -923,7 +924,7 @@ mod tests {
                 })
                 .await;
             assert!(sent.is_ok(), "heard out, in part");
-            assert_eq!(news, ["started", "missed 0.05..0.15", "held up"]);
+            assert_eq!(news, ["started", "missed 0.05..0.15"]);
         });
     }
 
