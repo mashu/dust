@@ -7,10 +7,11 @@
 //! does. A page of runs at a time, as History lists its sessions, the best
 //! of each length wherever it falls.
 
-use cw_core::{ContestKind, RunEntry, SessionResult, StoredLog, contest_runs};
+use cw_core::{ContestKind, RunEntry, StoredLog, contest_runs};
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
+use crate::ui::figures::History;
 use crate::ui::format::{counted, day_and_clock, minutes_seconds};
 use crate::ui::help;
 use crate::ui::stats_detail::{ASSISTED, HISTORY_PAGE, log_parts};
@@ -20,16 +21,13 @@ use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 /// opens its results through `on_open`.
 #[component]
 pub(super) fn RunsCard(
-    sessions: Vec<SessionResult>,
+    sessions: History,
     kind: ContestKind,
     on_open: EventHandler<SessionPick>,
 ) -> Element {
     // Each run's log is read and scored to make its row: once for the
     // history and contest shown, not again for every redraw.
-    let runs = use_memo(use_reactive!(|sessions, kind| contest_runs(
-        &sessions, kind
-    )));
-    let runs = runs.read();
+    let runs = sessions.figure("runs", kind, |sessions| contest_runs(sessions, kind));
     let mut shown = use_signal(|| HISTORY_PAGE);
     // The newest a page at a time, and the best of each length wherever it
     // falls, so that every mark the card makes is in sight.

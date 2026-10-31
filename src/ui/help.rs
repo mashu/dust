@@ -6,8 +6,8 @@ use cw_core::{
     ALONG_FLOOR_MS, BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS,
     EARLIER_TRIES, ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES,
     KEEPING_UP_MS, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH,
-    RATED_GROUP_CHARS, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES,
-    RECOGNITION_WINDOW, Ranking, RecognitionBands,
+    PER_SESSION_UP_TO, RATED_GROUP_CHARS, REACTION_MIN_MS, RECENT_SESSIONS, RECENT_TRIES,
+    RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -237,11 +237,18 @@ pub fn bigram() -> Element {
 }
 
 /// Accuracy over time, against the level-up threshold `pass` where a
-/// session's own accuracy is what levels you up.
-pub fn accuracy_over_time(pass: Option<f64>) -> Element {
+/// session's own accuracy is what levels you up; `grouped` where the
+/// history is long enough for its older sessions to be drawn a week or a
+/// month to a point.
+pub fn accuracy_over_time(pass: Option<f64>, grouped: bool) -> Element {
     rsx! {
         p {
             "Each point is a session's accuracy, the share of the characters sent that you copied right, oldest on the left."
+        }
+        if grouped {
+            p {
+                "Past {PER_SESSION_UP_TO} sessions, the older ones are drawn a week to a point, or a month, at the average of their accuracies, so the whole of your history fits; the newest {RECENT_SESSIONS} are still a point each."
+            }
         }
         if let Some(pass) = pass {
             dl { class: "help-terms",
@@ -325,11 +332,18 @@ fn ranked(ranking: Ranking) -> &'static str {
     }
 }
 
-/// The score timeline, of a board ranked by `ranking`.
-pub fn timeline(ranking: Ranking) -> Element {
+/// The score timeline, of a board ranked by `ranking`; `grouped` where it
+/// holds enough sessions for only the best of each older week or month to
+/// be drawn.
+pub fn timeline(ranking: Ranking, grouped: bool) -> Element {
     rsx! {
         p {
             "Each dot is a session on the board, oldest on the left, as high as {ranked(ranking)}. Point at a row of the board, or tap it, to mark it here."
+        }
+        if grouped {
+            p {
+                "Past {PER_SESSION_UP_TO} sessions on the board, the older ones show only the best of each week, or month, as a dot, so the whole of your history fits; the newest {RECENT_SESSIONS} each have theirs."
+            }
         }
         dl { class: "help-terms",
             dt { "A larger dot" }

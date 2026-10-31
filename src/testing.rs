@@ -53,6 +53,9 @@ thread_local! {
     /// How many times each component that tells of it has rendered since a
     /// test last looked, by name.
     static RENDERS: std::cell::RefCell<Vec<(&'static str, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many times each figure of the history has been worked out since a
+    /// test last looked, by name.
+    static WORKED_OUT: std::cell::RefCell<Vec<(&'static str, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The page asks for the field with this id to have the cursor, by
@@ -77,16 +80,53 @@ pub fn listen_elsewhere(on_elsewhere: Callback<()>) {
     ELSEWHERE.with_borrow_mut(|heard| heard.push(on_elsewhere));
 }
 
-/// A component costly to draw has rendered: a test can count how often
-/// ([`Ui::take_renders`]), and so tell a hover that redraws a mark from one
-/// that redraws a whole tab.
+/// A component costly to draw has rendered, or something costly to work
+/// out has been: a test can count how often ([`take_renders`]), and so
+/// tell a hover that redraws a mark from one that redraws a whole tab, or a
+/// tap that replays the history from one that does not.
 pub fn rendered(component: &'static str) {
-    RENDERS.with_borrow_mut(|renders| {
-        match renders.iter_mut().find(|(name, _)| *name == component) {
+    count(&RENDERS, component);
+}
+
+/// A figure of the history was worked out, rather than found worked out
+/// already ([`crate::ui::figures::History::figure`]): a test can count how
+/// often ([`Ui::take_worked_out`]), and so tell a screen opened again that
+/// reads its figures from one that works them out again.
+pub fn worked_out(figure: &'static str) {
+    count(&WORKED_OUT, figure);
+}
+
+/// One more of `what` in `counts`.
+fn count(
+    counts: &'static std::thread::LocalKey<std::cell::RefCell<Vec<(&'static str, usize)>>>,
+    what: &'static str,
+) {
+    counts.with_borrow_mut(
+        |counts| match counts.iter_mut().find(|(name, _)| *name == what) {
             Some((_, count)) => *count += 1,
-            None => renders.push((component, 1)),
-        }
-    });
+            None => counts.push((what, 1)),
+        },
+    );
+}
+
+/// How many times `what` was counted in `counts` since this was last
+/// called for it.
+fn take_count(
+    counts: &'static std::thread::LocalKey<std::cell::RefCell<Vec<(&'static str, usize)>>>,
+    what: &str,
+) -> usize {
+    counts.with_borrow_mut(|counts| {
+        counts
+            .iter_mut()
+            .find(|(name, _)| *name == what)
+            .map_or(0, |(_, count)| std::mem::take(count))
+    })
+}
+
+/// How many times `component` rendered since this was last called for it
+/// ([`rendered`]).
+pub fn take_renders(component: &str) -> usize {
+    take_count(&RENDERS, component)
 }
 
 pub struct Harness {
@@ -953,12 +993,23 @@ impl Ui {
     /// How many times `component` rendered since this was last called for
     /// it ([`rendered`]).
     pub fn take_renders(&mut self, component: &str) -> usize {
-        RENDERS.with_borrow_mut(|renders| {
-            renders
-                .iter_mut()
-                .find(|(name, _)| *name == component)
-                .map_or(0, |(_, count)| std::mem::take(count))
-        })
+        take_renders(component)
+    }
+
+    /// How many times the figure `figure` was worked out since this was last
+    /// called for it ([`worked_out`]).
+    pub fn take_worked_out(&mut self, figure: &str) -> usize {
+        take_count(&WORKED_OUT, figure)
+    }
+
+    /// Every figure worked out since any was last looked at, with how many
+    /// times; none where nothing was.
+    pub fn take_all_worked_out(&mut self) -> Vec<(&'static str, usize)> {
+        WORKED_OUT
+            .take()
+            .into_iter()
+            .filter(|(_, count)| *count > 0)
+            .collect()
     }
 
     /// Whether anything is ready to run: a task woken, an effect queued, a

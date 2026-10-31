@@ -1,12 +1,13 @@
 use cw_core::{
-    AutoLevelProgress, CharSetMode, ContestSettings, LevelAxis, RunStyle, SessionResult,
+    AutoLevelProgress, CharSetMode, ContestSettings, LevelAxis, RunStyle, StreakStatus,
     TrainingSettings, compute_char_pool, compute_streak_status, newest_unlocked, parse_callsign,
 };
 use dioxus::prelude::*;
 
 use crate::audio::AUDIO_IS_SILENT;
 use crate::ui::auto_level::AutoLevelCard;
-use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
+use crate::ui::figures::History;
+use crate::ui::heatmap::{ActivityHeatmap, Calendar, StreakCard};
 use crate::ui::settings_charset::{pileup_callers, pileup_count};
 use crate::ui::settings_station::{
     CallField, CallReading, NameField, SectionEntry, StateEntry, ZoneField, focus_call_field,
@@ -257,14 +258,60 @@ impl ContestHero {
     }
 }
 
+/// What Home shows of the history: the last session's accuracy, how many
+/// sessions there are, the streak and the practice calendar. Worked out
+/// once for each change to the history, and each day, not on every redraw
+/// of the screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Practice {
+    pub last_accuracy: Option<f64>,
+    pub session_count: usize,
+    pub streak: StreakStatus,
+    /// None without a session to show, or a day that reads.
+    pub calendar: Option<Calendar>,
+}
+
+impl Practice {
+    /// What Home shows of `history` on `today`. Every session counts,
+    /// whatever character set it was recorded with; the streak and the
+    /// calendar go by the days sessions count towards, as the clock reads
+    /// them.
+    pub fn of(history: &History, today: &str) -> Self {
+        let (last_accuracy, session_count) = history.with(|sessions| {
+            (
+                sessions.last().map(|session| session.accuracy),
+                sessions.len(),
+            )
+        });
+        let days = history
+            .shown()
+            .figure("practice days", today.to_string(), |sessions| {
+                let dates: Vec<&str> = sessions
+                    .iter()
+                    .map(|session| session.date.as_str())
+                    .collect();
+                let calendar = if sessions.is_empty() {
+                    None
+                } else {
+                    Calendar::of(sessions, today)
+                };
+                (compute_streak_status(&dates, today), calendar)
+            });
+        Self {
+            last_accuracy,
+            session_count,
+            streak: days.0,
+            calendar: days.1.clone(),
+        }
+    }
+}
+
 #[component]
 pub fn Home(
     settings: TrainingSettings,
-    last_accuracy: Option<f64>,
-    session_count: usize,
+    /// What Home shows of the history.
+    practice: Practice,
     pool: String,
-    sessions: Vec<SessionResult>,
-    today: String,
     auto_progress: Option<AutoLevelProgress>,
     on_start: EventHandler<()>,
     on_listen: EventHandler<()>,
@@ -368,11 +415,11 @@ pub fn Home(
         Some(typed)
     };
     let held = settings.clone();
-    let acc = last_accuracy
+    let acc = practice
+        .last_accuracy
         .map(|a| format!("{}%", (a * 100.0).round()))
         .unwrap_or_else(|| "—".into());
-    let dates: Vec<String> = sessions.iter().map(|s| s.date.clone()).collect();
-    let streak = compute_streak_status(&dates, &today);
+    let session_count = practice.session_count;
 
     let chars = compute_char_pool(&settings);
     let newest = newest_unlocked(&settings);
@@ -652,9 +699,9 @@ pub fn Home(
                     }
                 }
             }
-            StreakCard { status: streak }
-            if !sessions.is_empty() {
-                ActivityHeatmap { sessions, today }
+            StreakCard { status: practice.streak }
+            if practice.calendar.is_some() {
+                ActivityHeatmap { calendar: practice.calendar }
             }
             if let Some(progress) = auto_progress {
                 AutoLevelCard { progress }

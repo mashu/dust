@@ -12,6 +12,7 @@ mod auto_level;
 pub mod band;
 mod belief;
 mod board;
+mod buckets;
 mod callsign;
 mod contest;
 mod endurance;
@@ -52,6 +53,9 @@ pub use board::{
     Ranking, RunEntry, TimelinePoint, assisted_runs, board_kinds, board_modes, board_place,
     contest_runs, latest_run_length, per_group, rating, run_kinds, run_lengths, score_board,
     score_timeline,
+};
+pub use buckets::{
+    PER_SESSION_UP_TO, POINTS_UP_TO, RECENT_SESSIONS, accuracy_buckets, chart_buckets, chart_day,
 };
 pub use callsign::{
     CALLSIGN_TIER_MAX, CallSpec, CallsignParts, Countries, GeneratedCall, call_fault,
@@ -96,8 +100,8 @@ pub use recognition::{
 };
 pub use rng::{Rng, SplitMix64};
 pub use sampling::{
-    CharSamplingState, Sampler, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section,
-    generate_training_group,
+    CharSamplingState, Sampler, SamplerPrior, adaptive_speed_on, adapts_group_size, adapts_speed,
+    aim_section, generate_training_group,
 };
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
@@ -129,9 +133,9 @@ pub use stats::{
     HARD_PAIR_MIN_TRIES, HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS,
     MasteryStatus, MistakeStats, RECENT_TRIES, SamplingRow, SessionHistoryRow, SessionRecognition,
     SessionUntimed, accuracy_chart, best_accuracy, character_diagnostics, group_length_forecast,
-    mastered_count, mistake_stats, overall_accuracy, practised_modes, sampling_rows,
-    session_history, session_recognition, session_untimed, span_history, speed_forecast,
-    speed_history,
+    history_order, history_row, mastered_count, mistake_stats, overall_accuracy, practised_modes,
+    sampling_rows, session_history, session_recognition, session_untimed, span_history,
+    speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

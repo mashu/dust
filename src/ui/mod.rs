@@ -13,6 +13,7 @@ pub mod display;
 pub mod elsewhere;
 pub mod endurance;
 pub mod envelope;
+pub mod figures;
 pub mod file_pick;
 #[cfg(feature = "desktop")]
 pub mod floating;

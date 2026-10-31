@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::alignment::CopyTally;
 use crate::auto_level::judged_copy;
-use crate::belief::{SESSION_FADE, sessions_faded};
+use crate::belief::{FADE_HORIZON, SESSION_FADE, sessions_faded};
 use crate::callsign::{CallSpec, GeneratedCall, generate_call};
 use crate::contest::{CallSource, Side};
 use crate::machine::GroupSource;
@@ -50,11 +50,18 @@ impl CharSamplingState {
     /// speed: a session ten sessions back counts half as much as the latest
     /// ([`sessions_faded`]). A weakness put right long ago stops drawing the
     /// character more often, and a character not heard for a while is less
-    /// certain again.
+    /// certain again. Only the newest [`FADE_HORIZON`] sessions are read:
+    /// one further back counts for nothing that shows.
     pub fn from_history(history: &[SessionResult]) -> Self {
+        Self::from_newest(history, FADE_HORIZON)
+    }
+
+    /// [`Self::from_history`], from the newest `newest` sessions that copied
+    /// anything.
+    fn from_newest(history: &[SessionResult], newest: usize) -> Self {
         let mut state = Self::default();
-        for (session, worth) in sessions_faded(history) {
-            for (character, stats) in session.letter_accuracy().iter() {
+        for (_, letters, worth) in sessions_faded(history, newest) {
+            for (character, stats) in letters.iter() {
                 let belief = state.beliefs.entry(*character).or_default();
                 belief.alpha += worth * f64::from(stats.correct);
                 belief.beta += worth * f64::from(stats.total.saturating_sub(stats.correct));
@@ -67,7 +74,13 @@ impl CharSamplingState {
     /// session older, so the last session counts for a little less than
     /// the one about to be sent, as the span's and the speed's do.
     pub fn for_session(history: &[SessionResult]) -> Self {
-        let mut state = Self::from_history(history);
+        Self::for_newest(history, FADE_HORIZON)
+    }
+
+    /// [`Self::for_session`], from the newest `newest` sessions that copied
+    /// anything.
+    fn for_newest(history: &[SessionResult], newest: usize) -> Self {
+        let mut state = Self::from_newest(history, newest);
         for belief in state.beliefs.values_mut() {
             belief.alpha = CHAR_SAMPLING_PRIOR_ALPHA
                 + (belief.alpha - CHAR_SAMPLING_PRIOR_ALPHA) * SESSION_FADE;
@@ -93,6 +106,66 @@ impl CharSamplingState {
     }
 }
 
+/// What a [`Sampler`] starts from: what the history says of each
+/// character, of your copy span and of your copy speed, as a new session
+/// sees it. Building it replays the newest [`FADE_HORIZON`] sessions, too
+/// much to do inside a tap on a slow phone, so the app builds it ahead,
+/// keeps it until the history changes, and starts each sampler from a copy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SamplerPrior {
+    state: CharSamplingState,
+    span: SpanBelief,
+    speed: SpeedBelief,
+    /// What of the settings it was built for.
+    built_for: PriorSettings,
+}
+
+/// What of the settings a [`SamplerPrior`] is built from: the character set
+/// whose sessions the span and the speed replay, the group size range the
+/// span's first guess sits in the middle of, the shortest group adaptive
+/// group size draws, which a group's lost end is read against, and the
+/// speeds the copy speed's first guess sits in the middle of. Settings that
+/// agree in these build the same prior from the same history, whatever else
+/// they say.
+#[derive(Clone, Debug, PartialEq)]
+struct PriorSettings {
+    mode: CharSetMode,
+    group_sizes: (usize, usize),
+    length_floor: Option<usize>,
+    speeds: (f64, f64),
+}
+
+impl PriorSettings {
+    fn of(settings: &TrainingSettings) -> Self {
+        Self {
+            mode: settings.curriculum.char_set_mode,
+            group_sizes: group_size_bounds(settings),
+            length_floor: length_floor(settings),
+            speeds: SpeedPath::of(settings).bounds(),
+        }
+    }
+}
+
+impl SamplerPrior {
+    /// What the history says to a session of `settings`.
+    pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
+        Self {
+            state: CharSamplingState::for_session(history),
+            span: SpanBelief::for_session(history, settings),
+            speed: SpeedBelief::for_session(history, settings),
+            built_for: PriorSettings::of(settings),
+        }
+    }
+
+    /// Whether it is the prior `settings` would build from the history it
+    /// was built from: they agree in all it reads of them. A change of
+    /// level, volume or call leaves it as it was; one of the character set,
+    /// the group sizes or the speeds does not.
+    pub fn suits(&self, settings: &TrainingSettings) -> bool {
+        self.built_for == PriorSettings::of(settings)
+    }
+}
+
 /// The trainer's own group source: groups drawn for the curriculum, leaning
 /// on the characters the history says are hard and on those this session
 /// has not sent yet, and learning from every answer as it comes. With
@@ -115,10 +188,21 @@ impl Sampler {
     /// knows about the alphabet it trains. `seed` should differ from session
     /// to session.
     pub fn new(history: &[SessionResult], settings: &TrainingSettings, seed: u64) -> Self {
+        Self::from_prior(
+            SamplerPrior::from_history(history, settings),
+            settings,
+            seed,
+        )
+    }
+
+    /// The sampler [`Self::new`] makes, from a prior built ahead: it draws
+    /// what that one draws, as long as the prior suits `settings`
+    /// ([`SamplerPrior::suits`]).
+    pub fn from_prior(prior: SamplerPrior, settings: &TrainingSettings, seed: u64) -> Self {
         Self {
-            state: CharSamplingState::for_session(history),
-            span: SpanBelief::for_session(history, settings),
-            speed: SpeedBelief::for_session(history, settings),
+            state: prior.state,
+            span: prior.span,
+            speed: prior.speed,
             length_floor: length_floor(settings),
             rng: SplitMix64::new(seed),
         }
@@ -661,6 +745,7 @@ fn generate_group(
 mod tests {
     use super::*;
     use crate::session::GroupResult;
+    use crate::settings::Aim;
 
     /// Teach `sampler` that `typed` was the answer to `sent`, played at
     /// `played` if it was measured.
@@ -1713,6 +1798,287 @@ mod tests {
         assert!(
             struggling < fresh - 1.0,
             "struggling {struggling}, fresh {fresh}"
+        );
+    }
+
+    /// One group a sampler drew: what it sent, how many times, and at what
+    /// speed.
+    type Drawn = (String, u32, Option<(f64, f64)>);
+
+    /// What a sampler draws: each group, its repeats and its speed, an
+    /// answer to each learned from as it comes, the first character of
+    /// every third group missed, so what it learns as it goes is drawn from
+    /// too.
+    fn draws(mut sampler: Sampler, settings: &TrainingSettings, groups: usize) -> Vec<Drawn> {
+        (0..groups)
+            .map(|index| {
+                let (group, repeats) = sampler.next_group(settings);
+                let speed = GroupSource::next_speed(&mut sampler, settings);
+                let typed: String = if index % 3 == 0 {
+                    group.chars().skip(1).collect()
+                } else {
+                    group.clone()
+                };
+                answer(&mut sampler, &group, &typed, speed);
+                (group, repeats, speed)
+            })
+            .collect()
+    }
+
+    /// A sampler started from a prior built ahead, for settings that read
+    /// alike, draws every group and speed a new one draws: with no history,
+    /// with one, and with a simulated learner's, lengths and speeds
+    /// adapting.
+    #[test]
+    fn a_sampler_from_a_prior_built_ahead_draws_what_a_new_one_does() {
+        use crate::learner_sim::{Adapting, IMPROVING, Judged, practise};
+        let (_, simulated) = practise(IMPROVING, Adapting::Both, Aim::Balanced, Judged::Now, 30, 3);
+        let cases = [
+            (Vec::new(), length_settings(false)),
+            (history_of("KMKMKM", true), length_settings(true)),
+            (simulated, Adapting::Both.settings(Aim::Balanced)),
+        ];
+        for (history, settings) in &cases {
+            // Built while another level, volume and call were set.
+            let mut before = settings.clone();
+            before.curriculum.level -= 1;
+            before.band.master_volume /= 2.0;
+            before.contest.set_my_call("W1AW");
+            let prior = SamplerPrior::from_history(history, &before);
+            assert!(prior.suits(settings));
+            for seed in [1, 7, 42] {
+                assert_eq!(
+                    draws(
+                        Sampler::from_prior(prior.clone(), settings, seed),
+                        settings,
+                        200
+                    ),
+                    draws(Sampler::new(history, settings, seed), settings, 200),
+                    "seed {seed}"
+                );
+            }
+        }
+    }
+
+    /// A prior is built again only for settings that read differently: the
+    /// character set, the group sizes or the speeds, each of which moves
+    /// it. Anything else leaves it as it is.
+    #[test]
+    fn a_prior_suits_every_setting_it_does_not_read() {
+        use crate::learner_sim::Adapting;
+        let settings = Adapting::Both.settings(Aim::Balanced);
+        let history = history_of("KMKMKM", false);
+        let prior = SamplerPrior::from_history(&history, &settings);
+        let alike: [fn(&mut TrainingSettings); 5] = [
+            |s| s.curriculum.level = 3,
+            |s| s.curriculum.aim = Aim::Stretch,
+            |s| s.band.master_volume = 0.3,
+            |s| s.contest.set_my_call("W1AW"),
+            |s| s.playback.lock_input_during_group_playback = true,
+        ];
+        for change in alike {
+            let mut moved = settings.clone();
+            change(&mut moved);
+            let moved = moved.clamp();
+            assert!(prior.suits(&moved), "{moved:?}");
+            assert_eq!(SamplerPrior::from_history(&history, &moved), prior);
+        }
+        let apart: [fn(&mut TrainingSettings); 7] = [
+            |s| s.curriculum.char_set_mode = CharSetMode::Mixed,
+            |s| s.curriculum.min_group_size = 3,
+            |s| s.curriculum.max_group_size = 6,
+            |s| s.curriculum.adaptive_group_size = false,
+            |s| s.playback.char_wpm_min = 18.0,
+            |s| s.playback.char_wpm_max = 25.0,
+            |s| {
+                s.playback.link_char_to_effective = false;
+                s.playback.effective_wpm_min = 8.0;
+                s.playback.effective_wpm_max = 10.0;
+            },
+        ];
+        for change in apart {
+            let mut moved = settings.clone();
+            change(&mut moved);
+            let moved = moved.clamp();
+            assert!(!prior.suits(&moved), "{moved:?}");
+            let rebuilt = SamplerPrior::from_history(&history, &moved);
+            assert!(
+                (&rebuilt.span, &rebuilt.speed) != (&prior.span, &prior.speed),
+                "the prior does not read what moved: {moved:?}"
+            );
+        }
+    }
+
+    /// Two thousand sessions of simulated learners ([`crate::learner_sim`]),
+    /// every way of adapting among them: a struggling learner's first and
+    /// an improving one's after, so the oldest say what the newest do not.
+    /// Some of them are another character set's, and they are stored out of
+    /// the order they were practised in.
+    fn long_history() -> Vec<SessionResult> {
+        use crate::learner_sim::{Adapting, IMPROVING, Judged, STRUGGLING, practise};
+        let mut history: Vec<SessionResult> = (0..80u64)
+            .flat_map(|run| {
+                let learner = if run < 64 { STRUGGLING } else { IMPROVING };
+                let adapting = Adapting::ALL[run as usize % Adapting::ALL.len()];
+                practise(learner, adapting, Aim::Balanced, Judged::Now, 25, run).1
+            })
+            .collect();
+        for (at, session) in history.iter_mut().enumerate() {
+            session.timestamp = at as u64 + 1;
+            if at % 7 == 3 {
+                session.char_set_mode = CharSetMode::Digits;
+            }
+        }
+        history.rotate_left(1_300);
+        history
+    }
+
+    /// The prior the newest `newest` sessions that count build.
+    fn prior_from_newest(
+        history: &[SessionResult],
+        settings: &TrainingSettings,
+        newest: usize,
+    ) -> SamplerPrior {
+        SamplerPrior {
+            state: CharSamplingState::for_newest(history, newest),
+            span: SpanBelief::for_newest(history, settings, newest),
+            speed: SpeedBelief::for_newest(history, settings, newest),
+            built_for: PriorSettings::of(settings),
+        }
+    }
+
+    /// The largest gap between two priors' figures: each character's
+    /// belief, one never heard on the flat prior, the span and its forecast,
+    /// and the copy speed and how much is copied at it.
+    fn furthest_apart(a: &SamplerPrior, b: &SamplerPrior) -> f64 {
+        let heard: std::collections::BTreeSet<char> = a
+            .state
+            .beliefs
+            .keys()
+            .chain(b.state.beliefs.keys())
+            .copied()
+            .collect();
+        let characters = heard.into_iter().flat_map(|character| {
+            let (a, b) = (
+                belief_for(&a.state, character),
+                belief_for(&b.state, character),
+            );
+            [a.alpha - b.alpha, a.beta - b.beta]
+        });
+        let (span_a, span_b) = (a.span.estimate(), b.span.estimate());
+        let forecasts = a
+            .span
+            .forecast(2, 8, Some(0.7))
+            .into_iter()
+            .zip(b.span.forecast(2, 8, Some(0.7)))
+            .flat_map(|(a, b)| {
+                [
+                    a.drawn - b.drawn,
+                    a.whole - b.whole,
+                    a.whole_sd - b.whole_sd,
+                ]
+            });
+        let speeds = [0.5, 0.9].into_iter().flat_map(|rate| {
+            let (a, b) = (a.speed.estimate(rate), b.speed.estimate(rate));
+            [a.mean - b.mean, a.sd - b.sd]
+        });
+        let copied = [12.0, 20.0, 30.0].into_iter().flat_map(|wpm| {
+            let (a, b) = (a.speed.right_at(wpm), b.speed.right_at(wpm));
+            [a.mean - b.mean, a.sd - b.sd]
+        });
+        characters
+            .chain([span_a.mean - span_b.mean, span_a.sd - span_b.sd])
+            .chain(forecasts)
+            .chain(speeds)
+            .chain(copied)
+            .fold(0.0, |furthest: f64, gap| furthest.max(gap.abs()))
+    }
+
+    /// Replaying only the newest [`FADE_HORIZON`] sessions finds what
+    /// replaying the whole history finds, to well within anything shown:
+    /// what it leaves out is too far back to count. Each character's
+    /// belief, the span and the speed alike, and so every group and speed a
+    /// sampler draws from them. Fewer sessions would not do: forty leave out
+    /// what still counts.
+    #[test]
+    fn a_bounded_replay_matches_the_whole_history() {
+        use crate::learner_sim::Adapting;
+        let history = long_history();
+        assert_eq!(history.len(), 2_000);
+        for adapting in [Adapting::Neither, Adapting::Both] {
+            let settings = adapting.settings(Aim::Balanced);
+            let bounded = SamplerPrior::from_history(&history, &settings);
+            let whole = prior_from_newest(&history, &settings, usize::MAX);
+            let gap = furthest_apart(&bounded, &whole);
+            assert!(gap < 1e-9, "{adapting:?}: {gap:e} apart");
+            assert!(
+                furthest_apart(&prior_from_newest(&history, &settings, 40), &whole) > 1e-3,
+                "{adapting:?}: the oldest sessions say nothing the newest do not"
+            );
+            assert_eq!(
+                draws(Sampler::from_prior(bounded, &settings, 5), &settings, 200),
+                draws(Sampler::from_prior(whole, &settings, 5), &settings, 200),
+                "{adapting:?}"
+            );
+        }
+    }
+
+    /// However long the history, a session start reads its newest
+    /// [`FADE_HORIZON`] sessions and not one before them. Each of their
+    /// groups, its length adapted, is aligned once for the characters and
+    /// once for the speed, and no older one is aligned at all; and the
+    /// prior, the span's with the rest, is exactly the one those sessions
+    /// build on their own, though every session before them copied each
+    /// group whole and they copied none.
+    #[test]
+    fn a_session_start_reads_the_newest_sessions_and_no_more() {
+        use crate::alignment::HELD_ALIGNMENTS;
+        let older = 50;
+        let whole = [("KMRS", "KMRS"), ("KM", "KM")].repeat(3);
+        let missed = [("KMRS", "KMR"), ("KM", "KX")].repeat(3);
+        let history: Vec<SessionResult> = (0..FADE_HORIZON + older)
+            .map(|at| {
+                let copies = if at < older { &whole } else { &missed };
+                SessionResult {
+                    timestamp: at as u64 + 1,
+                    groups: copies
+                        .iter()
+                        .map(|(sent, received)| GroupResult {
+                            sent: (*sent).to_string(),
+                            received: (*received).to_string(),
+                            correct: sent == received,
+                        })
+                        .collect(),
+                    length_floor: Some(2),
+                    ..SessionResult::empty_for_test()
+                }
+            })
+            .collect();
+        let newest = &history[older..];
+        let groups = FADE_HORIZON * missed.len();
+        let settings = length_settings(true);
+        let aligned = |read: &dyn Fn()| {
+            HELD_ALIGNMENTS.set(0);
+            read();
+            HELD_ALIGNMENTS.get()
+        };
+        assert_eq!(
+            aligned(&|| {
+                CharSamplingState::for_session(&history);
+            }),
+            groups,
+            "the characters'"
+        );
+        assert_eq!(
+            aligned(&|| {
+                SamplerPrior::from_history(&history, &settings);
+            }),
+            2 * groups,
+            "the characters' and the speed's"
+        );
+        assert_eq!(
+            SamplerPrior::from_history(&history, &settings),
+            SamplerPrior::from_history(newest, &settings)
         );
     }
 
