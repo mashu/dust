@@ -1,19 +1,23 @@
-//! `localStorage`: the browser store.
+//! The browser store: `localStorage` for all but the history, which the
+//! browser's database keeps ([`super::idb`]), opened before the app starts
+//! ([`preload`]).
 //!
-//! A browser keeps it, its room and its Web Locks for the whole origin, and
-//! a GitHub Pages project site shares its origin with every other one of the
-//! account (docs/platforms.md). So every name kept or locked here starts
-//! with `dust_`, and only names of Dust's own are ever taken away: by exact
-//! name, or by a prefix of its own ([`keep_aside`], [`take_marks`]).
+//! A browser keeps them, their room and its Web Locks for the whole origin,
+//! and a GitHub Pages project site shares its origin with every other one
+//! of the account (docs/platforms.md). So every name kept or locked here
+//! starts with `dust_`, and only names of Dust's own are ever taken away: by
+//! exact name, or by a prefix of its own ([`keep_aside`], [`take_marks`]).
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
+use super::idb::{BrowserHistory, Script};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
-use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
+use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
     over_stored, read_settings_from, saved_now,
@@ -30,6 +34,13 @@ const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
 /// The sessions deleted by hand ([`super::Deleted`]), as builds before
 /// records remember them, and the history kept whole still does.
 const DELETED_KEY: &str = "dust_deleted";
+/// Where builds before records keep the history whole, and where this one
+/// keeps it for a visit the browser's database will not.
+const BLOB_KEYS: BlobKeys = BlobKeys {
+    history: SESSIONS_KEY,
+    deleted: DELETED_KEY,
+    aside: UNREADABLE_SESSIONS_KEY,
+};
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
 const LAST_BACKUP_KEY: &str = "dust_last_backup";
 /// The sessions and runs marked open ([`Store::mark_open`]): each page's
@@ -51,24 +62,77 @@ pub struct WebStore {
     /// This page's mark, while its session is marked open: what writes it,
     /// and takes it away with its lock ([`hold_mark`]).
     open_held: RefCell<Option<js_sys::Function>>,
-    /// The history by record, kept whole in `localStorage` as it always
-    /// was, and to its room, until it moves into the browser's database.
-    history: BlobHistory<Local>,
+    /// Where the history is kept this visit.
+    history: History,
+}
+
+/// Where the history is kept this visit.
+enum History {
+    /// The browser's database, by record, with no room to keep it to but
+    /// what the browser gives the site.
+    Database(Rc<BrowserHistory<Script, Local>>),
+    /// The browser's page storage, kept whole and to its room, as builds
+    /// before kept it, where the database would not open, or would not
+    /// take the history: and why not, told of as the app opens.
+    Page {
+        whole: BlobHistory<Local>,
+        why: RefCell<Option<String>>,
+    },
+}
+
+/// What the browser's database made of the history as the page opened
+/// ([`preload`]): the history opened, or why the page storage keeps it this
+/// visit, with what reading it set aside meanwhile.
+type Preloaded = Result<Rc<BrowserHistory<Script, Local>>, (String, Vec<SetAside>)>;
+
+thread_local! {
+    static PRELOADED: RefCell<Option<Preloaded>> = const { RefCell::new(None) };
+}
+
+/// Open the history in the browser's database before the app starts, and
+/// read it whole, so that the app opens on it at once, the boot screen
+/// showing meanwhile. The history kept whole in the page storage is moved
+/// in first, where it was not ([`BrowserHistory::open`]). Where the
+/// database will not open, or will not take the history, the page storage
+/// keeps it this visit ([`WebStore::default`]).
+pub async fn preload() {
+    let opened = match Script::open().await {
+        Ok((script, read_only)) => BrowserHistory::open(script, read_only, Local, BLOB_KEYS)
+            .await
+            .map(Rc::new)
+            .map_err(|not| (not.why, not.set_aside)),
+        Err(why) => Err((why, Vec::new())),
+    };
+    PRELOADED.with(|preloaded| *preloaded.borrow_mut() = Some(opened));
 }
 
 impl Default for WebStore {
+    /// The store, on the history [`preload`] opened; on the page storage,
+    /// saying why, where it opened none.
     fn default() -> Self {
-        let keys = BlobKeys {
-            history: SESSIONS_KEY,
-            deleted: DELETED_KEY,
-            aside: UNREADABLE_SESSIONS_KEY,
+        let preloaded = PRELOADED.with(|preloaded| preloaded.borrow().clone());
+        let (history, set_aside) = match preloaded {
+            Some(Ok(database)) => (History::Database(database), Vec::new()),
+            Some(Err((why, set_aside))) => (History::page(why), set_aside),
+            None => (History::page("it was not opened".into()), Vec::new()),
         };
         Self {
             settings_held: Cell::default(),
-            set_aside: RefCell::default(),
+            set_aside: RefCell::new(set_aside),
             asked_to_keep: Cell::default(),
             open_held: RefCell::default(),
-            history: BlobHistory::new(Local, keys, HISTORY_BUDGET),
+            history,
+        }
+    }
+}
+
+impl History {
+    /// The page storage, keeping the history this visit, as the database
+    /// would not, for the reason given.
+    fn page(why: String) -> Self {
+        Self::Page {
+            whole: BlobHistory::new(Local, BLOB_KEYS, HISTORY_BUDGET),
+            why: RefCell::new(Some(why)),
         }
     }
 }
@@ -374,7 +438,9 @@ impl Store for WebStore {
     /// one said: a copy there was no room to set aside then may fit now.
     fn take_set_aside(&self) -> Vec<SetAside> {
         let mut set_aside = std::mem::take(&mut *self.set_aside.borrow_mut());
-        set_aside.extend(self.history.take_set_aside());
+        if let History::Page { whole, .. } = &self.history {
+            set_aside.extend(whole.take_set_aside());
+        }
         set_aside
     }
 
@@ -493,32 +559,68 @@ impl Store for WebStore {
         })
     }
 
+    /// The history read as the page opened ([`preload`]); or, kept in the
+    /// page storage this visit, read now, and why told of once.
     fn load_history(&self) -> HistoryLoad {
-        self.history.load()
+        match &self.history {
+            History::Database(database) => database.load(),
+            History::Page { whole, why } => {
+                let mut load = whole.load();
+                if let Some(why) = why.borrow_mut().take() {
+                    load.notices.push(HistoryNotice::PageStorage(why));
+                }
+                load
+            }
+        }
     }
 
     fn change_history(&self, change: HistoryChange) -> Pending<HistorySaved> {
-        if storage().is_none() {
-            return done(HistorySaved::Failed(
+        match &self.history {
+            History::Database(database) => {
+                let database = Rc::clone(database);
+                Box::pin(async move { database.apply(change).await })
+            }
+            History::Page { .. } if storage().is_none() => done(HistorySaved::Failed(
                 "this browser has no storage for it.".into(),
-            ));
+            )),
+            History::Page { whole, .. } => done(whole.apply(&change)),
         }
-        done(self.history.apply(&change))
     }
 
     fn history_listing(&self) -> Pending<Option<Vec<RecordId>>> {
-        done(self.history.listing())
+        match &self.history {
+            History::Database(database) => {
+                let database = Rc::clone(database);
+                Box::pin(async move { database.listing().await })
+            }
+            History::Page { whole, .. } => done(whole.listing()),
+        }
     }
 
     fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
-        done(self.history.read(&ids))
+        match &self.history {
+            History::Database(database) => {
+                let database = Rc::clone(database);
+                Box::pin(async move { database.read(ids).await })
+            }
+            History::Page { whole, .. } => done(whole.read(&ids)),
+        }
     }
 
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
-        done(self.history.forgotten(&ids))
+        match &self.history {
+            History::Database(database) => {
+                let database = Rc::clone(database);
+                Box::pin(async move { database.forgotten(ids).await })
+            }
+            History::Page { whole, .. } => done(whole.forgotten(&ids)),
+        }
     }
 
     fn history_changed(&self) -> bool {
-        self.history.changed()
+        match &self.history {
+            History::Database(database) => database.changed(),
+            History::Page { whole, .. } => whole.changed(),
+        }
     }
 }
