@@ -517,11 +517,10 @@ fn keyed_along_the_first_of_two_sends_every_character_is_timed() {
     });
 }
 
-/// The session the lock-ask card turns the lock off for: an older
-/// install's settings with it on, answered "Type along" on Home. The very
-/// next session keyed along is timed.
+/// An older install's settings with Lock typing while sending on, turned
+/// off in Settings: the very next session keyed along is timed.
 #[test]
-fn turned_off_from_home_the_next_session_keyed_along_is_timed() {
+fn turned_off_in_settings_the_next_session_keyed_along_is_timed() {
     run(|| async {
         let mut settings = along(3, 3, 20.0);
         settings.playback.lock_input_during_group_playback = true;
@@ -529,14 +528,15 @@ fn turned_off_from_home_the_next_session_keyed_along_is_timed() {
         store.save_settings(&settings);
         store.mark_tutorial_done();
         let (mut ui, recorder) = Ui::launch(store);
-        assert!(ui.shows("lock-ask"), "{}", ui.html());
-        ui.click("btn-type-along");
+        ui.click("nav-settings");
+        ui.commit("switch-lock-typing-while-sending", "false");
         assert!(!ui.with_app(|ctx| {
             ctx.settings
                 .peek()
                 .playback
                 .lock_input_during_group_playback
         }));
+        ui.click("nav-practice");
         let keyed = key_along(&mut ui, &recorder, By::Keyboard, 250).await;
         every_character_timed(&ui, keyed);
     });

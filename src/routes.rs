@@ -21,7 +21,7 @@ use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
 use crate::ui::contest_results::NothingKept;
 use crate::ui::figures::use_history;
-use crate::ui::home::{Home, Practice, lock_keeps_groups_untimed};
+use crate::ui::home::{Home, Practice};
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
@@ -78,18 +78,6 @@ fn HomeRoute() -> Element {
         let mut settings = ctx.settings;
         settings.write().contest.set_my_section(&typed);
     });
-    // Asked once on this install, whichever way it is answered; the lock
-    // turned off is stored at once, as a setting changed off the settings
-    // screen is.
-    let mut asked_about_lock = use_signal(|| ctx.app().store.asked_about_lock());
-    let on_lock_answer = use_callback(move |type_along: bool| {
-        ctx.app().store.mark_asked_about_lock();
-        asked_about_lock.set(true);
-        if type_along {
-            let mut settings = ctx.settings;
-            settings.write().playback.lock_input_during_group_playback = false;
-        }
-    });
     // Read from the store, a file on desktop and phones: once for each
     // move of the settings, not on every redraw of the screen.
     let progress = use_memo(move || auto_progress(&*ctx.app().store, &ctx.settings.read()));
@@ -116,8 +104,6 @@ fn HomeRoute() -> Element {
             on_state,
             on_zone,
             on_section,
-            ask_about_lock: !asked_about_lock() && lock_keeps_groups_untimed(&settings),
-            on_lock_answer,
         }
     }
 }
@@ -134,7 +120,6 @@ fn SettingsRoute() -> Element {
     use_band_follow(ctx);
     use_qsos_follow(ctx);
     use_preview_stop_when_hidden(ctx, SETTINGS_HIDDEN);
-    use_lock_chosen(ctx);
     let preview = ctx.preview.read();
     rsx! {
         SettingsView {
@@ -149,29 +134,6 @@ fn SettingsRoute() -> Element {
             on_hear_qsos,
         }
     }
-}
-
-/// Lock typing while sending switched on the settings screen is a choice,
-/// and Home need not ask whether to keep it ([`crate::persist::Store::asked_about_lock`]).
-fn use_lock_chosen(ctx: AppCtx) {
-    let opened_with = use_hook(|| {
-        ctx.settings
-            .peek()
-            .playback
-            .lock_input_during_group_playback
-    });
-    let mut marked = use_hook(|| CopyValue::new(false));
-    use_effect(move || {
-        let locked = ctx
-            .settings
-            .read()
-            .playback
-            .lock_input_during_group_playback;
-        if locked != opened_with && !*marked.peek() {
-            marked.set(true);
-            ctx.app().store.mark_asked_about_lock();
-        }
-    });
 }
 
 /// Hear a QSO is of the contest it was started from: once the settings
@@ -444,7 +406,6 @@ fn ResultsRoute() -> Element {
     let on_home = use_callback(move |()| ctx.go_to(Screen::Home));
     // Stored at once, as a setting changed off the settings screen is.
     let on_unlock = use_callback(move |()| {
-        ctx.app().store.mark_asked_about_lock();
         let mut settings = ctx.settings;
         settings.write().playback.lock_input_during_group_playback = false;
     });
