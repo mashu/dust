@@ -40,6 +40,8 @@ mod system_back;
 mod testing;
 mod theme;
 mod time;
+#[cfg(test)]
+mod timing_tests;
 mod ui;
 
 use crate::app::App;
