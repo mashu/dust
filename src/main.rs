@@ -261,10 +261,15 @@ fn main() {
         }
         launch_mobile();
     }
-    // A browser applies each render as it comes, frames or none.
+    // A browser applies each render as it comes, frames or none. The
+    // history is read from the browser's database first, which answers only
+    // a moment later; the boot screen shows meanwhile.
     #[cfg(feature = "web")]
     {
-        dioxus::launch(App);
+        wasm_bindgen_futures::spawn_local(async {
+            persist::preload().await;
+            dioxus::launch(App);
+        });
     }
 }
 

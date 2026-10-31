@@ -624,6 +624,9 @@ impl Drop for TestSeeds {
 pub enum PageStep {
     /// A script run, as `document::eval` runs one.
     Run { script: String },
+    /// A script run to its end, whatever it waits on, before the next step:
+    /// one that waits on the page's database.
+    Wait { script: String },
     /// A key pressed or let go, with nothing focused.
     Key(PageKey),
     /// The window loses the focus.
@@ -633,6 +636,12 @@ pub enum PageStep {
 impl PageStep {
     pub fn run(script: impl Into<String>) -> Self {
         Self::Run {
+            script: script.into(),
+        }
+    }
+
+    pub fn wait(script: impl Into<String>) -> Self {
+        Self::Wait {
             script: script.into(),
         }
     }
@@ -734,8 +743,9 @@ pub struct PageHeard {
 }
 
 /// Take `steps` on a page made up in Node, where the app's page scripts run
-/// as in a webview (`src/fake_page.mjs`), and say what the scripts did
-/// during each. None on a machine with no Node, which the test says; CI has
+/// as in a webview (`src/fake_page.mjs`), with a browser's database made up
+/// beside them (`src/fake_idb.mjs`), and say what the scripts did during
+/// each. None on a machine with no Node, which the test says; CI has
 /// it, so there a Node that will not start fails the test rather than
 /// passing it untried.
 pub fn on_fake_page(steps: &[PageStep]) -> Option<Vec<PageHeard>> {
@@ -1658,6 +1668,39 @@ window.addEventListener("blur", () => dioxus.send("blur"));"#;
         assert!(heard[1].prevented);
         assert!(heard[2].sent.is_empty() && !heard[2].prevented);
         assert_eq!(heard[3].sent, [serde_json::json!("blur")]);
+    }
+
+    /// A script waited on runs to its end before the next step is taken,
+    /// whatever it waits on: here the page's made-up database, which
+    /// answers a moment later, and holds what a transaction wrote once it
+    /// is made.
+    #[test]
+    fn a_script_waited_on_runs_to_its_end_on_the_fake_page() {
+        let script = r#"const asked = (request) =>
+    new Promise((done, failed) => {
+        request.onsuccess = () => done(request.result);
+        request.onerror = () => failed(request.error);
+    });
+const open = indexedDB.open("test", 1);
+open.onupgradeneeded = () => open.result.createObjectStore("kept");
+const db = await asked(open);
+const tx = db.transaction(["kept"], "readwrite");
+tx.objectStore("kept").put("value", "key");
+await new Promise((done) => { tx.oncomplete = done; });
+dioxus.send(await asked(db.transaction(["kept"]).objectStore("kept").get("key")));
+dioxus.send(fakeIdb.committed);
+localStorage.setItem("dust_theme", "dark");"#;
+        let Some(heard) = on_fake_page(&[
+            PageStep::wait(script),
+            PageStep::run(r#"dioxus.send(localStorage.getItem("dust_theme"));"#),
+        ]) else {
+            return;
+        };
+        assert_eq!(
+            heard[0].sent,
+            [serde_json::json!("value"), serde_json::json!(1)]
+        );
+        assert_eq!(heard[1].sent, [serde_json::json!("dark")]);
     }
 
     /// A script that throws on the made-up page fails the test, saying what

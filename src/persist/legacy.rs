@@ -175,7 +175,7 @@ pub(super) enum Kept {
 /// aside holds back every session finished after it: so old copies give
 /// way to a new one, the oldest first.
 #[cfg(any(feature = "web", test))]
-fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> Kept {
+pub(super) fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> Kept {
     let Ok(keys) = store.keys() else {
         return Kept::Not;
     };
@@ -345,19 +345,16 @@ fn newest_that_fit(sessions: &[SessionResult], budget: usize) -> (String, usize)
 
 /// The layout of the history this build writes: records and tombstones
 /// beside them ([`super::record`]).
-#[cfg_attr(feature = "web", allow(dead_code))]
 pub(super) const LAYOUT: u64 = 1;
 
 /// The oldest layout a build has to know to write to a history: a later
 /// build that keeps it so that this one would harm it says so by raising
 /// it, and this one then only reads ([`Gate::Newer`]).
-#[cfg_attr(feature = "web", allow(dead_code))]
 pub(super) const COMPATIBLE: u64 = 1;
 
 /// How long before the move a session may have finished and still be one
 /// an older build stored after it: one finished a day before the move,
 /// stored by a copy left open since, is still taken up.
-#[cfg_attr(feature = "web", allow(dead_code))]
 const MOVE_SLACK_MS: u64 = 86_400_000;
 
 /// How the history is kept, and what the move from the history kept whole
@@ -365,7 +362,6 @@ const MOVE_SLACK_MS: u64 = 86_400_000;
 /// move cut short is made again.
 ///
 /// Whatever a later build adds to it is carried along as it was read.
-#[cfg_attr(feature = "web", allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Layout {
@@ -396,8 +392,9 @@ pub(super) struct Layout {
 
 /// What tells one state of the history kept whole from another without
 /// reading it: its length, and when it was last written (on a computer or
-/// a phone, in nanoseconds since the epoch).
-#[cfg_attr(feature = "web", allow(dead_code))]
+/// a phone, in nanoseconds since the epoch). A browser keeps no such time:
+/// there it is the hash of what the history holds, and the length is in the
+/// browser's characters ([`super::idb`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct Fingerprint {
     pub(super) len: u64,
@@ -405,7 +402,6 @@ pub(super) struct Fingerprint {
 }
 
 /// Whether, and how, this build may write to a history.
-#[cfg_attr(feature = "web", allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Gate {
     /// Moved, in a layout this build writes.
@@ -422,7 +418,6 @@ pub(super) enum Gate {
     Unread,
 }
 
-#[cfg_attr(feature = "web", allow(dead_code))]
 impl Gate {
     /// The gate a layout stored as `raw` sets, or none being stored.
     ///
@@ -445,7 +440,6 @@ impl Gate {
     }
 }
 
-#[cfg_attr(feature = "web", allow(dead_code))]
 impl Layout {
     /// The layout as it is written: pretty, as a file somebody may open.
     pub(super) fn written(&self) -> serde_json::Result<Vec<u8>> {
@@ -454,7 +448,6 @@ impl Layout {
 }
 
 /// The latest deletion `deleted` holds, as a watermark: none, as nought.
-#[cfg_attr(feature = "web", allow(dead_code))]
 fn latest(deleted: &[Deleted]) -> u64 {
     deleted.iter().map(|gone| gone.at).max().unwrap_or(0)
 }
@@ -463,7 +456,6 @@ fn latest(deleted: &[Deleted]) -> u64 {
 /// as a record ([`record::records_for_blob`]), and the layout to write once
 /// every record is, `now`. `fingerprint` is the history kept whole as it
 /// was read, and `deleted` the deletions it remembers, already done to it.
-#[cfg_attr(feature = "web", allow(dead_code))]
 pub(super) fn moved(
     sessions: &[SessionResult],
     fingerprint: Option<Fingerprint>,
@@ -506,7 +498,6 @@ pub(super) fn moved(
 ///
 /// The change and the layout to write once it is made, or none where
 /// there is nothing new.
-#[cfg_attr(feature = "web", allow(dead_code))]
 pub(super) fn imported(
     layout: &Layout,
     fingerprint: Option<Fingerprint>,
@@ -566,8 +557,9 @@ pub(super) struct BlobKeys {
 }
 
 /// The history kept whole, taking changes by record
-/// ([`super::Store::change_history`]): how a browser keeps it until its
-/// database holds it, and for good where the database will not open.
+/// ([`super::Store::change_history`]): how a browser keeps it for a visit
+/// its database will not open, or will not take the history moved into it
+/// ([`super::idb`]).
 ///
 /// Each change reads the whole history, does to it what the change says,
 /// and writes it whole again, as stores did before records, keeping the

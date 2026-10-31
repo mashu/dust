@@ -111,6 +111,18 @@ pub struct MemoryStore {
     /// copy's own adapter to it, as each tab has its own: none, where the
     /// history is kept by record here ([`Self::in_page`]).
     page: Option<BlobHistory<PageShelf>>,
+    /// Another copy's word of each change it makes is heard, the way a
+    /// browser's tabs tell each other ([`Self::tell_news`]): by a copy of
+    /// the app made while this is set.
+    pub hears_news: Cell<bool>,
+    news: Rc<RefCell<News>>,
+}
+
+/// How many changes other copies have told of, and what waits on the next.
+#[derive(Default)]
+struct News {
+    told: u64,
+    waiting: Vec<Waker>,
 }
 
 /// A browser's page storage, as far as the history kept whole goes: what
@@ -451,9 +463,35 @@ impl Store for MemoryStore {
         }
         self.seen_changes.replace(self.changes.get()) != self.changes.get()
     }
+
+    fn history_news(&self) -> Option<Pending<()>> {
+        if !self.hears_news.get() {
+            return None;
+        }
+        let news = self.news.clone();
+        let told = news.borrow().told;
+        Some(Box::pin(std::future::poll_fn(move |asked| {
+            let mut news = news.borrow_mut();
+            if news.told > told {
+                return Poll::Ready(());
+            }
+            news.waiting.push(asked.waker().clone());
+            Poll::Pending
+        })))
+    }
 }
 
 impl MemoryStore {
+    /// Another copy of the app tells of a change it made to the history:
+    /// every copy that hears of them takes it up ([`Self::hears_news`]).
+    pub fn tell_news(&self) {
+        let mut news = self.news.borrow_mut();
+        news.told += 1;
+        for waker in news.waiting.drain(..) {
+            waker.wake();
+        }
+    }
+
     /// A copy of the app that keeps the history whole in `shelf`, a
     /// browser's page storage, which other copies may share, each through
     /// an adapter of its own, as tabs share a browser's

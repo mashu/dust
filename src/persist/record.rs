@@ -37,7 +37,6 @@ pub struct RecordId {
 
 /// How long a record's name is: twenty digits of order, a dash, sixteen
 /// hex digits of nonce.
-#[cfg_attr(feature = "web", allow(dead_code))]
 const NAME_LEN: usize = 20 + 1 + 16;
 
 impl RecordId {
@@ -49,7 +48,6 @@ impl RecordId {
 
     /// The id a name names, if it is one: exactly as [`Self::name`] writes
     /// it, so one id has one name and a name of anything else is no id.
-    #[cfg_attr(feature = "web", allow(dead_code))]
     pub fn parse(name: &str) -> Option<Self> {
         let bytes = name.as_bytes();
         if bytes.len() != NAME_LEN || bytes[20] != b'-' {
@@ -268,6 +266,12 @@ pub enum HistoryNotice {
     /// A newer Dust keeps the history here in a way this one cannot write:
     /// what it holds is read, and nothing is written.
     Newer,
+    /// The browser's database would not keep the history, for the reason
+    /// given, so the browser's page storage keeps it this visit, whole and
+    /// to its room, as builds before kept it. The next visit tries the
+    /// database again.
+    #[cfg_attr(not(any(feature = "web", test)), allow(dead_code))]
+    PageStorage(String),
 }
 
 /// What a newer Dust's history says to this one ([`HistoryNotice::Newer`]).
@@ -298,6 +302,9 @@ impl HistoryNotice {
                 "Your sessions from before this version of Dust could not be read just now ({why}). They are left as they were, and Dust tries again the next time it opens."
             ),
             Self::Newer => NEWER_LAYOUT.into(),
+            Self::PageStorage(why) => format!(
+                "This browser would not keep your history in its database just now ({why}), so this visit keeps it in the browser's small page storage, as Dust did before: that has room for only your newest sessions, and lets older ones go as it fills. Sessions in the database are not lost, and Dust opens it again the next time it starts. Save a backup to keep every session safe."
+            ),
         }
     }
 }
@@ -503,6 +510,19 @@ mod tests {
         );
         let pending = HistoryNotice::MovePending("permission denied".into()).text();
         assert!(pending.contains("(permission denied)"), "{pending}");
+        let page = HistoryNotice::PageStorage("it has no room left for this site".into()).text();
+        assert!(
+            page.contains("its database just now (it has no room left for this site)"),
+            "{page}"
+        );
+        assert!(
+            page.contains("room for only your newest sessions"),
+            "{page}"
+        );
+        assert!(
+            page.ends_with("Save a backup to keep every session safe."),
+            "{page}"
+        );
         assert_eq!(HistoryNotice::Newer.text(), NEWER_LAYOUT);
         assert!(HistoryChange::default().is_empty());
     }

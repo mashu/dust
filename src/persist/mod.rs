@@ -2,10 +2,11 @@
 //! of sessions and the auto-level counters — and the backup file the user
 //! keeps of them, outside the store ([`backup`]).
 //!
-//! One [`Store`] per platform — files on desktop and mobile, `localStorage`
-//! in a browser — built once and handed to the app, which never asks which
-//! one it has. Reading is forgiving: a store that cannot read something gives
-//! back the most it can, and never writes over what it could not read.
+//! One [`Store`] per platform — files on desktop and mobile, a browser's
+//! database and `localStorage` in a browser — built once and handed to the
+//! app, which never asks which one it has. Reading is forgiving: a store
+//! that cannot read something gives back the most it can, and never writes
+//! over what it could not read.
 
 #[cfg(all(target_os = "android", not(test)))]
 mod android;
@@ -14,6 +15,8 @@ pub mod backup;
 mod desktop;
 #[cfg(feature = "native-runtime")]
 mod files;
+#[cfg(any(feature = "web", test))]
+mod idb;
 mod legacy;
 #[cfg(test)]
 pub mod memory;
@@ -143,6 +146,14 @@ pub trait Store {
     /// Whether the history may have changed, elsewhere, since this copy
     /// last read or listed it: whether it is worth listing again.
     fn history_changed(&self) -> bool;
+    /// A wait that ends as another copy of the app tells of a change it
+    /// made to the history, so that a screen showing it takes the change up
+    /// at once. None where no copy tells, as only a browser's tabs do: the
+    /// history is looked at again as a screen that shows it opens, and as
+    /// the page comes back into sight.
+    fn history_news(&self) -> Option<Pending<()>> {
+        None
+    }
 }
 
 /// A session of groups or a contest run, as it is marked open while it runs
@@ -363,7 +374,6 @@ pub enum HistorySaved {
     Full,
     /// Not stored: a newer Dust keeps the history here in a way this one
     /// would harm, so it writes nothing to it ([`record::NEWER_LAYOUT`]).
-    #[cfg_attr(feature = "web", allow(dead_code))]
     Newer,
     /// Not stored, for the reason given.
     Failed(String),
@@ -413,6 +423,9 @@ impl HistorySaved {
         }
     }
 }
+
+#[cfg(feature = "web")]
+pub use web::preload;
 
 /// The store this build keeps its data in.
 pub fn default_store() -> Rc<dyn Store> {
@@ -604,7 +617,6 @@ impl SessionKey {
     }
 
     /// The key of a session finished at `timestamp`, on `date`.
-    #[cfg_attr(feature = "web", allow(dead_code))]
     pub fn new(timestamp: u64, date: String) -> Self {
         Self(timestamp, date)
     }
