@@ -11,10 +11,6 @@
 //! once need no merge: each takes up the records and tombstones the other
 //! left ([`super::Store::history_listing`]).
 
-// The app moves onto records after this: until then only the stores and
-// their tests use them.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -41,6 +37,7 @@ pub struct RecordId {
 
 /// How long a record's name is: twenty digits of order, a dash, sixteen
 /// hex digits of nonce.
+#[cfg_attr(feature = "web", allow(dead_code))]
 const NAME_LEN: usize = 20 + 1 + 16;
 
 impl RecordId {
@@ -52,6 +49,7 @@ impl RecordId {
 
     /// The id a name names, if it is one: exactly as [`Self::name`] writes
     /// it, so one id has one name and a name of anything else is no id.
+    #[cfg_attr(feature = "web", allow(dead_code))]
     pub fn parse(name: &str) -> Option<Self> {
         let bytes = name.as_bytes();
         if bytes.len() != NAME_LEN || bytes[20] != b'-' {
@@ -99,6 +97,7 @@ impl RecordId {
     /// A session that takes the place of the record `was`, filled in, say,
     /// by a restore, written as `json`: in its place, and named by what it
     /// holds now.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn beside(was: RecordId, json: &str) -> Self {
         Self {
             order: was.order,
@@ -109,6 +108,7 @@ impl RecordId {
     /// The next name in the same place, for a record whose own name some
     /// other bytes already have. Only bytes damaged where they lie, or two
     /// sessions alike in their place and their hash, ever have it.
+    #[cfg_attr(feature = "web", allow(dead_code))]
     pub fn bumped(self) -> Self {
         Self {
             nonce: self.nonce.wrapping_add(1),
@@ -218,6 +218,7 @@ pub struct HistoryChange {
 }
 
 impl HistoryChange {
+    #[cfg_attr(feature = "web", allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.put.is_empty() && self.forget.is_empty() && self.unforget.is_empty()
     }
@@ -245,6 +246,7 @@ pub struct HistoryLoad {
 /// Something about the history to tell the user, found as it was read
 /// ([`HistoryLoad::notices`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "web", allow(dead_code))]
 pub enum HistoryNotice {
     /// `count` records this build cannot read, found for the first time.
     /// They are left where they are: a build that reads them shows them.
@@ -266,6 +268,7 @@ pub const NEWER_LAYOUT: &str = "A newer version of Dust changed how history is k
 
 impl HistoryNotice {
     /// The notice in words.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn text(&self) -> String {
         match self {
             Self::Unread { count } => {

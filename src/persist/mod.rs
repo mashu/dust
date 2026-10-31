@@ -32,6 +32,8 @@ use cw_core::{
 };
 use serde::Deserialize;
 
+use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+
 /// How much history is kept: years of daily practice.
 pub const MAX_SESSIONS: usize = 500;
 
@@ -139,6 +141,36 @@ pub trait Store {
     /// under: closed, crashed, killed, reloaded. Taken, so each is told of
     /// once; one a copy is still running is left to it.
     fn take_cut_off(&self) -> CutOffTaking;
+    // The app moves onto these next: until then only tests call them.
+    /// The whole history, by record ([`record`]): moved first, where an
+    /// older build kept it whole, and with whatever an older build stored
+    /// there since taken up.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn load_history(&self) -> HistoryLoad;
+    /// Make `change` to the history, and say what became of it. A store
+    /// that cannot make it all makes none of it that would lose a session:
+    /// what it stored stays stored, and nothing is deleted before what
+    /// fills it in is stored.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn change_history(&self, change: HistoryChange) -> Pending<HistorySaved>;
+    /// Every record stored, those deleted left out: what another copy of
+    /// the app stored and deleted shows up here. None where the store
+    /// cannot be listed, which is no word that anything is missing.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn history_listing(&self) -> Pending<Option<Vec<RecordId>>>;
+    /// The records `ids`, as they are stored. One that cannot be read
+    /// comes back as its id.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>>;
+    /// Which of `ids` were deleted by hand: of those missing from the
+    /// listing, the ones to let go. Any other was lost in passing, and is
+    /// to be stored again: missing is never deleted.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>>;
+    /// Whether the history may have changed, elsewhere, since this copy
+    /// last read or listed it: whether it is worth listing again.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn history_changed(&self) -> bool;
 }
 
 /// A session of groups or a contest run, as it is marked open while it runs
@@ -286,11 +318,11 @@ pub enum HistorySaved {
     Held,
     /// Not stored: the store has no room left. The session is kept here,
     /// in the app, until it has.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(feature = "web", allow(dead_code))]
     Full,
     /// Not stored: a newer Dust keeps the history here in a way this one
     /// would harm, so it writes nothing to it ([`record::NEWER_LAYOUT`]).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(feature = "web", allow(dead_code))]
     Newer,
     /// Not stored, for the reason given.
     Failed(String),

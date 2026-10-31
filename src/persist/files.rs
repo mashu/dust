@@ -25,9 +25,6 @@
 //! whatever an older build stores there after the move is taken up here
 //! ([`legacy::imported`]).
 
-// The app moves onto records after this: until then only tests use them.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;

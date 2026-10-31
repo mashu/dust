@@ -13,8 +13,10 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::legacy::{
-    Aside, HISTORY_BUDGET, Kept, read_history, set_aside_from, store_newest_that_fit,
+    Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, read_history, set_aside_from,
+    store_newest_that_fit,
 };
+use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SETTINGS_HELD,
     SetAside, Store, newest, over_stored, read_settings_from, saved_now,
@@ -39,7 +41,6 @@ const LAST_BACKUP_KEY: &str = "dust_last_backup";
 /// still running it.
 const OPEN_PREFIX: &str = "dust_open_session_";
 
-#[derive(Default)]
 pub struct WebStore {
     /// The stored history could not be read, nor copied out of the way, the
     /// last time it was read, so it is not to be written over until a read
@@ -54,10 +55,55 @@ pub struct WebStore {
     /// This page's mark, while its session is marked open: what writes it,
     /// and takes it away with its lock ([`hold_mark`]).
     open_held: RefCell<Option<js_sys::Function>>,
+    /// The history by record, kept whole in `localStorage` as it always
+    /// was, until it moves into the browser's database.
+    history: BlobHistory<Local>,
+}
+
+impl Default for WebStore {
+    fn default() -> Self {
+        let keys = BlobKeys {
+            history: SESSIONS_KEY,
+            deleted: DELETED_KEY,
+            aside: UNREADABLE_SESSIONS_KEY,
+        };
+        Self {
+            history_held: Cell::default(),
+            settings_held: Cell::default(),
+            set_aside: RefCell::default(),
+            asked_to_keep: Cell::default(),
+            open_held: RefCell::default(),
+            history: BlobHistory::new(Local, keys, HISTORY_BUDGET),
+        }
+    }
 }
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// `localStorage`, looked up afresh each time it is used: a browser that
+/// keeps nothing has none to read, and takes nothing.
+struct Local;
+
+impl Aside for Local {
+    fn keys(&self) -> Result<Vec<String>, ()> {
+        Shelf(&storage().ok_or(())?).keys()
+    }
+
+    fn get(&self, key: &str) -> Result<Option<String>, ()> {
+        Shelf(&storage().ok_or(())?).get(key)
+    }
+
+    fn set(&self, key: &str, raw: &str) -> bool {
+        storage().is_some_and(|store| Shelf(&store).set(key, raw))
+    }
+
+    fn remove(&self, key: &str) {
+        if let Some(store) = storage() {
+            Shelf(&store).remove(key);
+        }
+    }
 }
 
 /// `localStorage`, as what is set aside is kept in it ([`set_aside_from`]).
@@ -380,7 +426,9 @@ impl Store for WebStore {
     }
 
     fn take_set_aside(&self) -> Vec<SetAside> {
-        std::mem::take(&mut self.set_aside.borrow_mut())
+        let mut set_aside = std::mem::take(&mut *self.set_aside.borrow_mut());
+        set_aside.extend(self.history.take_set_aside());
+        set_aside
     }
 
     /// None, where they cannot be read: a deletion forgotten costs a
@@ -523,5 +571,34 @@ impl Store for WebStore {
                 .map(|mark| CutOff::read(mark.as_bytes()))
                 .collect()
         })
+    }
+
+    fn load_history(&self) -> HistoryLoad {
+        self.history.load()
+    }
+
+    fn change_history(&self, change: HistoryChange) -> Pending<HistorySaved> {
+        if storage().is_none() {
+            return done(HistorySaved::Failed(
+                "this browser has no storage for it.".into(),
+            ));
+        }
+        done(self.history.apply(&change))
+    }
+
+    fn history_listing(&self) -> Pending<Option<Vec<RecordId>>> {
+        done(self.history.listing())
+    }
+
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+        done(self.history.read(&ids))
+    }
+
+    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
+        done(self.history.forgotten(&ids))
+    }
+
+    fn history_changed(&self) -> bool {
+        self.history.changed()
     }
 }

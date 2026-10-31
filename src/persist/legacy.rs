@@ -5,17 +5,25 @@
 //! and, in a browser, how much of it is kept for the room there is. Older
 //! builds still read and write it, and the move to records reads it once
 //! and leaves it as it was for them ([`moved`]), then takes up whatever an
-//! older build stores there after it ([`imported`]).
+//! older build stores there after it ([`imported`]). A browser keeps it
+//! whole, behind the record API, where its database will not open
+//! ([`BlobHistory`]).
 
+#[cfg(any(feature = "web", test))]
+use std::cell::{Cell, RefCell};
+#[cfg(any(feature = "web", test))]
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 
 use cw_core::SessionResult;
 use serde::Deserialize;
 
-#[cfg(any(feature = "web", test))]
-use super::HistorySaved;
 use super::record::{self, HistoryChange, RecordId};
+#[cfg(any(feature = "web", test))]
+use super::record::{HistoryLoad, Record};
 use super::{Deleted, SessionKey};
+#[cfg(any(feature = "web", test))]
+use super::{HistorySaved, SetAside};
 
 /// How much of the site's storage the history may take, in characters.
 /// Browsers give a site about five million; the rest is left for the
@@ -104,6 +112,27 @@ pub(super) trait Aside {
     /// Hold `raw` under `key`, and say whether it took.
     fn set(&self, key: &str, raw: &str) -> bool;
     fn remove(&self, key: &str);
+}
+
+/// One store seen through a reference: two copies of the app on one, as
+/// two tabs share a browser's.
+#[cfg(any(feature = "web", test))]
+impl<T: Aside> Aside for &T {
+    fn keys(&self) -> Result<Vec<String>, ()> {
+        (**self).keys()
+    }
+
+    fn get(&self, key: &str) -> Result<Option<String>, ()> {
+        (**self).get(key)
+    }
+
+    fn set(&self, key: &str, raw: &str) -> bool {
+        (**self).set(key, raw)
+    }
+
+    fn remove(&self, key: &str) {
+        (**self).remove(key);
+    }
 }
 
 /// Which copy set aside under `prefix` `key` is, counting from one: the
@@ -516,6 +545,322 @@ pub(super) fn imported(
     Some((change, next))
 }
 
+/// Where a history kept whole is stored, in a browser's `localStorage`: the
+/// history, the deletions it remembers, and the prefix of what of it is set
+/// aside.
+#[cfg(any(feature = "web", test))]
+pub(super) struct BlobKeys {
+    pub(super) history: &'static str,
+    pub(super) deleted: &'static str,
+    pub(super) aside: &'static str,
+}
+
+/// The history kept whole, taking changes by record
+/// ([`super::Store::change_history`]): how a browser keeps it until its
+/// database holds it, and for good where the database will not open.
+///
+/// Each change reads the whole history, does to it what the change says,
+/// and writes it whole again, as stores did before records, keeping the
+/// newest that fit its room, `budget` ([`store_newest_that_fit`]). Its
+/// sessions are known by where they fall in it ([`record::records_for_blob`]),
+/// and one another copy wrote by what it holds: the same session is the
+/// same JSON wherever it falls. Deletions are remembered by key beside it,
+/// as older builds remember them, and read by them too.
+#[cfg(any(feature = "web", test))]
+pub(super) struct BlobHistory<S> {
+    shelf: S,
+    keys: BlobKeys,
+    budget: usize,
+    /// The history could not be read, nor set aside, when it was last
+    /// read: nothing is written over it until a read says otherwise.
+    held: Cell<bool>,
+    /// What reads set aside, as they could not read it, not yet told of.
+    set_aside: RefCell<Vec<SetAside>>,
+    /// The name of each record this copy stored, by where it falls and by
+    /// the hash of what the history holds of it: so one placed where it
+    /// finished keeps its name when the history is read again, though
+    /// counted from the history alone it falls at its stamp, and one whose
+    /// score reads otherwise today keeps the name it was stored under.
+    placed: RefCell<HashMap<u64, BTreeMap<u64, RecordId>>>,
+    /// The key of every record seen, by id: what tells those deleted.
+    seen_keys: RefCell<HashMap<RecordId, SessionKey>>,
+    /// What the history and its deletions held when last looked at.
+    seen: Cell<Option<u64>>,
+}
+
+#[cfg(any(feature = "web", test))]
+impl<S: Aside> BlobHistory<S> {
+    pub(super) fn new(shelf: S, keys: BlobKeys, budget: usize) -> Self {
+        Self {
+            shelf,
+            keys,
+            budget,
+            held: Cell::new(false),
+            set_aside: RefCell::new(Vec::new()),
+            placed: RefCell::new(HashMap::new()),
+            seen_keys: RefCell::new(HashMap::new()),
+            seen: Cell::new(None),
+        }
+    }
+
+    /// The whole history, by record.
+    pub(super) fn load(&self) -> HistoryLoad {
+        let sessions = self.current();
+        self.seen.set(Some(self.look()));
+        HistoryLoad {
+            sessions: sessions
+                .into_iter()
+                .map(|(record, session)| (record.id, session))
+                .collect(),
+            set_aside: self.take_set_aside(),
+            complete: !self.held.get(),
+            ..HistoryLoad::default()
+        }
+    }
+
+    /// Make `change` to the history, and say what became of it.
+    ///
+    /// Deletions are remembered before the history is written without
+    /// them, and forgotten again if it cannot be. A session deleted is not
+    /// stored again unless the change undoes its deletion.
+    pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
+        let mut held = self.current();
+        if self.held.get() {
+            return HistorySaved::Held;
+        }
+        let mut deleted = self.deleted();
+        let before = deleted.clone();
+        let undone: HashSet<RecordId> = change.unforget.iter().copied().collect();
+        for id in &change.unforget {
+            let key = change
+                .put
+                .iter()
+                .find(|record| record.id == *id)
+                .and_then(|record| record::read_record(&record.json))
+                .map(|session| SessionKey::of(&session))
+                .or_else(|| self.seen_keys.borrow().get(id).cloned());
+            if let Some(key) = key {
+                deleted.retain(|gone| gone.key() != key);
+            }
+        }
+        let gone: HashSet<SessionKey> = deleted.iter().map(Deleted::key).collect();
+        for record in &change.put {
+            // As it reads back: what the history will hold of it.
+            let read = record::read_record(&record.json)
+                .and_then(|session| Some((serde_json::to_string(&session).ok()?, session)));
+            let Some((json, session)) = read else {
+                return HistorySaved::Failed("a session to store could not be read.".into());
+            };
+            self.placed
+                .borrow_mut()
+                .entry(record::fnv64(json.as_bytes()))
+                .or_default()
+                .insert(record.id.order, record.id);
+            let key = SessionKey::of(&session);
+            self.seen_keys.borrow_mut().insert(record.id, key.clone());
+            let kept_already = held.iter().any(|(kept, _)| kept.json == json);
+            if kept_already || (gone.contains(&key) && !undone.contains(&record.id)) {
+                continue;
+            }
+            let at = held.partition_point(|(kept, _)| kept.id < record.id);
+            held.insert(
+                at,
+                (
+                    Record {
+                        id: record.id,
+                        json,
+                    },
+                    session,
+                ),
+            );
+        }
+        for (id, gone) in &change.forget {
+            // By its name here, or else by what it holds, as another copy
+            // named it.
+            let at = held
+                .iter()
+                .position(|(kept, _)| kept.id == *id)
+                .or_else(|| {
+                    held.iter().position(|(kept, session)| {
+                        SessionKey::of(session) == gone.key()
+                            && (kept.id.nonce == id.nonce
+                                || record::fnv64(kept.json.as_bytes()) == id.nonce)
+                    })
+                });
+            if let Some(at) = at {
+                held.remove(at);
+            }
+            if !deleted.contains(gone) {
+                deleted.push(gone.clone());
+            }
+        }
+        // A deletion is remembered before the history goes without it, and
+        // one undone is forgotten only once the session is back.
+        let remembered = deleted.iter().any(|gone| !before.contains(gone));
+        let forgotten = deleted != before && !remembered;
+        if remembered {
+            self.save_deleted(&deleted);
+        }
+        let sessions: Vec<SessionResult> = held.into_iter().map(|(_, session)| session).collect();
+        let saved = store_newest_that_fit(&sessions, self.budget, |raw| {
+            self.shelf.set(self.keys.history, raw)
+        });
+        if saved.kept().is_none() {
+            if remembered {
+                self.save_deleted(&before);
+            }
+            return saved;
+        }
+        if forgotten {
+            self.save_deleted(&deleted);
+        }
+        self.seen.set(Some(self.look()));
+        match saved {
+            HistorySaved::Stored { .. } => HistorySaved::Stored {
+                kept: change.put.len(),
+            },
+            squeezed => squeezed,
+        }
+    }
+
+    /// Every record there is: none where the history cannot be read.
+    pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
+        let held = self.current();
+        self.seen.set(Some(self.look()));
+        (!self.held.get()).then(|| held.into_iter().map(|(record, _)| record.id).collect())
+    }
+
+    /// The records `ids`, each that is there.
+    pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
+        let held = self.current();
+        ids.iter()
+            .map(|id| {
+                held.iter()
+                    .find(|(record, _)| record.id == *id)
+                    .map(|(record, _)| record.clone())
+                    .ok_or(*id)
+            })
+            .collect()
+    }
+
+    /// Which of `ids` were deleted by hand: those whose key the deletions
+    /// remember. One never seen here is taken as not deleted.
+    pub(super) fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
+        let gone: HashSet<SessionKey> = self.deleted().iter().map(Deleted::key).collect();
+        let keys = self.seen_keys.borrow();
+        ids.iter()
+            .copied()
+            .filter(|id| keys.get(id).is_some_and(|key| gone.contains(key)))
+            .collect()
+    }
+
+    /// Whether the history or its deletions changed since last looked at.
+    pub(super) fn changed(&self) -> bool {
+        let now = self.look();
+        self.seen.replace(Some(now)) != Some(now)
+    }
+
+    /// What reads set aside, not yet told of: taken.
+    pub(super) fn take_set_aside(&self) -> Vec<SetAside> {
+        std::mem::take(&mut self.set_aside.borrow_mut())
+    }
+
+    /// What the history and its deletions hold, as one hash.
+    fn look(&self) -> u64 {
+        let held = |key| self.shelf.get(key).ok().flatten().unwrap_or_default();
+        let both = format!("{}\n{}", held(self.keys.history), held(self.keys.deleted));
+        record::fnv64(both.as_bytes())
+    }
+
+    /// The deletions remembered: none, where they cannot be read, which
+    /// costs a session deleted staying, never one kept going.
+    fn deleted(&self) -> Vec<Deleted> {
+        self.shelf
+            .get(self.keys.deleted)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_deleted(&self, deleted: &[Deleted]) {
+        if let Ok(raw) = serde_json::to_string(deleted) {
+            self.shelf.set(self.keys.deleted, &raw);
+        }
+    }
+
+    /// Note `what` to tell of, if it was set aside now, and say whether it
+    /// is kept aside, now or before.
+    fn noted(&self, kept: Kept, what: SetAside) -> bool {
+        if kept == Kept::Now {
+            self.set_aside.borrow_mut().push(what);
+        }
+        kept != Kept::Not
+    }
+
+    /// The history as it is stored, each session by its record. What does
+    /// not read is set aside first, as a browser's store always set it
+    /// aside; where it cannot be, the history is held, and only what reads
+    /// of it comes back.
+    fn current(&self) -> Vec<(Record, SessionResult)> {
+        self.held.set(false);
+        let raw = match self.shelf.get(self.keys.history) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return Vec::new(),
+            Err(()) => {
+                self.held.set(true);
+                return Vec::new();
+            }
+        };
+        let (history, aside) = (self.keys.history, self.keys.aside);
+        let Some(read) = read_history(&raw) else {
+            let kept = set_aside_from(&self.shelf, history, &raw, aside, &raw, None);
+            if !self.noted(kept, SetAside::History { kept: None }) {
+                self.held.set(true);
+            }
+            return Vec::new();
+        };
+        if let Some(unread) = read.unread_json() {
+            let kept = match serde_json::to_string(&read.sessions) {
+                Ok(rest) => set_aside_from(&self.shelf, history, &raw, aside, &unread, Some(&rest)),
+                Err(_) => Kept::Not,
+            };
+            let count = read.unread.len();
+            if !self.noted(kept, SetAside::Sessions { count, kept: None }) {
+                self.held.set(true);
+            }
+        }
+        self.named(read.sessions)
+    }
+
+    /// `sessions`, the history in its order, each by its record: where this
+    /// copy placed it, or else at its stamp, or just after the one before.
+    fn named(&self, sessions: Vec<SessionResult>) -> Vec<(Record, SessionResult)> {
+        let placed = self.placed.borrow();
+        let mut keys = self.seen_keys.borrow_mut();
+        let mut last: Option<u64> = None;
+        let mut named = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            let Ok(json) = serde_json::to_string(&session) else {
+                continue;
+            };
+            let nonce = record::fnv64(json.as_bytes());
+            let floor = last.map_or(0, |last| last.saturating_add(1));
+            let id = placed
+                .get(&nonce)
+                .and_then(|names| names.range(floor..).next().map(|(_, id)| *id))
+                .unwrap_or_else(|| RecordId {
+                    order: session.timestamp.saturating_mul(1000).max(floor),
+                    nonce,
+                });
+            last = Some(id.order);
+            keys.insert(id, SessionKey::of(&session));
+            named.push((Record { id, json }, session));
+        }
+        named
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,5 +1220,219 @@ mod tests {
         // A history every session was deleted from is stored empty.
         let saved = store_newest_that_fit(&[], usize::MAX, |raw| raw == "[]");
         assert_eq!(saved, HistorySaved::Stored { kept: 0 });
+    }
+
+    /// A browser's history kept whole, by the record API, on `shelf`.
+    fn whole_on(shelf: &Shelf) -> BlobHistory<&Shelf> {
+        let keys = BlobKeys {
+            history: "history",
+            deleted: "deleted",
+            aside: "aside",
+        };
+        BlobHistory::new(shelf, keys, usize::MAX)
+    }
+
+    /// A session finished at `at`, scored as this build scores it.
+    fn finished(at: u64) -> SessionResult {
+        record::scored(SessionResult {
+            timestamp: at,
+            ..session(&format!("day {at}"))
+        })
+    }
+
+    fn next_after(session: &SessionResult, newest: Option<RecordId>) -> Record {
+        Record::of(session, |json| {
+            RecordId::next(session.timestamp, newest, json)
+        })
+        .unwrap()
+    }
+
+    /// The history kept whole, as the shelf holds it.
+    fn kept_whole(shelf: &Shelf) -> Vec<u64> {
+        stamps(&parse_sessions(&shelf.get("history").unwrap().unwrap()).unwrap())
+    }
+
+    /// A history kept whole takes changes by record: each session stored
+    /// keeps the name it was stored under, a deletion is remembered beside
+    /// the history as older builds remember it, and undone, the session is
+    /// back where it was.
+    #[test]
+    fn a_history_kept_whole_takes_changes_by_record() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let whole = whole_on(&shelf);
+        let read = whole.load();
+        assert!(read.complete && read.sessions.is_empty());
+        let (first, second) = (finished(1_000), finished(2_000));
+        let one = next_after(&first, None);
+        let two = next_after(&second, Some(one.id));
+        let change = HistoryChange {
+            put: vec![one.clone(), two.clone()],
+            ..HistoryChange::default()
+        };
+        assert_eq!(whole.apply(&change), HistorySaved::Stored { kept: 2 });
+        assert_eq!(whole.listing(), Some(vec![one.id, two.id]));
+        assert_eq!(whole.read(&[two.id]), [Ok(two.clone())]);
+        assert_eq!(kept_whole(&shelf), [1_000, 2_000]);
+        // Deleted: gone from the history, and remembered as older builds
+        // remember it.
+        let gone = Deleted::of(&first, 7);
+        let forget = HistoryChange {
+            forget: vec![(one.id, gone.clone())],
+            ..HistoryChange::default()
+        };
+        assert_eq!(whole.apply(&forget), HistorySaved::Stored { kept: 0 });
+        assert_eq!(kept_whole(&shelf), [2_000]);
+        let remembered: Vec<Deleted> =
+            serde_json::from_str(&shelf.get("deleted").unwrap().unwrap()).unwrap();
+        assert_eq!(remembered, [gone]);
+        assert_eq!(whole.forgotten(&[one.id, two.id]), [one.id]);
+        // Stored again without undoing it: still deleted.
+        whole.apply(&HistoryChange {
+            put: vec![one.clone()],
+            ..HistoryChange::default()
+        });
+        assert_eq!(kept_whole(&shelf), [2_000]);
+        // Undone: back where it was, and no longer remembered.
+        let undo = HistoryChange {
+            put: vec![one.clone()],
+            unforget: vec![one.id],
+            ..HistoryChange::default()
+        };
+        assert_eq!(whole.apply(&undo), HistorySaved::Stored { kept: 1 });
+        assert_eq!(whole.listing(), Some(vec![one.id, two.id]));
+        assert_eq!(shelf.get("deleted").unwrap().as_deref(), Some("[]"));
+        assert!(whole.forgotten(&[one.id]).is_empty());
+    }
+
+    /// A session stored where it finished, as a restore stores it, keeps
+    /// its name here; another tab, which knows it by what it holds, still
+    /// deletes it, and this one is told it was deleted.
+    #[test]
+    fn a_session_restored_into_a_history_kept_whole_keeps_its_name() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let (here, there) = (whole_on(&shelf), whole_on(&shelf));
+        here.load();
+        there.load();
+        let newer = next_after(&finished(9_000), None);
+        here.apply(&HistoryChange {
+            put: vec![newer.clone()],
+            ..HistoryChange::default()
+        });
+        let restored = finished(5_000);
+        let placed = Record::of(&restored, |json| RecordId::placed(5_000, json)).unwrap();
+        here.apply(&HistoryChange {
+            put: vec![placed.clone()],
+            ..HistoryChange::default()
+        });
+        assert_eq!(here.listing(), Some(vec![placed.id, newer.id]));
+        assert!(there.changed());
+        let theirs = there.listing().expect("a listing");
+        assert_eq!(theirs.len(), 2);
+        let gone = Deleted::of(&restored, 7);
+        there.apply(&HistoryChange {
+            forget: vec![(theirs[0], gone)],
+            ..HistoryChange::default()
+        });
+        assert!(here.changed());
+        assert_eq!(here.listing(), Some(vec![newer.id]));
+        assert_eq!(here.forgotten(&[placed.id]), [placed.id]);
+
+        // One whose score reads otherwise today keeps its name too, and is
+        // stored once however often it is stored.
+        let unscored = SessionResult {
+            timestamp: 7_000,
+            score: 1.0,
+            ..session("day 7000")
+        };
+        let stale = Record::of(&unscored, |json| RecordId::placed(7_000, json)).unwrap();
+        let again = HistoryChange {
+            put: vec![stale.clone()],
+            ..HistoryChange::default()
+        };
+        here.apply(&again);
+        here.apply(&again);
+        assert_eq!(here.listing(), Some(vec![stale.id, newer.id]));
+    }
+
+    /// A history kept whole is kept to its room, the newest that fit, as it
+    /// always was; a change it cannot store at all leaves the history and
+    /// the deletions remembered as they were.
+    #[test]
+    fn a_history_kept_whole_keeps_to_its_room() {
+        let sessions: Vec<SessionResult> = (1..=4).map(|n| finished(n * 1_000)).collect();
+        let one = serde_json::to_string(&sessions[0]).unwrap().len();
+        let shelf = Shelf::with_room(usize::MAX);
+        let keys = BlobKeys {
+            history: "history",
+            deleted: "deleted",
+            aside: "aside",
+        };
+        let whole = BlobHistory::new(&shelf, keys, 2 + 2 * one + 1);
+        let mut newest = None;
+        let records: Vec<Record> = sessions
+            .iter()
+            .map(|session| {
+                let record = next_after(session, newest);
+                newest = Some(record.id);
+                record
+            })
+            .collect();
+        let saved = whole.apply(&HistoryChange {
+            put: records.clone(),
+            ..HistoryChange::default()
+        });
+        assert_eq!(
+            saved,
+            HistorySaved::Squeezed {
+                kept: 2,
+                runs: false
+            }
+        );
+        assert_eq!(kept_whole(&shelf), [3_000, 4_000]);
+        // No room even for the newest: nothing written, nothing remembered.
+        let before = shelf.get("history").unwrap();
+        shelf.room.set(one);
+        let change = HistoryChange {
+            put: vec![next_after(&finished(5_000), newest)],
+            forget: vec![(records[2].id, Deleted::of(&sessions[2], 7))],
+            ..HistoryChange::default()
+        };
+        assert!(matches!(whole.apply(&change), HistorySaved::Failed(_)));
+        assert_eq!(shelf.get("history").unwrap(), before);
+        assert!(whole.forgotten(&[records[2].id]).is_empty());
+    }
+
+    /// A history kept whole that does not read is set aside before a
+    /// change goes over it, as it always was, and told of once; one that
+    /// cannot be set aside holds every change back.
+    #[test]
+    fn a_history_kept_whole_that_does_not_read_is_set_aside_first() {
+        let shelf = Shelf::with_room(usize::MAX);
+        shelf.set("history", "{ not a list");
+        let whole = whole_on(&shelf);
+        let read = whole.load();
+        assert_eq!(read.set_aside, [SetAside::History { kept: None }]);
+        assert_eq!(shelf.aside(), [("aside".into(), "{ not a list".into())]);
+        let first = next_after(&finished(1_000), None);
+        let change = HistoryChange {
+            put: vec![first.clone()],
+            ..HistoryChange::default()
+        };
+        assert_eq!(whole.apply(&change), HistorySaved::Stored { kept: 1 });
+        assert_eq!(whole.listing(), Some(vec![first.id]));
+        assert!(whole.take_set_aside().is_empty(), "told of once");
+
+        let shelf = Shelf::with_room(usize::MAX);
+        shelf.set("history", "{ not a list");
+        shelf.unreadable.set(true);
+        let whole = whole_on(&shelf);
+        assert!(!whole.load().complete);
+        assert_eq!(whole.listing(), None);
+        assert_eq!(whole.apply(&change), HistorySaved::Held);
+        shelf.unreadable.set(false);
+        assert_eq!(
+            shelf.get("history").unwrap().as_deref(),
+            Some("{ not a list")
+        );
     }
 }

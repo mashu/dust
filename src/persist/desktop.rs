@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
+use super::files::HistoryFiles;
 use super::legacy::read_history;
+use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SETTINGS_HELD,
     SetAside, Store, newest, over_stored, read_settings_from,
@@ -50,6 +52,8 @@ pub struct DesktopStore {
     set_aside: RefCell<Vec<SetAside>>,
     /// This copy's mark, while its session is marked open.
     open_held: RefCell<Option<HeldMark>>,
+    /// The history by record, under `history/` ([`HistoryFiles`]).
+    history: HistoryFiles,
 }
 
 /// A copy's mark ([`OPEN`]): its id, and the lock it holds on it.
@@ -69,8 +73,10 @@ impl DesktopStore {
 
     /// Files under `root`, and no backups.
     pub fn at(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
         Self {
-            root: root.into(),
+            history: HistoryFiles::at(&root),
+            root,
             backup_folder: None,
             backups_inside: None,
             history_held: Cell::new(false),
@@ -563,6 +569,31 @@ impl Store for DesktopStore {
 
     fn take_cut_off(&self) -> CutOffTaking {
         Box::pin(std::future::ready(self.cut_off()))
+    }
+
+    fn load_history(&self) -> HistoryLoad {
+        self.history.load()
+    }
+
+    /// Made then and there, on the caller's thread.
+    fn change_history(&self, change: HistoryChange) -> Pending<HistorySaved> {
+        done(self.history.apply(&change))
+    }
+
+    fn history_listing(&self) -> Pending<Option<Vec<RecordId>>> {
+        done(self.history.listing())
+    }
+
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+        done(self.history.read(&ids))
+    }
+
+    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
+        done(self.history.forgotten(&ids))
+    }
+
+    fn history_changed(&self) -> bool {
+        self.history.changed()
     }
 }
 
