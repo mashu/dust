@@ -97,7 +97,6 @@ impl RecordId {
     /// A session that takes the place of the record `was`, filled in, say,
     /// by a restore, written as `json`: in its place, and named by what it
     /// holds now.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn beside(was: RecordId, json: &str) -> Self {
         Self {
             order: was.order,
@@ -276,7 +275,6 @@ pub const NEWER_LAYOUT: &str = "A newer version of Dust changed how history is k
 
 impl HistoryNotice {
     /// The notice in words.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn text(&self) -> String {
         match self {
             Self::Unread { count } => {
