@@ -1208,7 +1208,7 @@ mod tests {
             assert_eq!((untimed.timed, untimed.copied), (0, 3));
             assert_eq!(untimed.held_up, 0);
             let copied = cw_core::copy_times(&group.sent, &group.received, times);
-            let poll = u32::from(crate::time::POLL_MS);
+            let poll = crate::time::POLL_MS;
             assert!(
                 copied[0].is_some_and(|first| (400..=400 + poll).contains(&first)),
                 "{copied:?}"
