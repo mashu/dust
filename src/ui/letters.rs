@@ -1,6 +1,7 @@
 //! The Letter accuracy card: how often you copy each character right, how
-//! sure that figure is, which way it is going, and how fast you recognise
-//! it, the ones that need the most work first.
+//! sure that figure is, which way it is going, how fast you recognise it
+//! and how long you pause to copy it, the ones that need the most work
+//! first.
 //!
 //! A row is a bar, drawn as "What comes up next" draws its own: as long as
 //! the share copied right, in the colour of where the character stands,
@@ -8,14 +9,16 @@
 //! the top of where the accuracy likely is. The line under it says the
 //! rest, how fast it is recognised among it, in the colour of its band:
 //! green fast, yellow ICR, orange slow, red too slow, as Settings →
-//! Recognition sets them (docs/recognition.md). A summary above names the
-//! weak, the building and the ones with too few tries to tell, and those
-//! recognised at once (ICR); a character tried once is no longer called
-//! weak.
+//! Recognition sets them (docs/recognition.md). Its copy time, the pause
+//! before its key as you copy a group once it has ended, follows as a
+//! plain figure, with no colour: it holds your typing, and is no
+//! recognition. A summary above names the weak, the building and the ones
+//! with too few tries to tell, and those recognised at once (ICR); a
+//! character tried once is no longer called weak.
 
 use cw_core::{
-    CharacterDiagnostic, MASTERED_MIN_ACCURACY, MasteryStatus, RECOGNITION_MIN_TRIES, Recognition,
-    RecognitionBand, RecognitionBands, TrainingSettings, character_diagnostics,
+    CharacterDiagnostic, CopyTime, MASTERED_MIN_ACCURACY, MasteryStatus, RECOGNITION_MIN_TRIES,
+    Recognition, RecognitionBand, RecognitionBands, TrainingSettings, character_diagnostics,
 };
 use dioxus::prelude::*;
 
@@ -146,8 +149,18 @@ fn letter_label(letter: &CharacterDiagnostic, bands: RecognitionBands, timing: b
             ", recognised in about {} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed",
             millis(ms)
         )),
-        Recognition::Untimed if timing => text.push_str(", not timed yet"),
+        Recognition::Untimed if timing && letter.copy_tries == 0 => {
+            text.push_str(", not timed yet");
+        }
         Recognition::Untimed => {}
+    }
+    match letter.copy_time() {
+        CopyTime::Timed { ms } => text.push_str(&format!(", copy time {}", millis(ms))),
+        CopyTime::Provisional { ms, tries } => text.push_str(&format!(
+            ", copy time about {} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed",
+            millis(ms)
+        )),
+        CopyTime::Untimed => {}
     }
     text
 }
@@ -212,9 +225,14 @@ fn row_view(letter: &CharacterDiagnostic, bands: RecognitionBands, timing: bool)
                             }
                         }
                     },
-                    Recognition::Provisional { ms, tries } => rsx! { " · about {millis(ms)} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed" },
-                    Recognition::Untimed if timing => rsx! { " · not timed yet" },
+                    Recognition::Provisional { ms, tries } => rsx! { " · recognised in about {millis(ms)} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed" },
+                    Recognition::Untimed if timing && letter.copy_tries == 0 => rsx! { " · not timed yet" },
                     Recognition::Untimed => rsx! {},
+                }
+                match letter.copy_time() {
+                    CopyTime::Timed { ms } => rsx! { " · copy time {millis(ms)}" },
+                    CopyTime::Provisional { ms, tries } => rsx! { " · copy time about {millis(ms)} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed" },
+                    CopyTime::Untimed => rsx! {},
                 }
             }
         }
@@ -261,13 +279,14 @@ pub fn LettersTab(settings: TrainingSettings, #[props(into)] sessions: History) 
         .map(|&(letter, band, _)| (letter, band))
         .collect();
     let timed = !banded.is_empty();
-    let timing = letters.iter().any(|letter| letter.recognition_tries > 0);
+    let recognising = letters.iter().any(|letter| letter.recognition_tries > 0);
+    let timing = recognising || letters.iter().any(|letter| letter.copy_tries > 0);
     rsx! {
         div { class: "card stack-sm",
             CardHead {
                 icon: IconName::Letters,
                 title: "Letter accuracy",
-                note: "How often you copy each character right, which way it is going, and how fast you recognise it",
+                note: "How often you copy each character right, which way it is going, how fast you recognise it, and how long you pause to copy it",
                 help: help::letters(bands),
             }
             div { class: "err-summary",
@@ -304,7 +323,7 @@ pub fn LettersTab(settings: TrainingSettings, #[props(into)] sessions: History) 
             }
             if !timing {
                 p { class: "muted", style: "margin: 0; font-size: 0.85rem;",
-                    "How fast you recognise each character is timed from its sound to your key, as you key along: with Lock typing while sending off (Settings → Session shape), or in groups of one character sent once (Sends per group 1×). Key each one as soon as you hear it."
+                    "Each character you key right is timed: keyed along while its group sounds, by how soon after its sound you key it; keyed once its group has ended, by how long you pause before its key as you copy. Keys after a group is sent again are not timed."
                 }
             }
             div { class: "err-legend", aria_hidden: "true",
@@ -315,7 +334,7 @@ pub fn LettersTab(settings: TrainingSettings, #[props(into)] sessions: History) 
                 span { i { class: "err-swatch range" } "where it likely is" }
                 span { i { class: "err-swatch mark" } "mastered from {line:.0}%" }
             }
-            if timing {
+            if recognising {
                 div { class: "err-legend", aria_hidden: "true",
                     span { "Recognised in" }
                     span { i { class: "err-swatch rec-fast" } "ICR, under {bands.fast_ms} ms" }
@@ -358,6 +377,8 @@ mod tests {
             earlier_tries: 0,
             recognition_ms: None,
             recognition_tries: 0,
+            copy_ms: None,
+            copy_tries: 0,
         }
     }
 
@@ -451,6 +472,33 @@ mod tests {
             letter_label(&untimed, bands, true).ends_with(", mastered, not timed yet"),
             "{}",
             letter_label(&untimed, bands, true)
+        );
+    }
+
+    /// A copy time is read out after the recognition time, as a plain
+    /// figure, never in a band: about so far under eight tries. A letter
+    /// with only a copy time is timed, not "not timed yet".
+    #[test]
+    fn a_row_reads_out_its_copy_time_apart() {
+        let bands = RecognitionBands::default();
+        let mut copied = letter(27, 30);
+        copied.copy_tries = 3;
+        copied.copy_ms = Some(452.0);
+        let label = letter_label(&copied, bands, true);
+        assert!(
+            label.ends_with(", mastered, copy time about 450 ms so far, 3 of 8 tries timed"),
+            "{label}"
+        );
+        assert!(!label.contains("not timed yet"), "{label}");
+        let mut both = letter(27, 30);
+        both.recognition_tries = 12;
+        both.recognition_ms = Some(321.0);
+        both.copy_tries = 12;
+        both.copy_ms = Some(452.0);
+        let label = letter_label(&both, bands, true);
+        assert!(
+            label.ends_with(", recognised in 320 ms, fast, ICR, copy time 450 ms"),
+            "{label}"
         );
     }
 

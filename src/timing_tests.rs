@@ -1,16 +1,18 @@
-//! The regression check for characters keyed along and left untimed.
+//! The regression check for characters keyed along, or copied after their
+//! group, and left untimed.
 //!
-//! Each test runs a whole group session the way a learner does, with Lock
-//! typing while sending off: Start on the Practice screen, each character
-//! keyed a moment after its sound reached the ear, in the answer box or on
-//! the keypad, through the screen's own handlers, then Enter, and on to the
-//! Results screen. It then reads what the learner reads: the count of
-//! characters timed on Results, no "not timed" line there, and the session
-//! as the history keeps it, every character timed from its own sound
-//! (docs/recognition.md).
+//! Each test runs a whole group session the way a learner does: Start on
+//! the Practice screen, each character keyed in the answer box or on the
+//! keypad, through the screen's own handlers, then Enter, and on to the
+//! Results screen. Keyed along, each a moment after its sound reached the
+//! ear, every character has a recognition time; copied once its group has
+//! ended, the usual way to copy, every letter has a copy time, the pause
+//! before its key. The tests read what the learner reads: the figure on
+//! Results, no "not timed" line there, the session as the history keeps
+//! it, and Letters (docs/recognition.md).
 //!
-//! A session keyed along that comes out untimed, by a change anywhere from
-//! the screen's key handler through the session, its results and its
+//! A session keyed either way that comes out untimed, by a change anywhere
+//! from the screen's key handler through the session, its results and its
 //! storage, fails here.
 
 use std::rc::Rc;
@@ -20,7 +22,7 @@ use dioxus::prelude::ReadableExt;
 
 use crate::audio::fake::Recorder;
 use crate::persist::Store;
-use crate::testing::{Ui, run, test_settings};
+use crate::testing::{Ui, kpi, run, test_settings};
 use crate::time::{POLL_MS, mono_ms};
 
 /// How a learner keys.
@@ -155,20 +157,28 @@ fn kept(ui: &Ui) -> SessionResult {
         .expect("the session is kept")
 }
 
-/// Every character keyed is timed: on Results, and in the history.
+/// Every character keyed along is recognised: on Results, and in the
+/// history; none of them copy-timed.
 fn every_character_timed(ui: &Ui, keyed: usize) {
     let html = ui.html();
     assert!(keyed > 0);
+    let recognised = kpi(&html, "kpi-recognised");
     assert!(
-        html.contains(&format!("{keyed} timed")),
-        "{keyed} keyed, not all timed: {html}"
+        recognised.contains(&format!(">{keyed} timed<")),
+        "{keyed} keyed, not all timed: {recognised} in {html}"
     );
+    assert!(!ui.shows("kpi-copy"), "copy-timed: {html}");
     assert!(!ui.shows("untimed-hint"), "{html}");
     let session = kept(ui);
     let untimed = cw_core::session_untimed(&session);
     assert_eq!(
-        (untimed.chars, untimed.timed, untimed.held_up),
-        (keyed, keyed, 0),
+        (
+            untimed.chars,
+            untimed.timed,
+            untimed.copied,
+            untimed.held_up
+        ),
+        (keyed, keyed, 0, 0),
         "{:?}",
         session.group_timings
     );
@@ -185,7 +195,240 @@ fn every_character_timed(ui: &Ui, keyed: usize) {
             group.sent,
             group.received
         );
+        assert!(
+            cw_core::copy_times(&group.sent, &group.received, times)
+                .iter()
+                .all(Option::is_none),
+            "{} keyed along, yet copy-timed: {times:?}",
+            group.sent
+        );
     }
+}
+
+/// A group copied after it ended: when its end reached the ear, and when
+/// each of its letters was keyed, on the app's clock.
+#[derive(Debug)]
+struct Copied {
+    heard_end: u64,
+    keys: Vec<u64>,
+}
+
+/// Run a session from the Practice screen's Start to its Results, copying
+/// every group once it has ended, as most learners copy: its first letter
+/// `first_ms` after its end reached the ear, each later one `gaps_ms` after
+/// the one before, in turn, then closing it. What was keyed, group by
+/// group.
+async fn copy_after(
+    ui: &mut Ui,
+    recorder: &Recorder,
+    by: By,
+    first_ms: u64,
+    gaps_ms: &[u64],
+) -> Vec<Copied> {
+    ui.click("btn-start-training");
+    assert_eq!(ui.screen(), "training", "{}", ui.html());
+    let mut copied: Vec<Copied> = Vec::new();
+    let mut sends_seen = 0;
+    let mut gap = gaps_ms.iter().cycle();
+    let deadline = mono_ms() + 120_000;
+    while ui.screen() != "results" {
+        assert!(mono_ms() < deadline, "no results: {}", ui.html());
+        let starts = recorder.starts();
+        let Some(send) = starts.get(sends_seen).cloned() else {
+            ui.advance(u64::from(POLL_MS)).await;
+            continue;
+        };
+        sends_seen += 1;
+        let Some(SessionPhase::Playing { index }) = phase(ui) else {
+            continue;
+        };
+        if index < copied.len() {
+            continue;
+        }
+        let text = sent(ui, index);
+        let last_end = send
+            .plan
+            .wanted
+            .chars
+            .last()
+            .map_or(0, |span| (span.end_sec * 1_000.0).round() as u64);
+        let heard_end =
+            send.at.0 + (recorder.latency_sec.get() * 1_000.0).round() as u64 + last_end;
+        // Its sound over and the box waiting for its answer.
+        while !matches!(phase(ui), Some(SessionPhase::AwaitingAnswer { index: open }) if open == index)
+        {
+            assert!(mono_ms() < deadline, "never answered: {}", ui.html());
+            ui.advance(u64::from(POLL_MS)).await;
+        }
+        until(ui, heard_end + first_ms).await;
+        let mut keys = Vec::new();
+        let mut typed = String::new();
+        for letter in text.chars() {
+            if let Some(&before) = keys.last() {
+                until(ui, before + gap.next().copied().unwrap_or(200)).await;
+            }
+            keys.push(mono_ms());
+            typed.push(letter);
+            key(ui, by, index, letter, &typed);
+        }
+        copied.push(Copied { heard_end, keys });
+        if matches!(phase(ui), Some(SessionPhase::AwaitingAnswer { index: open }) if open == index)
+        {
+            confirm(ui, by, index);
+        }
+    }
+    copied
+}
+
+/// Every letter copied after its group is copy-timed: on Results, apart
+/// from any recognition time, nothing called untimed, and in the history,
+/// each pause what it was keyed with: the first from the group's end as
+/// heard, each later one from the key before.
+fn every_letter_copy_timed(ui: &Ui, copied: &[Copied], locked: bool) {
+    let html = ui.html();
+    let n: usize = copied.iter().map(|group| group.keys.len()).sum();
+    assert!(n > 0);
+    let session = kept(ui);
+    let copy = cw_core::session_copy(&session).expect("a copy time");
+    assert_eq!(copy.timed, n, "{:?}", session.group_timings);
+    let tile = kpi(&html, "kpi-copy");
+    assert!(tile.contains(&format!(">{n} timed<")), "{tile}");
+    assert!(
+        tile.contains(&format!(">{:.0} ms<", copy.median_ms)),
+        "{tile}"
+    );
+    assert!(!ui.shows("kpi-recognised"), "{html}");
+    assert!(!ui.shows("untimed-hint"), "{html}");
+    assert!(!html.contains("Nothing was timed"), "{html}");
+    let untimed = cw_core::session_untimed(&session);
+    assert_eq!(
+        (
+            untimed.chars,
+            untimed.timed,
+            untimed.copied,
+            untimed.held_up
+        ),
+        (n, 0, n, 0),
+        "{:?}",
+        session.group_timings
+    );
+    assert_eq!(session.typing_locked, locked);
+    assert_eq!(session.groups.len(), copied.len());
+    for ((group, timing), keyed) in session
+        .groups
+        .iter()
+        .zip(&session.group_timings)
+        .zip(copied)
+    {
+        let times = timing
+            .char_times
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} kept no keys: {timing:?}", group.sent));
+        assert_eq!(timing.untimed, None, "{timing:?}");
+        assert_eq!(times.box_open, !locked, "{times:?}");
+        assert!(cw_core::copied_after(times), "{times:?}");
+        assert!(
+            cw_core::recognise(&group.sent, &group.received, times)
+                .iter()
+                .all(Option::is_none),
+            "{} copied, yet recognised: {times:?}",
+            group.sent
+        );
+        let took = cw_core::copy_times(&group.sent, &group.received, times);
+        let first = took[0].expect("its first letter copy-timed");
+        let want = keyed.keys[0] - keyed.heard_end;
+        assert!(
+            u64::from(first).abs_diff(want) <= 5,
+            "first {first} ms, keyed {want} ms after: {times:?}"
+        );
+        for (at, pause) in took.iter().enumerate().skip(1) {
+            assert_eq!(
+                *pause,
+                Some(u32::try_from(keyed.keys[at] - keyed.keys[at - 1]).expect("a pause")),
+                "{}: {took:?}",
+                group.sent
+            );
+        }
+    }
+}
+
+/// The pauses between the letters a learner copies: as they come, uneven.
+const GAPS: [u64; 4] = [180, 260, 150, 300];
+
+/// Groups of three at 20 WPM, each copied half a second after it ended,
+/// the usual way to copy: every letter has a copy time, on Results and in
+/// the history, and Letters shows each one's, none "not timed yet".
+#[test]
+fn copied_after_each_group_on_a_keyboard_every_letter_has_a_copy_time() {
+    run(|| async {
+        let (mut ui, recorder) = Ui::app_with_settings(along(4, 3, 20.0));
+        let copied = copy_after(&mut ui, &recorder, By::Keyboard, 500, &GAPS).await;
+        assert_eq!(copied.len(), 4);
+        every_letter_copy_timed(&ui, &copied, false);
+        let letters: std::collections::BTreeSet<char> = kept(&ui)
+            .groups
+            .iter()
+            .flat_map(|group| group.sent.chars().collect::<Vec<_>>())
+            .collect();
+        ui.click("btn-back");
+        ui.click("nav-stats");
+        ui.click("seg-letters");
+        let html = ui.html();
+        for letter in letters {
+            let id = format!("id=\"letter-{}\"", letter.to_ascii_lowercase());
+            let at = html
+                .find(&id)
+                .unwrap_or_else(|| panic!("no {id} in {html}"));
+            // Its own row: to the next letter's, or the end of the list.
+            let row = &html[at..];
+            let row = &row[..row[1..]
+                .find("id=\"letter-")
+                .map_or(row.len(), |next| next + 1)];
+            assert!(
+                row.contains(" · copy time"),
+                "{letter} has no copy time: {row}"
+            );
+        }
+        assert!(!html.contains("not timed yet"), "{html}");
+    });
+}
+
+/// The same on the keypad, as on a phone or tablet.
+#[test]
+fn copied_after_each_group_on_the_keypad_every_letter_has_a_copy_time() {
+    run(|| async {
+        let (mut ui, recorder) = Ui::app_with_settings(along(4, 3, 20.0));
+        let copied = copy_after(&mut ui, &recorder, By::Keypad, 500, &GAPS).await;
+        assert_eq!(copied.len(), 4);
+        every_letter_copy_timed(&ui, &copied, false);
+    });
+}
+
+/// An output that says its sound reaches the ear later: the first letter's
+/// pause is from when the group's end was heard.
+#[test]
+fn copied_after_through_an_output_with_latency_is_timed_from_when_it_was_heard() {
+    run(|| async {
+        let (mut ui, recorder) = Ui::app_with_settings(along(4, 3, 20.0));
+        recorder.latency_sec.set(0.15);
+        let copied = copy_after(&mut ui, &recorder, By::Keyboard, 500, &GAPS).await;
+        every_letter_copy_timed(&ui, &copied, false);
+    });
+}
+
+/// With Lock typing while sending on, each group is typed once it has been
+/// sent: every letter has a copy time, and nothing offers to turn the lock
+/// off.
+#[test]
+fn with_lock_typing_on_each_group_copied_after_has_a_copy_time() {
+    run(|| async {
+        let mut settings = along(4, 3, 20.0);
+        settings.playback.lock_input_during_group_playback = true;
+        let (mut ui, recorder) = Ui::app_with_settings(settings);
+        let copied = copy_after(&mut ui, &recorder, By::Keyboard, 500, &GAPS).await;
+        every_letter_copy_timed(&ui, &copied, true);
+        assert!(!ui.shows("btn-turn-off-lock-typing"), "{}", ui.html());
+    });
 }
 
 /// Groups of three at 20 WPM, each character keyed a quarter of a second

@@ -1437,17 +1437,22 @@ fn typed_after(sent: &[(&str, &str)], late: u32) -> SessionResult {
 }
 
 /// A session with nothing timed says why, and what would have it timed:
-/// the lock it ran with, when its groups were longer than a character, and
-/// a button to turn it off while the settings still have it on.
+/// the lock it ran with, when its groups were longer than a character and
+/// sent more than once, the box opening only after the last send, and a
+/// button to turn it off while the settings still have it on. Sent once, a
+/// locked group is copied after, and the lock is no reason.
 #[test]
 fn results_with_nothing_timed_say_why() {
-    let locked = crate::testing::stored_session("2026-10-22", &[("KM", "KM"), ("RS", "RS")]);
+    let mut locked = crate::testing::stored_session("2026-10-22", &[("KM", "KM"), ("RS", "RS")]);
     assert!(locked.typing_locked, "run with the test settings' lock");
+    for timing in &mut locked.group_timings {
+        timing.sends = 2;
+    }
     let html = results_of(locked.clone(), true);
     assert!(html.contains("none timed"), "{html}");
     for shown in [
-        "Nothing was timed: Lock typing while sending was on",
-        "turn it off and key each one as you hear it",
+        "Nothing was timed: Lock typing while sending was on, so the box opened only after each group's last send",
+        "Turn it off and key each group before it is sent again",
         r#"id="btn-turn-off-lock-typing""#,
         "Turn off Lock typing",
     ] {
@@ -1455,17 +1460,32 @@ fn results_with_nothing_timed_say_why() {
     }
     // Turned off since: said so, and nothing to press.
     let html = results_of(locked, false);
-    assert!(html.contains("It is off now"), "{html}");
+    assert!(
+        html.contains("It is off now: key each group before it is sent again"),
+        "{html}"
+    );
     assert!(!html.contains("btn-turn-off-lock-typing"), "{html}");
+
+    // Locked, each group sent once, with no key: the lock is no reason.
+    let once = crate::testing::stored_session("2026-10-22", &[("KM", "KM"), ("RS", "RS")]);
+    let html = results_of(once, true);
+    assert!(!html.contains("Lock typing"), "{html}");
+    assert!(!html.contains("btn-turn-off-lock-typing"), "{html}");
+    assert!(
+        html.contains("Nothing was timed: a character is timed only when you key it yourself"),
+        "{html}"
+    );
 
     // Run without it, whatever the settings say now.
     let mut open = crate::testing::stored_session("2026-10-22", &[("KM", "KM")]);
     open.typing_locked = false;
     let html = results_of(open, true);
-    assert!(html.contains("key each character as you hear it"), "{html}");
-    assert!(html.contains("while the group is still sounding"), "{html}");
     assert!(
-        html.contains("within half a second of that character"),
+        html.contains("keyed along while its group sounds, by how soon after its sound you key it"),
+        "{html}"
+    );
+    assert!(
+        html.contains("keyed once the group has ended, by how long you pause before its key"),
         "{html}"
     );
     assert!(!html.contains("before it ends"), "{html}");
@@ -1481,40 +1501,39 @@ fn results_with_nothing_timed_say_why() {
     assert!(!html.contains("Lock typing"), "{html}");
 }
 
-/// Typed after each group was sent, the results say how late the first
-/// key came, as measured, and what would have the group timed; and they
-/// say so too when only a few characters were timed.
+/// Typed after each group was sent, every letter has a copy time: the
+/// results show it in a tile of its own, and say nothing went untimed. A
+/// session with both shows both, never averaged.
 #[test]
-fn results_say_how_late_the_first_key_came() {
+fn results_show_copy_time_for_groups_typed_after_them() {
+    use crate::testing::kpi;
+    // KM and RS copied 400 ms after each ended, the second letter 150 ms
+    // after the first: 400, 150, 400, 150.
     let html = results_of(typed_after(&[("KM", "KM"), ("RS", "RS")], 400), true);
-    assert!(
-        html.contains(
-            "Nothing was timed: in every group, your first key came about 0.4 s after the group had ended."
-        ),
-        "{html}"
-    );
-    assert!(
-        html.contains(
-            "only when you key its first character while the group is still sounding, or, for a short group, within half a second of that character"
-        ),
-        "{html}"
-    );
-    assert!(!html.contains("Lock typing"), "{html}");
+    let copy = kpi(&html, "kpi-copy");
+    for shown in ["Copy time", "275 ms", "4 timed"] {
+        assert!(copy.contains(shown), "no {shown:?} in {copy}");
+    }
+    assert!(html.contains(r#"class="grid-3""#), "{html}");
+    assert!(!html.contains("kpi-recognised"), "{html}");
+    assert!(!html.contains("untimed-hint"), "{html}");
+    assert!(!html.contains("Nothing was timed"), "{html}");
 
-    // Two groups typed late and one of a character timed: one character
-    // of five is under a third, and still said.
+    // Two groups copied 1.2 s after they ended and one of a character
+    // keyed 300 ms after its sound: both figures, side by side.
     let mut some = typed_after(&[("KM", "KM"), ("RS", "RS"), ("K", "K")], 1_200);
     if let Some(times) = some.group_timings[2].char_times.as_mut() {
         times.keys = vec![Some(800)];
     }
     let html = results_of(some.clone(), true);
-    assert!(html.contains("1 timed"), "{html}");
-    assert!(
-        html.contains(
-            "Only 1 of 5 characters was timed: in 2 of 3 groups, your first key came about 1.2 s after the group had ended."
-        ),
-        "{html}"
-    );
+    assert!(html.contains(r#"class="grid-4""#), "{html}");
+    let recognised = kpi(&html, "kpi-recognised");
+    assert!(recognised.contains("300 ms"), "{recognised}");
+    assert!(recognised.contains("1 timed"), "{recognised}");
+    let copy = kpi(&html, "kpi-copy");
+    assert!(copy.contains("675 ms"), "{copy}");
+    assert!(copy.contains("4 timed"), "{copy}");
+    assert!(!html.contains("untimed-hint"), "{html}");
     // A third or more timed: nothing to say.
     some.groups.truncate(1);
     some.groups[0] = GroupResult {
@@ -1530,7 +1549,8 @@ fn results_say_how_late_the_first_key_came() {
 /// not known, and that is no fault of your typing.
 #[test]
 fn results_say_when_the_sound_was_held_up() {
-    let mut held = typed_after(&[("KM", "KM"), ("RS", "RS"), ("UK", "UK")], 400);
+    let mut held = typed_after(&[("KM", "KM"), ("RS", "RS"), ("UK", "XX")], 400);
+    let kept = held.group_timings[1].char_times.clone();
     for timing in &mut held.group_timings[..2] {
         timing.char_times = None;
         timing.untimed = Some(cw_core::Untimed::HeldUp);
@@ -1542,11 +1562,14 @@ fn results_say_when_the_sound_was_held_up() {
         ),
         "{html}"
     );
-    // In fewer than half, what was measured of the rest is said instead.
+    // In fewer than half, held up says nothing: here the group not held
+    // up was copied after, two of six characters timed, a third.
     held.group_timings[1].untimed = None;
+    held.group_timings[1].char_times = kept;
     let html = results_of(held, true);
     assert!(!html.contains("held up"), "{html}");
-    assert!(html.contains("your first key came about 0.4 s"), "{html}");
+    assert!(!html.contains("untimed-hint"), "{html}");
+    assert!(html.contains(r#"id="kpi-copy""#), "{html}");
 }
 
 /// Keys only once a group was sent again are not timed, and the results
@@ -2216,6 +2239,38 @@ fn a_locked_group_of_one_character_is_not_called_untimed() {
                 current: 0,
                 total: 2,
                 groups: vec!["K".to_string(), String::new()],
+                inputs: vec![String::new(), String::new()],
+                confirmed: vec![false, false],
+                focused: 0,
+                playing: true,
+                locked: true,
+                repeat_total: 1,
+                repeat_done: 0,
+                on_change: move |_: TypedAnswer| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(
+        html.contains(">Listen — the box opens when it ends.<"),
+        "{html}"
+    );
+    assert!(!html.contains("not timed"), "{html}");
+}
+
+/// A group of more than one character sent once with typing locked is
+/// copied after it ends and given a copy time: the hint says only when the
+/// box opens.
+#[test]
+fn a_locked_group_sent_once_is_not_called_untimed() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), String::new()],
                 inputs: vec![String::new(), String::new()],
                 confirmed: vec![false, false],
                 focused: 0,
@@ -3089,7 +3144,9 @@ mod interactions {
         assert!(line("letter-s").contains(r#"class="rec-chip rec-too-slow">900 ms<"#));
         // What the row shows, not its label: " · " starts only the
         // visible text, where the label has ", ".
-        assert!(line("letter-u").contains(" · about 410 ms so far, 3 of 8 tries timed"));
+        assert!(
+            line("letter-u").contains(" · recognised in about 410 ms so far, 3 of 8 tries timed")
+        );
         assert!(line("letter-e").contains(" · not timed yet"));
         let e = cw_core::character_diagnostics(&timed_history())
             .into_iter()
@@ -3100,6 +3157,87 @@ mod interactions {
         assert!(ui.has(r#"class="err-chip rec-fast group-text">K<"#));
         assert!(ui.has(r#"class="err-chip rec-icr group-text">M<"#));
         assert!(ui.has("ICR, under 600"));
+    }
+
+    /// `groups` groups of `sent`, each copied after it ended: its letters
+    /// end at 250 and 500 ms, and are keyed at 900 and 1050 ms, 400 ms after
+    /// the group's end and 150 ms after the first.
+    fn copied_session(date: &str, sent: &str, groups: usize) -> SessionResult {
+        let mut session = stored_session(date, &vec![(sent, sent); groups]);
+        session.typing_locked = false;
+        for timing in &mut session.group_timings {
+            timing.char_times = Some(cw_core::CharTimes {
+                ends: vec![250, 500],
+                keys: vec![Some(900), Some(1_050)],
+                corrected: Vec::new(),
+                latency_ms: 0,
+                box_open: true,
+            });
+        }
+        session
+    }
+
+    /// KM copied after it ended eight times, RS three times, and E sent once
+    /// on its own with no key.
+    #[component]
+    fn CopiedLettersHarness() -> Element {
+        let mut history = vec![
+            copied_session("2026-09-01", "KM", 8),
+            copied_session("2026-09-02", "RS", 3),
+            stored_session("2026-09-03", &[("E", "E")]),
+        ];
+        for (timestamp, session) in history.iter_mut().enumerate() {
+            session.timestamp = timestamp as u64 + 1;
+        }
+        rsx! {
+            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions: history }
+        }
+    }
+
+    /// Each letter copied after its group shows its copy time, a plain
+    /// figure with no band or colour; about so far under eight tries; and
+    /// one never timed either way says so. Nothing of the recognition
+    /// bands shows with none recognised.
+    #[test]
+    fn a_copied_after_letter_shows_its_copy_time() {
+        let ui = Ui::new(CopiedLettersHarness, ());
+        let line = |id: &str| {
+            let html = ui.html();
+            let at = html.find(&format!("id=\"{id}\"")).expect("the row");
+            let row = &html[at..];
+            row[..row.find("</div><div").unwrap_or(row.len())].to_string()
+        };
+        assert!(
+            line("letter-k").contains(" · copy time 400 ms"),
+            "{}",
+            line("letter-k")
+        );
+        assert!(
+            line("letter-m").contains(" · copy time 150 ms"),
+            "{}",
+            line("letter-m")
+        );
+        assert!(
+            line("letter-r").contains(" · copy time about 400 ms so far, 3 of 8 tries timed"),
+            "{}",
+            line("letter-r")
+        );
+        assert!(
+            line("letter-e").contains(" · not timed yet"),
+            "{}",
+            line("letter-e")
+        );
+        assert!(!line("letter-k").contains("not timed yet"));
+        let html = ui.html();
+        assert!(!html.contains("rec-chip"), "a copy time in a band: {html}");
+        assert!(!html.contains(">Recognised in<"), "{html}");
+        assert!(!html.contains("Instant (ICR)"), "{html}");
+        assert!(
+            !html.contains("keyed along while its group sounds"),
+            "{html}"
+        );
+        let k = ui.input_tag("letter-k");
+        assert!(k.contains(", copy time 400 ms\""), "{k}");
     }
 
     /// KM answered after each send, nothing keyed along, as it ships.
@@ -3116,7 +3254,11 @@ mod interactions {
     #[test]
     fn untimed_letters_say_how_to_be_timed_and_show_no_time() {
         let ui = Ui::new(UntimedLettersHarness, ());
-        assert!(ui.has("as you key along"), "{}", ui.html());
+        assert!(
+            ui.has("keyed along while its group sounds"),
+            "{}",
+            ui.html()
+        );
         assert!(!ui.has("not timed yet"));
         assert!(!ui.has(" ms"), "a time with nothing timed: {}", ui.html());
         assert!(

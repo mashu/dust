@@ -1157,8 +1157,9 @@ mod tests {
     }
 
     /// Typed whole only once the group had been sent, the box open, its
-    /// first key 400 ms after the group ended: nothing is timed, but what
-    /// was keyed is kept, and says how late the first key came.
+    /// first key 400 ms after the group ended: nothing is recognised, but
+    /// what was keyed is kept, and each letter has a copy time: the first
+    /// how late it came, each other its pause after the key before it.
     #[test]
     fn typing_after_the_group_keeps_how_late_its_first_key_came() {
         run(|| async {
@@ -1204,8 +1205,20 @@ mod tests {
                 "{late} ms: {times:?}"
             );
             let untimed = cw_core::session_untimed(&result);
-            assert_eq!(untimed.first_key_late_ms, Some(late as f64));
+            assert_eq!((untimed.timed, untimed.copied), (0, 3));
             assert_eq!(untimed.held_up, 0);
+            let copied = cw_core::copy_times(&group.sent, &group.received, times);
+            let poll = u32::from(crate::time::POLL_MS);
+            assert!(
+                copied[0].is_some_and(|first| (400..=400 + poll).contains(&first)),
+                "{copied:?}"
+            );
+            for pause in &copied[1..] {
+                assert!(
+                    pause.is_some_and(|pause| (150 - poll..=150 + poll).contains(&pause)),
+                    "{copied:?}"
+                );
+            }
         });
     }
 

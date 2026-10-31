@@ -699,8 +699,9 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(short_session());
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "training");
-            // Groups of two characters, typing locked as they are sent.
-            assert!(ui.has("Listen — typing locked, so not timed."));
+            // Groups of two characters, typing locked as they are sent, once
+            // each: copied after, and given a copy time.
+            assert!(ui.has("Listen — the box opens when it ends."));
             // The nav is out of the way while a session runs.
             assert!(!ui.has("bottom-nav"));
             assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
@@ -715,12 +716,17 @@ mod ui_tests {
     }
 
     /// A session run with Lock typing while sending on, its groups of two
-    /// characters typed once each was sent, timed nothing: its results say
-    /// the lock is why, and turn it off at a press, stored at once.
+    /// characters each sent twice and typed once the last send was over,
+    /// timed nothing: keys after a group is sent again are not timed. Its
+    /// results say the lock is why, and turn it off at a press, stored at
+    /// once.
     #[test]
     fn a_locked_session_turns_the_lock_off_from_its_results() {
         run(|| async {
-            let (mut ui, recorder) = awaiting_answer(short_session()).await;
+            let mut settings = short_session();
+            settings.playback.group_repeat_min = 2;
+            settings.playback.group_repeat_max = 2;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
             let sent = recorder.texts().first().cloned().expect("a group was sent");
             ui.type_into("group-input-0", &sent);
             assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
@@ -833,7 +839,7 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(settings);
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "training");
-            assert!(ui.has("Listen — typing locked, so not timed."));
+            assert!(ui.has("Listen — the box opens when it ends."));
             // Locked, but neither read-only nor disabled: either would take
             // the focus away, and a phone's keyboard with it.
             let sending = ui.input_tag("group-input-0");
