@@ -211,15 +211,28 @@ fn keyed_along_on_the_keypad_every_character_is_timed() {
     });
 }
 
-/// Short groups sent fast, keyed as soon as a learner who keeps up does:
-/// each first key after its group has ended, within the along floor.
+/// Short groups sent fast, each first key coming just after its group has
+/// ended, as a learner who keeps up keys a group gone by before its first
+/// character is: still typed along, every character timed. Two characters
+/// of K and M at 30 WPM, sent evenly, leave 400 to 480 ms of the group
+/// after its first character; keyed 490 ms after each, the first key comes
+/// 10 to 90 ms after the group, inside the slack it is allowed.
 #[test]
-fn short_fast_groups_keyed_along_are_timed() {
+fn short_fast_groups_keyed_just_after_they_end_are_timed() {
     run(|| async {
-        let (mut ui, recorder) = Ui::app_with_settings(along(5, 2, 30.0));
-        let keyed = key_along(&mut ui, &recorder, By::Keyboard, 300).await;
+        let mut settings = along(5, 2, 30.0);
+        settings.playback.fist_variation = 0.0;
+        let (mut ui, recorder) = Ui::app_with_settings(settings);
+        let keyed = key_along(&mut ui, &recorder, By::Keyboard, 490).await;
         assert_eq!(keyed, 10);
         every_character_timed(&ui, keyed);
+        for timing in &kept(&ui).group_timings {
+            let times = timing.char_times.as_ref().expect("timed");
+            assert!(
+                cw_core::first_key_late_ms(times).is_some_and(|late| late > 0),
+                "keyed while the group still sounded: {times:?}"
+            );
+        }
     });
 }
 

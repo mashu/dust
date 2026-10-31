@@ -211,7 +211,9 @@ async function main() {
       }
       const hint = document.querySelector('#untimed-hint');
       return {
-        text: document.querySelector('#screen-results').innerText,
+        // As written, not as styled: the stylesheet sets some labels in
+        // capitals, which innerText would give.
+        text: document.querySelector('#screen-results').textContent,
         hint: hint && hint.innerText,
         keyed: window.__ear.keyed,
         stored,
@@ -221,18 +223,27 @@ async function main() {
     const problems = [];
     if (!session) problems.push('no session in the browser database');
     if (seen.hint) problems.push(`Results says: ${seen.hint}`);
+    // Characters in groups the ear here keyed exactly right: every one is
+    // timed. A group it misread may be timed in part, as the app times
+    // only keys that line up with what was sent.
     let right = 0;
+    let exact = 0;
     for (const [i, group] of (session ? session.groups : []).entries()) {
       const timing = session.groupTimings[i] || {};
       if (timing.untimed) problems.push(`group ${i + 1} (${group.sent}) went untimed: ${timing.untimed}`);
       if (!timing.charTimes) problems.push(`group ${i + 1} (${group.sent}) kept no character times`);
-      [...group.sent].forEach((ch, at) => { if (group.received[at] === ch) right += 1; });
+      if (group.received === group.sent) {
+        exact += 1;
+        right += [...group.sent].length;
+      }
     }
+    const groups = session ? session.groups.length : 0;
     const chars = session ? session.groups.reduce((n, g) => n + [...g.sent].length, 0) : 0;
-    if (right < chars * 0.8) problems.push(`the ear here read only ${right} of ${chars} characters right`);
-    const timed = Number((seen.text.match(/(\d+) timed/) || [])[1] || 0);
-    if (timed !== right) problems.push(`Results times ${timed} characters, of ${right} keyed right along`);
-    console.log(`Keyed ${right} of ${chars} characters right along; Results: ${timed} timed.`);
+    if (groups < GROUPS) problems.push(`only ${groups} of ${GROUPS} groups were kept`);
+    if (exact < groups * 0.8) problems.push(`the ear here keyed only ${exact} of ${groups} groups right`);
+    const timed = Number((seen.text.match(/(\d+)\s*timed/i) || [])[1] || 0);
+    if (timed < right) problems.push(`Results times ${timed} characters, of ${right} in groups keyed right along`);
+    console.log(`Keyed ${exact} of ${groups} groups (${right} of ${chars} characters) right along; Results: ${timed} timed.`);
     if (problems.length) {
       failed = problems;
       console.log(JSON.stringify({ results: seen.text, keyed: seen.keyed, session }, null, 1));
