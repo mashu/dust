@@ -8,9 +8,9 @@ use std::rc::Rc;
 
 use cw_core::{SessionResult, TrainingSettings};
 
-use crate::persist::Store;
 use crate::persist::backup::{read_backup, write_backup};
 use crate::persist::memory::MemoryStore;
+use crate::persist::{OpenSession, Store};
 use crate::testing::{Ui, run, stored_session, test_settings};
 
 /// `count` sessions a day apart, oldest first, the way the store keeps
@@ -394,6 +394,47 @@ fn a_history_past_androids_own_backup_says_to_save_a_backup() {
         store.device_backup_outgrown.set(true);
         store.no_backups.set(true);
         assert!(!open(store, &history(3)).has(said));
+    });
+}
+
+/// Where the history stored cannot be read, a backup holds every session
+/// shown all the same, the one the store had no room for among them: a
+/// backup is how that one is kept safe meanwhile. Saving one used to fail,
+/// saying the history stored here could not be read.
+#[test]
+fn a_backup_holds_every_session_shown_where_the_store_cannot_be_read() {
+    run(|| async {
+        let store = MemoryStore::default();
+        store.full.set(true);
+        // Cut off as the app stopped, finished and not yet stored: kept as
+        // the app starts, and not stored for want of room.
+        let mut kept = stored_session("2026-09-20", &[("KM", "KM")]);
+        kept.timestamp = 20 * 86_400_000;
+        store.mark_open(Some(OpenSession {
+            unstored: vec![kept.clone()],
+            over: true,
+            ..OpenSession::starting(false, kept.timestamp)
+        }));
+        let mut ui = open(store, &history(3));
+        assert_eq!(stored_dates(&ui).len(), 3, "the fourth only shown");
+        ui.store.unlistable.set(true);
+
+        ui.click("btn-save-a-backup");
+        let files = ui.store.backup_files.borrow().clone();
+        assert_eq!(files.len(), 1);
+        let (name, contents) = &files[0];
+        let backup = read_backup(contents).expect("a backup");
+        let dates: Vec<String> = backup.sessions.into_iter().map(|s| s.date).collect();
+        assert_eq!(
+            dates,
+            ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-20"]
+        );
+        assert!(
+            ui.has(&format!("Backup saved as {name}, in your downloads.")),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("could not be saved"));
     });
 }
 

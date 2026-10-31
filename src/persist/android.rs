@@ -13,7 +13,7 @@
 //! own folder before that.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use dioxus::mobile::wry::prelude::{JNIEnv, JObject, jni};
@@ -83,7 +83,7 @@ pub fn backups_inside_app() -> bool {
     version.is_ok_and(|version| version < ANDROID_10)
 }
 
-use super::backup::BackedUp;
+use super::backup::{BackedUp, NotSaved};
 use super::desktop::save_streamed;
 
 /// `Build.VERSION_CODES.Q`, Android 10: the first that adds to Downloads
@@ -101,13 +101,12 @@ const DOWNLOADS: &str = "Download";
 /// a Java array, which a long history would not fit.
 pub fn save_backup(
     name: &str,
-    write: impl FnOnce(&mut dyn Write) -> io::Result<BackedUp>,
-) -> Result<(String, BackedUp), String> {
+    write: impl FnOnce(&mut dyn Write) -> Result<BackedUp, NotSaved>,
+) -> Result<(String, BackedUp), NotSaved> {
     let android = ndk_context::android_context();
     // Safety: as in `files_dir`.
-    let vm =
-        unsafe { jni::JavaVM::from_raw(android.vm().cast()) }.map_err(|err| err.to_string())?;
-    let mut env = vm.attach_current_thread().map_err(|err| err.to_string())?;
+    let vm = unsafe { jni::JavaVM::from_raw(android.vm().cast()) }.map_err(failed)?;
+    let mut env = vm.attach_current_thread().map_err(failed)?;
     // Safety: as in `files_dir`.
     let activity = unsafe { JObject::from_raw(android.context().cast()) };
     let saved = save(&mut env, &activity, name, write);
@@ -118,27 +117,35 @@ pub fn save_backup(
     saved
 }
 
+/// Why a backup was not saved: what stopped it, in words.
+fn failed(err: impl std::fmt::Display) -> NotSaved {
+    NotSaved::Failed(err.to_string())
+}
+
+/// Save it, as [`save_backup`] says. Where `write` gives up, as it does
+/// for a history it cannot read all of, nothing is left in the cache or
+/// in Downloads.
 fn save(
     env: &mut JNIEnv,
     activity: &JObject,
     name: &str,
-    write: impl FnOnce(&mut dyn Write) -> io::Result<BackedUp>,
-) -> Result<(String, BackedUp), String> {
+    write: impl FnOnce(&mut dyn Write) -> Result<BackedUp, NotSaved>,
+) -> Result<(String, BackedUp), NotSaved> {
     let version = env
         .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
         .and_then(|value| value.i())
-        .map_err(|err| err.to_string())?;
+        .map_err(failed)?;
     if version >= ANDROID_10 {
-        let cache = cache_dir(env, activity).map_err(|err| err.to_string())?;
-        let (kept, backed) = save_streamed(&cache, name, write).map_err(|err| err.to_string())?;
+        let cache = cache_dir(env, activity).map_err(failed)?;
+        let (kept, backed) = save_streamed(&cache, name, write)?;
         let written = cache.join(kept);
-        let saved = into_downloads(env, activity, name, &written).map_err(|err| err.to_string());
+        let saved = into_downloads(env, activity, name, &written).map_err(failed);
         // Copied or not, the copy in the cache goes.
         let _ = fs::remove_file(&written);
         return saved.map(|saved| (format!("{saved}, in Downloads"), backed));
     }
-    let folder = app_downloads(env, activity).map_err(|err| err.to_string())?;
-    let (name, backed) = save_streamed(&folder, name, write).map_err(|err| err.to_string())?;
+    let folder = app_downloads(env, activity).map_err(failed)?;
+    let (name, backed) = save_streamed(&folder, name, write)?;
     Ok((folder.join(name).display().to_string(), backed))
 }
 

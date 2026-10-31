@@ -18,7 +18,7 @@ use std::task::{Poll, Waker};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::backup::BackupFile;
+use super::backup::{BackupFile, NotSaved};
 use super::legacy::{
     self, Aside, BlobHistory, BlobKeys, Fingerprint, Layout, parse_sessions, read_history,
 };
@@ -120,7 +120,12 @@ pub struct MemoryStore {
 /// A browser's page storage, as far as the history kept whole goes: what
 /// every tab of a site shares ([`MemoryStore::in_page`]).
 #[derive(Clone, Default)]
-pub struct PageShelf(Rc<RefCell<BTreeMap<String, String>>>);
+pub struct PageShelf {
+    kept: Rc<RefCell<BTreeMap<String, String>>>,
+    /// The browser will not let the site at its storage, as where the user
+    /// blocks a site's data: every read and write of it fails.
+    blocked: Rc<Cell<bool>>,
+}
 
 /// The keys a browser keeps the history whole under, as a browser's store
 /// names them.
@@ -134,23 +139,19 @@ impl PageShelf {
     /// Keep `sessions` as the history, whole, over whatever it held.
     pub fn keep(&self, sessions: &[SessionResult]) {
         let raw = serde_json::to_string(sessions).expect("sessions write");
-        self.set(PAGE_KEYS.history, &raw);
+        self.put(PAGE_KEYS.history, raw);
     }
 
     /// The sessions the history kept whole holds, in its order.
     pub fn sessions(&self) -> Vec<SessionResult> {
-        self.get(PAGE_KEYS.history)
-            .ok()
-            .flatten()
+        self.held(PAGE_KEYS.history)
             .and_then(|raw| parse_sessions(&raw))
             .unwrap_or_default()
     }
 
     /// The sessions remembered as deleted by hand, by their keys.
     pub fn deleted(&self) -> Vec<SessionKey> {
-        self.get(PAGE_KEYS.deleted)
-            .ok()
-            .flatten()
+        self.held(PAGE_KEYS.deleted)
             .and_then(|raw| serde_json::from_str::<Vec<Deleted>>(&raw).ok())
             .unwrap_or_default()
             .iter()
@@ -162,36 +163,59 @@ impl PageShelf {
     /// whole, the way a tab writing it whole from an older read loses what
     /// another stored since: nothing remembers them as deleted.
     pub fn lose(&self, timestamp: u64) {
-        let raw = self
-            .get(PAGE_KEYS.history)
-            .ok()
-            .flatten()
-            .expect("a history");
+        let raw = self.held(PAGE_KEYS.history).expect("a history");
         let mut sessions: Vec<serde_json::Value> = serde_json::from_str(&raw).expect("a list");
         sessions.retain(|session| session["timestamp"] != timestamp);
-        self.set(
+        self.put(
             PAGE_KEYS.history,
-            &serde_json::to_string(&sessions).expect("sessions write"),
+            serde_json::to_string(&sessions).expect("sessions write"),
         );
+    }
+
+    /// Let the site at the storage, or not, as the browser does
+    /// ([`Self::blocked`]).
+    pub fn block(&self, blocked: bool) {
+        self.blocked.set(blocked);
+    }
+
+    /// What is kept under `key`, whether the site may reach it or not.
+    fn held(&self, key: &str) -> Option<String> {
+        self.kept.borrow().get(key).cloned()
+    }
+
+    /// Keep `raw` under `key`, whether the site may reach it or not.
+    fn put(&self, key: &str, raw: String) {
+        self.kept.borrow_mut().insert(key.into(), raw);
     }
 }
 
 impl Aside for PageShelf {
     fn keys(&self) -> Result<Vec<String>, ()> {
-        Ok(self.0.borrow().keys().cloned().collect())
+        if self.blocked.get() {
+            return Err(());
+        }
+        Ok(self.kept.borrow().keys().cloned().collect())
     }
 
     fn get(&self, key: &str) -> Result<Option<String>, ()> {
-        Ok(self.0.borrow().get(key).cloned())
+        if self.blocked.get() {
+            return Err(());
+        }
+        Ok(self.held(key))
     }
 
     fn set(&self, key: &str, raw: &str) -> bool {
-        self.0.borrow_mut().insert(key.into(), raw.into());
+        if self.blocked.get() {
+            return false;
+        }
+        self.put(key, raw.into());
         true
     }
 
     fn remove(&self, key: &str) {
-        self.0.borrow_mut().remove(key);
+        if !self.blocked.get() {
+            self.kept.borrow_mut().remove(key);
+        }
     }
 }
 
@@ -299,33 +323,35 @@ impl Store for MemoryStore {
         !self.no_backups.get()
     }
 
-    /// Written whole, from every record held, as a browser writes one.
+    /// Written whole, from every record held, as a browser writes one; or,
+    /// where they cannot be listed, from what the app holds, once it has
+    /// given all of it.
     fn save_backup(&self, name: &str, backup: BackupFile) -> BackupSaving {
         if self.no_backups.get() {
-            return saved_now(Err("this build has nowhere to put it".into()));
+            return saved_now(Err(NotSaved::Failed(
+                "this build has nowhere to put it".into(),
+            )));
         }
+        let tombstones = self.tombstones.borrow();
         let stored = match &self.page {
             Some(page) => page.records(),
             None if self.unlistable.get() => None,
-            None => {
-                let tombstones = self.tombstones.borrow();
-                Some(
-                    self.records
-                        .borrow()
-                        .iter()
-                        .filter(|(id, _)| !tombstones.contains_key(id))
-                        .map(|(id, held)| Record {
-                            id: *id,
-                            json: held.json.clone(),
-                        })
-                        .collect(),
-                )
-            }
+            None => Some(
+                self.records
+                    .borrow()
+                    .iter()
+                    .filter(|(id, _)| !tombstones.contains_key(id))
+                    .map(|(id, held)| Record {
+                        id: *id,
+                        json: held.json.clone(),
+                    })
+                    .collect(),
+            ),
         };
-        let Some(stored) = stored else {
-            return saved_now(Err("the history stored here could not be read".into()));
+        let (contents, backed) = match backup.whole(stored, |id| tombstones.contains_key(&id)) {
+            Ok(whole) => whole,
+            Err(not) => return saved_now(Err(not)),
         };
-        let (contents, backed) = backup.whole(stored.into_iter().map(Ok));
         self.backup_files
             .borrow_mut()
             .push((name.to_string(), contents));

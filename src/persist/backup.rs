@@ -11,7 +11,7 @@
 //! each is stored ([`BackupFile`]). Read back, only its sessions are held,
 //! each read from where it lies in the file ([`read_backup`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Write};
 
 use cw_core::{SessionResult, TrainingSettings};
@@ -86,13 +86,26 @@ pub fn write_backup(
 /// ([`BackupFile::write`]), so a history of any length is never held whole
 /// to be backed up. The file is a backup as [`write_backup`] writes one,
 /// which every version of Dust reads.
+///
+/// A store that cannot read all it holds saves nothing and says so
+/// ([`NotSaved::Unread`]), and the app saves the backup again holding every
+/// session here ([`BackupFile::holding_every_session`]): it then holds what
+/// the app shows, whatever became of the store.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackupFile {
     /// What comes before the sessions: the mark, when it was saved, and the
     /// settings.
     head: String,
-    /// The sessions here the store has yet to take, by record, in order.
-    unsaved: Vec<Record>,
+    /// The sessions here that go in beside what the store holds, by record,
+    /// in order: those it has yet to take, or every one here.
+    held: Vec<Record>,
+    /// Whether `held` is every session here, for a store that could not
+    /// read all it holds.
+    every: bool,
+    /// The records stored that this build could not read when it read
+    /// them: only the store holds them, so one it cannot read now is left
+    /// out, and the app is not asked for it.
+    unread: BTreeSet<RecordId>,
 }
 
 /// What a backup file holds of the sessions ([`BackupFile::write`]).
@@ -101,9 +114,37 @@ pub struct BackedUp {
     /// The sessions in it.
     pub sessions: usize,
     /// The sessions stored that could not go in it: what is stored of each
-    /// could not be read at all, or is not even JSON, damaged where it
-    /// lies.
+    /// could not be read at all, or is not even JSON, and the app holds
+    /// none of it.
     pub left_out: usize,
+}
+
+/// Why a backup file was not saved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotSaved {
+    /// The store could not read all it holds: its history could not be
+    /// listed, or a session in it that the app may hold could not be read.
+    /// Nothing was saved. Saved again holding every session here
+    /// ([`BackupFile::holding_every_session`]), it holds what the app does.
+    Unread,
+    /// Why not, in words that follow "could not be saved:".
+    Failed(String),
+}
+
+impl NotSaved {
+    /// Why not, in words that follow "could not be saved:".
+    pub fn why(&self) -> &str {
+        match self {
+            Self::Unread => "the history stored here could not be read",
+            Self::Failed(why) => why,
+        }
+    }
+}
+
+impl From<io::Error> for NotSaved {
+    fn from(err: io::Error) -> Self {
+        Self::Failed(err.to_string())
+    }
 }
 
 impl BackupFile {
@@ -120,70 +161,130 @@ impl BackupFile {
             head.push(',');
         }
         head.push_str("\"sessions\":[");
-        Self { head, unsaved }
+        Self {
+            head,
+            held: unsaved,
+            every: false,
+            unread: BTreeSet::new(),
+        }
+    }
+
+    /// The same backup, where `unread` are the records stored that this
+    /// build could not read when it read them, which only the store holds.
+    pub fn beside_unread(self, unread: BTreeSet<RecordId>) -> Self {
+        Self { unread, ..self }
+    }
+
+    /// The same backup, the sessions it was made with every one here: for
+    /// a store that could not read all it holds ([`NotSaved::Unread`]).
+    /// Each goes in where the store holds none of it that reads, but for
+    /// one the store holds as deleted; and where the store cannot list what
+    /// it holds at all, they are the backup.
+    pub fn holding_every_session(self) -> Self {
+        Self {
+            every: true,
+            ..self
+        }
     }
 
     /// Write the backup to `out`, with `stored`, every record the store
-    /// holds, in the order of the history: each as it is stored, which
-    /// keeps whatever a later build added to it, and those here the store
-    /// has yet to take in their places among them. A record the store holds
-    /// and the app has yet to hear it took is one session, as stored.
+    /// holds, deleted ones left out, in the order of the history: each as
+    /// it is stored, which keeps whatever a later build added to it, and
+    /// those here that go in beside it in their places among them. A
+    /// record the store holds and the app has yet to hear it took is one
+    /// session, as stored. One here that the store holds as `deleted` stays
+    /// out, whatever the app has yet to hear of it: restoring the backup
+    /// would bring it back.
     ///
     /// A record this build cannot read goes in as it is, so a build that
-    /// reads it restores it; one that cannot be read at all, or is not even
-    /// JSON, cannot go in a file of JSON, and is counted as left out.
+    /// reads it restores it. One that cannot be read at all, or is not even
+    /// JSON, goes in as the app holds it. Where the app may hold it and has
+    /// not given it, the backup stops there, to be saved by no store, and
+    /// the app is asked for it ([`NotSaved::Unread`]); where it holds none,
+    /// the session cannot go in a file of JSON, and is counted as left out.
     pub fn write(
         &self,
         out: &mut dyn Write,
         stored: impl IntoIterator<Item = Result<Record, RecordId>>,
-    ) -> io::Result<BackedUp> {
+        deleted: impl Fn(RecordId) -> bool,
+    ) -> Result<BackedUp, NotSaved> {
         out.write_all(self.head.as_bytes())?;
         let mut backed = BackedUp::default();
-        let mut here = self.unsaved.iter().peekable();
+        let mut here = self.held.iter().peekable();
         for stored in stored {
-            let id = match &stored {
-                Ok(record) => record.id,
-                Err(id) => *id,
+            let (id, json) = match stored {
+                Ok(record) => (record.id, Some(record.json)),
+                Err(id) => (id, None),
             };
             while let Some(record) = here.next_if(|record| record.id < id) {
-                put(out, &record.json, &mut backed)?;
+                if !deleted(record.id) {
+                    put_held(out, record, &mut backed)?;
+                }
             }
             let held = here.next_if(|record| record.id == id);
-            match (stored, held) {
-                (Ok(record), _) => put(out, &record.json, &mut backed)?,
+            match (json.filter(|json| is_json(json)), held) {
+                (Some(json), _) => put(out, &json, &mut backed)?,
                 // What the app holds of it, where the store's cannot be read.
-                (Err(_), Some(record)) => put(out, &record.json, &mut backed)?,
-                (Err(_), None) => backed.left_out += 1,
+                (None, Some(record)) => put_held(out, record, &mut backed)?,
+                (None, None) if self.every || self.unread.contains(&id) => backed.left_out += 1,
+                (None, None) => return Err(NotSaved::Unread),
             }
         }
         for record in here {
-            put(out, &record.json, &mut backed)?;
+            if !deleted(record.id) {
+                put_held(out, record, &mut backed)?;
+            }
         }
         out.write_all(b"]}")?;
         Ok(backed)
     }
 
-    /// The whole backup, with `stored`, as a string: for a store that hands
-    /// a file over whole, as a browser does.
+    /// Write the backup to `out` for a store whose history could not be
+    /// listed: of every session here, where it holds them, those stored
+    /// that this build could not read counted as left out; or else nothing,
+    /// and every session here is asked for ([`NotSaved::Unread`]).
+    pub fn write_unlisted(&self, out: &mut dyn Write) -> Result<BackedUp, NotSaved> {
+        if !self.every {
+            return Err(NotSaved::Unread);
+        }
+        out.write_all(self.head.as_bytes())?;
+        let mut backed = BackedUp {
+            left_out: self.unread.len(),
+            ..BackedUp::default()
+        };
+        for record in &self.held {
+            put_held(out, record, &mut backed)?;
+        }
+        out.write_all(b"]}")?;
+        Ok(backed)
+    }
+
+    /// The whole backup, with `stored`, every record the store holds, or
+    /// none where it could not list them, as a string: for a store that
+    /// hands a file over whole, as a browser does.
     #[cfg_attr(not(any(feature = "web", test)), allow(dead_code))]
     pub fn whole(
         &self,
-        stored: impl IntoIterator<Item = Result<Record, RecordId>>,
-    ) -> (String, BackedUp) {
+        stored: Option<Vec<Record>>,
+        deleted: impl Fn(RecordId) -> bool,
+    ) -> Result<(String, BackedUp), NotSaved> {
         let mut out = Vec::new();
-        // Writing to memory fails only where memory does.
-        let backed = self.write(&mut out, stored).unwrap_or_default();
-        (String::from_utf8(out).unwrap_or_default(), backed)
+        let backed = match stored {
+            Some(stored) => self.write(&mut out, stored.into_iter().map(Ok), deleted)?,
+            None => self.write_unlisted(&mut out)?,
+        };
+        Ok((String::from_utf8(out).unwrap_or_default(), backed))
     }
 }
 
-/// Put `json`, a session as it is stored, into the backup on its way to
-/// `out`, after the sessions before it: if it is JSON at all.
+/// Whether `json`, a session as it is stored, is JSON at all.
+fn is_json(json: &str) -> bool {
+    serde_json::from_str::<serde::de::IgnoredAny>(json).is_ok()
+}
+
+/// Put `json`, a session in JSON, into the backup on its way to `out`,
+/// after the sessions before it.
 fn put(out: &mut dyn Write, json: &str, backed: &mut BackedUp) -> io::Result<()> {
-    if serde_json::from_str::<serde::de::IgnoredAny>(json).is_err() {
-        backed.left_out += 1;
-        return Ok(());
-    }
     if backed.sessions > 0 {
         out.write_all(b",")?;
     }
@@ -192,15 +293,27 @@ fn put(out: &mut dyn Write, json: &str, backed: &mut BackedUp) -> io::Result<()>
     Ok(())
 }
 
+/// Put `record`, a session here, into the backup on its way to `out`: if
+/// it is JSON at all, as every session this build writes is.
+fn put_held(out: &mut dyn Write, record: &Record, backed: &mut BackedUp) -> io::Result<()> {
+    if !is_json(&record.json) {
+        backed.left_out += 1;
+        return Ok(());
+    }
+    put(out, &record.json, backed)
+}
+
 impl BackedUp {
     /// What to say of a backup saved, after where it was saved, when there
     /// is anything to say: the sessions it could not hold.
     pub fn told(&self) -> Option<String> {
         match self.left_out {
             0 => None,
-            1 => Some("1 session stored here is damaged, and could not go in it.".to_string()),
+            1 => {
+                Some("1 session stored here could not be read, and could not go in it.".to_string())
+            }
             count => Some(format!(
-                "{count} sessions stored here are damaged, and could not go in it."
+                "{count} sessions stored here could not be read, and could not go in it."
             )),
         }
     }
@@ -868,12 +981,22 @@ mod tests {
         assert_eq!(read_backup(&marked), read_backup(&cases[0]));
     }
 
+    /// The backup `backup` comes to, written with `stored`, and what it
+    /// holds; or why nothing of it was.
+    fn written(
+        backup: &BackupFile,
+        stored: Vec<Result<Record, RecordId>>,
+        deleted: &[RecordId],
+    ) -> Result<(String, BackedUp), NotSaved> {
+        let mut out = Vec::new();
+        let backed = backup.write(&mut out, stored, |id| deleted.contains(&id))?;
+        Ok((String::from_utf8(out).expect("text"), backed))
+    }
+
     /// A backup written a session at a time is the backup written whole of
     /// the same history, byte for byte: those stored as they are stored,
     /// those here the store has yet to take in their places among them,
-    /// and one both stored and here once, as stored. One the store could
-    /// not read is in it as the app holds it, if it does, or else left out
-    /// and counted, as is one that is not even JSON.
+    /// and one both stored and here once, as stored.
     #[test]
     fn a_backup_written_a_session_at_a_time_is_the_whole_one() {
         let mut settings = TrainingSettings::default();
@@ -882,14 +1005,12 @@ mod tests {
             .map(|day| at(day, &format!("2026-10-0{day}")))
             .collect();
         let records = records_for_blob(&history);
-        let stored = |at: &[usize]| -> Vec<Result<Record, RecordId>> {
-            at.iter().map(|at| Ok(records[*at].clone())).collect()
-        };
         // Here and not stored: the first, the fourth, and the last, which
         // is stored too.
         let unsaved = vec![records[5].clone(), records[0].clone(), records[3].clone()];
         let backup = BackupFile::new(&settings, 42, unsaved);
-        let (written, backed) = backup.whole(stored(&[1, 2, 4, 5]));
+        let stored = [1, 2, 4, 5].map(|at| records[at].clone()).to_vec();
+        let (written, backed) = backup.whole(Some(stored), |_| false).expect("written");
         assert_eq!(written, write_backup(&settings, &history, 42));
         assert_eq!(
             backed,
@@ -899,18 +1020,59 @@ mod tests {
             }
         );
         assert_eq!(read_backup(&written), read_backup_as_0_16_2(&written));
+        assert_eq!(BackedUp::default().told(), None);
+    }
 
-        // The second cannot be read where it is stored, and the app holds
-        // none of it; the fourth cannot either, but the app holds it; the
-        // fifth is stored as no JSON at all.
-        let mut damaged = stored(&[1, 2, 4]);
-        damaged[0] = Err(records[1].id);
-        damaged[2] = Ok(Record {
-            id: records[4].id,
-            json: "{ half".into(),
-        });
-        damaged.insert(2, Err(records[3].id));
-        let (written, backed) = backup.whole(damaged);
+    /// A session the store cannot read, or holds as no JSON at all, goes
+    /// in as the app holds it. Where the app may hold it and has not given
+    /// it, nothing is written, and the app is asked for every session it
+    /// holds; given them, the backup is whole. Only a session the app holds
+    /// none of, one this build could not read when it read the store, is
+    /// left out, and counted. It used to be left out and called damaged
+    /// though the app held it.
+    #[test]
+    fn a_session_the_store_cannot_read_goes_in_as_the_app_holds_it() {
+        let settings = TrainingSettings::default();
+        let history: Vec<SessionResult> = (1..=6)
+            .map(|day| at(day, &format!("2026-10-0{day}")))
+            .collect();
+        let records = records_for_blob(&history);
+        let unsaved = vec![records[0].clone(), records[3].clone()];
+        // The second cannot be read where it is stored; the fourth cannot
+        // either, but the app has yet to hear the store took it; the fifth
+        // is stored as no JSON at all.
+        let damaged = || -> Vec<Result<Record, RecordId>> {
+            vec![
+                Err(records[1].id),
+                Ok(records[2].clone()),
+                Err(records[3].id),
+                Ok(Record {
+                    id: records[4].id,
+                    json: "{ half".into(),
+                }),
+                Ok(records[5].clone()),
+            ]
+        };
+        let backup = BackupFile::new(&settings, 42, unsaved);
+        assert_eq!(
+            written(&backup, damaged(), &[]),
+            Err(NotSaved::Unread),
+            "the app may hold the second and the fifth"
+        );
+        assert_eq!(
+            NotSaved::Unread.why(),
+            "the history stored here could not be read"
+        );
+
+        let every = BackupFile::new(&settings, 42, records.clone()).holding_every_session();
+        let (whole, backed) = written(&every, damaged(), &[]).expect("written");
+        assert_eq!(whole, write_backup(&settings, &history, 42));
+        assert_eq!(backed.left_out, 0);
+
+        // Read as nothing when the app read the store: only the store
+        // holds them.
+        let unread = backup.beside_unread([records[1].id, records[4].id].into());
+        let (file, backed) = written(&unread, damaged(), &[]).expect("written");
         assert_eq!(
             backed,
             BackedUp {
@@ -920,11 +1082,74 @@ mod tests {
         );
         assert_eq!(
             backed.told().as_deref(),
-            Some("2 sessions stored here are damaged, and could not go in it.")
+            Some("2 sessions stored here could not be read, and could not go in it.")
         );
         let kept = [0, 2, 3, 5].map(|at| history[at].clone());
-        assert_eq!(written, write_backup(&settings, &kept, 42));
-        assert_eq!(BackedUp::default().told(), None);
+        assert_eq!(file, write_backup(&settings, &kept, 42));
+    }
+
+    /// A store whose history cannot be listed writes nothing of a backup
+    /// until the app gives every session it holds; then the backup is
+    /// those, and the sessions stored that this build could not read are
+    /// told of as left out.
+    #[test]
+    fn a_history_that_cannot_be_listed_is_backed_up_from_the_app() {
+        let settings = TrainingSettings::default();
+        let history: Vec<SessionResult> = (1..=3)
+            .map(|day| at(day, &format!("2026-10-0{day}")))
+            .collect();
+        let records = records_for_blob(&history);
+        let unsaved = BackupFile::new(&settings, 42, vec![records[2].clone()]);
+        assert_eq!(unsaved.whole(None, |_| false), Err(NotSaved::Unread));
+        let mut out = Vec::new();
+        assert_eq!(unsaved.write_unlisted(&mut out), Err(NotSaved::Unread));
+        assert!(out.is_empty(), "nothing written");
+
+        let every = BackupFile::new(&settings, 42, records).holding_every_session();
+        let (written, backed) = every.whole(None, |_| false).expect("written");
+        assert_eq!(written, write_backup(&settings, &history, 42));
+        assert_eq!(backed.left_out, 0);
+        let later = RecordId {
+            order: 9_000_000_000,
+            nonce: 1,
+        };
+        let (_, backed) = every
+            .beside_unread([later].into())
+            .whole(None, |_| false)
+            .expect("written");
+        assert_eq!(
+            backed,
+            BackedUp {
+                sessions: 3,
+                left_out: 1
+            }
+        );
+    }
+
+    /// A session here that the store holds as deleted stays out of a
+    /// backup, though the app has yet to hear the deletion was made, or
+    /// has yet to hear its Undo was not: restoring the backup would bring
+    /// it back. One the store neither holds nor remembers deleting goes in
+    /// as the app holds it: missing is never deleted.
+    #[test]
+    fn a_session_the_store_holds_as_deleted_stays_out_of_a_backup() {
+        let settings = TrainingSettings::default();
+        let history: Vec<SessionResult> = (1..=4)
+            .map(|day| at(day, &format!("2026-10-0{day}")))
+            .collect();
+        let records = records_for_blob(&history);
+        let stored = vec![Ok(records[0].clone())];
+        let gone = [records[1].id, records[3].id];
+        let unsaved = BackupFile::new(&settings, 42, vec![records[1].clone()]);
+        let (file, backed) = written(&unsaved, stored.clone(), &gone).expect("written");
+        assert_eq!(file, write_backup(&settings, &history[..1], 42));
+        assert_eq!(backed.left_out, 0);
+
+        let every = BackupFile::new(&settings, 42, records).holding_every_session();
+        let (file, backed) = written(&every, stored, &gone).expect("written");
+        let kept = [0, 2].map(|at| history[at].clone());
+        assert_eq!(file, write_backup(&settings, &kept, 42));
+        assert_eq!(backed.left_out, 0);
     }
 
     /// A backup is read on a thread of its own, as it is in the app, and
@@ -963,7 +1188,7 @@ mod tests {
             .collect();
         let records = records_for_blob(&history);
         let backup = BackupFile::new(&TrainingSettings::default(), 1, Vec::new());
-        let (raw, backed) = backup.whole(records.into_iter().map(Ok));
+        let (raw, backed) = backup.whole(Some(records), |_| false).expect("written");
         eprintln!("{} sessions, {} MB", backed.sessions, raw.len() / 1_000_000);
         let started = std::time::Instant::now();
         let read = read_backup(&raw).expect("a backup");

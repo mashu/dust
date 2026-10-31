@@ -94,7 +94,9 @@ pub trait Store {
     /// on an iPhone. It holds every session the store holds, each as it is
     /// stored, written a session at a time where the store can
     /// ([`backup::BackupFile`]). Says what became of it, in words for the
-    /// user, or why it could not go.
+    /// user, or why it could not go: where the store could not read all it
+    /// holds, nothing went, and the backup is wanted again holding every
+    /// session the app does ([`backup::NotSaved::Unread`]).
     fn save_backup(&self, name: &str, backup: backup::BackupFile) -> BackupSaving;
     /// Whether a backup file this store says it saved is known to be
     /// saved. A browser hands a download over and hears no more of it:
@@ -326,11 +328,11 @@ pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<CutOff>>>>;
 /// A backup file on its way: saved already, as a browser hands one over, or
 /// still being written on the history's own thread, as on a computer or a
 /// phone.
-pub type BackupSaving = Pin<Box<dyn Future<Output = Result<String, String>>>>;
+pub type BackupSaving = Pin<Box<dyn Future<Output = Result<String, backup::NotSaved>>>>;
 
 /// A backup file saved, or not, already: as a browser hands one over.
 #[cfg(any(feature = "web", test))]
-fn saved_now(result: Result<String, String>) -> BackupSaving {
+fn saved_now(result: Result<String, backup::NotSaved>) -> BackupSaving {
     Box::pin(std::future::ready(result))
 }
 
@@ -472,6 +474,15 @@ pub fn files_at(root: &std::path::Path) -> Rc<dyn Store> {
 #[cfg(all(test, feature = "native-runtime"))]
 pub fn files_on_worker_at(root: &std::path::Path) -> Rc<dyn Store> {
     Rc::new(desktop::DesktopStore::on_worker_at(root))
+}
+
+/// The same, saving backup files into `folder`.
+#[cfg(all(test, feature = "native-runtime"))]
+pub fn files_on_worker_backing_up(
+    root: &std::path::Path,
+    folder: &std::path::Path,
+) -> Rc<dyn Store> {
+    Rc::new(desktop::DesktopStore::on_worker_at(root).with_backup_folder(folder))
 }
 
 /// How the auto-level run for `settings` stands.

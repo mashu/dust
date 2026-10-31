@@ -12,7 +12,7 @@ use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use super::backup::BackupFile;
+use super::backup::{BackupFile, NotSaved};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
 use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
 use super::{
@@ -436,12 +436,16 @@ impl Store for WebStore {
     /// ([`Store::confirms_backups`]).
     ///
     /// The history kept whole is read whole anyway, so the file is written
-    /// whole from it, and handed over as one.
+    /// whole from it, and handed over as one. Where it cannot be read, as
+    /// where the browser blocks the site's storage, the file holds what the
+    /// app does, once the app has given every session it holds
+    /// ([`NotSaved::Unread`]). A session deleted is gone from the app as
+    /// soon as it is deleted, here or, taken up first, in another tab.
     fn save_backup(&self, name: &str, backup: BackupFile) -> BackupSaving {
-        let Some(stored) = self.history.records() else {
-            return saved_now(Err("the history stored here could not be read".into()));
+        let (contents, backed) = match backup.whole(self.history.records(), |_| false) {
+            Ok(whole) => whole,
+            Err(not) => return saved_now(Err(not)),
         };
-        let (contents, backed) = backup.whole(stored.into_iter().map(Ok));
         saved_now(
             download(name, &contents)
                 .map(|()| {
@@ -453,7 +457,7 @@ impl Store for WebStore {
                         None => handed,
                     }
                 })
-                .ok_or_else(|| "this browser would not hand over the file".into()),
+                .ok_or_else(|| NotSaved::Failed("this browser would not hand over the file".into())),
         )
     }
 
