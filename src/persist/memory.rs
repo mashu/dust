@@ -309,8 +309,9 @@ impl Store for MemoryStore {
         if self.unlistable.get() {
             return load;
         }
-        if self.layout.borrow().is_none() {
-            self.migrate(&mut load);
+        let moved = self.layout.borrow().is_some();
+        if !moved && let Err(why) = self.migrate(&mut load) {
+            load.notices.push(HistoryNotice::MovePending(why));
         }
         self.import();
         let tombstones = self.tombstones.borrow();
@@ -329,7 +330,9 @@ impl Store for MemoryStore {
             load.notices.push(HistoryNotice::Unread { count: new });
             told.extend(load.unread.iter().copied());
         }
-        load.complete = true;
+        // Complete once the move is made: until then, the sessions kept
+        // whole are stored, though not here.
+        load.complete = self.layout.borrow().is_some();
         self.seen_changes.set(self.changes.get());
         load
     }
@@ -501,11 +504,8 @@ impl MemoryStore {
 
     /// Make `change`, as the files make it.
     fn make(&self, change: &HistoryChange) -> HistorySaved {
-        if let Some(why) = self.failing.borrow().clone() {
-            return HistorySaved::Failed(why);
-        }
-        if self.full.get() {
-            return HistorySaved::Full;
+        if let Some(refused) = self.refused() {
+            return refused;
         }
         let mut tombstones = self.tombstones.borrow_mut();
         let mut records = self.records.borrow_mut();
@@ -546,9 +546,21 @@ impl MemoryStore {
         }
     }
 
+    /// Why the store takes no change to the history now, the way a full or
+    /// failing disk takes none: nothing, where it takes them.
+    fn refused(&self) -> Option<HistorySaved> {
+        if let Some(why) = self.failing.borrow().clone() {
+            return Some(HistorySaved::Failed(why));
+        }
+        self.full.get().then_some(HistorySaved::Full)
+    }
+
     /// Move the history kept whole into records, as the files move it:
-    /// what does not read set aside, the rest in its order.
-    fn migrate(&self, load: &mut HistoryLoad) {
+    /// what does not read set aside, the rest in its order, and the layout
+    /// noted last. A store that takes no change makes no move, and says
+    /// why: the history kept whole is not taken for moved, and the next
+    /// read moves it.
+    fn migrate(&self, load: &mut HistoryLoad) -> Result<(), String> {
         let raw = self.legacy.borrow().clone();
         let sessions = match raw.as_deref().map(read_history) {
             None => Vec::new(),
@@ -577,13 +589,23 @@ impl MemoryStore {
             &self.legacy_deleted.borrow(),
             crate::time::now_ms(),
         );
-        if !moved.is_empty() {
+        // The layout, written last, needs the room a record does.
+        let saved = if moved.is_empty() {
+            self.refused().unwrap_or(HistorySaved::Stored { kept: 0 })
+        } else {
             self.make(&HistoryChange {
                 put: moved,
                 ..HistoryChange::default()
+            })
+        };
+        if saved.kept().is_none() {
+            return Err(match saved {
+                HistorySaved::Failed(why) => why,
+                _ => "no room left".into(),
             });
         }
         *self.layout.borrow_mut() = Some(layout);
+        Ok(())
     }
 
     /// Take up what an older build stored in, or deleted from, the history
@@ -812,6 +834,52 @@ mod tests {
         assert!(read.sessions.is_empty());
         assert_eq!(read.set_aside, [SetAside::History { kept: None }]);
         assert_eq!(*damaged.legacy_aside.borrow(), ["{ not a list"]);
+    }
+
+    /// A store that takes no change, full or failing, makes no move, as the
+    /// files make none: the read says the move waits, and is not complete,
+    /// and the history kept whole is moved once the store takes it.
+    #[test]
+    fn a_move_the_store_cannot_make_waits_for_the_next_read() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let whole = [finished(now_ms - 9 * DAY), finished(now_ms - 8 * DAY)];
+        store.keep_whole(&whole);
+        store.full.set(true);
+        let read = store.load_history();
+        assert!(!read.complete);
+        assert!(read.sessions.is_empty());
+        assert_eq!(
+            read.notices,
+            [HistoryNotice::MovePending("no room left".into())]
+        );
+        assert!(store.layout.borrow().is_none());
+        assert_eq!(store.record_writes.get(), 0);
+        store.full.set(false);
+        *store.failing.borrow_mut() = Some("disk gone".into());
+        let read = store.load_history();
+        assert!(!read.complete);
+        assert_eq!(
+            read.notices,
+            [HistoryNotice::MovePending("disk gone".into())]
+        );
+        *store.failing.borrow_mut() = None;
+        let read = store.load_history();
+        assert!(read.complete && read.notices.is_empty());
+        assert_eq!(
+            read.sessions
+                .into_iter()
+                .map(|(_, session)| session)
+                .collect::<Vec<_>>(),
+            whole
+        );
+        assert!(store.layout.borrow().is_some());
+        // With nothing kept whole, the layout alone waits for room.
+        let fresh = MemoryStore::default();
+        fresh.full.set(true);
+        assert!(!fresh.load_history().complete);
+        fresh.full.set(false);
+        assert!(fresh.load_history().complete);
     }
 
     /// The history a test stores whole comes back as it went in, and a
