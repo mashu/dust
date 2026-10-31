@@ -20,6 +20,8 @@ pub mod memory;
 pub mod record;
 #[cfg(feature = "web")]
 mod web;
+#[cfg(feature = "native-runtime")]
+mod worker;
 
 #[cfg(all(test, feature = "native-runtime"))]
 pub(crate) use desktop::tests::TempDir;
@@ -143,6 +145,10 @@ pub trait Store {
     /// Whether the history may have changed, elsewhere, since this copy
     /// last read or listed it: whether it is worth listing again.
     fn history_changed(&self) -> bool;
+    /// Wait, a moment at most, for every change asked of the history so
+    /// far to be made: as the app closes, where the store makes them on a
+    /// thread of its own, which the app's going would cut short.
+    fn flush_history(&self) {}
 }
 
 /// A session of groups or a contest run, as it is marked open while it runs
@@ -431,11 +437,27 @@ pub fn default_store() -> Rc<dyn Store> {
     }
 }
 
+/// Start reading the history as the app starts, on a thread of its own, so
+/// that the app's window comes up meanwhile and opens on it: the store the
+/// app opens takes what was read ([`default_store`]). Nothing to start in
+/// a browser, which reads its store once the page is up.
+#[cfg(feature = "native-runtime")]
+pub fn preload() {
+    desktop::preload();
+}
+
 /// The store a computer or phone keeps, its files under `root` and no
-/// backups: for a test of the app on the files themselves.
+/// backups: for a test of the app on the files themselves, which are read
+/// and written then and there.
 #[cfg(all(test, feature = "native-runtime"))]
 pub fn files_at(root: &std::path::Path) -> Rc<dyn Store> {
     Rc::new(desktop::DesktopStore::at(root))
+}
+
+/// The same, read and written on a thread of their own, as the app's are.
+#[cfg(all(test, feature = "native-runtime"))]
+pub fn files_on_worker_at(root: &std::path::Path) -> Rc<dyn Store> {
+    Rc::new(desktop::DesktopStore::on_worker_at(root))
 }
 
 /// How the auto-level run for `settings` stands.

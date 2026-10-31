@@ -168,6 +168,9 @@ fn launch_desktop() {
     unsafe {
         linux_webview::prepare();
     }
+    // The history is read on a thread of its own while the window comes
+    // up: only now, as the environment is set up for the webview.
+    persist::preload();
     use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
@@ -259,6 +262,9 @@ fn main() {
             kick_the_event_loop();
             stall_log::start();
         }
+        // The history is read on a thread of its own while the webview
+        // starts up. Android hands the app its folder before `main` runs.
+        persist::preload();
         launch_mobile();
     }
     // A browser applies each render as it comes, frames or none.

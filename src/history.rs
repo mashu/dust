@@ -7,8 +7,12 @@
 //! deleted goes back exactly where it was, and one changed elsewhere is
 //! told from one alike in when it finished.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::ops::Deref;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use cw_core::SessionResult;
@@ -212,8 +216,62 @@ pub fn settle_or_spawn<T: 'static>(mut pending: Pending<T>, then: impl FnOnce(T)
     match pending.as_mut().poll(&mut asked) {
         Poll::Ready(value) => then(value),
         Poll::Pending => {
-            dioxus::core::spawn_forever(async move { then(pending.await) });
+            let waiting = Rc::new(RefCell::new(Waiting {
+                going: Some(Box::pin(async move { then(pending.await) })),
+                task: None,
+            }));
+            WAITING.with(|all| all.borrow_mut().push(waiting.clone()));
+            dioxus::core::spawn_forever(std::future::poll_fn(move |asked| {
+                waiting.borrow_mut().task = Some(asked.waker().clone());
+                look(&waiting, asked)
+            }));
         }
+    }
+}
+
+/// What follows a change the store is still making ([`settle_or_spawn`]):
+/// done by the task that waits on it, or by [`settle_waiting`], whichever
+/// comes to it first, and once.
+struct Waiting {
+    /// The change on its way and what follows it; none once done.
+    going: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    /// What wakes the task that waits on it, once it has looked.
+    task: Option<Waker>,
+}
+
+thread_local! {
+    /// Every change still on its way, in the order it was asked for.
+    static WAITING: RefCell<Vec<Rc<RefCell<Waiting>>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Look whether the change `waiting` waits on is made, `asked` to be woken
+/// once it is, and if it is, do what follows it.
+fn look(waiting: &Rc<RefCell<Waiting>>, asked: &mut Context) -> Poll<()> {
+    let going = waiting.borrow_mut().going.take();
+    let Some(mut going) = going else {
+        return Poll::Ready(());
+    };
+    // Polled with nothing of `waiting` held, as what follows may ask for
+    // another change.
+    if going.as_mut().poll(asked).is_pending() {
+        waiting.borrow_mut().going = Some(going);
+        return Poll::Pending;
+    }
+    WAITING.with(|all| all.borrow_mut().retain(|held| !Rc::ptr_eq(held, waiting)));
+    Poll::Ready(())
+}
+
+/// Do now what follows each change the store has made, of those asked for
+/// before, rather than when the app's tasks come round to it: as the app
+/// closes, they may never. Each is done once, here or by its task.
+pub fn settle_waiting() {
+    let waiting = WAITING.with(|all| all.borrow().clone());
+    for one in &waiting {
+        // Looked at as its task would look, so that task is the one woken
+        // once a change still on its way is made.
+        let task = one.borrow().task.clone();
+        let waker = task.unwrap_or_else(|| Waker::noop().clone());
+        let _ = look(one, &mut Context::from_waker(&waker));
     }
 }
 
@@ -382,5 +440,44 @@ mod tests {
         app.process_events();
         assert_eq!(*got.borrow(), [9]);
         assert_eq!(looks.get(), 2);
+    }
+
+    /// What follows a change made since it was asked for is done there and
+    /// then, as the app closes, rather than by its task, which the app's
+    /// going may cut short; and once, whichever comes to it first. One
+    /// still on its way is left to its task.
+    #[test]
+    fn what_follows_a_change_made_is_done_as_the_app_closes() {
+        let mut app = VirtualDom::new(|| rsx! {});
+        let got: Rc<RefCell<Vec<u32>>> = Rc::default();
+        let made = Rc::new(Cell::new(false));
+        let later: Rc<RefCell<Option<Waker>>> = Rc::default();
+        app.in_scope(ScopeId::ROOT, || {
+            for value in [1, 2] {
+                let (into, made, later) = (got.clone(), made.clone(), later.clone());
+                let pending: Pending<u32> = Box::pin(std::future::poll_fn(move |asked| {
+                    if made.get() {
+                        Poll::Ready(value)
+                    } else {
+                        *later.borrow_mut() = Some(asked.waker().clone());
+                        Poll::Pending
+                    }
+                }));
+                settle_or_spawn(pending, move |value| into.borrow_mut().push(value));
+            }
+        });
+        // The tasks have looked, and wait.
+        app.process_events();
+        settle_waiting();
+        assert!(got.borrow().is_empty(), "nothing made yet");
+        made.set(true);
+        settle_waiting();
+        assert_eq!(*got.borrow(), [1, 2], "in the order asked");
+        if let Some(waker) = later.borrow_mut().take() {
+            waker.wake();
+        }
+        app.process_events();
+        assert_eq!(*got.borrow(), [1, 2], "and once");
+        assert!(WAITING.with(|all| all.borrow().is_empty()));
     }
 }

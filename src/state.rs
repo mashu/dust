@@ -787,6 +787,17 @@ impl AppCtx {
         }
     }
 
+    /// As the app closes: wait, a moment at most, for the store to make
+    /// every change asked of the history, and take up there and then what
+    /// became of each, rather than leave it to tasks the app's going cuts
+    /// short. A session kept as the app closes is stored, and its mark
+    /// goes, before the app does; one the store is still making is kept
+    /// by its mark, for the next launch.
+    pub fn flush_history(self) {
+        self.app().store.flush_history();
+        crate::history::settle_waiting();
+    }
+
     /// Try again, in [`RETRY_MS`], to store what the store has yet to take:
     /// one try waiting at a time.
     fn retry_later(self) {
@@ -2495,6 +2506,56 @@ mod tests {
             2,
             "one record a session, and nothing beside"
         );
+    }
+
+    /// The history written on a thread of its own, as the app writes it: a
+    /// session kept shows at once, its mark held until the thread has
+    /// stored it; and the app, closing, waits for the thread and takes up
+    /// what it did, so the session is stored and its mark gone before the
+    /// app is, and the next launch has nothing cut off to tell of. A
+    /// deletion is told of once it is made, and only then.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_session_kept_as_the_app_closes_is_stored_before_it_goes() {
+        let dir = crate::persist::TempDir::new("closing-on-the-worker");
+        let tab = Tab::on_store(crate::persist::files_on_worker_at(&dir.0));
+        let marks = || {
+            std::fs::read_dir(dir.0.join("open"))
+                .map(|marks| marks.count())
+                .unwrap_or(0)
+        };
+        // Marked as a session is, its end held with its mark before it is
+        // kept.
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(1),
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.finish(day(1));
+        assert_eq!(tab.shown(), [1], "shown at once");
+        assert!(marks() > 0, "held until the thread has stored it");
+        tab.act(AppCtx::flush_history);
+        assert_eq!(marks(), 0, "stored, and its mark gone");
+        let next = crate::persist::files_at(&dir.0);
+        let mut cut = next.take_cut_off();
+        let asked = &mut std::task::Context::from_waker(std::task::Waker::noop());
+        assert_eq!(
+            cut.as_mut().poll(asked),
+            std::task::Poll::Ready(Vec::new()),
+            "nothing cut off"
+        );
+        assert_eq!(Tab::on_store(next).shown(), [1]);
+
+        tab.finish(day(2));
+        tab.act(AppCtx::flush_history);
+        tab.delete(1);
+        assert_eq!(tab.shown(), [2]);
+        assert_eq!(tab.toast(), None, "not told of before it is made");
+        tab.act(AppCtx::flush_history);
+        let toast = tab.toast().expect("told");
+        assert_eq!(toast.text, "1 session deleted");
+        assert_eq!(Tab::on_store(crate::persist::files_at(&dir.0)).shown(), [2]);
     }
 
     /// Settings the store would not take stay as they were set, and are

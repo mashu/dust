@@ -5,11 +5,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 
 use super::files::HistoryFiles;
-use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
+use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
     over_stored, read_settings_from,
@@ -52,8 +54,36 @@ pub struct DesktopStore {
     set_aside: RefCell<Vec<SetAside>>,
     /// This copy's mark, while its session is marked open.
     open_held: RefCell<Option<HeldMark>>,
-    /// The history by record, under `history/` ([`HistoryFiles`]).
-    history: HistoryFiles,
+    /// The history by record, under `history/` ([`HistoryFiles`]), read and
+    /// written on a thread of its own ([`HistoryJobs`]).
+    history: HistoryJobs,
+    /// The history as it is being read for the app to open on, started
+    /// as the app started ([`preload`]): taken by the first load.
+    loading: RefCell<Option<Loading>>,
+}
+
+/// The history read as the app starts ([`preload`]), for the store the app
+/// opens on to take.
+struct Preloaded {
+    root: PathBuf,
+    history: HistoryJobs,
+    loading: Loading,
+}
+
+static PRELOADED: Mutex<Option<Preloaded>> = Mutex::new(None);
+
+/// Start reading the history, on its own thread, as the app starts: before
+/// its window is up, so the webview starts up meanwhile, and the app opens
+/// on what is left of it to read, if anything.
+pub(super) fn preload() {
+    let root = data_dir();
+    let history = HistoryJobs::on_worker(HistoryFiles::at(&root));
+    let loading = history.start_load();
+    *PRELOADED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Preloaded {
+        root,
+        history,
+        loading,
+    });
 }
 
 /// A copy's mark ([`OPEN`]): its id, and the lock it holds on it.
@@ -63,19 +93,52 @@ struct HeldMark {
 }
 
 impl DesktopStore {
+    /// The app's store, its history read and written on a thread of its
+    /// own: the one started as the app started, where it is the same
+    /// folder's ([`preload`]).
     pub fn new() -> Self {
+        let root = data_dir();
+        let preloaded = PRELOADED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .filter(|preloaded| preloaded.root == root);
+        let (history, loading) = match preloaded {
+            Some(Preloaded {
+                history, loading, ..
+            }) => (history, Some(loading)),
+            None => (HistoryJobs::on_worker(HistoryFiles::at(&root)), None),
+        };
         Self {
             backup_folder: backup_folder(),
             backups_inside: backups_inside_app(),
-            ..Self::at(data_dir())
+            loading: RefCell::new(loading),
+            ..Self::with_history(root, history)
         }
     }
 
-    /// Files under `root`, and no backups.
+    /// Files under `root`, and no backups, the history read and written
+    /// then and there: for a test, which looks at once.
+    #[cfg(test)]
     pub fn at(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
+        let history = HistoryJobs::inline(HistoryFiles::at(&root));
+        Self::with_history(root, history)
+    }
+
+    /// Files under `root`, and no backups, the history read and written on
+    /// a thread of its own, as the app's are.
+    #[cfg(test)]
+    pub fn on_worker_at(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let history = HistoryJobs::on_worker(HistoryFiles::at(&root));
+        Self::with_history(root, history)
+    }
+
+    fn with_history(root: PathBuf, history: HistoryJobs) -> Self {
         Self {
-            history: HistoryFiles::at(&root),
+            history,
+            loading: RefCell::new(None),
             root,
             backup_folder: None,
             backups_inside: None,
@@ -490,29 +553,40 @@ impl Store for DesktopStore {
         Box::pin(std::future::ready(self.cut_off()))
     }
 
+    /// The history read as the app started, once it is; or read now.
     fn load_history(&self) -> HistoryLoad {
-        self.history.load()
+        let started = self.loading.borrow_mut().take();
+        match started {
+            Some(loading) => loading.wait(),
+            None => self.history.load(),
+        }
     }
 
-    /// Made then and there, on the caller's thread.
+    /// Made on the history's own thread, after whatever was asked before.
     fn change_history(&self, change: HistoryChange) -> Pending<HistorySaved> {
-        done(self.history.apply(&change))
+        self.history.apply(change)
     }
 
     fn history_listing(&self) -> Pending<Option<Vec<RecordId>>> {
-        done(self.history.listing())
+        self.history.listing()
     }
 
     fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
-        done(self.history.read(&ids))
+        self.history.read(ids)
     }
 
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
-        done(self.history.forgotten(&ids))
+        self.history.forgotten(ids)
     }
 
     fn history_changed(&self) -> bool {
         self.history.changed()
+    }
+
+    fn flush_history(&self) {
+        if !self.history.flush(FLUSH_WITHIN) {
+            eprintln!("the app closed before the history was all written");
+        }
     }
 }
 
