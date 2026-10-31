@@ -2526,6 +2526,41 @@ mod tests {
         );
     }
 
+    /// The same skip found only once the session had paused — the page
+    /// stalled long enough to be taken for away — the answer typed in full
+    /// along the send: resumed, the answer confirms itself, untimed.
+    #[test]
+    fn a_lossy_skip_told_after_a_pause_still_untimes_the_group() {
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM", "KM"], 1));
+        let _ = m.apply(km_started(0), MonoMs(0));
+        let keys = Keys {
+            at: vec![Some(MonoMs(450)), Some(MonoMs(650))],
+            corrected: Vec::new(),
+        };
+        let _ = m.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+                keys,
+            },
+            MonoMs(650),
+        );
+        let _ = m.apply(SessionEvent::Pause, MonoMs(700));
+        let _ = m.apply(missed(0, 0.1, 0.4), MonoMs(2_800));
+        let auto = m.apply(SessionEvent::Resume, MonoMs(9_000));
+        let _ = fire(&mut m, &auto, 9_000 + u64::from(AUTO_CONFIRM_DELAY_MS));
+        assert_eq!(m.phase(), SessionPhase::InterGroupGap { next: 1 });
+        let timing = &m
+            .session()
+            .result(10_000, "2026-10-31".into())
+            .group_timings[0];
+        assert_eq!(
+            (timing.untimed, timing.char_times.is_none()),
+            (Some(Untimed::HeldUp), true),
+            "{timing:?}"
+        );
+    }
+
     /// A group every send of which goes in part unheard is sent again
     /// twice, then answered, the last send counted as heard: a stream that
     /// keeps skipping never keeps a group from its answer, nor the box
