@@ -28,7 +28,8 @@ use crate::time::{POLL_MS, now_ms, sleep_ms};
 use crate::ui::format::{counted, day_of, short_date};
 
 /// How long after the store last refused what the app has yet to store it
-/// is tried again, while anything waits: the next change tries it sooner.
+/// is tried again, while anything waits: the page coming back into sight,
+/// or the next change, try it sooner.
 pub const RETRY_MS: u32 = 60_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -690,7 +691,8 @@ impl AppCtx {
 
     /// Take up whatever another tab, window or copy of the app stored or
     /// deleted since this one last looked, where the store says anything
-    /// may have changed: as a screen that shows the history opens.
+    /// may have changed: as a screen that shows the history opens, and as
+    /// the page comes back into sight.
     pub fn take_up_changes(self) {
         if self.app().store.history_changed() {
             self.sync_with_store(|| {});
@@ -705,7 +707,8 @@ impl AppCtx {
     /// want of room, as only a browser's page storage does, goes from here
     /// too; and the mark follows what the store has taken
     /// ([`Self::settle_mark`]). Whatever is still to be stored is tried
-    /// again with the next change, and every [`RETRY_MS`] until it is.
+    /// again with the next change, as the page comes back into sight, and
+    /// every [`RETRY_MS`] until it is.
     fn change_history(self, mut change: HistoryChange, then: impl FnOnce(HistorySaved) + 'static) {
         {
             let history = self.sessions.peek();

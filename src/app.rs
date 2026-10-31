@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::refocus_run;
 use crate::keep_awake::use_keep_awake;
 use crate::page_closed::use_end_on_close;
-use crate::page_hidden::{APP_HIDDEN, use_page_hidden};
+use crate::page_hidden::{APP_HIDDEN, APP_SHOWN, use_page_hidden, use_page_shown};
 use crate::routes::Route;
 use crate::session_runtime::finish_run;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
@@ -124,6 +124,13 @@ pub fn App() -> Element {
     // A session or run is kept as the app is closed, where the platform
     // says it is closing.
     use_end_on_close(ctx);
+    // Back in sight, the history takes up what another copy of the app
+    // stored or deleted meanwhile, and what the store had no room for is
+    // tried again.
+    use_page_shown(APP_SHOWN, move || {
+        ctx.store_unsaved();
+        ctx.take_up_changes();
+    });
     // Back on a phone, or in a browser, goes back through the app's screens
     // rather than out of it (src/system_back.rs).
     #[cfg(any(test, feature = "web", target_os = "android"))]
@@ -1070,6 +1077,26 @@ mod ui_tests {
             drop(ui);
             let (_ui, _recorder) = Ui::launch(store.clone());
             assert_eq!(store.load_sessions().len(), 1, "kept once");
+        });
+    }
+
+    /// A session the store had no room for is stored as the page comes back
+    /// into sight, once the store has room, and its mark goes then: the
+    /// learner is likely to have made room while away.
+    #[test]
+    fn a_session_waiting_for_room_is_stored_as_the_page_comes_back() {
+        run(|| async {
+            let (mut ui, recorder) = awaiting_answer(short_session()).await;
+            ui.store.full.set(true);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
+            assert!(ui.store.load_sessions().is_empty());
+            assert!(ui.store.open().is_some(), "held by its mark");
+            ui.store.full.set(false);
+            ui.with_app(|_| crate::page_hidden::show_page());
+            assert_eq!(ui.store.load_sessions().len(), 1);
+            assert_eq!(ui.store.open(), None);
         });
     }
 
