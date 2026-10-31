@@ -14,6 +14,12 @@
 //! - `restoring-<n>.json`: the records a change of many sessions at once
 //!   is storing, held locked while it does: one left unlocked was cut
 //!   short.
+//! - `packs/*.jsonl.gz`: older records a later build packs together, to
+//!   keep the history to fewer and smaller files. This build only reads
+//!   them: gzip, one record a line, `{"id": <its name>, "s": <what was
+//!   written for it, as a JSON string>}`. A record both packed and loose
+//!   is one record; a tombstone deletes one packed as it deletes one
+//!   loose.
 //!
 //! Every file is written whole or not at all ([`place_whole`]), so two
 //! copies of the app on one folder, which take no lock between them, never
@@ -26,13 +32,14 @@
 //! ([`legacy::imported`]).
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use cw_core::SessionResult;
+use flate2::read::GzDecoder;
 
 use super::desktop::{
     DELETED, SESSIONS, copy_aside, move_aside, place_whole, shown, sync_dir, write_whole,
@@ -47,6 +54,9 @@ const HISTORY: &str = "history";
 const RECORDS: &str = "sessions";
 /// The tombstones, in the history's folder.
 const TOMBSTONES: &str = "deleted";
+/// The records packed together, in the history's folder.
+const PACKS: &str = "packs";
+const PACK_EXTENSION: &str = ".jsonl.gz";
 const LAYOUT_FILE: &str = "layout.json";
 const TOLD: &str = "told.json";
 /// What a change of many sessions at once is called while it runs:
@@ -81,16 +91,26 @@ pub(super) struct HistoryFiles {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Stamps {
     records: Option<SystemTime>,
+    packs: Option<SystemTime>,
     tombstones: Option<SystemTime>,
     legacy: Option<Fingerprint>,
 }
 
 /// What the history's folders hold.
 struct Listing {
-    /// Every record, in order.
+    /// Every record, loose or packed, in order.
     records: BTreeSet<RecordId>,
     /// Every tombstone.
     gone: BTreeSet<RecordId>,
+    /// What each packed record holds, as it was written.
+    packed: BTreeMap<RecordId, String>,
+}
+
+/// A record as a pack holds it: one line.
+#[derive(serde::Deserialize)]
+struct PackLine {
+    id: String,
+    s: String,
 }
 
 /// A change of many sessions at once, as it runs: its journal, held
@@ -188,7 +208,8 @@ impl HistoryFiles {
                 }
                 continue;
             }
-            match self.read_session(id) {
+            let raw = self.raw_record(id, &listing.packed);
+            match raw.as_deref().and_then(read_record) {
                 Some(session) => {
                     keys.insert(id, SessionKey::of(&session));
                     load.sessions.push((id, session));
@@ -333,11 +354,12 @@ impl HistoryFiles {
     /// The records `ids`, as they are stored, each that can be read: one
     /// that cannot comes back as its id.
     pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
+        let packed = self.packed().unwrap_or_default();
         ids.iter()
             .map(|&id| {
-                fs::read_to_string(self.records().join(file_name(id)))
+                self.raw_record(id, &packed)
                     .map(|json| Record { id, json })
-                    .map_err(|_| id)
+                    .ok_or(id)
             })
             .collect()
     }
@@ -362,6 +384,7 @@ impl HistoryFiles {
         let modified = |dir: &Path| fs::metadata(dir).and_then(|meta| meta.modified()).ok();
         Stamps {
             records: modified(&self.records()),
+            packs: modified(&self.dir.join(PACKS)),
             tombstones: modified(&self.tombstones()),
             legacy: fingerprint_of(&self.root.join(SESSIONS)).ok().flatten(),
         }
@@ -392,16 +415,55 @@ impl HistoryFiles {
 
     /// Every record and tombstone there is.
     fn listing_now(&self) -> io::Result<Listing> {
+        let packed = self.packed()?;
+        let mut records = ids_in(&self.records())?;
+        records.extend(packed.keys().copied());
         Ok(Listing {
-            records: ids_in(&self.records())?,
+            records,
             gone: ids_in(&self.tombstones())?,
+            packed,
         })
     }
 
-    /// The session stored as `id`, if it reads.
-    fn read_session(&self, id: RecordId) -> Option<SessionResult> {
-        let raw = fs::read_to_string(self.records().join(file_name(id))).ok()?;
-        read_record(&raw)
+    /// What is stored for `id`, loose, or else in a pack: none where it
+    /// cannot be read.
+    fn raw_record(&self, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<String> {
+        match fs::read_to_string(self.records().join(file_name(id))) {
+            Ok(raw) => Some(raw),
+            Err(_) => packed.get(&id).cloned(),
+        }
+    }
+
+    /// Every record a later build packed together, and what each holds,
+    /// as it was written. A line that does not read, or a pack cut short,
+    /// gives up what it can: the pack is left as it is.
+    fn packed(&self) -> io::Result<BTreeMap<RecordId, String>> {
+        let entries = match fs::read_dir(self.dir.join(PACKS)) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+            Err(err) => return Err(err),
+        };
+        let mut packed = BTreeMap::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(PACK_EXTENSION)
+            {
+                continue;
+            }
+            let lines = io::BufReader::new(GzDecoder::new(fs::File::open(entry.path())?)).lines();
+            for line in lines.map_while(Result::ok) {
+                let Ok(line) = serde_json::from_str::<PackLine>(&line) else {
+                    continue;
+                };
+                if let Some(id) = RecordId::parse(&line.id) {
+                    packed.entry(id).or_insert(line.s);
+                }
+            }
+        }
+        Ok(packed)
     }
 
     /// Every record there is by its session's key: those read before as
@@ -414,9 +476,9 @@ impl HistoryFiles {
             let key = match keys.get(id) {
                 Some(key) => key.clone(),
                 None => {
-                    let Some(key) = fs::read(self.records().join(file_name(*id)))
-                        .ok()
-                        .and_then(|raw| serde_json::from_slice::<KeyOnly>(&raw).ok())
+                    let Some(key) = self
+                        .raw_record(*id, &listing.packed)
+                        .and_then(|raw| serde_json::from_str::<KeyOnly>(&raw).ok())
                         .map(|key| SessionKey::new(key.timestamp, key.date))
                     else {
                         continue;
@@ -577,7 +639,8 @@ impl HistoryFiles {
     /// still running could own.
     fn clear_temporaries(&self) {
         let now = SystemTime::now();
-        for dir in [self.dir.clone(), self.records(), self.tombstones()] {
+        let packs = self.dir.join(PACKS);
+        for dir in [self.dir.clone(), self.records(), self.tombstones(), packs] {
             let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
             };
@@ -1605,5 +1668,61 @@ mod tests {
             fs::read_to_string(dir.0.join(HISTORY).join(&aside[0])).unwrap(),
             "{ damaged"
         );
+    }
+
+    /// Write a pack of `records`, as a later build packs them, with
+    /// `extra` lines after them.
+    fn pack(dir: &TempDir, name: &str, records: &[&Record], extra: &[&str]) -> PathBuf {
+        use flate2::write::GzEncoder;
+        let packs = dir.0.join(HISTORY).join(PACKS);
+        fs::create_dir_all(&packs).unwrap();
+        let mut lines = String::new();
+        for record in records {
+            let line = serde_json::json!({ "id": record.id.name(), "s": record.json });
+            lines.push_str(&line.to_string());
+            lines.push('\n');
+        }
+        for line in extra {
+            lines.push_str(line);
+            lines.push('\n');
+        }
+        let path = packs.join(name);
+        let mut packing = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        packing.write_all(lines.as_bytes()).unwrap();
+        fs::write(&path, packing.finish().unwrap()).unwrap();
+        path
+    }
+
+    /// Records a later build packed together are read as records: one both
+    /// packed and loose is one record, a tombstone deletes one packed, and
+    /// the pack is never written.
+    #[test]
+    fn a_pack_and_a_loose_copy_of_one_record_read_as_one() {
+        let (dir, files) = history("packs");
+        files.load();
+        let (first, second, third) = (finished(1_000), finished(2_000), finished(3_000));
+        let (one, two, three) = (record(&first), record(&second), record(&third));
+        let packed = pack(
+            &dir,
+            &format!("{}-{}{PACK_EXTENSION}", one.id, two.id),
+            &[&one, &two],
+            &["not a line", r#"{"id":"not a name","s":"{}"}"#],
+        );
+        fs::write(dir.0.join(HISTORY).join(PACKS).join("notes.txt"), "x").unwrap();
+        files.apply(&put(&[two.clone(), three.clone()]));
+        let read = files.load();
+        assert_eq!(
+            read.sessions,
+            [(one.id, first.clone()), (two.id, second), (three.id, third)]
+        );
+        assert!(read.unread.is_empty());
+        assert_eq!(files.listing(), Some(vec![one.id, two.id, three.id]));
+        assert_eq!(files.read(&[one.id]), [Ok(one.clone())]);
+        let before = fs::read(&packed).unwrap();
+        files.apply(&forget(&[(&one, &first)]));
+        assert_eq!(ids(&files.load()), [two.id, three.id]);
+        assert_eq!(files.listing(), Some(vec![two.id, three.id]));
+        assert_eq!(files.forgotten(&[one.id]), [one.id]);
+        assert_eq!(fs::read(&packed).unwrap(), before, "never written");
     }
 }
