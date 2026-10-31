@@ -9,8 +9,16 @@
 // channel to the app. Dioxus closes that channel once the body is done, yet
 // still delivers what is sent on it after, which is how a listener the body
 // leaves behind talks to the app; so here a send is heard whenever it comes.
+// A script waited on runs to its end before the next step is taken, as one
+// that waits on the browser's database has to.
+//
+// The page has a browser's database, broadcast channels and page storage too,
+// made up in memory (`src/fake_idb.mjs`), for the history's script.
 
 import { readFileSync } from "node:fs";
+import { install } from "./fake_idb.mjs";
+
+install(globalThis);
 
 class Target {
   #listeners = new Map();
@@ -67,7 +75,7 @@ const run = (script) => {
     recv: () => new Promise(() => {}),
     close: () => {},
   };
-  new AsyncFunction("dioxus", "window", "document", "navigator", script)(
+  return new AsyncFunction("dioxus", "window", "document", "navigator", script)(
     dioxus,
     window,
     document,
@@ -102,6 +110,8 @@ for (const step of steps) {
   heard = { sent: [], prevented: false };
   if (step.step === "run") {
     run(step.script);
+  } else if (step.step === "wait") {
+    await run(step.script);
   } else if (step.step === "key") {
     const { step: _, ...fields } = step;
     const key = event(fields.type, fields);

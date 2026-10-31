@@ -41,6 +41,17 @@ pub fn NoticeBanner() -> Element {
 /// A notice in words.
 fn notice_text(notice: &Notice) -> String {
     match notice {
+        Notice::CutOff(CutOff::Marked(open)) if open.over => {
+            // Over, and held only for what the store had yet to take.
+            let count = open.unstored.len() + usize::from(open.so_far.is_some());
+            if count == 1 {
+                "Dust closed before your last session was saved. It is kept now.".into()
+            } else {
+                format!(
+                    "Dust closed before {count} of your sessions were saved. They are kept now."
+                )
+            }
+        }
         Notice::CutOff(CutOff::Marked(open)) => {
             let what = if open.run { "contest run" } else { "session" };
             let when = started(open.started_at)
@@ -51,7 +62,12 @@ fn notice_text(notice: &Notice) -> String {
                 (true, false) => ". The groups you had answered were kept.",
                 (true, true) => ". The QSOs you had logged were kept.",
             };
-            format!("Your {what}{when} was cut off: Dust closed while it ran{kept}")
+            let before = match open.unstored.len() {
+                0 => String::new(),
+                1 => " The session before it, not saved yet, was kept too.".into(),
+                count => format!(" The {count} sessions before it, not saved yet, were kept too."),
+            };
+            format!("Your {what}{when} was cut off: Dust closed while it ran{kept}{before}")
         }
         Notice::CutOff(CutOff::Unread) => {
             "Your last session was cut off: Dust closed while it ran, so it was not kept.".into()
@@ -126,11 +142,9 @@ mod tests {
     #[test]
     fn a_cut_off_session_says_when_it_started_and_that_it_was_not_kept() {
         let at = crate::time::now_ms();
-        let text = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
-            started_at: at,
-            run: false,
-            so_far: None,
-        })));
+        let text = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession::starting(
+            false, at,
+        ))));
         let time = clock(at).expect("a time today");
         assert_eq!(
             text,
@@ -138,11 +152,10 @@ mod tests {
                 "Your session started at {time} was cut off: Dust closed while it ran, so it was not kept."
             )
         );
-        let run = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
-            started_at: at - 3 * 86_400_000,
-            run: true,
-            so_far: None,
-        })));
+        let run = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession::starting(
+            true,
+            at - 3 * 86_400_000,
+        ))));
         assert!(run.starts_with("Your contest run started "), "{run}");
         assert!(run.contains(" at "), "{run}");
         assert_eq!(
@@ -189,12 +202,11 @@ mod tests {
         let time = clock(at).expect("a time today");
         let kept = |run| {
             notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
-                started_at: at,
-                run,
                 so_far: Some(Box::new(crate::persist::SoFar {
                     result: cw_core::SessionResult::empty_for_test(),
                     settings: None,
                 })),
+                ..OpenSession::starting(run, at)
             })))
         };
         assert_eq!(
@@ -208,6 +220,55 @@ mod tests {
             format!(
                 "Your contest run started at {time} was cut off: Dust closed while it ran. The QSOs you had logged were kept."
             )
+        );
+    }
+
+    /// A mark that carried sessions the store had yet to take says they
+    /// were kept: those finished before a session cut off, or, once its own
+    /// was over, the sessions it was held for alone.
+    #[test]
+    fn a_cut_off_mark_says_what_it_carried_was_kept() {
+        let at = crate::time::now_ms();
+        let time = clock(at).expect("a time today");
+        let session = cw_core::SessionResult::empty_for_test();
+        let carrying = |count, over| {
+            notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
+                unstored: vec![session.clone(); count],
+                over,
+                ..OpenSession::starting(false, at)
+            })))
+        };
+        assert_eq!(
+            carrying(1, false),
+            format!(
+                "Your session started at {time} was cut off: Dust closed while it ran, so it was not kept. The session before it, not saved yet, was kept too."
+            )
+        );
+        assert!(
+            carrying(2, false)
+                .ends_with(" The 2 sessions before it, not saved yet, were kept too."),
+            "{}",
+            carrying(2, false)
+        );
+        assert_eq!(
+            carrying(1, true),
+            "Dust closed before your last session was saved. It is kept now."
+        );
+        assert_eq!(
+            carrying(3, true),
+            "Dust closed before 3 of your sessions were saved. They are kept now."
+        );
+        let finished = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
+            so_far: Some(Box::new(crate::persist::SoFar {
+                result: session.clone(),
+                settings: None,
+            })),
+            over: true,
+            ..OpenSession::starting(false, at)
+        })));
+        assert_eq!(
+            finished,
+            "Dust closed before your last session was saved. It is kept now."
         );
     }
 }

@@ -8,9 +8,9 @@ use std::rc::Rc;
 
 use cw_core::{SessionResult, TrainingSettings};
 
-use crate::persist::Store;
 use crate::persist::backup::{read_backup, write_backup};
 use crate::persist::memory::MemoryStore;
+use crate::persist::{OpenSession, Store};
 use crate::testing::{Ui, run, stored_session, test_settings};
 
 /// `count` sessions a day apart, oldest first, the way the store keeps
@@ -310,7 +310,8 @@ fn a_restore_that_only_fills_in_says_so() {
 }
 
 /// A file that is not a backup, or far too large to be one, is refused, and
-/// the card says why.
+/// the card says why. Too large is past a gigabyte: a backup of fifty
+/// megabytes or more, which used to be refused, is a history of years.
 #[test]
 fn a_file_that_is_not_a_backup_is_refused() {
     run(|| async {
@@ -327,10 +328,113 @@ fn a_file_that_is_not_a_backup_is_refused() {
         );
         ui.advance(20).await;
         assert!(ui.has("settings.json is not a Dust backup"));
-        ui.choose_file("file-backup", "film.mkv", "{}", 900_000_000);
+        ui.choose_file("file-backup", "film.mkv", "{}", 1_100_000_000);
         ui.advance(20).await;
         assert!(ui.has("film.mkv is far larger than any backup: nothing was restored."));
         assert_eq!(stored_dates(&ui).len(), 2);
+    });
+}
+
+/// A large backup is read and restored, however large, up to a gigabyte:
+/// the card says, as it reads it, that one so large takes a while, and the
+/// message says the sessions are being restored until they are, then what
+/// was restored, with Undo.
+#[test]
+fn a_large_backup_says_it_takes_a_while_and_restores_all_the_same() {
+    run(|| async {
+        let all = history(5);
+        let store = MemoryStore::default();
+        let mut ui = open(store, &all[..1]);
+        let file = write_backup(&test_settings(), &all, 0);
+        let large = 600_000_000;
+        assert_eq!(
+            super::backup::reading_for("big.json", large),
+            "Reading big.json, 600 MB: a backup this large takes a while to restore."
+        );
+        assert_eq!(
+            super::backup::reading_for("small.json", file.len() as u64),
+            "Reading small.json…"
+        );
+        // The store answers a moment later, as the history's own thread does.
+        ui.store.deferred.set(true);
+        ui.choose_file("file-backup", "big.json", &file, large);
+        ui.advance(20).await;
+        assert!(ui.has("Restoring 4 sessions…"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 1, "not stored yet");
+        ui.store.settle();
+        ui.advance(20).await;
+        assert!(
+            ui.has("Restored 4 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.shows("toast-undo"));
+        assert_eq!(stored_dates(&ui).len(), 5);
+    });
+}
+
+/// A history past what Android's own backup of the app takes is said so
+/// on the card, which says to save a backup file; one that is not, and an
+/// app with nowhere to save one, say nothing of it.
+#[test]
+fn a_history_past_androids_own_backup_says_to_save_a_backup() {
+    run(|| async {
+        let said = "Android&#39;s own backup of an app stops at 25 MB";
+        let ui = open(MemoryStore::default(), &history(3));
+        assert!(!ui.has(said));
+        let store = MemoryStore::default();
+        store.device_backup_outgrown.set(true);
+        let ui = open(store, &history(3));
+        assert!(
+            ui.has("Your history here is past 20 MB, and Android&#39;s own backup of an app stops at 25 MB: save a backup file now and then"),
+            "{}",
+            ui.html()
+        );
+        let store = MemoryStore::default();
+        store.device_backup_outgrown.set(true);
+        store.no_backups.set(true);
+        assert!(!open(store, &history(3)).has(said));
+    });
+}
+
+/// Where the history stored cannot be read, a backup holds every session
+/// shown all the same, the one the store had no room for among them: a
+/// backup is how that one is kept safe meanwhile. Saving one used to fail,
+/// saying the history stored here could not be read.
+#[test]
+fn a_backup_holds_every_session_shown_where_the_store_cannot_be_read() {
+    run(|| async {
+        let store = MemoryStore::default();
+        store.full.set(true);
+        // Cut off as the app stopped, finished and not yet stored: kept as
+        // the app starts, and not stored for want of room.
+        let mut kept = stored_session("2026-09-20", &[("KM", "KM")]);
+        kept.timestamp = 20 * 86_400_000;
+        store.mark_open(Some(OpenSession {
+            unstored: vec![kept.clone()],
+            over: true,
+            ..OpenSession::starting(false, kept.timestamp)
+        }));
+        let mut ui = open(store, &history(3));
+        assert_eq!(stored_dates(&ui).len(), 3, "the fourth only shown");
+        ui.store.unlistable.set(true);
+
+        ui.click("btn-save-a-backup");
+        let files = ui.store.backup_files.borrow().clone();
+        assert_eq!(files.len(), 1);
+        let (name, contents) = &files[0];
+        let backup = read_backup(contents).expect("a backup");
+        let dates: Vec<String> = backup.sessions.into_iter().map(|s| s.date).collect();
+        assert_eq!(
+            dates,
+            ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-20"]
+        );
+        assert!(
+            ui.has(&format!("Backup saved as {name}, in your downloads.")),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("could not be saved"));
     });
 }
 

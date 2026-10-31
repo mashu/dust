@@ -1634,6 +1634,7 @@ dependencies = [
  "dioxus-html",
  "dioxus-ssr",
  "dirs",
+ "flate2",
  "gloo-timers",
  "gtk",
  "js-sys",

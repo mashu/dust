@@ -60,7 +60,7 @@
       <p class="meta">
         Dust — CW Morse trainer<br>
         Android package <code>dev.dust.morse</code><br>
-        Effective date: 30 October 2026
+        Effective date: 31 October 2026
       </p>
       <p>
         This policy covers the Dust app on Android and iPhone, and the same
@@ -108,8 +108,16 @@
           soon after each character's sound you keyed it, with the delay your
           audio device reports, accuracy, scores, speed, and per-letter
           results. For a contest run, also its
-          log of QSOs and your country, continent and CQ zone. Up to 500
-          sessions are kept; in a browser, as many of the newest as fit.
+          log of QSOs and your country, continent and CQ zone. Every session
+          is kept until you delete it; a browser keeps them while it gives
+          this site room, and the app says when it has none.
+        </li>
+        <li>
+          <strong>Sessions you deleted.</strong> For each one, when it
+          finished, on what day, and when you deleted it, and nothing else of
+          it. These notes are kept for good, so that another window or tab of
+          Dust, or a copy of the app left open on the history from before,
+          never brings a deleted session back.
         </li>
         <li>
           <strong>Level counters.</strong> Counts used to decide when to raise
@@ -175,11 +183,20 @@
           it, and every project the developer publishes on GitHub Pages is a
           page under mashu.github.io. Only the developer’s GitHub repositories
           can publish there, and whatever a page there loads shares its access.
-          Dust keeps everything under names that begin with
-          <code>dust_</code>, and never touches anything else the site keeps.
+          Dust keeps the practice history in the browser’s database for the
+          site (IndexedDB), in one named <code>dust_history</code>, and the
+          rest in the site’s page storage (localStorage). It keeps everything
+          under names that begin with <code>dust_</code>, and never touches
+          anything else the site keeps.
           The room the browser gives the site is shared too: where other
-          pages use some of it, the history keeps fewer of its newest
-          sessions, and the app says so. The app asks the browser to keep this
+          pages fill it, new sessions wait to be saved until there is room,
+          and the app says so. Where a browser will not open its database for
+          Dust, as some will not in a private window, that visit keeps the
+          history in the browser’s small page storage instead, as earlier
+          versions of Dust did: that has room for only the newest sessions,
+          and lets older ones go as it fills. The app says so whenever that
+          happens, and leaves the sessions in the database as they are.
+          The app asks the browser to keep this
           storage rather than clear it to free space; the browser may ask you
           first. Nothing is synced between browsers or devices.
         </li>
@@ -202,6 +219,15 @@
           copies it.
         </li>
       </ul>
+      <p>
+        Earlier versions of Dust kept the whole history in one place:
+        <code>sessions.json</code> in the folder named above, or
+        <code>dust_sessions</code> in a browser. Updating Dust copies it into
+        the way the history is kept now, and leaves that copy as it was when
+        you updated, so that an earlier version can still open it. Deleting
+        a session afterwards does not take it out of that copy; removing the
+        app’s data, below, does.
+      </p>
       <p>
         Dust itself syncs nothing between devices: it has no server to sync
         through. A backup file, below, is how to move your history yourself.
@@ -281,11 +307,14 @@
 
       <h2>How long it is kept, and how to delete it</h2>
       <p>
-        The history stays on the device until you remove it. Up to 500
-        sessions are kept; in a browser, as many of the newest as fit. Older
-        ones are discarded as you practise. On every platform any session, or
-        all of them, can be deleted under Stats, History, and clearing Your
-        station removes your callsign and exchange.
+        The history stays on the device until you remove it: Dust never
+        lets a session go to make room, but for a visit that keeps it in a
+        browser’s small page storage, above. On every platform any session,
+        or all of them, can be deleted under Stats, History, and clearing
+        Your station removes your callsign and exchange. A deleted session
+        leaves the note of when it finished and was deleted, above, and
+        stays in the copy an earlier version kept, if it was there when you
+        updated.
       </p>
       <ul>
         <li>
@@ -304,9 +333,10 @@
         <li>
           <strong>Web.</strong> Delete all the sessions under Stats, History,
           and clear Your station. That leaves the practice settings, the app’s
-          own counters and marks, none of which say who you are, and any copy
-          of a history Dust could not read and set aside, and touches no other
-          site.
+          own counters and marks, none of which say who you are, the notes of
+          the sessions deleted, any copy of a history Dust could not read and
+          set aside, and the history an earlier version kept, as it was when
+          you updated; and it touches no other site.
           Clearing the site data for <code>https://mashu.github.io</code> in
           your browser’s settings deletes everything Dust keeps there, along
           with what any other site at mashu.github.io keeps.

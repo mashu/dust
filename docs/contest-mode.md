@@ -2923,11 +2923,12 @@ settings" when nothing was added.
 
 ### 9.4 Size budget
 
-Web history is held to 3,000,000 characters (`HISTORY_BUDGET`,
-`persist/web.rs`), filled newest first (`store_newest_that_fit`,
-`persist/mod.rs`); every store keeps at most 500 sessions (`MAX_SESSIONS`).
-Measured on sample sessions (compact JSON,
-speeds to 0.1 WPM):
+There is none: the history is kept a record a session, in a browser's
+database or a folder of files, with no count and no limit but the room the
+device gives it (`docs/platforms.md`, How the history is kept). What a run
+takes still matters, to the room a browser gives the site, to Android's own
+backup of the app, which stops at 25 MB, and to a backup file. Measured on
+sample sessions (compact JSON, speeds to 0.1 WPM):
 
 | Session | Characters |
 |---|---|
@@ -2939,15 +2940,18 @@ speeds to 0.1 WPM):
 | Sprint, 200 QSOs (60 min at 200/h) | 107,900 |
 
 A WPX QSO adds about 290 characters to about 1,600 fixed, so a 10-minute run
-costs 1.6 group sessions at 70/h and 2.9 at 150/h, and in a browser a heavy
-contest user keeps fewer than 500 sessions. The squeeze notice
-(`HistorySaved::Squeezed`) gains "Long contest runs take more room" when
-the history held a run with its log (`Squeezed { kept, runs }`), and
-"The newest 500 sessions are kept" (`PrivacyCard`, `src/ui/privacy.rs`)
-becomes "Up to
-500 sessions are kept; in a browser, as many of the newest as fit". Groups
-cannot shrink: older builds require `received`, `correct` and
-`timeToCompleteMs` (`GroupResult`, `SessionTiming`, `session.rs`).
+costs 1.6 group sessions at 70/h and 2.9 at 150/h. Only a browser that will
+not open its database keeps the history whole for the visit, as builds
+before records did, to 3,000,000 characters (`HISTORY_BUDGET`,
+`persist/legacy.rs`), filled newest first (`store_newest_that_fit`); there a
+heavy contest user keeps fewer sessions, and the squeeze notice
+(`HistorySaved::Squeezed`) gains "Long contest runs take more room" when the
+history held a run with its log (`Squeezed { kept, runs, .. }`). The Privacy
+card (`HISTORY_KEPT`, `src/ui/privacy.rs`) says "Every session is kept until
+you delete it; a browser keeps them while it gives this site room, and the
+app says when it has none." Groups cannot shrink: older builds require
+`received`, `correct` and `timeToCompleteMs` (`GroupResult`,
+`SessionTiming`, `session.rs`).
 
 ### 9.5 Privacy
 

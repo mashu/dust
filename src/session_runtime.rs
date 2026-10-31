@@ -11,6 +11,8 @@
 //! settings in Contest start one, and [`finish_run`] and [`abort_run`] reach
 //! whichever is live.
 
+use std::collections::HashSet;
+
 use cw_core::{
     AnswerClose, CharSamplingState, CharSetMode, Completion, ContestEvent, CountersKey,
     CountersUpdate, Group, KeyLog, Keys, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId,
@@ -21,7 +23,8 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{LiveContest, send_run_event, start_run};
-use crate::persist::{OpenSession, SessionKey, SoFar};
+use crate::persist::record::{Record, RecordId};
+use crate::persist::{CutOff, OpenSession, SessionKey, SoFar};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::state::{AppCtx, Finished, Notice, Screen};
@@ -779,72 +782,110 @@ fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
     message
 }
 
-/// Keep what the sessions and runs the app stopped under had done by then,
-/// `kept`, as Exit would have kept each ([`AppCtx::tell_of_cut_off`]): in
-/// the history, where each falls by when it was last added to, and a
-/// session of groups counted towards its level's run, the level moved if
-/// the run earned it. One the app stopped under as it was stored, its mark
-/// holding it as stored, is in the history already, and kept once.
-pub fn keep_cut_off(ctx: AppCtx, kept: Vec<SoFar>) {
+/// Keep what the sessions and runs the app stopped under, `cut`, had done
+/// by then, as Exit would have kept each ([`AppCtx::tell_of_cut_off`]), and
+/// the sessions their marks carried that the store had yet to take: in the
+/// history, where each finished, and a session of groups counted towards
+/// its level's run, the level moved if the run earned it. One a mark
+/// carried was counted as it ended, and is not again.
+///
+/// Each is kept once, or not at all: one the history holds already, by
+/// when and on what day it finished, as the app stopped under it as it was
+/// stored, is not kept again, nor one deleted by hand under the record it
+/// would be stored as. Two marks that carry one session store it once:
+/// each is stored where it finished ([`RecordId::placed`]).
+pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
+    let store = ctx.app().store;
+    // Each as it is to be stored, on today's scale, as every session of the
+    // history is read, with the settings a session of groups is judged by.
+    let mut kept: Vec<(Record, SessionResult, Option<TrainingSettings>)> = Vec::new();
+    {
+        let history = ctx.sessions.peek();
+        let mut keys = HashSet::new();
+        let so_far = cut.iter().filter_map(CutOff::so_far).map(|so_far| {
+            let settings = so_far.settings.clone().map(TrainingSettings::clamp);
+            (so_far.result.clone(), settings)
+        });
+        let carried = cut
+            .iter()
+            .flat_map(CutOff::unstored)
+            .map(|session| (session.clone(), None));
+        for (mut result, settings) in so_far.chain(carried) {
+            let key = SessionKey::of(&result);
+            if history.has_key(&key) || !keys.insert(key) {
+                continue;
+            }
+            result.score = result.points();
+            let Some(record) = Record::of(&result, |json| RecordId::placed(result.timestamp, json))
+            else {
+                continue;
+            };
+            kept.push((record, result, settings));
+        }
+    }
     if kept.is_empty() {
         return;
     }
-    let mut sessions = ctx.sessions;
-    let store = ctx.app().store;
-    for so_far in kept {
-        let mut result = so_far.result;
-        // A session ended and stored as the app stopped, its mark still
-        // held with it as stored: kept already, and counted.
-        let key = SessionKey::of(&result);
-        if sessions
-            .peek()
-            .iter()
-            .any(|session| SessionKey::of(session) == key)
-        {
+    let ids = kept.iter().map(|(record, ..)| record.id).collect();
+    let gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
+    kept.retain(|(record, ..)| !gone.contains(&record.id));
+    if kept.is_empty() {
+        return;
+    }
+    // In the history, and held with this copy's mark, before any level is
+    // moved by them, and the levels moved before they are stored: the app
+    // stopping from here on keeps each once, its level counted once.
+    let mut judged = Vec::new();
+    let mut put = Vec::new();
+    for (record, result, settings) in kept {
+        if let Some(settings) = settings {
+            judged.push((record.id, result.clone(), settings));
+        }
+        put.push((record, result));
+    }
+    let held = ctx.hold_from_elsewhere(put);
+    if held.is_empty() {
+        return;
+    }
+    for (id, result, settings) in judged {
+        if held.iter().all(|record| record.id != id) {
             continue;
         }
-        // On today's scale, as every session of the history is read.
-        result.score = result.points();
-        if let Some(settings) = so_far.settings.map(TrainingSettings::clamp) {
-            let run = store.load_auto_counters(&CountersKey::of(&settings));
-            let done = complete_result(result, &settings, run);
-            settle_level(ctx, &done);
-            result = done.result;
+        let run = store.load_auto_counters(&CountersKey::of(&settings));
+        let done = complete_result(result, &settings, run);
+        settle_level(ctx, &done);
+    }
+    let mut notices = ctx.notices;
+    ctx.store_held(held, move |saved| {
+        store.ask_to_keep();
+        if let Some(problem) = saved.problem() {
+            notices.write().push(Notice::History(problem));
         }
-        let mut history = sessions.write();
-        let at = history.partition_point(|session| session.timestamp <= result.timestamp);
-        history.insert(at, result);
-    }
-    let saved = ctx.store_history();
-    store.ask_to_keep();
-    if let Some(problem) = saved.problem() {
-        let mut notices = ctx.notices;
-        notices.write().push(Notice::History(problem));
-    }
+    });
 }
 
 /// Add `finished` to the history, store it, and show it on the results
-/// screen: a session of groups and a contest run alike. It is marked over
-/// once it is stored, so the app stopping before then still tells of it.
+/// screen: a session of groups and a contest run alike. Its mark stays, as
+/// it holds it, until the store has taken it, so the app stopping before
+/// then, or a store with no room for it, still keeps it.
 pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     let AppCtx {
         mut screen,
         mut result,
-        mut sessions,
         mut notices,
         ..
     } = ctx;
-    // The history grows by one where it is, and is stored from there.
-    sessions.write().push(finished.clone());
-    let saved = ctx.store_history();
-    ctx.mark_ended();
-    // A browser may clear its store to make room; there is now something in
-    // it worth asking it to keep.
-    ctx.app().store.ask_to_keep();
-    // Up until it is read: a session not stored is a session lost.
-    if let Some(problem) = saved.problem() {
-        notices.write().push(Notice::History(problem));
-    }
+    ctx.mark_kept();
+    let store = ctx.app().store;
+    ctx.keep_finished(finished.clone(), move |saved| {
+        // A browser may clear its store to make room; there is now
+        // something in it worth asking it to keep.
+        store.ask_to_keep();
+        // Up until it is read: a session not stored is a session at risk.
+        if let Some(problem) = saved.problem() {
+            notices.write().push(Notice::History(problem));
+        }
+    });
     result.set(Some(Finished::Kept(Box::new(finished))));
     screen.set(Screen::Results);
     // Again starts from a history one session longer.
@@ -2779,41 +2820,6 @@ mod tests {
         });
     }
 
-    /// A store with room for fewer sessions than the history keeps the
-    /// newest, says so, and the screens show what it kept. A browser out of
-    /// room used to drop the oldest in silence, and the app went on showing
-    /// them until the next launch.
-    #[test]
-    fn a_history_too_big_to_store_keeps_its_newest_and_says_so() {
-        run(|| async {
-            let mut h = Harness::new();
-            h.ctx.sessions.set(vec![
-                crate::testing::stored_session("2026-09-01", &[("KM", "KM")]),
-                crate::testing::stored_session("2026-09-02", &[("KM", "KM")]),
-            ]);
-            h.store.room.set(Some(2));
-            h.start_training();
-            h.play_through(60_000).await;
-            assert_eq!(h.screen(), Screen::Results);
-            let shown: Vec<String> = h
-                .ctx
-                .sessions
-                .peek()
-                .iter()
-                .map(|s| s.date.clone())
-                .collect();
-            assert_eq!(shown.len(), 2);
-            assert_eq!(shown[0], "2026-09-02", "the oldest is the one let go");
-            assert_eq!(h.store.load_sessions().len(), 2);
-            assert!(
-                history_said(&h)
-                    .is_some_and(|text| text.contains("newest 2") && !text.contains("contest")),
-                "{:?}",
-                h.notices()
-            );
-        });
-    }
-
     /// What the history said of the session just kept, up until it is read.
     fn history_said(h: &Harness) -> Option<String> {
         h.notices().into_iter().find_map(|notice| match notice {
@@ -2822,50 +2828,171 @@ mod tests {
         })
     }
 
-    /// A history that held a contest run says why it ran short of room: a
-    /// run's log takes more of it than a session of groups.
-    #[test]
-    fn a_squeezed_history_that_held_a_run_says_runs_take_more_room() {
-        run(|| async {
-            let mut h = Harness::new();
-            let qsos = [("K5XYZ", "214", "K5XYZ", "214")];
-            h.ctx.sessions.set(vec![
-                crate::testing::stored_run("2026-09-01", &qsos),
-                crate::testing::stored_session("2026-09-02", &[("KM", "KM")]),
-            ]);
-            h.store.room.set(Some(2));
-            h.start_training();
-            h.play_through(60_000).await;
-            assert_eq!(h.store.load_sessions().len(), 2);
-            assert!(
-                history_said(&h).is_some_and(|text| text.contains("newest 2")
-                    && text.ends_with("Long contest runs take more room.")),
-                "{:?}",
-                h.notices()
-            );
-        });
+    /// The session the mark holds as its own, as far as it went.
+    fn marked_groups(h: &Harness) -> Option<usize> {
+        let open = h.store.open()?;
+        open.so_far.map(|so_far| so_far.result.groups.len())
     }
 
-    /// A history the store could not read is not written over, and the user
-    /// is told the session was not kept, until they have read it: a session
-    /// not stored is a session lost.
+    /// A session the store has no room for is kept here, says so, and
+    /// stays marked, its mark holding it whole, until it is stored: should
+    /// the app stop first, the next launch keeps it. It used to be marked
+    /// over as soon as the store was asked, kept or not, and lived on in
+    /// the app alone. Tried again once there is room, it is stored, and
+    /// the mark goes.
     #[test]
-    fn a_session_is_not_stored_over_a_history_that_could_not_be_read() {
+    fn a_session_that_could_not_be_stored_stays_marked_until_it_is() {
         run(|| async {
             let mut h = Harness::new();
-            h.store.held.set(true);
+            h.store.full.set(true);
             h.start_training();
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results, "the results are still shown");
             assert!(h.store.load_sessions().is_empty());
-            h.advance(u64::from(crate::state::ACTION_TOAST_MS) * 2)
-                .await;
+            assert_eq!(h.ctx.sessions.peek().len(), 1, "kept here");
+            let said = history_said(&h).expect("told");
+            assert!(said.contains("kept here until there is"), "{said}");
+            let open = h.store.open().expect("still marked");
+            assert!(open.over);
+            assert!(marked_groups(&h).is_some_and(|groups| groups > 0));
+
+            h.store.full.set(false);
+            let ctx = h.ctx;
+            h.in_app(|| ctx.store_unsaved());
+            assert_eq!(h.store.load_sessions().len(), 1, "stored");
+            assert_eq!(h.store.open(), None, "and no longer marked");
+            assert!(h.ctx.sessions.peek().unsaved().is_empty());
+        });
+    }
+
+    /// A session the store had no room for is stored with the next change
+    /// it takes, beside the one that change was for; and failing all else,
+    /// it is tried again every so often, until it is.
+    #[test]
+    fn a_full_store_keeps_the_session_here_says_so_and_stores_it_with_the_next_change() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.store.full.set(true);
+            h.start_training();
+            h.play_through(60_000).await;
+            assert!(history_said(&h).is_some_and(|said| said.contains("no room left")));
+            h.store.full.set(false);
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.store.load_sessions().len(), 2, "both stored");
+            assert_eq!(h.store.open(), None);
+            assert_eq!(history_said(&h), None, "nothing to say of the second");
+
+            // Full again, and left to the store's next try.
+            h.store.full.set(true);
+            h.start_training();
+            h.play_through(60_000).await;
+            h.store.full.set(false);
+            assert_eq!(h.store.load_sessions().len(), 2);
+            h.advance(u64::from(crate::state::RETRY_MS)).await;
+            assert_eq!(h.store.load_sessions().len(), 3, "tried again");
+            assert_eq!(h.store.open(), None);
+        });
+    }
+
+    /// The mark goes only once the store says its session is stored: a
+    /// browser's database says so a moment after it is asked, and the app
+    /// stopping in that moment keeps the session from the mark.
+    #[test]
+    fn a_mark_ends_only_once_its_session_is_stored() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.store.deferred.set(true);
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.store.waiting(), 1);
+            assert!(h.store.open().is_some(), "marked until it is stored");
+            h.store.settle();
+            h.advance(1).await;
+            assert_eq!(h.store.load_sessions().len(), 1);
+            assert_eq!(h.store.open(), None);
+            assert_eq!(history_said(&h), None);
+        });
+    }
+
+    /// The store's word on a session that came after the next one started
+    /// leaves the next one's mark be: it is that session's, not this one's.
+    #[test]
+    fn a_late_ack_never_ends_the_next_sessions_mark() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.store.deferred.set(true);
+            h.start_training();
+            h.play_through(60_000).await;
+            let first = h.store.open().expect("marked").started_at;
+            h.advance(5).await;
+            h.start_training();
+            let next = h.store.open().expect("marked").started_at;
+            assert_ne!(next, first);
+            h.advance(1).await;
             assert!(
-                history_said(&h).is_some_and(|text| text.contains("could not be read")),
-                "{:?}",
+                h.notices()
+                    .iter()
+                    .all(|notice| !matches!(notice, Notice::CutOff(_))),
+                "its own mark is no copy's cut off: {:?}",
                 h.notices()
             );
-            assert_eq!(h.store.open(), None, "told of, so no longer open");
+            h.store.settle();
+            h.advance(1).await;
+            assert_eq!(h.store.load_sessions().len(), 1, "the first is stored");
+            let open = h.store.open().expect("the next session's mark stays");
+            assert_eq!(open.started_at, next);
+            assert!(!open.over);
+        });
+    }
+
+    /// A session finished before the last one was stored rides in the next
+    /// session's mark, as it was kept, its level counted: should the app
+    /// stop while the next one runs, both are kept.
+    #[test]
+    fn a_session_finished_before_the_last_was_stored_rides_in_the_next_mark() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.store.deferred.set(true);
+            h.start_training();
+            h.play_through(60_000).await;
+            let kept = h.ctx.sessions.peek()[0].clone();
+            h.start_training();
+            let open = h.store.open().expect("marked");
+            assert_eq!(open.unstored, std::slice::from_ref(&kept));
+            assert!(open.so_far.is_none(), "nothing of its own yet");
+            // Discarded, the next one's mark still carries the first.
+            h.send(SessionEvent::Abort);
+            let open = h.store.open().expect("still marked");
+            assert!(open.over);
+            assert_eq!(open.unstored, [kept]);
+            h.store.settle();
+            h.advance(1).await;
+            assert_eq!(h.store.open(), None, "stored, so let go");
+        });
+    }
+
+    /// Storing a session writes one record, however long the history is,
+    /// and nothing else: the whole history used to be written again.
+    #[test]
+    fn storing_a_session_writes_one_record_whatever_the_history_holds() {
+        run(|| async {
+            let mut h = Harness::new();
+            {
+                let mut history = h.ctx.sessions.write();
+                for day in 1..=40 {
+                    history.push(crate::testing::stored_session(
+                        &format!("2026-09-{:02}", day % 28 + 1),
+                        &[("KM", "KM")],
+                    ));
+                }
+            }
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.store.record_writes.get(), 1);
+            assert_eq!(h.store.tombstone_writes.get(), 0);
+            assert_eq!(h.ctx.sessions.peek().len(), 41);
         });
     }
 }

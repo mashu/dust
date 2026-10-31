@@ -239,7 +239,6 @@ pub fn entries() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persist::Store;
     use crate::testing::{Ui, contest_settings, run, test_settings};
 
     /// Away from Home the entry goes on, once, however many screens are

@@ -7,6 +7,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::persist::backup::sessions_since;
+use crate::persist::record::RecordId;
 use crate::state::SessionPick;
 use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::bigram::{BigramCard, hardest_pairs_card};
@@ -107,10 +108,10 @@ fn opens(row: &SessionHistoryRow) -> bool {
 /// What keys each row of the history by: when its session finished, which
 /// stays with it however the rows around it come and go, and how many
 /// before it finished at the same moment, should any.
-fn row_keys(rows: &[SessionHistoryRow]) -> Vec<String> {
+fn row_keys<T>(rows: &[(SessionHistoryRow, T)]) -> Vec<String> {
     let mut seen = std::collections::HashMap::<u64, usize>::new();
     rows.iter()
-        .map(|row| {
+        .map(|(row, _)| {
             let alike = seen.entry(row.timestamp).or_default();
             *alike += 1;
             format!("{}-{}", row.timestamp, *alike - 1)
@@ -118,22 +119,24 @@ fn row_keys(rows: &[SessionHistoryRow]) -> Vec<String> {
         .collect()
 }
 
-/// One session of the history: picked while choosing, otherwise opened to
-/// its results where it has them, and deleted from its own row.
+/// One session of the history, `id` its record: picked while choosing,
+/// otherwise opened to its results where it has them, and deleted from its
+/// own row.
 #[component]
 fn HistoryRow(
     row: SessionHistoryRow,
+    id: RecordId,
     selecting: bool,
-    chosen: Signal<BTreeSet<SessionPick>>,
+    chosen: Signal<BTreeSet<RecordId>>,
     confirming: Signal<bool>,
     opened: Signal<Option<SessionPick>>,
-    on_delete: Option<EventHandler<Vec<SessionPick>>>,
+    on_delete: Option<EventHandler<Vec<RecordId>>>,
 ) -> Element {
     let pick = SessionPick {
         index: row.index,
         timestamp: row.timestamp,
     };
-    let is_chosen = chosen.read().contains(&pick);
+    let is_chosen = chosen.read().contains(&id);
     let key = row.index.to_string();
     // Spans, as a button that holds them may hold nothing else.
     let when = rsx! {
@@ -155,8 +158,8 @@ fn HistoryRow(
                 aria_checked: "{is_chosen}",
                 onclick: move |_| {
                     let mut set = chosen.write();
-                    if !set.remove(&pick) {
-                        set.insert(pick);
+                    if !set.remove(&id) {
+                        set.insert(id);
                     }
                     confirming.set(false);
                 },
@@ -185,7 +188,7 @@ fn HistoryRow(
                     class: "history-delete",
                     title: "Delete this session",
                     aria_label: "Delete the session of {row.date}",
-                    onclick: move |_| on_delete.call(vec![pick]),
+                    onclick: move |_| on_delete.call(vec![id]),
                     Icon { name: IconName::Trash }
                 }
             }
@@ -195,19 +198,21 @@ fn HistoryRow(
 
 /// Every session kept on this device, newest first.
 ///
-/// Given `on_delete`, sessions can be deleted: one from its own row, or
-/// several chosen together in select mode, all of them included. Deleting
-/// everything asks once more; anything else is put right with the Undo the
-/// app offers after. Given `backups`, the history can be saved to a file and
-/// restored from one, above the list.
+/// Given `on_delete`, sessions can be deleted, each by its record: one from
+/// its own row, or several chosen together in select mode, all of them
+/// included. A record stays with its session however the history changes
+/// around it, so what is chosen stays chosen. Deleting everything asks once
+/// more; anything else is put right with the Undo the app offers after.
+/// Given `backups`, the history can be saved to a file and restored from
+/// one, above the list.
 #[component]
 pub fn HistoryTab(
     #[props(into)] sessions: History,
-    on_delete: Option<EventHandler<Vec<SessionPick>>>,
+    on_delete: Option<EventHandler<Vec<RecordId>>>,
     backups: Option<Backups>,
 ) -> Element {
     let mut selecting = use_signal(|| false);
-    let mut chosen = use_signal(BTreeSet::<SessionPick>::new);
+    let mut chosen = use_signal(BTreeSet::<RecordId>::new);
     let mut confirming = use_signal(|| false);
     let mut shown = use_signal(|| HISTORY_PAGE);
     // The run whose results are open, read again from its row.
@@ -216,33 +221,30 @@ pub fn HistoryTab(
         return results;
     }
 
-    // Every session, newest first, by its stamp alone; and the rows of
-    // those shown. Each run's log is read and checked to make its row: only
-    // for the rows on the page, once for the history as it stands, not
-    // again for every choice made in the list.
+    // Every session, newest first, by its stamp alone, each by its place
+    // and its record; and the rows of those shown. Each run's log is read
+    // and checked to make its row: only for the rows on the page, once for
+    // the history as it stands, not again for every choice made in the list.
     let every = sessions.figure("history order", (), |all| {
         history_order(all)
             .into_iter()
-            .map(|index| SessionPick {
-                index,
-                timestamp: all[index].timestamp,
-            })
+            .filter_map(|index| Some((index, sessions.id_at(index)?)))
             .collect::<Vec<_>>()
     });
     let rows = sessions.figure("history rows", shown(), |all| {
         every
             .iter()
             .take(shown())
-            .filter_map(|pick| history_row(all, pick.index))
+            .filter_map(|&(index, id)| Some((history_row(all, index)?, id)))
             .collect::<Vec<_>>()
     });
     let total = every.len();
     let selecting_now = selecting() && on_delete.is_some() && total > 0;
     // Only what is still in the history counts as chosen.
-    let picked: Vec<SessionPick> = every
+    let picked: Vec<RecordId> = every
         .iter()
-        .filter(|pick| chosen.read().contains(pick))
-        .copied()
+        .map(|(_, id)| *id)
+        .filter(|id| chosen.read().contains(id))
         .collect();
     let count = picked.len();
     let everything = count == total;
@@ -300,10 +302,11 @@ pub fn HistoryTab(
                 }
             } else {
                 div { class: "history-list",
-                    for (row, key) in rows.iter().zip(row_keys(&rows)) {
+                    for ((row, id), key) in rows.iter().zip(row_keys(&rows)) {
                         HistoryRow {
                             key: "{key}",
                             row: row.clone(),
+                            id: *id,
                             selecting: selecting_now,
                             chosen,
                             confirming,
@@ -340,7 +343,7 @@ pub fn HistoryTab(
                             class: "select-btn danger",
                             onclick: move |_| {
                                 if let Some(on_delete) = on_delete {
-                                    on_delete.call(every.to_vec());
+                                    on_delete.call(every.iter().map(|(_, id)| *id).collect());
                                 }
                                 finish();
                             },
@@ -355,7 +358,7 @@ pub fn HistoryTab(
                                 if everything {
                                     set.clear();
                                 } else {
-                                    set.extend(every.iter().copied());
+                                    set.extend(every.iter().map(|(_, id)| *id));
                                 }
                             },
                             if everything { "Select none" } else { "Select all" }
@@ -389,8 +392,8 @@ pub fn HistoryTab(
 mod row_key_tests {
     use super::*;
 
-    fn row(timestamp: u64, index: usize) -> SessionHistoryRow {
-        SessionHistoryRow {
+    fn row(timestamp: u64, index: usize) -> (SessionHistoryRow, ()) {
+        let row = SessionHistoryRow {
             date: "2026-10-29".into(),
             accuracy_pct: 90.0,
             score: 10.0,
@@ -403,7 +406,8 @@ mod row_key_tests {
             log: None,
             assisted: false,
             index,
-        }
+        };
+        (row, ())
     }
 
     /// A row keeps its key however the rows around it come and go, and two
