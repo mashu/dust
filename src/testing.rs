@@ -375,7 +375,7 @@ impl Harness {
         let store = Rc::new(MemoryStore::default());
         let app = AppState::with(recorder.factory(), store.clone());
         let ctx = dom.in_scope(ScopeId::ROOT, || {
-            AppCtx::new(app.clone(), settings, Vec::new())
+            AppCtx::new(app.clone(), settings, Default::default())
         });
         Self {
             dom,

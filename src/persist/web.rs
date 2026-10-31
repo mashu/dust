@@ -8,18 +8,15 @@
 
 use std::cell::{Cell, RefCell};
 
-use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
+use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use super::legacy::{
-    Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, read_history, set_aside_from,
-    store_newest_that_fit,
-};
+use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
 use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
 use super::{
-    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SETTINGS_HELD,
-    SetAside, Store, newest, over_stored, read_settings_from, saved_now,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
+    over_stored, read_settings_from, saved_now,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -30,7 +27,8 @@ const SETTINGS_KEY: &str = "dust_settings";
 const UNREADABLE_SETTINGS_KEY: &str = "dust_settings_unreadable";
 const SESSIONS_KEY: &str = "dust_sessions";
 const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
-/// The sessions deleted by hand ([`Deleted`]).
+/// The sessions deleted by hand ([`super::Deleted`]), as builds before
+/// records remember them, and the history kept whole still does.
 const DELETED_KEY: &str = "dust_deleted";
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
 const LAST_BACKUP_KEY: &str = "dust_last_backup";
@@ -42,11 +40,9 @@ const LAST_BACKUP_KEY: &str = "dust_last_backup";
 const OPEN_PREFIX: &str = "dust_open_session_";
 
 pub struct WebStore {
-    /// The stored history could not be read, nor copied out of the way, the
-    /// last time it was read, so it is not to be written over until a read
-    /// says otherwise.
-    history_held: Cell<bool>,
-    /// The same, of the settings.
+    /// The stored settings could not be read, nor copied out of the way,
+    /// the last time they were read, so they are not to be written over
+    /// until a read says otherwise.
     settings_held: Cell<bool>,
     /// What reads set aside, not yet told of ([`Store::take_set_aside`]).
     set_aside: RefCell<Vec<SetAside>>,
@@ -56,7 +52,7 @@ pub struct WebStore {
     /// and takes it away with its lock ([`hold_mark`]).
     open_held: RefCell<Option<js_sys::Function>>,
     /// The history by record, kept whole in `localStorage` as it always
-    /// was, until it moves into the browser's database.
+    /// was, and to its room, until it moves into the browser's database.
     history: BlobHistory<Local>,
 }
 
@@ -68,7 +64,6 @@ impl Default for WebStore {
             aside: UNREADABLE_SESSIONS_KEY,
         };
         Self {
-            history_held: Cell::default(),
             settings_held: Cell::default(),
             set_aside: RefCell::default(),
             asked_to_keep: Cell::default(),
@@ -377,85 +372,10 @@ impl Store for WebStore {
 
     /// Whether the history is held is this read's to say, whatever the last
     /// one said: a copy there was no room to set aside then may fit now.
-    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
-        self.history_held.set(false);
-        let store = storage()?;
-        let raw = store.get_item(SESSIONS_KEY).ok().flatten()?;
-        // Copies set aside go beside any set aside before, each under a key
-        // of its own, as far as the room goes, and where it does not, into
-        // the room of what they are set aside from.
-        let aside = Shelf(&store);
-        let Some(read) = read_history(&raw) else {
-            // Keep the unreadable copy where the next save cannot reach it —
-            // and only once it is safely there take it out of the way. A copy
-            // that would not go even so is no copy, and the original stays
-            // put.
-            let kept = set_aside_from(
-                &aside,
-                SESSIONS_KEY,
-                &raw,
-                UNREADABLE_SESSIONS_KEY,
-                &raw,
-                None,
-            );
-            if !self.noted(kept, SetAside::History { kept: None }) {
-                self.history_held.set(true);
-            }
-            return None;
-        };
-        // The sessions that do not read are set aside before the next save
-        // leaves them out; where they cannot be, nothing is saved over them.
-        if let Some(unread) = read.unread_json() {
-            let kept = match serde_json::to_string(&read.sessions) {
-                Ok(rest) => set_aside_from(
-                    &aside,
-                    SESSIONS_KEY,
-                    &raw,
-                    UNREADABLE_SESSIONS_KEY,
-                    &unread,
-                    Some(&rest),
-                ),
-                Err(_) => Kept::Not,
-            };
-            let count = read.unread.len();
-            if !self.noted(kept, SetAside::Sessions { count, kept: None }) {
-                self.history_held.set(true);
-            }
-        }
-        Some(read.sessions)
-    }
-
     fn take_set_aside(&self) -> Vec<SetAside> {
         let mut set_aside = std::mem::take(&mut *self.set_aside.borrow_mut());
         set_aside.extend(self.history.take_set_aside());
         set_aside
-    }
-
-    /// None, where they cannot be read: a deletion forgotten costs a
-    /// session deleted coming back, never one kept going.
-    fn read_deleted(&self) -> Vec<Deleted> {
-        storage()
-            .and_then(|store| store.get_item(DELETED_KEY).ok().flatten())
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
-    }
-
-    fn save_deleted(&self, deleted: &[Deleted]) {
-        if let (Some(store), Ok(raw)) = (storage(), serde_json::to_string(deleted)) {
-            let _ = store.set_item(DELETED_KEY, &raw);
-        }
-    }
-
-    fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
-        if self.history_held.get() {
-            return HistorySaved::Held;
-        }
-        let Some(store) = storage() else {
-            return HistorySaved::Failed("this browser has no storage for it.".into());
-        };
-        store_newest_that_fit(newest(sessions), HISTORY_BUDGET, |raw| {
-            store.set_item(SESSIONS_KEY, raw).is_ok()
-        })
     }
 
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters {

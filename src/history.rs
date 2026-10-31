@@ -7,9 +7,6 @@
 //! deleted goes back exactly where it was, and one changed elsewhere is
 //! told from one alike in when it finished.
 
-// The app moves onto records after this: until then only tests use it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::task::{Context, Poll, Waker};
@@ -17,7 +14,7 @@ use std::task::{Context, Poll, Waker};
 use cw_core::SessionResult;
 
 use crate::persist::SessionKey;
-use crate::persist::record::{HistoryLoad, Pending, RecordId, records_for_blob};
+use crate::persist::record::{HistoryLoad, Pending, Record, RecordId, records_for_blob};
 
 /// The history, oldest first, each session beside its record.
 ///
@@ -72,6 +69,20 @@ impl StoredHistory {
         }
     }
 
+    /// Put `session` after every other, under the record it would be stored
+    /// as, the way a session just finished here goes: how a test adds one.
+    #[cfg(test)]
+    pub fn push(&mut self, session: SessionResult) -> RecordId {
+        let newest = self.newest_id();
+        let id = Record::of(&session, |json| {
+            RecordId::next(session.timestamp, newest, json)
+        })
+        .expect("a session writes")
+        .id;
+        self.insert(id, session);
+        id
+    }
+
     /// Take the record `id` out, and hand back its session, if it was here.
     pub fn remove(&mut self, id: RecordId) -> Option<SessionResult> {
         let at = self.index_of(id)?;
@@ -92,6 +103,18 @@ impl StoredHistory {
     /// The record of the session at `index`.
     pub fn id_at(&self, index: usize) -> Option<RecordId> {
         self.ids.get(index).copied()
+    }
+
+    /// The session of the record `id`, if it is here.
+    pub fn get(&self, id: RecordId) -> Option<&SessionResult> {
+        self.index_of(id).map(|at| &self.sessions[at])
+    }
+
+    /// The record `id` as it is to be stored: its session, written as this
+    /// build writes it, under the same name.
+    pub fn record(&self, id: RecordId) -> Option<Record> {
+        let json = serde_json::to_string(self.get(id)?).ok()?;
+        Some(Record { id, json })
     }
 
     /// Where the record `id` is, if it is here.
@@ -137,6 +160,11 @@ impl StoredHistory {
         &self.unsaved
     }
 
+    /// The sessions the store has yet to take, in the order of the history.
+    pub fn unsaved_sessions(&self) -> impl Iterator<Item = &SessionResult> {
+        self.unsaved.iter().filter_map(|id| self.get(*id))
+    }
+
     /// The records the store holds that this build cannot read.
     pub fn unread(&self) -> &BTreeSet<RecordId> {
         &self.unread
@@ -148,6 +176,7 @@ impl StoredHistory {
     }
 
     /// How many changes the history has had.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn generation(&self) -> u64 {
         self.generation
     }

@@ -17,6 +17,8 @@ use std::rc::Rc;
 use cw_core::{BandSettings, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
+use crate::history::StoredHistory;
+use crate::persist::record::RecordId;
 use crate::state::{AppCtx, in_root};
 use crate::time::{as_shown, now_ms};
 
@@ -36,7 +38,7 @@ struct Held {
 
 enum Sessions {
     /// The app's history, read where the app keeps it.
-    App(Signal<Vec<SessionResult>>),
+    App(Signal<StoredHistory>),
     /// A history of its own: the app's as the clock reads it, while a
     /// session is stamped ahead of it, or one a screen is drawn with alone.
     Own(Vec<SessionResult>),
@@ -68,6 +70,19 @@ impl History {
 
     pub fn len(&self) -> usize {
         self.with(<[SessionResult]>::len)
+    }
+
+    /// The record of the session at `index`, by which it is deleted: the
+    /// app's own. A history of its own is no history the app keeps, and
+    /// names each session by its place.
+    pub fn id_at(&self, index: usize) -> Option<RecordId> {
+        match &self.0.sessions {
+            Sessions::App(sessions) => sessions.peek().id_at(index),
+            Sessions::Own(sessions) => (index < sessions.len()).then_some(RecordId {
+                order: index as u64,
+                nonce: 0,
+            }),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -373,7 +388,8 @@ mod tests {
             ui.take_all_worked_out();
             ui.with_app(|ctx| {
                 let mut sessions = ctx.sessions;
-                sessions.write().extend(self::sessions(13).pop());
+                let newest = self::sessions(13).pop().expect("a session");
+                sessions.write().push(newest);
             });
             ui.click("seg-overview");
             assert_eq!(ui.take_worked_out("overview"), 1);
@@ -418,7 +434,8 @@ mod tests {
             assert_eq!(ui.take_worked_out("practice days"), 0);
             ui.with_app(|ctx| {
                 let mut sessions = ctx.sessions;
-                sessions.write().extend(self::sessions(6).pop());
+                let newest = self::sessions(6).pop().expect("a session");
+                sessions.write().push(newest);
             });
             assert_eq!(ui.take_worked_out("practice days"), 1);
         });

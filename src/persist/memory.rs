@@ -3,9 +3,10 @@
 //!
 //! Its history is kept by record, as a store's on disk is ([`super::record`]),
 //! with what a test needs to make it misbehave as a real one can: full,
-//! failing, unlisted, slow to answer, or losing a record from under the
-//! app. Beside it is the history as an older build keeps it whole, which
-//! it moves and takes up as the files do ([`super::legacy`]).
+//! failing, unlisted, slow to answer, short of room as a browser's page
+//! storage is, or losing a record from under the app. Beside it is the
+//! history as an older build keeps it whole, which it moves and takes up as
+//! the files do ([`super::legacy`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::btree_map::Entry;
@@ -22,7 +23,7 @@ use super::record::{
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SessionKey, SetAside,
-    Store, newest, saved_as, saved_now,
+    Store, saved_as, saved_now,
 };
 
 #[derive(Default)]
@@ -58,15 +59,10 @@ pub struct MemoryStore {
     /// The settings cannot be written, for the reason given, the way a
     /// full disk refuses them.
     pub settings_refused: RefCell<Option<String>>,
-    /// Room for only this many sessions, the way a full browser leaves it.
-    pub room: Cell<Option<usize>>,
-    /// A history that could not be read is in the way of any save.
-    pub held: Cell<bool>,
-    /// The history cannot be read for now, the way a file another program
-    /// has open cannot: a read finds none, and holds it until a read does.
-    pub unreadable: Cell<bool>,
-    /// The last read could not read the history.
-    held_by_read: Cell<bool>,
+    /// Room for only this many sessions, the way a browser's page storage
+    /// has where it keeps the history whole: a change keeps the newest that
+    /// fit, and names the oldest it let go ([`HistorySaved::Squeezed`]).
+    pub page_room: Cell<Option<usize>>,
     /// The store has no room for any change to the history, the way a
     /// full disk or browser has none.
     pub full: Cell<bool>,
@@ -89,8 +85,6 @@ pub struct MemoryStore {
     seen_changes: Cell<u64>,
     /// What reads set aside, as they could not read it, not yet told of.
     pub set_aside: RefCell<Vec<SetAside>>,
-    /// The sessions deleted by hand.
-    pub deleted: RefCell<Vec<Deleted>>,
     last_backup: Cell<Option<u64>>,
     /// Every backup file handed over: its name and what it held.
     pub backup_files: RefCell<Vec<(String, String)>>,
@@ -112,7 +106,8 @@ pub struct MemoryStore {
 }
 
 /// A record as this store holds it: what was written for it, and the
-/// session a test stored whole, which comes back as it went in.
+/// session as it went in, which comes back as it was: one a test stored
+/// whole, or one the app stored as it wrote it.
 struct Held {
     json: String,
     whole: Option<SessionResult>,
@@ -179,66 +174,8 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    /// Every record that reads, in order, deleted ones left out; a session
-    /// a test stored whole comes back as it went in.
-    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
-        self.held_by_read.set(self.unreadable.get());
-        if self.unreadable.get() || !self.stored.get() {
-            return None;
-        }
-        let tombstones = self.tombstones.borrow();
-        Some(
-            self.records
-                .borrow()
-                .iter()
-                .filter(|(id, _)| !tombstones.contains_key(id))
-                .filter_map(|(_, held)| held.session())
-                .collect(),
-        )
-    }
-
     fn take_set_aside(&self) -> Vec<SetAside> {
         std::mem::take(&mut self.set_aside.borrow_mut())
-    }
-
-    fn read_deleted(&self) -> Vec<Deleted> {
-        self.deleted.borrow().clone()
-    }
-
-    fn save_deleted(&self, deleted: &[Deleted]) {
-        *self.deleted.borrow_mut() = deleted.to_vec();
-    }
-
-    /// The history in place of what was stored, each session a record, in
-    /// its order.
-    fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
-        if self.held.get() || self.held_by_read.get() {
-            return HistorySaved::Held;
-        }
-        let newest = newest(sessions);
-        let kept =
-            &newest[newest.len() - self.room.get().unwrap_or(usize::MAX).min(newest.len())..];
-        *self.records.borrow_mut() = records_for_blob(kept)
-            .into_iter()
-            .zip(kept)
-            .map(|(record, session)| {
-                let held = Held {
-                    json: record.json,
-                    whole: Some(session.clone()),
-                };
-                (record.id, held)
-            })
-            .collect();
-        self.stored.set(true);
-        self.changed_here();
-        if kept.len() < newest.len() {
-            HistorySaved::Squeezed {
-                kept: kept.len(),
-                runs: newest.iter().any(|session| session.contest.is_some()),
-            }
-        } else {
-            HistorySaved::Stored { kept: kept.len() }
-        }
     }
 
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters {
@@ -414,6 +351,38 @@ impl MemoryStore {
         self.marked.borrow().clone()
     }
 
+    /// Every session stored that reads, in the order of the history,
+    /// deleted ones left out: what the next launch would show. A session
+    /// comes back as it went in.
+    pub fn load_sessions(&self) -> Vec<SessionResult> {
+        let tombstones = self.tombstones.borrow();
+        self.records
+            .borrow()
+            .iter()
+            .filter(|(id, _)| !tombstones.contains_key(id))
+            .filter_map(|(_, held)| held.session())
+            .collect()
+    }
+
+    /// Store `sessions` in place of every record, each a record, in their
+    /// order, as the move from a history kept whole names them: how a test
+    /// sets up what a store holds.
+    pub fn save_sessions(&self, sessions: &[SessionResult]) {
+        *self.records.borrow_mut() = records_for_blob(sessions)
+            .into_iter()
+            .zip(sessions)
+            .map(|(record, session)| {
+                let held = Held {
+                    json: record.json,
+                    whole: Some(session.clone()),
+                };
+                (record.id, held)
+            })
+            .collect();
+        self.stored.set(true);
+        self.changed_here();
+    }
+
     /// Make every change waiting ([`Self::deferred`]), in order, and wake
     /// what waits on each.
     pub fn settle(&self) {
@@ -527,7 +496,9 @@ impl MemoryStore {
             if let Entry::Vacant(place) = records.entry(id) {
                 place.insert(Held {
                     json: record.json.clone(),
-                    whole: None,
+                    // As it was written, not scored again, as the files
+                    // would read it: a test compares what went in.
+                    whole: serde_json::from_str(&record.json).ok(),
                 });
                 self.record_writes.set(self.record_writes.get() + 1);
             }
@@ -541,6 +512,30 @@ impl MemoryStore {
         }
         self.stored.set(true);
         self.changed_here();
+        // Short of room, as a browser's page storage is: the oldest go, and
+        // are named.
+        let live: Vec<RecordId> = records
+            .keys()
+            .filter(|id| !tombstones.contains_key(id))
+            .copied()
+            .collect();
+        if let Some(room) = self.page_room.get()
+            && live.len() > room
+        {
+            let trimmed = live[..live.len() - room].to_vec();
+            for id in &trimmed {
+                records.remove(id);
+            }
+            let runs = records
+                .values()
+                .filter_map(Held::session)
+                .any(|session| session.contest.is_some());
+            return HistorySaved::Squeezed {
+                kept: room,
+                runs,
+                trimmed,
+            };
+        }
         HistorySaved::Stored {
             kept: change.put.len(),
         }
@@ -882,19 +877,54 @@ mod tests {
         assert!(fresh.load_history().complete);
     }
 
-    /// The history a test stores whole comes back as it went in, and a
-    /// store that has stored nothing has no history, which is not an empty
-    /// one.
+    /// The history a test stores whole comes back as it went in, and so
+    /// does a session the app stores, as it wrote it.
     #[test]
     fn a_history_stored_whole_comes_back_as_it_went_in() {
         let store = MemoryStore::default();
-        assert_eq!(store.read_sessions(), None);
+        assert!(store.load_sessions().is_empty());
         let mut stored = session("2026-10-01");
         stored.score = 123.0;
         store.save_sessions(std::slice::from_ref(&stored));
-        assert_eq!(store.load_sessions(), [stored]);
+        assert_eq!(store.load_sessions(), [stored.clone()]);
         assert_eq!(store.load_history().sessions.len(), 1);
+        let mut written = session("2026-10-02");
+        written.score = 7.0;
+        written.timestamp = 2_000;
+        let newest = store.load_history().sessions.last().map(|(id, _)| *id);
+        let record = Record::of(&written, |json| {
+            RecordId::next(written.timestamp, newest, json)
+        })
+        .expect("a record");
+        now(store.change_history(put(&[record])));
+        assert_eq!(store.load_sessions(), [stored, written]);
         store.save_sessions(&[]);
-        assert_eq!(store.read_sessions(), Some(Vec::new()));
+        assert!(store.load_sessions().is_empty());
+    }
+
+    /// Short of room, as a browser's page storage is, the store keeps the
+    /// newest that fit and names the oldest it let go.
+    #[test]
+    fn a_store_short_of_room_names_what_it_let_go() {
+        let store = MemoryStore::default();
+        store.load_history();
+        store.page_room.set(Some(2));
+        let records: Vec<Record> = (1..=3).map(|n| record(&finished(n * 1_000))).collect();
+        assert_eq!(
+            now(store.change_history(put(&records))),
+            HistorySaved::Squeezed {
+                kept: 2,
+                runs: false,
+                trimmed: vec![records[0].id],
+            }
+        );
+        assert_eq!(
+            now(store.history_listing()),
+            Some(vec![records[1].id, records[2].id])
+        );
+        assert!(
+            now(store.forgotten(vec![records[0].id])).is_empty(),
+            "let go, not deleted"
+        );
     }
 }

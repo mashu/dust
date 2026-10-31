@@ -12,9 +12,10 @@ use dioxus::prelude::*;
 
 use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
+use crate::persist::record::RecordId;
 use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
-use crate::state::{AppCtx, Finished, Screen, SessionPick};
+use crate::state::{AppCtx, Finished, Screen};
 use crate::time::{local_date_string, mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
@@ -95,7 +96,9 @@ fn HomeRoute() -> Element {
     use_warm_sampler(ctx);
     // What Home shows of the history: once for each change to it, and each
     // day, read from what the screens share of it; the screen opened again
-    // on the same history works nothing out again.
+    // on the same history works nothing out again. What another copy of
+    // the app stored or deleted since is taken up as it opens.
+    use_hook(move || ctx.take_up_changes());
     let history = use_history(ctx);
     let today = local_date_string();
     let practice = use_memo(use_reactive!(|today| Practice::of(&history(), &today)));
@@ -295,13 +298,15 @@ struct Waiting {
 fn StatsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     // The history as the screens share it, never copied, with what was
-    // worked out of it when Stats was last open.
+    // worked out of it when Stats was last open, and what another copy of
+    // the app stored or deleted since taken up as it opens.
+    use_hook(move || ctx.take_up_changes());
     let history = use_history(ctx);
     rsx! {
         StatsView {
             settings: ctx.settings.read().clone(),
             sessions: history(),
-            on_delete: move |picked: Vec<SessionPick>| ctx.delete_sessions(&picked),
+            on_delete: move |picked: Vec<RecordId>| ctx.delete_sessions(&picked),
             backups: Backups {
                 last: *ctx.last_backup.read(),
                 can_save: ctx.app().store.saves_backups(),
@@ -475,7 +480,7 @@ mod tests {
     /// session and its first group, or a results screen with nothing to show.
     #[component]
     fn EmptyRoute(screen: Screen) -> Element {
-        use_context_provider(|| AppCtx::new(AppState::new(), test_settings(), Vec::new()));
+        use_context_provider(|| AppCtx::new(AppState::new(), test_settings(), Default::default()));
         rsx! { Route { screen } }
     }
 

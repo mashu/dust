@@ -25,11 +25,13 @@ use super::{Deleted, SessionKey};
 #[cfg(any(feature = "web", test))]
 use super::{HistorySaved, SetAside};
 
-/// How much of the site's storage the history may take, in characters.
-/// Browsers give a site about five million; the rest is left for the
-/// settings, the counters and the room a write needs. Other sites on the
-/// origin may have taken some of it, and then a write that does not fit
-/// keeps fewer of the newest sessions ([`store_newest_that_fit`]).
+/// How much of the site's page storage the history kept whole may take, in
+/// characters. Browsers give a site about five million; the rest is left
+/// for the settings, the counters and the room a write needs. Other sites
+/// on the origin may have taken some of it, and then a write that does not
+/// fit keeps fewer of the newest sessions ([`store_newest_that_fit`]).
+///
+/// Only a history kept whole has such a limit: records have none.
 #[cfg(feature = "web")]
 pub(super) const HISTORY_BUDGET: usize = 3_000_000;
 
@@ -271,17 +273,21 @@ pub(super) fn set_aside_from(
 /// and so on, down to the newest alone.
 ///
 /// Never fewer than that: a store with no room even for the newest session
-/// is full, and nothing is written. Halving used to go on below the newest
-/// session's size, down to an empty list, which a store always takes; so a
-/// browser short of room wrote an empty history over the whole of the one
-/// it held, and said it had kept the newest none.
+/// is full, and nothing is written ([`HistorySaved::Full`]): the app keeps
+/// what it would have stored until there is room. Halving used to go on
+/// below the newest session's size, down to an empty list, which a store
+/// always takes; so a browser short of room wrote an empty history over the
+/// whole of the one it held, and said it had kept the newest none.
+///
+/// What it lets go is said by how many it kept: the oldest of `sessions`
+/// ([`BlobHistory::apply`] names them).
 #[cfg(any(feature = "web", test))]
 pub(super) fn store_newest_that_fit(
     sessions: &[SessionResult],
     budget: usize,
     mut set: impl FnMut(&str) -> bool,
 ) -> HistorySaved {
-    let full = || HistorySaved::Failed("this browser's storage is full.".into());
+    let full = || HistorySaved::Full;
     // The room the newest session takes on its own, as a list of one.
     let newest_alone = sessions
         .last()
@@ -296,7 +302,11 @@ pub(super) fn store_newest_that_fit(
         if set(&raw) {
             return if kept < sessions.len() {
                 let runs = sessions.iter().any(|session| session.contest.is_some());
-                HistorySaved::Squeezed { kept, runs }
+                HistorySaved::Squeezed {
+                    kept,
+                    runs,
+                    trimmed: Vec::new(),
+                }
             } else {
                 HistorySaved::Stored { kept }
             };
@@ -561,7 +571,9 @@ pub(super) struct BlobKeys {
 ///
 /// Each change reads the whole history, does to it what the change says,
 /// and writes it whole again, as stores did before records, keeping the
-/// newest that fit its room, `budget` ([`store_newest_that_fit`]). Its
+/// newest that fit its room, `budget` ([`store_newest_that_fit`]), and
+/// naming the oldest it let go for want of it: the app lets them go too,
+/// and says so, rather than store them again with every change. Its
 /// sessions are known by where they fall in it ([`record::records_for_blob`]),
 /// and one another copy wrote by what it holds: the same session is the
 /// same JSON wherever it falls. Deletions are remembered by key beside it,
@@ -701,6 +713,7 @@ impl<S: Aside> BlobHistory<S> {
         if remembered {
             self.save_deleted(&deleted);
         }
+        let ids: Vec<RecordId> = held.iter().map(|(record, _)| record.id).collect();
         let sessions: Vec<SessionResult> = held.into_iter().map(|(_, session)| session).collect();
         let saved = store_newest_that_fit(&sessions, self.budget, |raw| {
             self.shelf.set(self.keys.history, raw)
@@ -716,10 +729,14 @@ impl<S: Aside> BlobHistory<S> {
         }
         self.seen.set(Some(self.look()));
         match saved {
-            HistorySaved::Stored { .. } => HistorySaved::Stored {
+            HistorySaved::Squeezed { kept, runs, .. } => HistorySaved::Squeezed {
+                kept,
+                runs,
+                trimmed: ids[..ids.len().saturating_sub(kept)].to_vec(),
+            },
+            _ => HistorySaved::Stored {
                 kept: change.put.len(),
             },
-            squeezed => squeezed,
         }
     }
 
@@ -1203,16 +1220,18 @@ mod tests {
             saved,
             HistorySaved::Squeezed {
                 kept: 1,
-                runs: false
+                runs: false,
+                trimmed: Vec::new(),
             }
         );
         let last = written.borrow().last().cloned().unwrap();
         assert_eq!(parse_sessions(&last).map(|s| s.len()), Some(1));
         assert!(written.borrow().iter().all(|raw| raw != "[]"));
-        // No room even for that: nothing is written over what is there.
+        // No room even for that: nothing is written over what is there,
+        // and the store is full.
         written.borrow_mut().clear();
         let saved = store_newest_that_fit(&all, usize::MAX, with_room(newest - 1));
-        assert!(matches!(saved, HistorySaved::Failed(_)), "{saved:?}");
+        assert_eq!(saved, HistorySaved::Full);
         assert!(written.borrow().iter().all(|raw| raw != "[]"));
         // Room for everything: everything.
         let saved = store_newest_that_fit(&all, usize::MAX, |_| true);
@@ -1396,8 +1415,9 @@ mod tests {
     }
 
     /// A history kept whole is kept to its room, the newest that fit, as it
-    /// always was; a change it cannot store at all leaves the history and
-    /// the deletions remembered as they were.
+    /// always was, and names the records it let go; a change it cannot
+    /// store at all is full, and leaves the history and the deletions
+    /// remembered as they were.
     #[test]
     fn a_history_kept_whole_keeps_to_its_room() {
         let sessions: Vec<SessionResult> = (1..=4).map(|n| finished(n * 1_000)).collect();
@@ -1426,7 +1446,8 @@ mod tests {
             saved,
             HistorySaved::Squeezed {
                 kept: 2,
-                runs: false
+                runs: false,
+                trimmed: vec![records[0].id, records[1].id],
             }
         );
         assert_eq!(kept_whole(&shelf), [3_000, 4_000]);
@@ -1438,7 +1459,7 @@ mod tests {
             forget: vec![(records[2].id, Deleted::of(&sessions[2], 7))],
             ..HistoryChange::default()
         };
-        assert!(matches!(whole.apply(&change), HistorySaved::Failed(_)));
+        assert_eq!(whole.apply(&change), HistorySaved::Full);
         assert_eq!(shelf.get("history").unwrap(), before);
         assert!(whole.forgotten(&[records[2].id]).is_empty());
     }
