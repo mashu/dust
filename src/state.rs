@@ -1697,7 +1697,7 @@ impl Toasts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(all(unix, feature = "native-runtime"))]
+    #[cfg(feature = "native-runtime")]
     use crate::persist::TempDir;
     use crate::persist::memory::{MemoryStore, PageShelf};
 
