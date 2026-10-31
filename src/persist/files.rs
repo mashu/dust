@@ -11,9 +11,9 @@
 //! - `layout.json`: how the history is kept, and what the move from the
 //!   history kept whole took of it ([`Layout`]). The move writes it last.
 //! - `told.json`: the records this build could not read, and has said so.
-//! - `restoring-<n>.json`: the records a change of many sessions at once
+//! - `restoring-<n>.json`: the records a restore of many sessions at once
 //!   is storing, held locked while it does: one left unlocked was cut
-//!   short.
+//!   short, as Dust stopped.
 //! - `packs/*.jsonl.gz`: older records a later build packs together, to
 //!   keep the history to fewer and smaller files. This build only reads
 //!   them: gzip, one record a line, `{"id": <its name>, "s": <what was
@@ -59,7 +59,7 @@ const PACKS: &str = "packs";
 const PACK_EXTENSION: &str = ".jsonl.gz";
 const LAYOUT_FILE: &str = "layout.json";
 const TOLD: &str = "told.json";
-/// What a change of many sessions at once is called while it runs:
+/// What a restore of many sessions at once is called while it runs:
 /// `restoring-<n>.json`.
 const JOURNAL_PREFIX: &str = "restoring-";
 
@@ -113,19 +113,22 @@ struct PackLine {
     s: String,
 }
 
-/// A change of many sessions at once, as it runs: its journal, held
-/// locked until the change is made.
+/// A restore of many sessions at once, as it runs: its journal, held
+/// locked until the change is over.
 struct Journal {
     path: PathBuf,
     /// Held for as long as the change runs.
     _lock: fs::File,
 }
 
-/// What a journal says: the records its change set out to store.
+/// What a journal says: the records its change set out to store, and of
+/// them those deleted before, whose deletion it undoes.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct Journaled {
     #[serde(default)]
     ids: Vec<String>,
+    #[serde(default)]
+    undone: Vec<String>,
 }
 
 /// The key a record's session finished at, read without the rest of it.
@@ -240,9 +243,9 @@ impl HistoryFiles {
     /// Deletions undone come first, then the records, then the deletions,
     /// each step made durable before the next: a change cut short never
     /// loses a session, though it may leave one deleted that was being put
-    /// back, or one beside what was filling it in. A change of many at once
-    /// is journaled while it runs, so the next to read the history can say
-    /// it was cut short.
+    /// back, or one beside what was filling it in. A restore of many at
+    /// once is journaled while it runs, so the next to read the history can
+    /// say it was cut short.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
         match self.gate() {
             Ok(Gate::Open(_) | Gate::Unmoved) => {}
@@ -252,8 +255,8 @@ impl HistoryFiles {
             }
             Err(err) => return saved_or_not(Err(err)),
         }
-        let journal = if change.put.len() > 1 {
-            match self.begin_journal(&change.put) {
+        let journal = if restores_many(change) {
+            match self.begin_journal(change) {
                 Ok(journal) => Some(journal),
                 Err(err) => return saved_or_not(Err(err)),
             }
@@ -261,9 +264,9 @@ impl HistoryFiles {
             None
         };
         let made = self.make(change);
-        if made.is_ok()
-            && let Some(journal) = journal
-        {
+        // Made or not, the change is over, and what became of it is said
+        // now: a journal left behind says only that Dust stopped first.
+        if let Some(journal) = journal {
             end_journal(journal, &self.dir);
         }
         self.restamp();
@@ -563,6 +566,10 @@ impl HistoryFiles {
     /// here by key ([`legacy::imported`]), and hand back what was made of
     /// it. Nothing, where nothing changed there, or what changed cannot be
     /// read or made now: it is tried again the next time.
+    ///
+    /// It is no restore, and is not journaled: what was taken up is noted
+    /// only once it is stored, so a take-up cut short is made again by the
+    /// next read, and nobody need be told.
     fn import(
         &self,
         layout: &Layout,
@@ -704,8 +711,9 @@ impl HistoryFiles {
         }
     }
 
-    /// Start a change of `put`, many sessions at once: its journal, locked.
-    fn begin_journal(&self, put: &[Record]) -> io::Result<Journal> {
+    /// Start `change`, a restore of many sessions at once: its journal,
+    /// locked.
+    fn begin_journal(&self, change: &HistoryChange) -> io::Result<Journal> {
         fs::create_dir_all(&self.dir)?;
         let name = format!("{JOURNAL_PREFIX}{:016x}.json", crate::time::seed_rng());
         // A temporary name, as any write has, cleared like one if the
@@ -716,7 +724,8 @@ impl HistoryFiles {
             .create_new(true)
             .open(&making)?;
         let journaled = Journaled {
-            ids: put.iter().map(|record| record.id.name()).collect(),
+            ids: change.put.iter().map(|record| record.id.name()).collect(),
+            undone: change.unforget.iter().map(|id| id.name()).collect(),
         };
         let placed = (|| {
             lock.try_lock().map_err(io::Error::other)?;
@@ -736,7 +745,7 @@ impl HistoryFiles {
         }
     }
 
-    /// Every change of many sessions at once that was cut short, told of
+    /// Every restore of many sessions at once that was cut short, told of
     /// once: its journal is there, and nothing holds it.
     fn journals_cut_short(&self) -> Vec<HistoryNotice> {
         let Ok(entries) = fs::read_dir(&self.dir) else {
@@ -771,9 +780,20 @@ impl HistoryFiles {
                 .iter()
                 .filter_map(|name| RecordId::parse(name))
                 .collect();
+            let undone: HashSet<RecordId> = journaled
+                .undone
+                .iter()
+                .filter_map(|name| RecordId::parse(name))
+                .collect();
+            // Stored, or deleted by hand and not to be put back, which the
+            // change leaves deleted as it is.
             let stored = meant
                 .iter()
-                .filter(|id| self.records().join(file_name(**id)).exists())
+                .filter(|id| {
+                    self.records().join(file_name(**id)).exists()
+                        || (!undone.contains(id)
+                            && self.tombstones().join(file_name(**id)).exists())
+                })
                 .count();
             if stored < meant.len() {
                 notices.push(HistoryNotice::CutShort {
@@ -790,7 +810,13 @@ impl HistoryFiles {
     }
 }
 
-/// The change made whole: its journal gone, and let go of.
+/// Whether `change` restores many sessions at once, and so is journaled
+/// while it runs ([`HistoryChange::restore`]).
+fn restores_many(change: &HistoryChange) -> bool {
+    change.restore && change.put.len() > 1
+}
+
+/// The change over: its journal gone, and let go of.
 fn end_journal(journal: Journal, dir: &Path) {
     let _ = fs::remove_file(&journal.path);
     let _ = sync_dir(dir);
@@ -967,6 +993,22 @@ mod tests {
             put: records.to_vec(),
             ..HistoryChange::default()
         }
+    }
+
+    /// `records` restored from a backup.
+    fn restore(records: &[Record]) -> HistoryChange {
+        HistoryChange {
+            restore: true,
+            ..put(records)
+        }
+    }
+
+    /// The journals in the history's folder in `dir`.
+    fn journals(dir: &TempDir) -> Vec<String> {
+        names(&dir.0.join(HISTORY))
+            .into_iter()
+            .filter(|name| name.contains(JOURNAL_PREFIX))
+            .collect()
     }
 
     fn forget(records: &[(&Record, &SessionResult)]) -> HistoryChange {
@@ -1317,7 +1359,7 @@ mod tests {
         assert_eq!(here.forgotten(&[one.id]), [one.id]);
     }
 
-    /// A change of many sessions at once that stops before it is done is
+    /// A restore of many sessions at once that stops before it is done is
     /// told of by the next to read the history, once; one still running
     /// in another copy is left to it.
     #[test]
@@ -1325,7 +1367,7 @@ mod tests {
         let (dir, files) = history("cut-short");
         files.load();
         let restored: Vec<Record> = (1..=3).map(|n| record(&finished(n * 1_000))).collect();
-        let journal = files.begin_journal(&restored).expect("a journal");
+        let journal = files.begin_journal(&restore(&restored)).expect("a journal");
         files.place_record(&restored[0]).unwrap();
         // Another copy reads the history while this one stores.
         let other = HistoryFiles::at(&dir.0).load();
@@ -1341,19 +1383,117 @@ mod tests {
             }]
         );
         assert!(HistoryFiles::at(&dir.0).load().notices.is_empty(), "once");
-        // Made whole, a change leaves no journal behind.
+        // Made whole, a restore leaves no journal behind.
         assert_eq!(
-            files.apply(&put(&restored)),
+            files.apply(&restore(&restored)),
             HistorySaved::Stored { kept: 3 }
         );
-        assert!(
-            !names(&dir.0.join(HISTORY))
-                .iter()
-                .any(|name| name.contains(JOURNAL_PREFIX)),
-            "{:?}",
-            names(&dir.0.join(HISTORY))
-        );
+        assert!(journals(&dir).is_empty(), "{:?}", journals(&dir));
         assert_eq!(files.load().sessions.len(), 3);
+    }
+
+    /// A restore that fails, the store full or a name in the way, is said
+    /// to have failed then and there, and leaves no journal: the next to
+    /// read the history is not told that Dust stopped, as it never did.
+    #[test]
+    fn a_restore_that_fails_is_not_told_of_as_cut_short() {
+        let (dir, files) = history("restore-failed");
+        files.load();
+        let restored: Vec<Record> = (1..=3).map(|n| record(&finished(n * 1_000))).collect();
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::create_dir_all(records.join(file_name(restored[1].id))).unwrap();
+        assert!(
+            matches!(files.apply(&restore(&restored)), HistorySaved::Failed(_)),
+            "a name in the way"
+        );
+        assert!(journals(&dir).is_empty(), "{:?}", journals(&dir));
+        fs::remove_dir(records.join(file_name(restored[1].id))).unwrap();
+        let read = HistoryFiles::at(&dir.0).load();
+        assert!(read.notices.is_empty(), "{:?}", read.notices);
+        assert_eq!(stamps(&read), [1_000]);
+        // Restored again, the rest is stored, each session once.
+        assert_eq!(
+            files.apply(&restore(&restored)),
+            HistorySaved::Stored { kept: 3 }
+        );
+        assert_eq!(stamps(&files.load()), [1_000, 2_000, 3_000]);
+    }
+
+    /// A restore cut short counts as stored what it left deleted by hand,
+    /// as it was asked to, and not what it was putting back.
+    #[test]
+    fn a_restore_cut_short_counts_what_it_left_deleted_as_done() {
+        let (dir, files) = history("cut-short-deleted");
+        files.load();
+        let sessions: Vec<SessionResult> = (1..=4).map(|n| finished(n * 1_000)).collect();
+        let restored: Vec<Record> = sessions.iter().map(record).collect();
+        files.apply(&put(&restored[..2]));
+        files.apply(&forget(&[
+            (&restored[0], &sessions[0]),
+            (&restored[1], &sessions[1]),
+        ]));
+        // The first stays deleted; the second is put back; neither is
+        // stored yet, nor the last two, as Dust stops.
+        let change = HistoryChange {
+            unforget: vec![restored[1].id],
+            ..restore(&restored)
+        };
+        drop(files.begin_journal(&change).expect("a journal"));
+        let next = HistoryFiles::at(&dir.0).load();
+        assert_eq!(
+            next.notices,
+            [HistoryNotice::CutShort {
+                meant: 4,
+                stored: 1
+            }]
+        );
+    }
+
+    /// Only a restore of many sessions at once is journaled: not one
+    /// session, nor many the app stores of its own, nor what is taken up
+    /// from an older build, which is taken up again if it is cut short.
+    #[test]
+    fn only_a_restore_of_many_sessions_is_journaled() {
+        let records: Vec<Record> = (1..=2).map(|n| record(&finished(n * 1_000))).collect();
+        assert!(restores_many(&restore(&records)));
+        assert!(!restores_many(&restore(&records[..1])));
+        assert!(!restores_many(&put(&records)));
+
+        let dir = TempDir::new("import-unjournaled");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = HistoryFiles::at(&dir.0);
+        files.load();
+        // An older build stores two sessions: taken up together, and no
+        // restore.
+        let (first, second) = (finished(now + 60_000), finished(now + 120_000));
+        let whole = [old.clone(), first.clone(), second.clone()];
+        keep_whole(&dir, &whole);
+        let Ok(Gate::Open(layout)) = files.gate() else {
+            panic!("not moved");
+        };
+        let live = files.live_keys().expect("listed");
+        let fingerprint = fingerprint_of(&dir.0.join(SESSIONS)).unwrap();
+        let (change, _) =
+            legacy::imported(&layout, fingerprint, &whole, &[], &live, &HashSet::new())
+                .expect("something new");
+        assert_eq!(change.put.len(), 2);
+        assert!(!restores_many(&change));
+        // The second cannot be taken up for now: the take-up is tried
+        // again, and leaves nothing to tell of.
+        let in_the_way = change.put[1].id;
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::create_dir_all(records.join(file_name(in_the_way))).unwrap();
+        assert_eq!(files.import(&layout, &live), None, "tried again later");
+        assert!(journals(&dir).is_empty(), "{:?}", journals(&dir));
+        fs::remove_dir(records.join(file_name(in_the_way))).unwrap();
+        let read = HistoryFiles::at(&dir.0).load();
+        assert!(read.notices.is_empty(), "{:?}", read.notices);
+        assert_eq!(
+            stamps(&read),
+            [old.timestamp, first.timestamp, second.timestamp]
+        );
     }
 
     /// A history a newer build keeps in a way this one would harm is read,

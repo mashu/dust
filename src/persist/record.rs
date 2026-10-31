@@ -215,6 +215,13 @@ pub struct HistoryChange {
     pub forget: Vec<(RecordId, Deleted)>,
     /// Records whose deletion is undone: put back with the same id.
     pub unforget: Vec<RecordId>,
+    /// The change restores a backup: should Dust stop before it is made,
+    /// the user is told, so they can restore it again
+    /// ([`HistoryNotice::CutShort`]). No other change is told of so: what
+    /// the app stores of its own it keeps until stored, and what is taken
+    /// up from an older build is taken up again at the next read.
+    #[cfg_attr(feature = "web", allow(dead_code))]
+    pub restore: bool,
 }
 
 impl HistoryChange {
@@ -251,8 +258,9 @@ pub enum HistoryNotice {
     /// `count` records this build cannot read, found for the first time.
     /// They are left where they are: a build that reads them shows them.
     Unread { count: usize },
-    /// A change of `meant` sessions at once, a restore say, stopped before
-    /// it was done: `stored` of them were stored.
+    /// A restore of `meant` sessions stopped before it was done, as Dust
+    /// stopped: `stored` of them were stored, or are deleted by hand and
+    /// left so ([`HistoryChange::restore`]).
     CutShort { meant: usize, stored: usize },
     /// The history kept whole by an older build could not be read for now,
     /// for the reason given, so it is not brought over yet: the next
