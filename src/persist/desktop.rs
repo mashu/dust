@@ -21,7 +21,6 @@ use super::{
 const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
 const TOLD_OF_PADDLE_KEYS: &str = "told_of_paddle_keys.txt";
-const ASKED_ABOUT_LOCK: &str = "asked_about_lock.txt";
 const SETTINGS: &str = "settings.json";
 /// The history as builds before records keep it whole, which the move to
 /// records reads once and leaves as it was ([`HistoryFiles`]).
@@ -474,14 +473,6 @@ impl Store for DesktopStore {
 
     fn mark_told_of_paddle_keys(&self) {
         let _ = self.write(TOLD_OF_PADDLE_KEYS, b"told");
-    }
-
-    fn asked_about_lock(&self) -> bool {
-        self.root.join(ASKED_ABOUT_LOCK).exists()
-    }
-
-    fn mark_asked_about_lock(&self) {
-        let _ = self.write(ASKED_ABOUT_LOCK, b"asked");
     }
 
     /// A settings file that does not read at all, edited by hand and left
@@ -1088,7 +1079,6 @@ pub(super) mod tests {
         let (_dir, store) = store("fresh");
         assert_eq!(store.load_theme(), "");
         assert!(!store.tutorial_done());
-        assert!(!store.asked_about_lock());
         assert_eq!(store.load_settings(), TrainingSettings::default().clamp());
         assert!(stored(&store).is_empty());
         assert_eq!(
@@ -1104,10 +1094,8 @@ pub(super) mod tests {
         assert_eq!(store.load_theme(), "dark");
         store.mark_tutorial_done();
         assert!(store.tutorial_done());
-        store.mark_asked_about_lock();
-        assert!(store.asked_about_lock());
         assert!(
-            DesktopStore::at(dir.0.clone()).asked_about_lock(),
+            DesktopStore::at(dir.0.clone()).tutorial_done(),
             "once an install"
         );
 
@@ -1151,7 +1139,6 @@ pub(super) mod tests {
         assert_eq!(
             files(&dir),
             [
-                "asked_about_lock.txt",
                 "auto_adjust.json",
                 "history",
                 "settings.json",

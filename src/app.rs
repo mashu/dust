@@ -699,8 +699,9 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(short_session());
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "training");
-            // Groups of two characters, typing locked as they are sent.
-            assert!(ui.has("Listen — typing locked, so not timed."));
+            // Groups of two characters, typing locked as they are sent, once
+            // each: copied after, and given a copy time.
+            assert!(ui.has("Listen — the box opens when it ends."));
             // The nav is out of the way while a session runs.
             assert!(!ui.has("bottom-nav"));
             assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
@@ -715,12 +716,17 @@ mod ui_tests {
     }
 
     /// A session run with Lock typing while sending on, its groups of two
-    /// characters typed once each was sent, timed nothing: its results say
-    /// the lock is why, and turn it off at a press, stored at once.
+    /// characters each sent twice and typed once the last send was over,
+    /// timed nothing: keys after a group is sent again are not timed. Its
+    /// results say the lock is why, and turn it off at a press, stored at
+    /// once.
     #[test]
     fn a_locked_session_turns_the_lock_off_from_its_results() {
         run(|| async {
-            let (mut ui, recorder) = awaiting_answer(short_session()).await;
+            let mut settings = short_session();
+            settings.playback.group_repeat_min = 2;
+            settings.playback.group_repeat_max = 2;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
             let sent = recorder.texts().first().cloned().expect("a group was sent");
             ui.type_into("group-input-0", &sent);
             assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
@@ -729,13 +735,9 @@ mod ui_tests {
                 "{}",
                 ui.html()
             );
-            // The harness marks the store as asked; the button must mark it
-            // itself.
-            ui.store.asked_about_lock.set(false);
             ui.click("btn-turn-off-lock-typing");
             assert!(!ui.with_app(|ctx| locked(&ctx.settings.peek())));
             assert!(!locked(&ui.store.load_settings()), "stored at once");
-            assert!(ui.store.asked_about_lock(), "chosen: Home need not ask");
             assert!(!ui.shows("btn-turn-off-lock-typing"));
             assert!(ui.has("It is off now"), "{}", ui.html());
         });
@@ -833,7 +835,7 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(settings);
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "training");
-            assert!(ui.has("Listen — typing locked, so not timed."));
+            assert!(ui.has("Listen — the box opens when it ends."));
             // Locked, but neither read-only nor disabled: either would take
             // the focus away, and a phone's keyboard with it.
             let sending = ui.input_tag("group-input-0");
@@ -1044,7 +1046,6 @@ mod ui_tests {
             let store = std::rc::Rc::new(MemoryStore::default());
             store.save_settings(&settings);
             store.mark_tutorial_done();
-            store.mark_asked_about_lock();
             let key = cw_core::CountersKey::of(&settings);
             let mut kept = stored_session("2026-10-02", &[("KM", "KM")]);
             kept.timestamp = crate::time::now_ms() - 60_000;
@@ -1635,8 +1636,7 @@ mod ui_tests {
         settings.playback.lock_input_during_group_playback
     }
 
-    /// A store with `settings`, past the first launch, never asked about
-    /// the lock.
+    /// A store with `settings`, past the first launch.
     fn store_with(settings: &TrainingSettings) -> std::rc::Rc<MemoryStore> {
         let store = std::rc::Rc::new(MemoryStore::default());
         store.save_settings(settings);
@@ -1644,57 +1644,28 @@ mod ui_tests {
         store
     }
 
-    /// A store from before Dust 0.16 still has Lock typing while sending
-    /// on, the default then, and every save keeps it: Home asks once
-    /// whether to keep it. Typing along turns it off, stored at once, and
-    /// nothing is asked at the next launch.
+    /// Lock typing while sending left on, as a store from before Dust 0.16
+    /// still has it, is never asked about on the Practice screen: it is a
+    /// setting like any other, and a locked group is copy-timed. Turned off
+    /// in Settings, it is stored as you leave them, and stays off.
     #[test]
-    fn a_lock_left_on_from_the_old_default_is_asked_about_once() {
+    fn a_lock_left_on_is_not_asked_about_on_the_practice_screen() {
         run(|| async {
             let store = store_with(&test_settings());
             let (mut ui, _recorder) = Ui::launch(store.clone());
-            assert!(ui.shows("lock-ask"), "{}", ui.html());
-            assert!(ui.has("Lock typing while sending is on"));
-            assert!(ui.has("It was the default before Dust 0.16."));
-            ui.click("btn-type-along");
-            assert!(!ui.with_app(|ctx| locked(&ctx.settings.peek())));
-            assert!(!locked(&store.load_settings()), "stored at once");
-            assert!(store.asked_about_lock());
-            assert!(!ui.shows("lock-ask"));
-            drop(ui);
-            let (ui, _recorder) = Ui::launch(store);
+            assert_eq!(ui.screen(), "home", "{}", ui.html());
             assert!(!ui.shows("lock-ask"), "{}", ui.html());
-        });
-    }
-
-    /// Kept on, it stays on and is not asked about again; a lock already
-    /// off, or turned on by hand in the settings, is never asked about.
-    #[test]
-    fn a_lock_kept_or_chosen_is_not_asked_about() {
-        run(|| async {
-            let store = store_with(&test_settings());
-            let (mut ui, _recorder) = Ui::launch(store.clone());
-            ui.click("btn-keep-it-on");
-            assert!(ui.with_app(|ctx| locked(&ctx.settings.peek())));
-            assert!(locked(&store.load_settings()));
-            assert!(store.asked_about_lock());
-            assert!(!ui.shows("lock-ask"));
-            drop(ui);
-            let (ui, _recorder) = Ui::launch(store);
-            assert!(!ui.shows("lock-ask"), "{}", ui.html());
-            drop(ui);
-
-            let mut open = test_settings();
-            open.playback.lock_input_during_group_playback = false;
-            let store = store_with(&open);
-            let (mut ui, _recorder) = Ui::launch(store.clone());
-            assert!(!ui.shows("lock-ask"));
-            assert!(!store.asked_about_lock(), "nothing to ask");
+            assert!(!ui.has("Lock typing while sending is on"), "{}", ui.html());
+            assert!(!ui.has("Keep it on"), "{}", ui.html());
             ui.click("nav-settings");
-            ui.commit("switch-lock-typing-while-sending", "true");
-            assert!(store.asked_about_lock(), "chosen by hand");
+            ui.commit("switch-lock-typing-while-sending", "false");
+            assert!(!ui.with_app(|ctx| locked(&ctx.settings.peek())));
             ui.click("nav-practice");
-            assert!(ui.with_app(|ctx| locked(&ctx.settings.peek())));
+            assert!(!ui.shows("lock-ask"), "{}", ui.html());
+            assert!(!locked(&store.load_settings()), "stored");
+            drop(ui);
+            let (mut ui, _recorder) = Ui::launch(store);
+            assert!(!ui.with_app(|ctx| locked(&ctx.settings.peek())));
             assert!(!ui.shows("lock-ask"), "{}", ui.html());
         });
     }

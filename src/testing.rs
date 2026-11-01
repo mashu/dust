@@ -339,6 +339,24 @@ pub fn test_settings() -> TrainingSettings {
     settings
 }
 
+/// The markup of the tile `id` on a page: from its id through the third
+/// `</div>` after it, its label, its value and the line under it. Read by
+/// id, so a figure in another tile never answers for it.
+pub fn kpi(html: &str, id: &str) -> String {
+    let marker = format!("id=\"{id}\"");
+    let Some(start) = html.find(&marker) else {
+        return String::new();
+    };
+    let mut end = start;
+    for _ in 0..3 {
+        match html[end..].find("</div>") {
+            Some(at) => end += at + "</div>".len(),
+            None => return html[start..].to_string(),
+        }
+    }
+    html[start..end].to_string()
+}
+
 /// The line under a call, as Your station and Home write it: "Reads as"
 /// and `parts`, each kept on one line, a dot between them.
 pub fn reads_as(parts: &[&str]) -> String {
@@ -893,10 +911,8 @@ impl Ui {
         store.save_settings(&settings);
         store.save_sessions(sessions);
         store.settings_saves.set(0);
-        // Past the first launch, which opens the guided setup by itself,
-        // and past asking whether to keep the lock the test settings have.
+        // Past the first launch, which opens the guided setup by itself.
         store.mark_tutorial_done();
-        store.mark_asked_about_lock();
         Self::launch(store)
     }
 

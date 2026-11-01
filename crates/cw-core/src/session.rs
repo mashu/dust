@@ -342,7 +342,7 @@ impl Group {
     /// How long the answer took, from the end of the latest send heard to
     /// its end before it — never quicker than a person types — how many
     /// times the group was heard by then, and what its characters'
-    /// recognition is read from ([`CharTimes`]), where its first send can be
+    /// recognition or copy times are read from ([`CharTimes`]), where its first send can be
     /// timed, or why it cannot. `box_open` is whether the box took keys
     /// while the group was sent.
     fn timing(&self, box_open: bool) -> SessionTiming {
@@ -991,7 +991,7 @@ pub struct SessionTiming {
     /// once.
     #[serde(default = "one_send")]
     pub sends: u32,
-    /// What its characters' recognition times are read from
+    /// What its characters' recognition or copy times are read from
     /// ([`crate::recognise`]): when each ended and when each was keyed.
     /// None for older saves, and where its sending cannot be timed.
     #[serde(
@@ -1731,9 +1731,19 @@ mod tests {
                 box_open: true,
             })
         );
-        // With the box shut, a group of more than one character keeps
-        // nothing: the rule could time none of it. Nor does one with no key.
-        assert_eq!(kept(&[Some(2_300)], false), None);
+        // With the box shut, a group of more than one character keeps its
+        // keys all the same: it has no recognition time, but has a copy
+        // time. One with no key keeps nothing.
+        assert_eq!(
+            kept(&[Some(2_300)], false),
+            Some(CharTimes {
+                ends: vec![300, 700, 1_000],
+                keys: vec![Some(1_300), None, None],
+                corrected: Vec::new(),
+                latency_ms: 40,
+                box_open: false,
+            })
+        );
         assert_eq!(kept(&[None, None, None], true), None);
         // Keys for more than was typed are no character of it.
         assert_eq!(
@@ -1741,6 +1751,30 @@ mod tests {
                 .map(|times| times.keys.len()),
             Some(3)
         );
+    }
+
+    /// With the lock on, a group of more than one character keyed once it
+    /// has been sent keeps its keys, and each letter has a copy time: the
+    /// first from the group's end as heard, each later from the key before.
+    /// None of it is recognised.
+    #[test]
+    fn a_locked_group_keeps_its_keys_for_its_copy_time() {
+        let times = kept(&[Some(2_300), Some(2_500), Some(2_700)], false).expect("its keys kept");
+        assert_eq!(
+            times,
+            CharTimes {
+                ends: vec![300, 700, 1_000],
+                keys: vec![Some(1_300), Some(1_500), Some(1_700)],
+                corrected: Vec::new(),
+                latency_ms: 40,
+                box_open: false,
+            }
+        );
+        assert_eq!(
+            crate::copy_times("KMR", "KMR", &times),
+            [Some(260), Some(200), Some(200)]
+        );
+        assert_eq!(crate::recognise("KMR", "KMR", &times), [None, None, None]);
     }
 
     /// A first send tried again was heard in part already, and one held up
@@ -1795,8 +1829,8 @@ mod tests {
 
     /// A session records whether typing was locked while its groups were
     /// sent, as its own settings had it: with the lock on, a group of more
-    /// than one character keeps nothing to time, and one of one character
-    /// still does.
+    /// than one character keeps its keys for its copy time, and one of one
+    /// character keeps them for its recognition time.
     #[test]
     fn a_session_records_whether_typing_was_locked_as_it_ran() {
         let run = |locked: bool| {
@@ -1827,7 +1861,7 @@ mod tests {
             .iter()
             .map(|timing| timing.char_times.is_some())
             .collect();
-        assert_eq!(kept, [false, true]);
+        assert_eq!(kept, [true, true]);
         assert!(
             locked.group_timings.iter().all(|t| t.untimed.is_none()),
             "the lock is the session's, no fault of a send"

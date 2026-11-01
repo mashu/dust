@@ -94,17 +94,23 @@ pub fn letters(bands: RecognitionBands) -> Element {
             }
             dt { "Recognised in" }
             dd {
-                "How soon you key a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest {RECOGNITION_WINDOW} timed tries. The key is the keyboard's or the keypad's, or for the paddles the first contact of the letter. A try is timed when you key it right, in its place, at least {REACTION_MIN_MS} ms after it sounded, while keeping up: the one before it keyed by {KEEPING_UP_MS} ms after this one reached you. A character put right after a slip is not timed, but costs the ones around it nothing. A group of more than one character is timed only when you key along, its first character keyed while the group is still sounding, or, for a short group, by {along} ms after that character reached you; keys after a group is sent again are not. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Key each character the moment you hear it."
+                "How soon you key a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest {RECOGNITION_WINDOW} timed tries. The key is the keyboard's or the keypad's, or for the paddles the first contact of the letter. A try is timed when you key it right, in its place, at least {REACTION_MIN_MS} ms after it sounded, while keeping up: the one before it keyed by {KEEPING_UP_MS} ms after this one reached you. A character put right after a slip is not timed, but costs the ones around it nothing. A group of more than one character gets this only when you key along, its first character keyed while the group is still sounding, or, for a short group, by {along} ms after that character reached you; keyed later, it gets a copy time instead. Keys after a group is sent again are not timed. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Key each character the moment you hear it."
             }
             dt { "The bands" }
             dd {
                 "Green under {fast} ms, fast; yellow under {icr} ms, instant character recognition (ICR): you know it as a sound rather than working it out; orange under {slow} ms; red from {slow} ms. Green and yellow count as ICR once a character is building or mastered: a weak one's time is only that of the tries it got right. Set them under Settings → Recognition."
             }
+            dt { "Copy time" }
+            dd {
+                "For a group of more than one character you key once it has ended, copying it from memory: how long you pause before each character's key, the median of its latest {RECOGNITION_WINDOW} timed tries. The first character's pause runs from the end of the group, as it reached you, to its key; each other's from the key before it. So it holds how fast you type as well as how sure you are: it shows which characters make you stop and think, not how fast you recognise them, and it has no bands and no ICR. A try is timed when you key it right, in its place, with no slip put right on it or on the one before it. A character that often starts a group, as a call's prefix does, reads a little slower, as its pause holds your start; with the paddles, each pause also holds keying the letter before. A pause past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. A group is timed one way or the other, never both, and the two are never averaged."
+            }
             dt { "About, so far" }
-            dd { "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band." }
+            dd {
+                "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band, or, for a copy time, to go by."
+            }
             dt { "Not timed yet" }
             dd {
-                "With Lock typing while sending on, only groups of one character sent once (Sends per group 1×) are timed: turn it off (group training, Settings → Session shape) to key along, on the keyboard, the keypad or the paddles. In a contest run, a call or an exchange is timed when it was heard once and alone, with Show copy off. A send the audio held up is not timed, nor is what the guided setup types for you. Nothing stands in for a time: a character never timed says so."
+                "No time of either kind yet. A character is timed each time you key it right, along with its group or once the group has ended; keys after a group is sent again are not timed, nor is a send the audio held up or paused, nor what the guided setup types for you. In a contest run only recognition is timed: a call or an exchange heard once and alone, with Show copy off. Nothing stands in for a time: a character never timed says so."
             }
         }
     }
@@ -460,11 +466,11 @@ pub fn session_shape() -> Element {
             dd { "How hard adapting pushes: Comfortable keeps copy mostly clean, Stretch pushes to where you miss often." }
             dt { "Sends per group" }
             dd {
-                "How many times each group is sent, a word space apart. Type along from the first send; with Lock typing while sending on, the box opens after the last. Each send after the first that you hear, typing along or not, halves what the group scores."
+                "How many times each group is sent, a word space apart. Type along from the first send; with Lock typing while sending on, the box opens after the last. Keys after a group is sent again are not timed (Stats → Letters). Each send after the first that you hear, typing along or not, halves what the group scores."
             }
             dt { "Lock typing while sending" }
             dd {
-                "Keeps you copying by ear rather than typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters cannot be timed (Stats → Letters)."
+                "Keeps you copying by ear rather than typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters get a copy time but no recognition time, and none at all when a group is sent more than once (Stats → Letters)."
             }
             dt { "Key · Key speed" }
             dd { "How your [ and ] paddles key, and how fast: straight, iambic A or B, or Ultimatic." }
@@ -542,6 +548,9 @@ pub fn recognition() -> Element {
             dd { "Yellow: instant character recognition, the sound known at once rather than worked out." }
             dt { "Slow under" }
             dd { "Orange: slower than ICR, under this. Red from it on." }
+        }
+        p {
+            "Copy time, for groups keyed after they end, is a plain figure: these bands are not for it."
         }
     }
 }

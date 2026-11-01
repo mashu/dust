@@ -414,8 +414,9 @@ impl Default for PlaybackSettings {
             group_pause_sec: 0.0,
             countdown_sec: 3,
             // Typed along, a group's characters are each timed from their
-            // sound (docs/recognition.md); locked, none longer than one can
-            // be. Who chose either keeps it: only a new install starts here.
+            // sound (docs/recognition.md); locked, a group longer than one
+            // gets only a copy time. Who chose either keeps it: only a new
+            // install starts here.
             lock_input_during_group_playback: false,
             paddle_swap: false,
             paddle_keys_by_place: true,

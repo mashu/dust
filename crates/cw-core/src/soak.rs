@@ -13,7 +13,7 @@ use crate::contest::bot::{Copied, copy_of};
 use crate::contest::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
-use crate::recognition::{CharTimes, KeyLog, Keys, recognise};
+use crate::recognition::{CharTimes, KeyLog, Keys, copy_times, recognise};
 use crate::score::MIN_RESPONSE_MS_PER_CHAR;
 use crate::session::{SendStart, whole_ms};
 use crate::timing::{SEND_RELEASE_SEC, resolve_pileup};
@@ -659,6 +659,11 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 stated_rule(&group.sent, &group.received, times),
                 "seed {seed}: {group:?} {times:?}"
             );
+            assert_eq!(
+                copy_times(&group.sent, &group.received, times),
+                stated_copy_rule(&group.sent, &group.received, times),
+                "seed {seed}: copied {group:?} {times:?}"
+            );
             timed += usize::from(recognised.iter().any(Option::is_some));
         }
         scored += result.groups.len();
@@ -732,6 +737,70 @@ fn coherent(
     }
 }
 
+/// Where the answer first differs from what was sent, if it is not as long;
+/// and whether position `at` is in its place: in an answer as long, every
+/// one; else one before the difference, unless it and all up to the
+/// difference are one letter, which the character at the difference, sent
+/// or typed, repeats: then any of them could be the one missed or added.
+fn in_place<'a>(sent: &'a [char], typed: &'a [char]) -> impl Fn(usize) -> bool + 'a {
+    let n = sent.len();
+    let differs = (0..n.max(typed.len()))
+        .find(|&i| sent.get(i) != typed.get(i))
+        .unwrap_or(n);
+    move |at: usize| {
+        if typed.len() == n {
+            return true;
+        }
+        let letter = sent[at];
+        let one_letter = (at..differs).all(|i| sent[i] == letter);
+        let repeated = sent.get(differs) == Some(&letter) || typed.get(differs) == Some(&letter);
+        at < differs && !(one_letter && repeated)
+    }
+}
+
+/// The copy-time rule of docs/recognition.md, stated plainly and position
+/// by position, for the soaks to hold [`copy_times`] to: for a group of more
+/// than one character with a first key, not typed along (the box shut, or
+/// that key past when the last character reached you and the slack, and
+/// past 400 ms after the first ended and the slack), each letter typed
+/// right in its place and not put right, timed from the group's end as
+/// heard for the first, from the key before it for the rest, unless that
+/// one was put right; never from a moment at or after its own key.
+fn stated_copy_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>> {
+    let sent: Vec<char> = sent.chars().collect();
+    let typed: Vec<char> = received.chars().collect();
+    let n = sent.len();
+    if n == 0 || times.ends.len() != n {
+        return vec![None; n];
+    }
+    let key = |at: usize| times.keys.get(at).copied().flatten().map(u64::from);
+    let reached = |at: usize| u64::from(times.ends[at]) + u64::from(times.latency_ms) + 100;
+    let along_by = reached(n - 1).max(reached(0) + 400);
+    let copied = n > 1 && key(0).is_some_and(|first| !times.box_open || first > along_by);
+    if !copied {
+        return vec![None; n];
+    }
+    let in_place = in_place(&sent, &typed);
+    let corrected = |at: usize| times.corrected.contains(&at);
+    let heard = u64::from(times.ends[n - 1]) + u64::from(times.latency_ms);
+    (0..n)
+        .map(|at| {
+            let k = key(at)?;
+            let from = match at {
+                0 => heard,
+                _ if corrected(at - 1) => return None,
+                _ => key(at - 1)?,
+            };
+            let typed_right = in_place(at) && typed.get(at) == Some(&sent[at]);
+            (typed_right && !corrected(at) && k > from).then(|| {
+                u32::try_from(k - from)
+                    .unwrap_or(u32::MAX)
+                    .min(RECOGNITION_MAX_MS)
+            })
+        })
+        .collect()
+}
+
 /// The rule of docs/recognition.md, stated plainly and position by
 /// position, for the soaks to hold [`recognise`] to.
 fn stated_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>> {
@@ -749,24 +818,7 @@ fn stated_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>
     if n > 1 && !(times.box_open && key(0).is_some_and(|k| u64::from(k) <= along_by)) {
         return vec![None; n];
     }
-    // Where the answer first differs from what was sent, if it is not as
-    // long; and whether position `at` is in its place: in an answer as
-    // long, every one; else one before the difference, unless it and all
-    // up to the difference are one letter, which the character at the
-    // difference, sent or typed, repeats: then any of them could be the
-    // one missed or added.
-    let differs = (0..n.max(typed.len()))
-        .find(|&i| sent.get(i) != typed.get(i))
-        .unwrap_or(n);
-    let in_place = |at: usize| {
-        if typed.len() == n {
-            return true;
-        }
-        let letter = sent[at];
-        let one_letter = (at..differs).all(|i| sent[i] == letter);
-        let repeated = sent.get(differs) == Some(&letter) || typed.get(differs) == Some(&letter);
-        at < differs && !(one_letter && repeated)
-    };
+    let in_place = in_place(&sent, &typed);
     (0..n)
         .map(|at| {
             let k = key(at)?;
@@ -788,6 +840,7 @@ fn stated_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>
 fn a_recognition_time_is_only_ever_what_the_rule_says() {
     const SENDABLE: [char; 8] = ['K', 'M', 'U', 'R', 'E', '5', '/', '?'];
     let mut timed = 0usize;
+    let mut copy_timed = 0usize;
     for seed in 0..SEEDS {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(3));
         // Repeated letters now and then, where a short answer is ambiguous.
@@ -860,13 +913,29 @@ fn a_recognition_time_is_only_ever_what_the_rule_says() {
             stated_rule(&sent, &typed, &times),
             "seed {seed}: {sent} as {typed}, {times:?}"
         );
+        let copied = copy_times(&sent, &typed, &times);
+        assert_eq!(
+            copied,
+            stated_copy_rule(&sent, &typed, &times),
+            "seed {seed}: copied {sent} as {typed}, {times:?}"
+        );
+        assert!(
+            recognised.iter().all(Option::is_none) || copied.iter().all(Option::is_none),
+            "seed {seed}: timed both ways: {sent} as {typed}, {times:?}"
+        );
         timed += recognised.iter().flatten().count();
+        copy_timed += copied.iter().flatten().count();
     }
     // Some thousands of characters are timed over the seeds; one for every
-    // four seeds is a floor that keeps these checks from going quiet.
+    // four seeds is a floor that keeps these checks from going quiet, and
+    // one for every eight of the copy-timed.
     assert!(
         timed > usize::try_from(SEEDS / 4).unwrap_or(0),
         "only {timed} timed"
+    );
+    assert!(
+        copy_timed > usize::try_from(SEEDS / 8).unwrap_or(0),
+        "only {copy_timed} copy-timed"
     );
 }
 

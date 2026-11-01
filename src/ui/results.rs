@@ -1,4 +1,4 @@
-use cw_core::{BOARD_MIN_GROUPS, CharSetMode, REACTION_MIN_MS, SessionResult};
+use cw_core::{BOARD_MIN_GROUPS, CharSetMode, SessionResult};
 use dioxus::prelude::*;
 
 use crate::ui::contest_results::ContestResults;
@@ -110,33 +110,31 @@ mod tests {
 }
 
 /// Why little of the session was timed, when under about a third of its
-/// characters were, as far as what it kept says, and what would have them
-/// timed (docs/recognition.md); and whether the lock it ran with is why.
-/// `lock_on` is whether the settings still lock typing while a group is
-/// sent.
+/// characters were, recognised or copied, as far as what it kept says, and
+/// what would have them timed (docs/recognition.md); and whether the lock
+/// it ran with is why: with its groups sent more than once, the box opened
+/// only after each group's last send, whose keys are not timed. `lock_on`
+/// is whether the settings still lock typing while a group is sent.
 fn untimed_hint(result: &SessionResult, lock_on: bool) -> Option<(String, bool)> {
     let untimed = cw_core::session_untimed(result);
-    if untimed.chars == 0 || untimed.timed * 3 >= untimed.chars {
+    let timed = untimed.timed + untimed.copied;
+    if untimed.chars == 0 || timed * 3 >= untimed.chars {
         return None;
     }
-    let lead = match untimed.timed {
+    let lead = match timed {
         0 => "Nothing was timed".to_string(),
         1 => format!("Only 1 of {} characters was timed", untimed.chars),
         timed => format!("Only {timed} of {} characters were timed", untimed.chars),
     };
-    let longer = result
-        .groups
-        .iter()
-        .any(|group| group.sent.chars().count() > 1);
-    if result.typing_locked && longer {
+    if result.typing_locked && untimed.keyed_in_repeat > 0 {
         let now = if lock_on {
-            "To time each character, turn it off and key each one as you hear it."
+            "Turn it off and key each group before it is sent again, or send each group once (Sends per group 1×)."
         } else {
-            "It is off now: key each character as you hear it."
+            "It is off now: key each group before it is sent again, or send each group once (Sends per group 1×)."
         };
         return Some((
             format!(
-                "{lead}: Lock typing while sending was on, so each group was typed only after it had been sent, which shows how well you remember it rather than how fast you recognise it. {now}"
+                "{lead}: Lock typing while sending was on, so the box opened only after each group's last send, and keys after a group is sent again are not timed. {now}"
             ),
             true,
         ));
@@ -152,19 +150,13 @@ fn untimed_hint(result: &SessionResult, lock_on: bool) -> Option<(String, bool)>
             "{lead}: the sound was held up on its way {}, so when their characters reached you is not known. That is the audio, not your typing.",
             in_groups(untimed.held_up)
         )
-    } else if let Some(late) = untimed.first_key_late_ms {
-        format!(
-            "{lead}: {}, your first key came about {:.1} s after the group had ended. A group is timed only when you key its first character while the group is still sounding, or, for a short group, within half a second of that character.",
-            in_groups(untimed.typed_after),
-            late / 1_000.0
-        )
     } else if untimed.keyed_in_repeat > 0 {
         format!(
             "{lead}: keys during a repeat are not timed, as by then you had heard the group once. Key each character as you hear it the first time it is sent."
         )
     } else {
         format!(
-            "{lead}: key each character as you hear it. A character is timed when its key comes at least {REACTION_MIN_MS} ms after its sound, and a group only when you key its first character while the group is still sounding, or, for a short group, within half a second of that character."
+            "{lead}: a character is timed only when you key it yourself, right, in its place and not as a slip put right: keyed along while its group sounds, by how soon after its sound you key it; keyed once the group has ended, by how long you pause before its key."
         )
     };
     Some((text, false))
@@ -178,8 +170,8 @@ pub fn ResultsView(
     place: Option<(usize, usize)>,
     auto_message: Option<String>,
     /// Turn off Lock typing while sending: offered while the settings still
-    /// have it on, when the session ran with it and it is why nothing was
-    /// timed.
+    /// have it on, when the session ran with it, its groups sent more than
+    /// once, and that is why nothing was timed.
     #[props(default)]
     on_unlock: Option<EventHandler<()>>,
     on_again: EventHandler<()>,
@@ -199,14 +191,23 @@ pub fn ResultsView(
     }
     let acc_pct = (result.accuracy * 100.0).round();
     let correct = result.groups.iter().filter(|g| g.correct).count();
-    // How fast its characters were recognised, from their sound to their
-    // key, as far as any was timed (docs/recognition.md).
-    let (recognised, timed) = match cw_core::session_recognition(&result) {
+    // How fast its characters were recognised, keyed along, and how long
+    // you paused before each key, copied after: two figures, never one
+    // (docs/recognition.md).
+    let recognition = cw_core::session_recognition(&result);
+    let copy = cw_core::session_copy(&result);
+    let (recognised, timed) = match recognition {
         Some(recognition) => (
             format!("{:.0} ms", recognition.median_ms),
             format!("{} timed", recognition.timed),
         ),
         None => ("—".to_string(), "none timed".to_string()),
+    };
+    let show_recognised = recognition.is_some() || copy.is_none();
+    let tiles = if recognition.is_some() && copy.is_some() {
+        "grid-4"
+    } else {
+        "grid-3"
     };
     let untimed = untimed_hint(&result, on_unlock.is_some());
     // About the copy, not the level: whether the level moves is the
@@ -250,15 +251,24 @@ pub fn ResultsView(
                     span { "{msg}" }
                 }
             }
-            div { class: "grid-3",
+            div { class: tiles,
                 div { class: "kpi blue",
                     div { class: "tiny", "Groups" }
                     div { class: "value", "{correct}/{result.groups.len()}" }
                 }
-                div { class: "kpi purple",
-                    div { class: "tiny", "Recognised in" }
-                    div { class: "value", "{recognised}" }
-                    div { class: "tiny", "{timed}" }
+                if show_recognised {
+                    div { id: "kpi-recognised", class: "kpi purple",
+                        div { class: "tiny", "Recognised in" }
+                        div { class: "value", "{recognised}" }
+                        div { class: "tiny", "{timed}" }
+                    }
+                }
+                if let Some(copy) = copy {
+                    div { id: "kpi-copy", class: "kpi",
+                        div { class: "tiny", "Copy time" }
+                        div { class: "value", "{copy.median_ms:.0} ms" }
+                        div { class: "tiny", "{copy.timed} timed" }
+                    }
                 }
                 div { class: "kpi indigo",
                     div { class: "tiny", "Points" }

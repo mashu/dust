@@ -1,7 +1,8 @@
 # Per-character timing
 
 Status: implemented. Stats → Letters shows each character's recognition
-time and whether it is instant (ICR); the results screen shows the session's.
+time and whether it is instant (ICR), and, apart from it, its copy time;
+the results screen shows the session's.
 
 ## What is measured
 
@@ -24,7 +25,8 @@ the speaker or headphones its key went in:
   text is a **correction** (`KeyLog`): it is no recognition of its own, but
   its place keeps the moment it was first keyed, which still says whether
   you were keeping up, so putting a slip right costs the characters around
-  it nothing. Text typed for you (the guided setup's Show me) has no moment.
+  it nothing. A character taken out inside the text, with nothing typed in
+  its place, makes the one now after the cut a correction too. Text typed for you (the guided setup's Show me) has no moment.
 
 Nothing is polled for it and nothing waits on it: each key reads the clock
 once and the box's `KeyLog` takes the moment as the text changes; each
@@ -51,16 +53,20 @@ mixing rule versions:
   clock; `null` where it cannot be: typed for you, before the send began, or
   after it was sent again.
 - `corrected` — the positions holding a correction; left out when none do.
-- `latencyMs` — the delay the device reports after the output. Used only to
-  decide whether you were keeping up (below), never added to or taken off a
-  time. Android reports none worth reading (its cpal host stamps the playback
+- `latencyMs` — the delay the device reports after the output. Never added
+  to or taken off a recognition time: it decides only whether you were
+  keeping up (below). It is taken off the first letter's copy time (Copy
+  time, below). Android reports none worth reading (its cpal host stamps the playback
   on another clock than the callback), so it counts as nothing there.
-- `boxOpen` — whether the box took keys while the group was sent.
+- `boxOpen` — whether the box took keys while the group was sent; with it
+  shut, a group of more than one character can only have a copy time.
 
 A group has `charTimes` only when its timeline can be trusted: its first send
 played on time and once (a send the audio held up or parked, or one tried
-again, is left out), and only when the rule could read a time from it: a
-key to time, and, for more than one character, the box open as it was sent.
+again, is left out), and only when it holds a key to time. A group of more
+than one character sent with the box shut has no recognition time but has
+a copy time, read from the same keys; builds up to 0.16.3 kept nothing for
+it, so those groups have no copy time.
 A send says it was held up as soon as that is known, whether it was heard
 out or stopped by an answer (`SendNews::HeldUp`). The web player reads that
 from its audio clock against the app's; the native player, which has no
@@ -110,9 +116,9 @@ was sent when all of these hold:
    its first key in by then for its last character, or, however short the
    rest of the group, by `ALONG_FLOOR_MS` (400 ms) after its first
    character ended, with the delay and the 100 ms after that — and only
-   with the box open: copied whole and typed after, it says how fast you
-   recall, not recognise. With the box shut, only a group of one character
-   can be timed.
+   with the box open. Copied whole and typed after, or with the box shut,
+   it says how fast you recall, not recognise: it gets a copy time instead
+   (below).
 
    The floor is for the first key alone. Behind `ET` at 25 WPM the `T` is
    gone 288 ms after the `E`, sooner than most people key what they heard,
@@ -124,21 +130,65 @@ was sent when all of these hold:
 A time past `RECOGNITION_MAX_MS` (3 s) counts as 3 s, as slow as a time
 says, rather than leaving the slowest tries out.
 
+## Copy time
+
+Most learners copy a group the usual way: they listen to it whole, then
+type it. Such a group is not typed along, so none of its characters has a
+recognition time; each gets a **copy time** instead (`copy_times`), the
+pause before its key as you copy it from memory:
+
+    first letter = its key − (end of the group's last character + latencyMs)
+    each later   = its key − the key before it
+
+- **Who gets it** (`copied_after`): a group of more than one character
+  whose first key has a moment and that was not typed along (`typed_along`):
+  its first key past the along deadline, or the box shut. A group is timed
+  one way or the other, never both, and the two are never averaged. A group
+  of one character has a recognition time only; a group typed along keeps
+  its recognition times even where you fell behind, the late ones untimed;
+  a group whose first key has no moment (typed for you, or keyed only after
+  the group was sent again) has neither.
+- **Which letters**: typed right, in their place (as above) and not as a
+  slip put right; after the first, the position before it keyed and not put
+  right, as its pause would hold the putting right; and its key after the
+  moment it is timed from, so letters that arrive at one moment get none.
+  Unlike recognition, the reported delay *is* taken off here, for the first
+  letter: its pause runs from when the group's end reached you. A pause past
+  3 s counts as 3 s.
+- **What it is**: the pause before each key as you copy from memory. It
+  holds your typing, and for the first character your start: it is not
+  recognition, and has no bands and no ICR. It shows which characters make
+  you stop and think.
+- **Read from what is kept**: it needs nothing new, so every session kept
+  with the box open since 0.16.0 has it.
+- **Not in contest runs**: a token's first key there comes after typing the
+  token before it in the same field, and a call's after a pile-up's
+  repeats, so its pauses are the QSO's, not a letter's.
+- **Known skews**: the first character holds your start, so one that often
+  starts a group, as a call's prefix does, reads a little slower; with the
+  paddles, each pause also holds keying the letter before; a phone's symbol
+  layer adds its switch; Android reports no delay, so the first pause there
+  holds the device's.
+
 ## Where it is shown
 
 - **Letters**: each character's median over its latest 40 timed tries, in
   its band once 8 are timed: fast, ICR, slow, too slow, at the edges set in
   Settings → Recognition (400, 600, 800 ms). A character counts as instant
   (ICR) in a fast or ICR band once it is building or mastered: a weak one's
-  time is only that of the tries it got right. A character never timed says
-  so: no estimate stands in for it.
-- **Results**: the session's median over its timed characters, and how many
-  were timed, where "Avg time" was. When under about a third of its
-  characters were timed, it says why, as far as the session kept it
-  (`session_untimed`): Lock typing while sending on as it ran, with a
-  button to turn it off while it still is; the audio holding up most of
-  its groups; how long after each group had ended its first key came,
-  measured; or keys only once a group was sent again.
+  time is only that of the tries it got right. Its copy time follows, the
+  median of its latest 40 copy-timed tries, as a plain figure with no band,
+  "about … so far" under 8. A character timed neither way says "not timed
+  yet": no estimate stands in for it.
+- **Results**: "Recognised in" and "Copy time", each the session's median
+  over its characters timed that way and how many were, side by side when
+  it has both, never averaged; "Recognised in — none timed" when it has
+  neither. When under about a third of its characters were timed either
+  way, it says why, as far as the session kept it (`session_untimed`): Lock
+  typing while sending on as it ran with its groups sent more than once,
+  with a button to turn it off while it still is; the audio holding up most
+  of its groups; keys only once a group was sent again; or what a character
+  needs to be timed.
 
 The paddles key a training group's box as the keyboard types into it: along
 with the send when typing is not locked while it plays.
@@ -147,8 +197,8 @@ In group training the station you copy is always the strongest on the band
 and apart in pitch from any calling across it, so it is timed under them; a
 contest's callers are not, so one heard under another is not timed.
 
-Every mode is timed by the same rule, contest runs included. The mode only
-decides what is sent.
+Every group mode is timed by the same rules; a contest run by recognition
+only. The mode only decides what is sent.
 
 ## What it does not change
 
@@ -157,11 +207,13 @@ per character of the group (`timeToCompleteMs`). Every save has it, and the
 history is scored again at every launch, so moving the score onto
 recognition times would re-rank every board and record, and put sessions
 from before and after on two scales. Auto level, the sampler and adaptive
-speed read only accuracy and speed.
+speed read only accuracy and speed. Copy time is shown only, as recognition
+is.
 
 ## Contest
 
-A caller's call, or an exchange token, is timed the same way, in run time:
+A caller's call, or an exchange token, is timed the same way, in run time
+(a run has no copy time: Copy time, above):
 
 - its character ends come from the turn's own plan (the core plans every
   segment), from when its segment's sound went to the output (the turn's

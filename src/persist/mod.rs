@@ -53,12 +53,6 @@ pub trait Store {
     /// install, as a USB paddle keys through them every day.
     fn told_of_paddle_keys(&self) -> bool;
     fn mark_told_of_paddle_keys(&self);
-    /// Whether the learner has been asked, on this install, whether to keep
-    /// Lock typing while sending on, or has turned it on or off since: the
-    /// default before Dust 0.16, which every save keeps, so a choice
-    /// cannot be told from the old default without asking.
-    fn asked_about_lock(&self) -> bool;
-    fn mark_asked_about_lock(&self);
     /// The stored settings, clamped; `None` when nothing stored reads as
     /// settings at all: a first launch, or a store that cannot be read.
     ///
