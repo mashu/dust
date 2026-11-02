@@ -359,6 +359,15 @@ Pages workflow has published it will fail the check. The Pages workflow
 deploys a push to `main` once its whole CI run has passed, so a change to the
 page goes live a CI run after it is merged.
 
+The listing's text is kept in
+[`fastlane/metadata/android/en-US`](../fastlane/metadata/android/en-US): the
+app name (`title.txt`, 30 characters at most), the short description
+(`short_description.txt`, 80) and the full description
+(`full_description.txt`, 4000). Paste each into the main store listing in
+Play Console. Play shows the full description as plain text, so Markdown such
+as `**bold**` appears as typed; the lists use `•`. F-Droid reads the same
+folder.
+
 ## iOS
 
 Same story as Android — `mobile` is the wry/tao webview stack and cpal reaches

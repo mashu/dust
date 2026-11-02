@@ -1,0 +1,61 @@
+Dust is a Morse code (CW) trainer for amateur radio operators, from your first two letters to contest speed. It sends groups, callsigns, words or a whole contest; you copy them by ear and see exactly what you got right, what you missed, and how fast you recognised each character.
+
+Made by a ham, SO5KM. Free and open source: no ads, no account, no in-app purchases.
+
+LEARN MORSE CODE THE KOCH WAY
+• Koch method: start with two characters and unlock the next as you copy them
+• Letter orders of LCWO and CW Academy, alphabetical, or your own
+• Auto level moves you up, or back, by how your sessions go
+• Farnsworth spacing and adjustable word spacing
+• Presets for Novice, Intermediate, Advanced and Expert
+• A guided setup walks you through your first session
+• Listen mode: hear characters and groups without being scored
+
+COPY WHAT YOU WILL HEAR ON THE AIR
+• Letters, digits, mixed, callsigns or words
+• Callsigns in six tiers, from real prefixes weighted the way you hear them
+• Words from a starter list with the prosigns AR and BT, or your own list
+• Adaptive speed and group size: faster and longer while you copy, slower and shorter when you miss
+• Characters you miss come round more often
+• Lock typing while sending to train head copy
+• Speed and pitch ranges, repeats, and the shape of every dit and dah
+
+A REAL BAND, NOT A CLEAN BEEP
+• Band noise heard through a CW filter you can narrow and reshape
+• QSB fading, QRN static and lightning crashes, signal-to-noise in dB
+• AGC and RF gain that behave like a rig's
+• Stations that key like people, not like a perfect keyer
+
+CW CONTEST AND PILE-UP TRAINING
+• Call CQ, copy the call and exchange, send TU, log the QSO
+• CQ WPX, CQ WW, ARRL DX, ARRL Field Day, NA Sprint and a simple QSO
+• One caller at a time, or a pile-up with QRM
+• Ask with ? when you miss something; type K5? to bring back only the stations that fit
+• Callers correct a wrong call, as real stations do
+• New to contesting? Hear a whole QSO first
+• Raw and verified scores, QSO rate and a log that marks every mistake
+• Send from the keyboard, the on-screen keypad or paddles
+
+PADDLES AND KEYER
+• Iambic A, iambic B, Ultimatic or straight
+• Key with a USB paddle adapter that types [ and ], or with the keyboard
+• A sidetone shaped like a real transmitter's
+
+SEE EXACTLY WHERE YOU STAND
+• Accuracy and mastery for every letter
+• Recognition time per character, with instant character recognition (ICR) bands
+• Mistakes: which characters you confuse, down to the dit or dah
+• Character pairs that trip you up
+• Copy speed in WPM and copy span, learned from every session
+• Endurance: when your copy starts to fade in a long session
+• Calendar, streaks, history, a scoreboard with medals and personal records
+• Back up and restore your practice
+
+PRIVATE BY DESIGN
+Your practice stays on your device. Dust has no account and no tracking, and never sends your callsign or history anywhere.
+
+Also runs in the browser and on Linux, Windows and macOS. Source code (GPLv3): github.com/mashu/dust
+
+73 and good luck on the air!
+
+Dust is independent and not affiliated with the ARRL, CQ magazine, CWops or LCWO.
