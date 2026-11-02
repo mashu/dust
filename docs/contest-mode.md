@@ -566,9 +566,9 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   the middle (`STYLE_ON_AIR`): about 34, 25, 9, 4, 3, 3, 6 and 16 in a
   hundred, half the hunters naming you and about one in four sending each
   field once. A reply can be turned off (`hunterStylesOff`, by corner):
-  none sends it, and what was its share goes to the rest as they stand,
-  its neighbours taking most (`shares_without`), or to all the rest alike
-  where the dot sits on its corner; the last reply on stays on
+  none sends it, and the rest are scaled up alike to make a hundred, so
+  they keep their proportions to one another and in the middle are alike
+  (`shares_without`), or share alike where the dot sits on its corner; the last reply on stays on
   (`toggle_corner`). A hunter decides as it first sends its exchange and
   keeps to it for repeats.
   "Hunter styles" on the contest card folds away under a line that says
@@ -577,7 +577,11 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   2 off"; it never says "original" or "cheat sheet", which a new user has
   not seen. Open, the shape: each corner numbered, its mark as large as
   its reply's share, one turned off dashed and crossed out, a shaded
-  outline of the mix, and the dot. A click or a drag inside puts the dot
+  outline of the mix, and the dot. The outline reaches out along each
+  spoke by the square root of its share against the largest, so each
+  slice of it grows as its share does and a small share is still seen; a
+  reply turned off has no point on it, so it never loops through the
+  middle. A click or a drag inside puts the dot
   there, as a finger's touch and drag do (`touch-action: none`, so a
   finger moves the dot rather than the page); a click on a corner's mark
   turns its reply off, or on again; with a mouse, pointing shows what a

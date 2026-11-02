@@ -5342,6 +5342,73 @@ mod tests {
         }
     }
 
+    /// Hunters send the replies turned off never, and the rest as the card
+    /// says: with replies 3 and 6 off, the six left alike in the middle, a
+    /// sixth each, and where the dot stands until moved in the shares the
+    /// card lists, each kept to its proportion to the others. Counted from
+    /// the hunters' first exchanges over many runs, against the shares
+    /// worked out for the card.
+    #[test]
+    fn hunters_send_the_replies_on_in_the_shares_the_card_lists() {
+        let off = [2, 5];
+        let shapes = [
+            "BK N4BKY TU UR R R S S BK",
+            "BK TU UR R R S S BK",
+            "R TU UR R R S S BK",
+            "TU UR R R S S BK",
+            "TU UR R S BK",
+            "R TU UR R S BK",
+            "BK TU UR R S BK",
+            "BK N4BKY TU UR R S BK",
+        ];
+        let runs: u32 = 900;
+        for at in [crate::contest::STYLE_EVEN, crate::contest::STYLE_ON_AIR] {
+            let mut counts = [0u32; 8];
+            for seed in 1..=u64::from(runs) {
+                let mut settings = run_settings(25.0);
+                settings.contest.contest_kind = crate::contest::ContestKind::Pota;
+                settings.contest.my_call = "N4BKY".to_string();
+                settings.contest.my_state = "AL".to_string();
+                settings.contest.hunter_style = at;
+                settings.contest.hunter_styles_off = off.to_vec();
+                let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["W7XYZ"]));
+                runtime.finish_turn();
+                runtime.key(OpKey::Esm, "W7XYZ", "");
+                let first = replies(runtime.last_turn())[0].to_string();
+                let (rst, st) = pota_hunter(&first, "N4BKY");
+                let shape = first.replace(rst, "R").replace(st.expect("a state"), "S");
+                let reply = shapes
+                    .iter()
+                    .position(|each| *each == shape)
+                    .expect("a reply");
+                counts[reply] += 1;
+            }
+            let want = crate::contest::ContestKind::Pota
+                .rules()
+                .reply_shares(at, &off);
+            for (reply, (count, share)) in counts.iter().zip(&want).enumerate() {
+                if off.contains(&reply) {
+                    assert_eq!(*count, 0, "{at:?}: reply {} is off", reply + 1);
+                    continue;
+                }
+                // Within four standard deviations of what the card says.
+                let expected = share * f64::from(runs);
+                let spread = (expected * (1.0 - share)).sqrt();
+                assert!(
+                    (f64::from(*count) - expected).abs() <= 4.0 * spread + 1.0,
+                    "{at:?}: reply {} came {count} times of {runs}, the card says {expected:.0}",
+                    reply + 1
+                );
+            }
+            if at == crate::contest::STYLE_EVEN {
+                for (reply, share) in want.iter().enumerate() {
+                    let alike = if off.contains(&reply) { 0.0 } else { 1.0 / 6.0 };
+                    assert!((share - alike).abs() < 1e-9, "{reply}: {share}");
+                }
+            }
+        }
+    }
+
     /// POTA hunters each keep to a reply: with the dot where it stands until
     /// moved, every lead comes, by its share, and each field sent once about
     /// three times in ten.

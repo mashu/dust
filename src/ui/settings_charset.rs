@@ -335,15 +335,28 @@ fn svg_points(points: impl Iterator<Item = [f64; 2]>) -> String {
 }
 
 /// The mix `shares` make, drawn as an outline inside the shape: each
-/// corner's point as far out as its share against the largest.
-fn mix_points(corners: &[[f64; 2]], shares: &[f64]) -> String {
+/// corner's point out along its spoke by the square root of its share
+/// against the largest, so the slice of the outline round each spoke grows
+/// as its share does and a small share is still seen. The replies `off` have
+/// no point at all: drawn at the middle, they pinched the outline into a
+/// loop there.
+fn mix_points(corners: &[[f64; 2]], shares: &[f64], off: &[usize]) -> String {
+    svg_points(mix_reach(corners, shares, off).into_iter())
+}
+
+/// The points [`mix_points`] draws.
+fn mix_reach(corners: &[[f64; 2]], shares: &[f64], off: &[usize]) -> Vec<[f64; 2]> {
     let most = shares.iter().copied().fold(0.0, f64::max).max(1e-9);
-    svg_points(
-        corners
-            .iter()
-            .zip(shares)
-            .map(|(corner, share)| corner.map(|value| value * share / most * 0.92)),
-    )
+    corners
+        .iter()
+        .zip(shares)
+        .enumerate()
+        .filter(|(at, _)| !off.contains(at))
+        .map(|(_, (corner, share))| {
+            let reach = (share / most).sqrt() * 0.92;
+            corner.map(|value| value * reach)
+        })
+        .collect()
 }
 
 /// What a mouse over the shape is on: a point a click would put the dot
@@ -383,13 +396,13 @@ fn StyleShape(
     let corners = shape_corners(count);
     let most = shares.iter().copied().fold(0.0, f64::max).max(1e-9);
     let edge = svg_points(corners.iter().copied());
-    let mix = mix_points(&corners, &shares);
+    let mix = mix_points(&corners, &shares, &off);
     // What the mouse would set, where it is over the shape and not where
     // the dot already stands.
     let ghost = match hover() {
         Some(Pointing::At(point)) if point != at => {
             let shares = shares_without(&corner_shares(count, point), &off);
-            Some((point, mix_points(&corners, &shares)))
+            Some((point, mix_points(&corners, &shares, &off)))
         }
         _ => None,
     };
@@ -1307,7 +1320,9 @@ fn WordCount(
 
 #[cfg(test)]
 mod tests {
-    use super::{SHAPE_PX, SHAPE_REACH, StylesCard, corner_under, in_percent, shape_point};
+    use super::{
+        SHAPE_PX, SHAPE_REACH, StylesCard, corner_under, in_percent, mix_reach, shape_point,
+    };
     use cw_core::{STYLE_EVEN, STYLE_ON_AIR, shape_corners};
 
     /// Shares read as whole percents that add up to 100, the rest going to
@@ -1380,6 +1395,33 @@ mod tests {
             even.iter()
                 .all(|(_, pct)| *pct == 0 || (16..=17).contains(pct))
         );
+    }
+
+    /// The mix's outline leaves out the replies turned off, so it never
+    /// loops through the middle for them, and reaches out by the square root
+    /// of each share: all the way for the largest, half way for a quarter
+    /// of it, all alike in the middle.
+    #[test]
+    fn the_mix_is_drawn_without_the_replies_turned_off() {
+        let corners = shape_corners(8);
+        let even = [0.125; 8];
+        let all = mix_reach(&corners, &even, &[]);
+        assert_eq!(all.len(), 8);
+        for point in &all {
+            assert!((point[0].hypot(point[1]) - 0.92).abs() < 1e-9);
+        }
+        let mut shares = [0.0; 8];
+        shares[0] = 0.4;
+        shares[1] = 0.1;
+        shares[7] = 0.5;
+        let some = mix_reach(&corners, &shares, &[2, 5]);
+        assert_eq!(some.len(), 6, "no point for the two off");
+        let reach = |point: [f64; 2]| point[0].hypot(point[1]);
+        assert!(
+            (reach(some[5]) - 0.92).abs() < 1e-9,
+            "the largest, all the way"
+        );
+        assert!((reach(some[1]) - (0.1f64 / 0.5).sqrt() * 0.92).abs() < 1e-9);
     }
 
     /// A corner's mark is where a click turns its reply: on it, or near

@@ -764,9 +764,10 @@ fn nearest_on_edge(a: [f64; 2], b: [f64; 2], at: [f64; 2]) -> [f64; 2] {
 }
 
 /// `shares` with the corners `off` taken out: each of theirs nothing, and
-/// what was theirs shared among the rest as they stand, so the nearest
-/// corners take most of it. Where nothing is left to share, the dot being
-/// at a corner turned off, the rest share alike. With every corner off, or
+/// the rest scaled up alike to make one again, so they keep their
+/// proportions to one another; in the middle, where all were alike, the
+/// rest are alike too. Where nothing is left to share, the dot being at a
+/// corner turned off, the rest share alike. With every corner off, or
 /// none, the shares are as they were: one at least is always on.
 pub fn shares_without(shares: &[f64], off: &[usize]) -> Vec<f64> {
     let on = |at: usize| !off.contains(&at);
@@ -1924,10 +1925,10 @@ mod tests {
         assert_eq!(pota().reply_at(0.999_999, STYLE_ON_AIR, &[7]), Some(6));
     }
 
-    /// A reply turned off is sent by none: what was its share goes to the
-    /// rest as they stand, its neighbours taking most; where none is left,
-    /// the dot at its corner, the rest share alike; and the last reply on
-    /// stays on.
+    /// A reply turned off is sent by none: the rest are scaled up alike, so
+    /// they keep their proportions to one another; where none is left, the
+    /// dot at its corner, the rest share alike; and the last reply on stays
+    /// on.
     #[test]
     fn a_reply_turned_off_is_sent_by_none() {
         let on_air = corner_shares(8, STYLE_ON_AIR);
