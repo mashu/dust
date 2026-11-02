@@ -1,7 +1,7 @@
 //! Each contest as one row of a table: what you send, what you copy, who
 //! calls and how it scores. A new contest is a row and its data.
 
-use super::data::places::{fold_labrador, w_ve};
+use super::data::places::{DX, fold_labrador, w_ve};
 use super::exchange::{self, Field, cut_power, cut_serial, cut_zone};
 use super::serial::{SPRINT_SERIALS, SerialFit, WPX_SERIALS};
 use super::turn::Sender;
@@ -9,7 +9,8 @@ use super::{ContestKind, TuCall};
 use crate::callsign::{CallSpec, Countries};
 
 /// Your side of the ARRL DX contest, from your call: W/VE works only DX, and
-/// DX only W/VE. Every other contest is the same from either side.
+/// DX only W/VE. In POTA, a W/VE activator sends its state and a DX one its
+/// report alone. Every other contest is the same from either side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     /// The USA, without Alaska, Hawaii or the islands, and Canada.
@@ -131,10 +132,11 @@ pub struct Scoring {
 /// your name, `{mystate}` for your state, province or territory, `{myzone}`
 /// for your CQ zone, `{mypwr}` for your power, `{myclass}` for your Field
 /// Day class, `{mysec}` for your section, `{rst}` for your report, `{nr}`
-/// for your serial, and in your TU `{hisname}` for the name you copied of
-/// the station you work. In a caller's, `{my}` is your call,
-/// `{his}` its own, `{rst}` its report, and each field you copy its name in
-/// braces: `{nr}`, `{name}`.
+/// for your serial, `{greet}` for the greeting of the time of day (`GM`,
+/// `GA`, `GE`), and in your TU `{hisname}` and `{hisstate}` for the name and
+/// the state you copied of the station you work. In a caller's, `{my}` is
+/// your call, `{his}` its own, `{rst}` its report, and each field you copy
+/// its name in braces: `{nr}`, `{name}`. A caller's lead may hold `{my}`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContestRules {
     pub kind: ContestKind,
@@ -175,7 +177,8 @@ pub struct ContestRules {
     pub their_exchange: PerSide<&'static str>,
     /// What a caller sends before its exchange the first time: the first
     /// of these as often as `caller.rs`'s `FIRST_LEAD` has it, the second
-    /// otherwise. Sent again, the exchange goes alone.
+    /// otherwise, `{my}` your call in it. Sent again, the exchange goes
+    /// alone.
     pub their_lead: [&'static str; 2],
     /// What a caller that has its call but not your exchange asks with:
     /// the first as often as `caller.rs`'s `FIRST_QUERY` has it, the second
@@ -226,6 +229,13 @@ pub struct Fill<'a> {
     /// The name you copied of the station you work, as the Exchange field
     /// reads it, for a TU that greets it by name. Empty for none.
     pub his_name: &'a str,
+    /// The state, province or territory you copied of the station you work,
+    /// as the Exchange field reads it, for a TU that sends it back, as a
+    /// POTA activator's does. Empty for none, and DX goes back as none.
+    pub his_state: &'a str,
+    /// The greeting of the time of day where you are ([`greeting`]), for an
+    /// exchange that holds one, as a POTA activator's does: `GA`.
+    pub greeting: &'a str,
     /// Your TU signs with your call, though the contest's does not by its
     /// own rules: a pile-up's, as often as you choose
     /// ([`ContestRules::tu_adds_call`]).
@@ -470,7 +480,65 @@ pub(super) const RULES: &[ContestRules] = &[
         works: None,
         simplified: None,
     },
+    // Parks on the Air, from the activator's side: `CQ CQ POTA DE K1ABC K`
+    // · `W7XYZ` · `W7XYZ TU GA UR 5NN 5NN MA MA BK` · `BK TU UR 579 579 OR OR
+    // BK` · `BK TU OR OR 73 EE` · `EE`. You greet the hunter by the time of
+    // day, and your TU sends its state back. Hunters are in the US and
+    // Canada, each sending its report and its state or province, which you
+    // copy; a hunter now and then names you after its BK. From outside the
+    // 48 states and Canada you send your report alone, as DX activators do.
+    // Your TU brings the next hunter once the one you worked has signed off,
+    // as a pile-up of hunters calls; nothing scores a run, which is no
+    // contest, and a hunter you worked does not call again.
+    ContestRules {
+        kind: ContestKind::Pota,
+        cq: "CQ CQ POTA DE {my} K",
+        tu: "BK TU {hisstate} {hisstate} 73 EE",
+        long_cq: "CQ CQ POTA DE {his} {his} K",
+        query: "AGN",
+        exchange: PerSide {
+            wve: "TU {greet} UR {rst} {rst} {mystate} {mystate} BK",
+            dx: "TU {greet} UR {rst} {rst} BK",
+        },
+        report: "5NN",
+        rst: true,
+        serial: false,
+        serial_cut: false,
+        copied: PerSide::both(&[Field::Rst, Field::St]),
+        callers: PerSide::both(CallSpec::contest(Countries::UsAndCanada)),
+        answer: "{his}",
+        their_exchange: PerSide::both("UR {rst} {rst} {st} {st} BK"),
+        their_lead: ["BK TU", "BK {my} TU"],
+        their_query: ["AGN", "AGN"],
+        signoff: Some("EE"),
+        tu_calls: true,
+        serials: None,
+        scoring: None,
+        labrador: false,
+        works: Some(PerSide {
+            wve: "you send your report and your state",
+            dx: "you send your report alone, as DX activators do",
+        }),
+        simplified: Some(
+            "Simplified: every hunter is in the US or Canada and sends its state (a DX hunter sends a report alone); Alaska and Hawaii send a report alone, as DX does here; and no park references.",
+        ),
+    },
 ];
+
+/// The greeting of the time of day at `hour`, local time, as operators send
+/// one: `GM` in the morning, from 4, `GA` in the afternoon, from noon, and
+/// `GE` from 6 in the evening on through the night.
+pub fn greeting(hour: u32) -> &'static str {
+    match hour {
+        4..=11 => "GM",
+        12..=17 => "GA",
+        _ => "GE",
+    }
+}
+
+/// The hour a greeting goes by where the local time is not known: the
+/// afternoon, `GA`, as the greeting most often heard in examples.
+pub const GREETING_HOUR: u32 = 12;
 
 impl Scoring {
     /// Whether anything multiplies the points, on either side: all but
@@ -736,11 +804,12 @@ impl ContestRules {
         squeeze(&text)
     }
 
-    /// A caller's first exchange, `body`, after the word the contest leads
-    /// it with, the `lead`th of [`Self::their_lead`]; alone in a contest
-    /// that leads it with none.
-    pub(super) fn their_first_exchange(&self, lead: usize, body: &str) -> String {
-        squeeze(&format!("{} {body}", self.their_lead[lead]))
+    /// A caller's first exchange to you, `my_call`, `body`, after the word
+    /// the contest leads it with, the `lead`th of [`Self::their_lead`];
+    /// alone in a contest that leads it with none.
+    pub(super) fn their_first_exchange(&self, lead: usize, my_call: &str, body: &str) -> String {
+        let lead = self.their_lead[lead].replace("{my}", my_call);
+        squeeze(&format!("{lead} {body}"))
     }
 
     /// A first QSO of this contest as it goes out, with `me` as you: who
@@ -770,6 +839,11 @@ impl ContestRules {
         } else {
             ""
         };
+        let his_state = if self.copied(side).contains(&Field::St) {
+            Field::St.example()
+        } else {
+            ""
+        };
         let first = Fill { serial: 1, ..*me };
         let them = Sender::Caller(0);
         let mut qso = vec![
@@ -783,20 +857,31 @@ impl ContestRules {
                 them,
                 self.their_first_exchange(
                     0,
+                    me.my_call,
                     &self.their_exchange_text(side, me.my_call, caller, &fields),
                 ),
             ),
-            (Sender::You, self.tu_text(&Fill { his_name, ..first })),
+            (
+                Sender::You,
+                self.tu_text(&Fill {
+                    his_name,
+                    his_state,
+                    ..first
+                }),
+            ),
         ];
         qso.extend(self.signoff.map(|signoff| (them, signoff.to_string())));
         qso
     }
 
     /// `template`, one of your texts, filled in with `me`: your call, name,
-    /// state, zone, power, class, section, report and serial, and the name
-    /// of the station you work. A name not there leaves no gap. Your zone
-    /// and power go out cut, as MorseRunner sends yours.
+    /// state, zone, power, class, section, report, serial and greeting, and
+    /// the name and state of the station you work. A name not there leaves
+    /// no gap, and neither does DX for its state, which names no place to
+    /// send back. Your zone and power go out cut, as MorseRunner sends
+    /// yours.
     fn fill(&self, template: &str, me: &Fill<'_>) -> String {
+        let his_state = if me.his_state == DX { "" } else { me.his_state };
         let serial = if self.serial_cut {
             cut_serial(me.serial)
         } else {
@@ -812,6 +897,8 @@ impl ContestRules {
                 .replace("{myclass}", me.my_class)
                 .replace("{mysec}", me.my_section)
                 .replace("{hisname}", me.his_name)
+                .replace("{hisstate}", his_state)
+                .replace("{greet}", me.greeting)
                 .replace("{rst}", self.report)
                 .replace("{nr}", &serial),
         )
@@ -857,6 +944,10 @@ mod tests {
         ContestKind::FieldDay.rules()
     }
 
+    fn pota() -> &'static ContestRules {
+        ContestKind::Pota.rules()
+    }
+
     /// You, as DL1ABC called MAT in zone 14 running 100 W, sending
     /// `serial`, working `his_name`.
     fn me(serial: u32, his_name: &str) -> Fill<'_> {
@@ -870,12 +961,14 @@ mod tests {
             my_section: "DX",
             serial,
             his_name,
+            his_state: "",
+            greeting: "GA",
             tu_signed: false,
         }
     }
 
     /// You, as K1ABC called MIKE in Massachusetts, zone 5, sending
-    /// `serial`.
+    /// `serial`, working BOB in Oregon in the afternoon.
     fn k1abc(serial: u32) -> Fill<'static> {
         Fill {
             my_call: "K1ABC",
@@ -887,6 +980,8 @@ mod tests {
             my_section: "EMA",
             serial,
             his_name: "BOB",
+            his_state: "OR",
+            greeting: "GA",
             tu_signed: false,
         }
     }
@@ -1004,7 +1099,11 @@ mod tests {
         ];
         let sent = rules.their_exchange_text(Side::WVe, "K1ABC", "W7XYZ", &theirs);
         assert_eq!(sent, "K1ABC 145 BOB OR");
-        assert_eq!(rules.their_first_exchange(0, &sent), sent, "led by nothing");
+        assert_eq!(
+            rules.their_first_exchange(0, "K1ABC", &sent),
+            sent,
+            "led by nothing"
+        );
         assert_eq!(rules.query, "NR?");
         assert_eq!(rules.serials, Some(SPRINT_SERIALS));
         assert!(!rules.sided());
@@ -1140,8 +1239,8 @@ mod tests {
         ];
         let sent = rules.their_exchange_text(Side::WVe, "K1ABC", "W7XYZ", &theirs);
         assert_eq!(sent, "3A OR");
-        assert_eq!(rules.their_first_exchange(0, &sent), "R 3A OR");
-        assert_eq!(rules.their_first_exchange(1, &sent), "TU 3A OR");
+        assert_eq!(rules.their_first_exchange(0, "K1ABC", &sent), "R 3A OR");
+        assert_eq!(rules.their_first_exchange(1, "K1ABC", &sent), "TU 3A OR");
         assert!(rules.tu_calls && rules.signoff.is_none() && rules.serials.is_none());
         assert!(!rules.sided() && rules.side_note(Side::Dx, true).is_none());
         assert_eq!(
@@ -1183,6 +1282,112 @@ mod tests {
 
     /// Labrador is LB in ARRL DX, a place of its own, and NL in the Sprint;
     /// every other value reads alike in every contest.
+    /// POTA on the air, as the exchange cheat sheet has it: `CQ CQ POTA DE
+    /// K1ABC K` · `W7XYZ` · `W7XYZ TU GA UR 5NN 5NN MA MA BK` · `BK TU UR 579
+    /// 579 OR OR BK` · `BK TU OR OR 73 EE` · `EE`. You greet the hunter by
+    /// the time of day and send its state back; from outside W/VE you send
+    /// your report alone, as DX does. Hunters in the US and Canada send
+    /// their report and state, which you copy. Your TU brings the next
+    /// hunter, and nothing scores a run.
+    #[test]
+    fn pota_sends_what_an_activator_sends() {
+        let rules = pota();
+        assert_eq!(rules.cq_text(&k1abc(0)), "CQ CQ POTA DE K1ABC K");
+        assert_eq!(
+            rules.exchange_text(Side::WVe, &k1abc(0)),
+            "TU GA UR 5NN 5NN MA MA BK"
+        );
+        let morning = Fill {
+            greeting: greeting(9),
+            ..k1abc(0)
+        };
+        assert_eq!(
+            rules.exchange_text(Side::WVe, &morning),
+            "TU GM UR 5NN 5NN MA MA BK"
+        );
+        // As DX: your report alone.
+        assert_eq!(
+            rules.exchange_text(Side::Dx, &me(0, "")),
+            "TU GA UR 5NN 5NN BK"
+        );
+        assert_eq!(rules.tu_text(&k1abc(0)), "BK TU OR OR 73 EE");
+        // No state copied, or DX, which names no place: no gap.
+        assert_eq!(rules.tu_text(&me(0, "")), "BK TU 73 EE");
+        let dx = Fill {
+            his_state: "DX",
+            ..k1abc(0)
+        };
+        assert_eq!(rules.tu_text(&dx), "BK TU 73 EE");
+        // Signed with your call as you choose, as a TU that brings the next
+        // caller is.
+        let signed = Fill {
+            tu_signed: true,
+            ..k1abc(0)
+        };
+        assert_eq!(rules.tu_text(&signed), "BK TU OR OR 73 EE K1ABC");
+        assert!(rules.tu_call_chosen() && rules.tu_calls);
+        assert_eq!(rules.answer_text("K1ABC", "W7XYZ", false), "W7XYZ");
+        assert_eq!(rules.answer_text("K1ABC", "W7XYZ", true), "W7XYZ W7XYZ");
+        let theirs = [
+            (Field::Rst, "57N".to_string()),
+            (Field::St, "FL".to_string()),
+        ];
+        let body = rules.their_exchange_text(Side::WVe, "K1ABC", "W4XYZ", &theirs);
+        assert_eq!(body, "UR 57N 57N FL FL BK");
+        assert_eq!(
+            rules.their_first_exchange(0, "K1ABC", &body),
+            "BK TU UR 57N 57N FL FL BK"
+        );
+        assert_eq!(
+            rules.their_first_exchange(1, "K1ABC", &body),
+            "BK K1ABC TU UR 57N 57N FL FL BK"
+        );
+        assert_eq!(rules.signoff, Some("EE"));
+        assert_eq!(rules.their_query, ["AGN", "AGN"], "no serial to ask for");
+        assert_eq!(rules.query, "AGN");
+        assert_eq!(rules.sends(Side::WVe), "5NN + state");
+        assert_eq!(rules.sends(Side::Dx), "5NN");
+        assert!(rules.sends_state(Side::WVe) && !rules.sends_state(Side::Dx));
+        assert!(!rules.sends_name());
+        assert!(!rules.prefills_report(Side::Dx), "the report is copied");
+        for side in [Side::WVe, Side::Dx] {
+            assert_eq!(rules.copied(side), [Field::Rst, Field::St]);
+            assert_eq!(
+                rules.callers(side),
+                CallSpec::contest(Countries::UsAndCanada)
+            );
+        }
+        assert!(rules.sided());
+        assert_eq!(
+            rules.side_note(Side::Dx, true).as_deref(),
+            Some("You are DX: you send your report alone, as DX activators do")
+        );
+        assert_eq!(
+            rules.side_note(Side::WVe, true).as_deref(),
+            Some("You are W/VE: you send your report and your state")
+        );
+        assert_eq!(rules.scoring, None);
+        assert!(rules.serials.is_none() && !rules.serial);
+        assert!(
+            rules
+                .long_cq_text("N4XYZ")
+                .starts_with("CQ CQ POTA DE N4XYZ")
+        );
+    }
+
+    /// The greeting goes by the hour: good morning from four, good
+    /// afternoon from noon, good evening from six on through the night.
+    #[test]
+    fn the_greeting_goes_by_the_time_of_day() {
+        let greetings: Vec<&str> = (0..24).map(greeting).collect();
+        let mut expected = vec!["GE"; 4];
+        expected.extend(["GM"; 8]);
+        expected.extend(["GA"; 6]);
+        expected.extend(["GE"; 6]);
+        assert_eq!(greetings, expected);
+        assert_eq!(greeting(GREETING_HOUR), "GA");
+    }
+
     #[test]
     fn labrador_reads_apart_only_in_arrl_dx() {
         assert_eq!(arrl_dx().canonical(Field::St, "LB").as_deref(), Some("LB"));
@@ -1257,6 +1462,23 @@ mod tests {
                 (you, "G4XYZ 5NN MA".to_string()),
                 (they, "TU 5NN KW".to_string()),
             ]
+        );
+        // A POTA hunter is where the state it sends is, and your TU sends
+        // it back; it signs off after.
+        assert_eq!(
+            pota().example_qso(Side::WVe, &k1abc(0)),
+            [
+                (you, "CQ CQ POTA DE K1ABC K".to_string()),
+                (they, "W7XYZ".to_string()),
+                (you, "W7XYZ TU GA UR 5NN 5NN MA MA BK".to_string()),
+                (they, "BK TU UR 579 579 OR OR BK".to_string()),
+                (you, "BK TU OR OR 73 EE".to_string()),
+                (they, "EE".to_string()),
+            ]
+        );
+        assert_eq!(
+            pota().example_qso(Side::Dx, &me(0, ""))[2],
+            (you, "W7XYZ TU GA UR 5NN 5NN BK".to_string())
         );
         // A Sprint caller is where the state it sends is: W7 is Oregon's
         // district.
@@ -1355,9 +1577,15 @@ mod tests {
                     "{:?}",
                     rules.kind
                 );
-                // Your TU greets them by a name only you copy.
+                // Your TU greets them by a name only you copy, and sends
+                // back a state only you copy.
                 assert!(
                     !rules.tu.contains("{hisname}") || rules.copied(side).contains(&Field::Name),
+                    "{:?}",
+                    rules.kind
+                );
+                assert!(
+                    !rules.tu.contains("{hisstate}") || rules.copied(side).contains(&Field::St),
                     "{:?}",
                     rules.kind
                 );
@@ -1450,10 +1678,13 @@ mod tests {
             said(ContestKind::ArrlDx, Side::Dx).as_deref(),
             Some("now and then ENN for 5NN")
         );
-        assert_eq!(
-            said(ContestKind::SimpleQso, Side::Dx).as_deref(),
-            Some("N for 9 (57N for 579), now and then ENN for 599")
-        );
+        for kind in [ContestKind::SimpleQso, ContestKind::Pota] {
+            assert_eq!(
+                said(kind, Side::Dx).as_deref(),
+                Some("N for 9 (57N for 579), now and then ENN for 599"),
+                "{kind:?}"
+            );
+        }
         for side in [Side::WVe, Side::Dx] {
             assert_eq!(said(ContestKind::Sprint, side), None);
             assert_eq!(said(ContestKind::FieldDay, side), None);

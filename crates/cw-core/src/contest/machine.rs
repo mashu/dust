@@ -39,7 +39,7 @@ use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
-use super::rules::{ContestRules, Fill, Side};
+use super::rules::{ContestRules, Fill, GREETING_HOUR, Side, greeting};
 use super::score::rate_at;
 use super::turn::{
     Fade, Segment, Sender, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
@@ -1215,6 +1215,9 @@ pub struct ContestMachine<S> {
     /// exchange sends them.
     my_class: String,
     my_section: String,
+    /// The greeting of the time of day your exchange holds, where it holds
+    /// one: by the local hour the runtime gives ([`Self::set_local_hour`]).
+    greeting: &'static str,
     /// One caller at a time, or a pile-up.
     style: RunStyle,
     /// The band's fading, which each caller follows from a point of its
@@ -1318,6 +1321,7 @@ impl<S: CallSource> ContestMachine<S> {
             my_power,
             my_class,
             my_section,
+            greeting: greeting(GREETING_HOUR),
             source,
             draws: rng.fork(RUN_STREAM),
             rng,
@@ -1540,6 +1544,14 @@ impl<S: CallSource> ContestMachine<S> {
             // Another turn's news, or a cancel: a stopped or replaced send.
             _ => Vec::new(),
         }
+    }
+
+    /// Greet the stations you work by the time of day at `hour`, local
+    /// time ([`greeting`]), where your exchange holds a greeting, as a POTA
+    /// activator's does: the runtime knows the hour, and the machine keeps
+    /// to its own clock. Until it is set, a run greets as in the afternoon.
+    pub fn set_local_hour(&mut self, hour: u32) {
+        self.greeting = greeting(hour);
     }
 
     /// The run as the screen shows it. Nothing in it moves with the time
@@ -2169,11 +2181,11 @@ impl<S: CallSource> ContestMachine<S> {
         // the rest of one keyed earlier.
         let from = carried.parts.len();
         let (mut text, mut parts) = (carried.text, carried.parts);
-        // A TU that greets the station by name greets it as you copied it.
-        let his_name = parse_exchange(self.rules, self.side, &fields.exch)
-            .value(Field::Name)
-            .unwrap_or_default()
-            .to_string();
+        // A TU that greets the station by name greets it as you copied it,
+        // and one that sends its state back sends it as you copied it.
+        let reading = parse_exchange(self.rules, self.side, &fields.exch);
+        let his_name = reading.value(Field::Name).unwrap_or_default().to_string();
+        let his_state = reading.value(Field::St).unwrap_or_default().to_string();
         let me = Fill {
             my_call: &self.my_call,
             my_name: &self.my_name,
@@ -2184,6 +2196,8 @@ impl<S: CallSource> ContestMachine<S> {
             my_section: &self.my_section,
             serial,
             his_name: &his_name,
+            his_state: &his_state,
+            greeting: self.greeting,
             // A TU signs with your call as often as you choose, every QSO
             // unless you choose otherwise, where the contest's TU does not
             // sign by its own rules.
@@ -2292,11 +2306,21 @@ impl<S: CallSource> ContestMachine<S> {
             self.qso.unheard_by = name;
         }
         if self.brings_callers(&message) {
-            // Their first call: nothing to time it from, nothing asked.
+            // Their first call: nothing to time it from, nothing asked. They
+            // keep clear of a station still sending as it leaves: one you
+            // keyed over, and one signing off after the TU that closed its
+            // QSO, as a POTA hunter does, so that its `EE` and the next
+            // call are never heard as one station.
             let sounding: Vec<usize> = carried
                 .callers
                 .iter()
                 .map(|over| over.reply.station)
+                .chain(
+                    replying
+                        .iter()
+                        .map(|replying| replying.station)
+                        .filter(|index| !self.stations[*index].caller.state.active()),
+                )
                 .collect();
             let joined = self.arrivals(&mut before.stations, &sounding, run_ms);
             replying.extend(joined.into_iter().map(Replying::unasked));
@@ -5277,6 +5301,134 @@ mod tests {
         assert_eq!((run.qsos.len(), run.qsos[0].nr), (1, 0));
         assert_eq!(run.score(&result.groups), None);
         assert!(result.score > 0.0, "the copy still earns its points");
+    }
+
+    /// A POTA QSO, line by line as the cheat sheet has it: your CQ POTA,
+    /// the hunter's call, its call and your greeting of the hour with your
+    /// report and state, its report and state after `BK`, your TU sending
+    /// its state back, and its `EE`, after which the next hunter calls. Its
+    /// groups are the call, the report and the state, and nothing scores it
+    /// but the copy.
+    #[test]
+    fn a_pota_qso_goes_as_an_activation_does() {
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_kind = crate::contest::ContestKind::Pota;
+        settings.contest.my_call = "N4BKY".to_string();
+        settings.contest.my_state = "AL".to_string();
+        settings.contest.contest_tu_call = crate::contest::TuCall::Never;
+        let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&["N4FFF", "W2AW"]));
+        runtime.machine.set_local_hour(9);
+        let cq = runtime.last_turn().clone();
+        assert_eq!(yours(&cq), "CQ CQ POTA DE N4BKY K");
+        assert_eq!(replies(&cq), ["N4FFF"]);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "N4FFF", "");
+        assert_eq!(
+            yours(runtime.last_turn()),
+            "N4FFF TU GM UR 5NN 5NN AL AL BK"
+        );
+        let exchange = replies(runtime.last_turn())[0].to_string();
+        let words: Vec<&str> = exchange.split_whitespace().collect();
+        let ur = words.iter().position(|word| *word == "UR").expect("UR");
+        let (rst, st) = (words[ur + 1], words[ur + 3]);
+        assert!(
+            ["BK TU", "BK N4BKY TU"].contains(&words[..ur].join(" ").as_str()),
+            "{exchange}"
+        );
+        assert_eq!(
+            words[ur..].join(" "),
+            format!("UR {rst} {rst} {st} {st} BK")
+        );
+        // Plain digits, as hunters with easy habits send them, and the
+        // state its call puts it in.
+        assert!(rst.chars().all(|c| c.is_ascii_digit()), "{rst}");
+        assert!(Field::Rst.canonical(rst).is_some() && Field::St.canonical(st).is_some());
+        runtime.finish_turn();
+        // The report is part of the copy: the state alone asks again.
+        assert_eq!(
+            esm(
+                &view(&runtime).qso,
+                &Fields {
+                    call: "N4FFF".into(),
+                    exch: st.into(),
+                    ..Fields::default()
+                },
+                runtime.machine.rules,
+                Side::WVe
+            )
+            .message,
+            [MessagePart::Again]
+        );
+        let effects = runtime.key(OpKey::Esm, "N4FFF", &format!("{rst} {st}"));
+        let tu = played(&effects).expect("TU goes out").clone();
+        assert_eq!(yours(&tu), format!("BK TU {st} {st} 73 EE"));
+        // It signs off, and the next hunter calls once it has.
+        assert_eq!(replies(&tu), ["EE", "W2AW"]);
+        let callers: Vec<&Segment> = tu
+            .segments
+            .iter()
+            .filter(|segment| segment.who.is_caller())
+            .collect();
+        assert!(callers[1].start_sec >= callers[0].end_sec);
+        runtime.finish_turn();
+        let done = view(&runtime);
+        assert_eq!(done.log[0].status, RowStatus::Checked(QsoCheck::default()));
+        assert_eq!(
+            done.log[0].fields,
+            [(Field::Rst, rst.to_string()), (Field::St, st.to_string())]
+        );
+        assert_eq!(done.serial, 0, "no serial to send");
+        assert!(!done.qso.nobody_calling, "the TU brought the next hunter");
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, run) = result(&runtime);
+        assert_eq!(result.alphabet_fingerprint, "contest:pota");
+        let copies: Vec<(&str, &str)> = result
+            .groups
+            .iter()
+            .map(|group| (group.sent.as_str(), group.received.as_str()))
+            .collect();
+        assert_eq!(copies[..3], [("N4FFF", "N4FFF"), (rst, rst), (st, st)]);
+        assert_eq!(run.fields, ["rst", "st"]);
+        assert_eq!(run.score(&result.groups), None);
+        assert!(result.score > 0.0, "the copy still earns its points");
+    }
+
+    /// The hunters a POTA TU brings in a pile-up keep clear of the pitch
+    /// of the hunter signing off in the same turn: its `EE` and the next
+    /// call are never heard as one station's, as callers keep clear of a
+    /// station still sending as it leaves.
+    #[test]
+    fn hunters_a_tu_brings_keep_clear_of_the_one_signing_off() {
+        let mut checked = 0;
+        for seed in 0..6 {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_kind = crate::contest::ContestKind::Pota;
+            settings.contest.my_call = "N4BKY".to_string();
+            settings.contest.my_state = "AL".to_string();
+            settings.band.stations_min = 3;
+            settings.band.stations_max = 5;
+            settings.set_contest_style(RunStyle::Pileup);
+            let settings = settings.clamp();
+            let sampler = Sampler::new(&[], &settings, seed);
+            let mut runtime = Runtime::start(seed, settings, sampler);
+            work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+            for turn in &runtime.turns {
+                let callers: Vec<&Segment> = turn
+                    .segments
+                    .iter()
+                    .filter(|segment| segment.who.is_caller())
+                    .collect();
+                for signoff in callers.iter().filter(|segment| segment.text == "EE") {
+                    for other in callers.iter().filter(|other| other.who != signoff.who) {
+                        let apart = (other.voice.tone_hz - signoff.voice.tone_hz).abs();
+                        assert!(apart >= 60.0 - 1e-6, "seed {seed}: {apart:.1} Hz apart");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 50, "only {checked} hunters checked");
     }
 
     /// In a Simple QSO, Enter or TU and log after F3 sends that TU again,

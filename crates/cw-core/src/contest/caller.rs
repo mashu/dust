@@ -1089,9 +1089,9 @@ impl Caller {
                 let text = if self.exchanges_sent > 0 {
                     body
                 } else if self.rng.f64() < FIRST_LEAD {
-                    rules.their_first_exchange(0, &body)
+                    rules.their_first_exchange(0, my_call, &body)
                 } else {
-                    rules.their_first_exchange(1, &body)
+                    rules.their_first_exchange(1, my_call, &body)
                 };
                 self.exchanges_sent += 1;
                 (text, Says::Exchange)

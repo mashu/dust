@@ -70,7 +70,9 @@ pub use place::filter_capacity;
 pub(crate) use record::LAYOUT;
 pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
-pub use rules::{ContestRules, Fill, Multiplier, PerSide, Points, Scoring, Side};
+pub use rules::{
+    ContestRules, Fill, GREETING_HOUR, Multiplier, PerSide, Points, Scoring, Side, greeting,
+};
 pub use score::{ContestScore, MyStation, Placed, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};
 pub use turn::{Fade, MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
@@ -97,16 +99,20 @@ pub enum ContestKind {
     FieldDay,
     /// An everyday QSO, Dust's own: a first real one for a learner.
     SimpleQso,
+    /// Parks on the Air: you activate a park and hunters call you. No
+    /// contest, so nothing scores it.
+    Pota,
 }
 
 impl ContestKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Sprint,
         Self::ArrlDx,
         Self::Wpx,
         Self::Cqww,
         Self::FieldDay,
         Self::SimpleQso,
+        Self::Pota,
     ];
 
     /// The name it is saved under.
@@ -118,6 +124,7 @@ impl ContestKind {
             Self::Cqww => "cqww",
             Self::FieldDay => "fieldDay",
             Self::SimpleQso => "simpleQso",
+            Self::Pota => "pota",
         }
     }
 
@@ -135,6 +142,7 @@ impl ContestKind {
             Self::Cqww => "CQ WW",
             Self::FieldDay => "Field Day",
             Self::SimpleQso => "Simple QSO",
+            Self::Pota => "POTA",
         }
     }
 
@@ -155,7 +163,8 @@ impl ContestKind {
     }
 
     /// Whether a run of it has a contest score, as every contest but Simple
-    /// QSO does, which is told by its pace and its copy instead.
+    /// QSO and POTA does, which are told by their pace and their copy
+    /// instead.
     pub fn scored(self) -> bool {
         self.rules().scoring.is_some()
     }
@@ -383,15 +392,24 @@ mod tests {
         let names: Vec<&str> = ContestKind::ALL.iter().map(|kind| kind.name()).collect();
         assert_eq!(
             names,
-            ["sprint", "arrlDx", "wpx", "cqww", "fieldDay", "simpleQso"]
+            [
+                "sprint",
+                "arrlDx",
+                "wpx",
+                "cqww",
+                "fieldDay",
+                "simpleQso",
+                "pota"
+            ]
         );
     }
 
-    /// Every contest scores but Simple QSO.
+    /// Every contest scores but Simple QSO and POTA, which are no contests.
     #[test]
-    fn every_contest_but_simple_qso_is_scored() {
+    fn every_contest_but_simple_qso_and_pota_is_scored() {
         for kind in ContestKind::ALL {
-            assert_eq!(kind.scored(), kind != ContestKind::SimpleQso, "{kind:?}");
+            let unscored = matches!(kind, ContestKind::SimpleQso | ContestKind::Pota);
+            assert_eq!(kind.scored(), !unscored, "{kind:?}");
         }
     }
 
@@ -447,5 +465,7 @@ mod tests {
         }
         assert_eq!(ContestKind::default(), ContestKind::Wpx);
         assert_eq!(ContestKind::Wpx.label(), "CQ WPX");
+        assert_eq!(ContestKind::Pota.label(), "POTA");
+        assert_eq!(ContestKind::from_name("pota"), Some(ContestKind::Pota));
     }
 }

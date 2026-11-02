@@ -41,12 +41,13 @@ const SEEDS: u64 = 2_000;
 /// call, and the floor of each kind needs more runs to stand on.
 const CONTEST_SEEDS: u64 = SEEDS + SEEDS / 2;
 
-/// The contest soak's pile-up seeds, half as many again as
-/// [`CONTEST_SEEDS`]: a caller that hears you go to someone else drops out
-/// of its QSO, and Enter sends the caller you go on to your exchange rather
-/// than a TU that logs it at once, so fewer of a pile-up's QSOs reach the
-/// log with a slip in the call.
-const PILEUP_SEEDS: u64 = CONTEST_SEEDS + CONTEST_SEEDS / 2;
+/// The contest soak's pile-up seeds, twice [`CONTEST_SEEDS`]: a caller
+/// that hears you go to someone else drops out of its QSO, and Enter sends
+/// the caller you go on to your exchange rather than a TU that logs it at
+/// once, so fewer of a pile-up's QSOs reach the log with a slip in the
+/// call; and since POTA joined, the runs are shared among seven, whose
+/// hunters wait out the one signing off before they call, so fewer again.
+const PILEUP_SEEDS: u64 = 2 * CONTEST_SEEDS;
 
 /// Settings from anywhere, including values no screen would ever produce.
 fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {

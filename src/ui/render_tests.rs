@@ -970,6 +970,62 @@ fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
     assert!(!wpx.contains("field-your-name"));
 }
 
+/// POTA has its pill and its dialogue from its row, as an activator works
+/// a hunter: your CQ POTA, its call, your greeting, report and state, its
+/// report and state, your TU sending its state back, and its `EE`. In the
+/// US or Canada you send your state, and Your station asks for it; outside
+/// them, your report alone, and the card says so. The greeting goes by the
+/// hour, so only what is around it is checked.
+#[test]
+fn pota_shows_an_activators_dialogue_and_your_side() {
+    let html = station_settings(
+        cw_core::ContestKind::Pota,
+        Station {
+            state: "MA",
+            ..called("K1ABC")
+        },
+    );
+    for shown in [
+        "Contest · POTA",
+        r#"id="contest-pota" class="pill active""#,
+        "You send 5NN + state\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}ST",
+        "You are W/VE: you send your report and your state",
+        "Simplified: every hunter is in the US or Canada and sends its state",
+        ">CQ CQ POTA DE K1ABC K<",
+        ">W7XYZ<",
+        " UR 5NN 5NN MA MA BK<",
+        ">BK TU UR 579 579 OR OR BK<",
+        ">BK TU OR OR 73 EE K1ABC<",
+        ">EE<",
+        r#"for="field-your-state-or-province""#,
+        "you\u{a0}are\u{a0}W/VE",
+        "Signing K1ABC · MA",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(html.contains(">W7XYZ TU G"), "a greeting first: {html}");
+    // A state is asked for in the US or Canada until given.
+    let asked = station_settings(cw_core::ContestKind::Pota, called("K1ABC"));
+    assert!(
+        asked.contains("Add your state or province to start a POTA"),
+        "{asked}"
+    );
+    // Outside them, your report alone, and no state to give.
+    let dx = station_settings(cw_core::ContestKind::Pota, called("SO5KM"));
+    for shown in [
+        "You send 5NN\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}ST",
+        "You are DX: you send your report alone, as DX activators do",
+        ">CQ CQ POTA DE SO5KM K<",
+        " UR 5NN 5NN BK<",
+        "you\u{a0}are\u{a0}DX",
+        "Signing SO5KM<",
+    ] {
+        assert!(dx.contains(shown), "no {shown:?} in {dx}");
+    }
+    assert!(!dx.contains("field-your-state"), "{dx}");
+    assert!(!dx.contains("Add your"), "{dx}");
+}
+
 /// Settings in Contest mode for the NA Sprint as `my_call`, called
 /// `my_name`, in `my_state`.
 fn sprint_settings(my_call: &'static str, my_name: &'static str, my_state: &'static str) -> String {
@@ -1291,8 +1347,8 @@ fn field_day_shows_its_dialogue_your_class_and_section() {
     ] {
         assert!(!html.contains(gone), "{gone:?} in {html}");
     }
-    // Six contests, a pill each.
-    assert_eq!(html.matches(r#"id="contest-"#).count(), 6, "{html}");
+    // Seven contests, POTA among them, a pill each.
+    assert_eq!(html.matches(r#"id="contest-"#).count(), 7, "{html}");
     // A W/VE call with no section given is asked for one.
     let html = station_settings(
         cw_core::ContestKind::FieldDay,
