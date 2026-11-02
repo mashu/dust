@@ -1504,9 +1504,16 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
    pointer's place on it reads in its own units; nothing drawn in it takes
    the pointer, so the place is always the drawing's, and a finger on it
    moves the knob rather than the page. */
-.style-shape { display: block; margin: 0 auto; touch-action: none; cursor: crosshair; overflow: visible; }
+.style-shape { display: block; margin: 0 auto; touch-action: none; cursor: crosshair; overflow: visible; -webkit-tap-highlight-color: transparent; }
 .style-shape * { pointer-events: none; }
-.style-shape:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; border-radius: 12px; }
+/* No ring round the drawing when it is tapped or clicked: a phone's
+   webview draws one in its own blue, a square round the whole card. The
+   keyboard's focus shows on the knob instead, as a slider's does. Each
+   rule alone, so a webview that does not know :focus-visible drops only
+   its own. */
+.style-shape:focus { outline: none; }
+.style-shape:focus-visible { outline: none; }
+.style-shape:focus-visible .style-knob { stroke-width: 0.055px; }
 .style-shape.on-corner { cursor: pointer; }
 /* Its face, lit a little in the middle, shaded in copper toward each
    corner as strongly as its share, and a quiet rim round it. */
@@ -1533,7 +1540,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
 .style-lead { fill: var(--ink-soft); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.112px; font-weight: 600; dominant-baseline: central; }
 .style-lead.top { fill: var(--ink); font-weight: 700; }
 .style-lead.off { fill: var(--ink-dim); text-decoration: line-through; }
-.style-corner { outline: none; }
+.style-corner, .style-corner:focus { outline: none; }
 .style-corner:focus-visible .style-pill { stroke: var(--copper); stroke-width: 0.035px; }
 /* The knob, as the sliders' is; and where a mouse over the shape would put
    it, dashed, set by nothing until a click. */

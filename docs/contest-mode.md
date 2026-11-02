@@ -601,7 +601,10 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   ring for the knob, or the corner a click would turn, and a line under
   the shape says so. The arrow keys move the knob a tenth, Home to the
   middle; Tab reaches each corner, which Enter or Space turns, for the
-  keyboard and a screen reader. Under it the three replies you'll hear
+  keyboard and a screen reader. Tapped or clicked, the drawing shows no
+  focus ring, which a phone's webview drew in its own blue round the
+  whole drawing; the keyboard's focus thickens the knob's ring instead,
+  and a corner's pill. Under it the three replies you'll hear
   most, in full, beside how many in a hundred send each, dashed while a
   mouse previews. Its ⓘ says what it does. There are no preset buttons:
   the corners, the middle and Home stand for them. Only POTA offers it
