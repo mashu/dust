@@ -252,6 +252,8 @@ fn exchange_of(words: &[&str]) -> Option<String> {
     };
     match (after("UR"), after("NAME")) {
         (Some(rst), Some(name)) => Some(format!("{rst} {name}")),
+        // A POTA hunter's report, sent twice, and then its state.
+        (Some(rst), None) => pota_exchange(words, rst),
         // After the report every caller sends, `5NN` or now and then
         // `ENN`: a serial, a zone or a power, its last word.
         _ if words.iter().any(|word| [CUT_599, ENN].contains(word)) => {
@@ -259,6 +261,16 @@ fn exchange_of(words: &[&str]) -> Option<String> {
         }
         _ => sprint_exchange(words).or_else(|| field_day_exchange(words)),
     }
+}
+
+/// A POTA hunter's exchange, its report `rst` after `UR`: the report and
+/// the first state after it, `UR 579 579 OR OR BK` read as `579 OR`.
+fn pota_exchange(words: &[&str], rst: &str) -> Option<String> {
+    let from = words.iter().position(|word| *word == "UR")? + 1;
+    let st = words[from..]
+        .iter()
+        .find(|word| **word != rst && Field::St.canonical(word).is_some())?;
+    Some(format!("{rst} {st}"))
 }
 
 /// A Field Day exchange, after the word that leads it: its class and
@@ -503,14 +515,17 @@ pub struct HeardTurn {
 /// Nothing of it is a run: no result is made, and only `source` hears what
 /// the operator copied, a source the caller keeps or lets go of. Your
 /// station is yours where `settings` give enough of it for a run, and
-/// stands in for yours where they do not ([`HeardQsos::stand_in`]).
+/// stands in for yours where they do not ([`HeardQsos::stand_in`]). You
+/// greet the stations as a run at the local `hour` does, where your
+/// exchange holds a greeting ([`ContestMachine::set_local_hour`]).
 pub fn hear_qsos<S: CallSource>(
     seed: u64,
     settings: &TrainingSettings,
     source: S,
     qsos: u32,
+    hour: u32,
 ) -> HeardQsos {
-    let (runtime, heard, stand_in) = worked_to_hear(seed, settings, source, qsos);
+    let (runtime, heard, stand_in) = worked_to_hear(seed, settings, source, qsos, hour);
     let mut turns = Vec::new();
     let mut ended_ms = 0;
     for turn in runtime.turns {
@@ -532,13 +547,15 @@ pub fn hear_qsos<S: CallSource>(
 }
 
 /// The run [`hear_qsos`] plays, worked by the perfect operator until
-/// `qsos` QSOs are in its log: the runtime it went through, the settings it
-/// ran on, and your station where some of it stands in for yours.
+/// `qsos` QSOs are in its log, greeting as at the local `hour`: the runtime
+/// it went through, the settings it ran on, and your station where some of
+/// it stands in for yours.
 fn worked_to_hear<S: CallSource>(
     seed: u64,
     settings: &TrainingSettings,
     source: S,
     qsos: u32,
+    hour: u32,
 ) -> (Runtime<S>, TrainingSettings, Option<String>) {
     let mut heard = settings.clone();
     heard.curriculum.char_set_mode = CharSetMode::Contest;
@@ -548,6 +565,8 @@ fn worked_to_hear<S: CallSource>(
     let stand_in = heard.contest.stand_in();
     let heard = heard.clamp();
     let mut runtime = Runtime::start(seed, heard.clone(), source);
+    // Before anything of yours that greets: the first CQ greets nobody.
+    runtime.machine.set_local_hour(hour);
     // However it stops, what went on the air is what is heard.
     work_until(&mut runtime, &mut Operator::perfect(), &[], |runtime| {
         runtime.machine.view().qsos >= qsos
@@ -559,7 +578,7 @@ fn worked_to_hear<S: CallSource>(
 mod tests {
     use super::script::{Habit, default_run_settings, run_settings, work};
     use super::*;
-    use crate::contest::RowStatus;
+    use crate::contest::{GREETING_HOUR, RowStatus};
     use crate::rng::SplitMix64;
     use crate::sampling::Sampler;
     use crate::score::{GroupCopy, group_points};
@@ -1171,7 +1190,15 @@ mod tests {
                 let mut settings = TrainingSettings::default();
                 settings.contest.contest_kind = kind;
                 settings.set_contest_style(style);
-                let hear = |seed| hear_qsos(seed, &settings, Sampler::new(&[], &settings, seed), 3);
+                let hear = |seed| {
+                    hear_qsos(
+                        seed,
+                        &settings,
+                        Sampler::new(&[], &settings, seed),
+                        3,
+                        GREETING_HOUR,
+                    )
+                };
                 assert_eq!(hear(5), hear(5), "{kind:?} {style:?}");
                 for seed in 0..24 {
                     let case = format!("{kind:?} {style:?} seed {seed}");
@@ -1184,9 +1211,15 @@ mod tests {
                         .map(|segment| segment.text.as_str())
                         .collect();
                     assert!(yours[0].starts_with("CQ "), "{case}: {yours:?}");
+                    // A TU, and not an exchange that thanks first, as a
+                    // POTA activator's does before its `UR`.
                     let tus = yours
                         .iter()
-                        .filter(|text| text.split_whitespace().any(|word| word == "TU"))
+                        .filter(|text| {
+                            let mut words = text.split_whitespace();
+                            words.clone().any(|word| word == "TU")
+                                && !words.any(|word| word == "UR")
+                        })
                         .count();
                     assert_eq!(tus, 3, "{case}: {yours:?}");
                     let last = &heard.turns.last().expect("turns").turn;
@@ -1213,6 +1246,63 @@ mod tests {
                     assert!(ats.windows(2).all(|pair| pair[0] < pair[1]), "{ats:?}");
                 }
             }
+        }
+    }
+
+    /// A POTA QSO heard as the cheat sheet has it: you greet the hunter by
+    /// the hour, it thanks you and sends its report and state, your TU
+    /// sends its state back, and it signs off with `EE`.
+    #[test]
+    fn hear_a_pota_qso_greets_by_the_hour_and_sends_the_state_back() {
+        use super::super::ContestKind;
+        let mut settings = TrainingSettings::default();
+        settings.contest.contest_kind = ContestKind::Pota;
+        settings.contest.my_call = "N4BKY".to_string();
+        settings.contest.my_state = "AL".to_string();
+        settings.contest.contest_tu_call = super::super::TuCall::Never;
+        for (hour, greet) in [(8, "GM"), (14, "GA"), (20, "GE")] {
+            let heard = hear_qsos(1, &settings, Sampler::new(&[], &settings, 1), 1, hour);
+            let sent: Vec<(Sender, &str)> = heard
+                .turns
+                .iter()
+                .flat_map(|heard| heard.turn.segments.iter())
+                .map(|segment| (segment.who, segment.text.as_str()))
+                .collect();
+            let case = format!("{hour}: {sent:?}");
+            assert_eq!(sent[0], (Sender::You, "CQ CQ POTA DE N4BKY K"), "{case}");
+            let mine: Vec<&str> = sent
+                .iter()
+                .filter(|(who, _)| *who == Sender::You)
+                .map(|(_, text)| *text)
+                .collect();
+            let hunter = sent
+                .iter()
+                .find(|(who, _)| *who != Sender::You)
+                .map(|(_, text)| *text)
+                .expect("a hunter calls");
+            assert!(parse_callsign(hunter).is_some(), "{case}");
+            let exchange = mine
+                .iter()
+                .find(|text| text.contains(" UR "))
+                .expect("your exchange");
+            assert_eq!(
+                *exchange,
+                format!("{hunter} TU {greet} UR 5NN 5NN AL AL BK"),
+                "{case}"
+            );
+            let theirs = sent
+                .iter()
+                .filter(|(who, _)| *who != Sender::You)
+                .map(|(_, text)| *text)
+                .find(|text| text.starts_with("BK "))
+                .expect("their exchange");
+            let words: Vec<&str> = theirs.split_whitespace().collect();
+            let st = words[words.len() - 2];
+            assert!(Field::St.canonical(st).is_some(), "{case}");
+            assert_eq!(words.last(), Some(&"BK"), "{case}");
+            let tu = mine.last().expect("your TU");
+            assert_eq!(*tu, format!("BK TU {st} {st} 73 EE"), "{case}");
+            assert_eq!(sent.last().map(|(_, text)| *text), Some("EE"), "{case}");
         }
     }
 
@@ -1306,12 +1396,40 @@ mod tests {
             ),
             (ContestKind::FieldDay, "KL7AB", "", None, "CQ FD KL7AB"),
             (ContestKind::FieldDay, "DL1ABC", "", None, "CQ FD DL1ABC"),
+            // POTA: DX sends its report alone; W/VE its state too.
+            (
+                ContestKind::Pota,
+                "",
+                "",
+                Some("DL1ABC"),
+                "CQ CQ POTA DE DL1ABC K",
+            ),
+            (
+                ContestKind::Pota,
+                "SO5KM",
+                "",
+                None,
+                "CQ CQ POTA DE SO5KM K",
+            ),
+            (
+                ContestKind::Pota,
+                "K1ABC",
+                "",
+                Some("K1ABC MA"),
+                "CQ CQ POTA DE K1ABC K",
+            ),
         ] {
             let mut settings = TrainingSettings::default();
             settings.contest.contest_kind = kind;
             settings.contest.my_call = call.to_string();
             settings.contest.my_name = name.to_string();
-            let heard = hear_qsos(1, &settings, Sampler::new(&[], &settings, 1), 1);
+            let heard = hear_qsos(
+                1,
+                &settings,
+                Sampler::new(&[], &settings, 1),
+                1,
+                GREETING_HOUR,
+            );
             assert_eq!(heard.stand_in.as_deref(), stand_in, "{kind:?} {call}");
             assert_eq!(cq(&heard), sent, "{kind:?} {call}");
         }
@@ -1382,7 +1500,29 @@ mod tests {
             copy_of("R 1D DX"),
             Some(Copied::Exchange("1D DX".to_string()))
         );
-        for nothing in ["73 EE", "AGN", "NR?", "", "R 3G OR"] {
+        // A POTA hunter's report and state, led by BK and TU, your call
+        // among them or not, or alone once asked again; and put right with
+        // its call.
+        for exchange in [
+            "BK TU UR 57N 57N FL FL BK",
+            "BK N4BKY TU UR 57N 57N FL FL BK",
+            "UR 57N 57N FL FL BK",
+        ] {
+            assert_eq!(
+                copy_of(exchange),
+                Some(Copied::Exchange("57N FL".to_string())),
+                "{exchange}"
+            );
+        }
+        assert_eq!(
+            copy_of("UR 5NN 5NN TN TN BK"),
+            Some(Copied::Exchange("5NN TN".to_string()))
+        );
+        assert_eq!(
+            copy_of("DE W4XYZ UR 599 599 FL FL BK"),
+            Some(Copied::Correction("W4XYZ", Some("599 FL".to_string())))
+        );
+        for nothing in ["73 EE", "EE", "AGN", "NR?", "", "R 3G OR", "UR 579 579 BK"] {
             assert_eq!(copy_of(nothing), None, "{nothing:?}");
         }
     }
@@ -1557,11 +1697,12 @@ mod tests {
                     for seed in 0..24 {
                         let case = format!("{habits:?} {kind:?} {style:?} seed {seed}");
                         let source = || Sampler::new(&[], &settings, seed);
-                        let (runtime, ..) = worked_to_hear(seed, &settings, source(), 3);
+                        let (runtime, ..) =
+                            worked_to_hear(seed, &settings, source(), 3, GREETING_HOUR);
                         let view = runtime.machine.view();
                         assert!(view.qsos >= 3, "{case}");
                         assert_eq!(view.clean, view.qsos, "{case}: {:?}", view.log);
-                        let heard = hear_qsos(seed, &settings, source(), 3);
+                        let heard = hear_qsos(seed, &settings, source(), 3, GREETING_HOUR);
                         let last = &heard.turns.last().expect("turns").turn;
                         let theirs: Vec<&str> = last
                             .segments
@@ -1594,7 +1735,7 @@ mod tests {
                 for seed in 0..120 {
                     let case = format!("{habits:?} {style:?} seed {seed}");
                     let source = Sampler::new(&[], &settings, seed);
-                    let (runtime, ..) = worked_to_hear(seed, &settings, source, 3);
+                    let (runtime, ..) = worked_to_hear(seed, &settings, source, 3, GREETING_HOUR);
                     let view = runtime.machine.view();
                     assert!(view.qsos >= 3, "{case}: {} QSOs", view.qsos);
                     assert_eq!(view.clean, view.qsos, "{case}: {:?}", view.log);

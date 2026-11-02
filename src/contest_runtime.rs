@@ -22,7 +22,7 @@ use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::session_runtime::{Live, keep_and_show};
 use crate::state::{AppCtx, Finished, Said, Screen};
-use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
+use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
 
 /// A gap this long between two of the run screen's ticks is time the app
 /// was not running: a phone locked, a process put on hold. The ticks come
@@ -305,7 +305,9 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     // the run copies as it goes.
     let sampler = ctx.sampler(&settings, seed_rng());
     let now = MonoMs(mono_ms());
-    let (machine, effects) = ContestMachine::start(seed_rng(), now, settings, sampler);
+    let (mut machine, effects) = ContestMachine::start(seed_rng(), now, settings, sampler);
+    // Before anything of yours that greets: the first CQ greets nobody.
+    machine.set_local_hour(local_hour());
     entry.start(rules, side);
     announced.set(None);
     view.set(Some(machine.view()));

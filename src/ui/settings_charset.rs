@@ -2,13 +2,14 @@ use cw_core::{
     CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, Fill, GROUP_SIZE_MAX, LevelAxis,
     MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
     SequenceChoice, SettingsSection, TrainingSettings, TuCall, WORD_LIST_MAX, WordList,
-    compute_char_pool, current_practice_window, parse_callsign, tier_examples,
+    compute_char_pool, current_practice_window, greeting, parse_callsign, tier_examples,
     unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
 use crate::playback::Dialogue;
 use crate::state::AppCtx;
+use crate::time::local_hour;
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
@@ -170,6 +171,8 @@ impl ContestCard {
                     // The QSO is your first: its TU signs as a run's
                     // first would, with your call in TU every QSO.
                     tu_signed: rules.tu_adds_call(contest.contest_tu_call, 1),
+                    // And it greets as a run started now would.
+                    greeting: greeting(local_hour()),
                     ..Fill::default()
                 },
             ),

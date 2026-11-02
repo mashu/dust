@@ -126,6 +126,13 @@ pub fn local_date_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
+/// The hour of the day where you are, 0 to 23: what a contest's greeting
+/// goes by (`cw_core::greeting`).
+pub fn local_hour() -> u32 {
+    use chrono::Timelike;
+    chrono::Local::now().hour()
+}
+
 /// `history` as the screens show it: a session stamped ahead of the clock,
 /// finished while it was set ahead, read as finished just after the latest
 /// that was not, on its day ([`settle_clock_ahead`]). Only for showing: the

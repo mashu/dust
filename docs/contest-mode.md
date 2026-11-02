@@ -1,8 +1,8 @@
 # Contest mode
 
 Status: built. Every phase of §14 has landed, 0 to 5. Contest is a mode on
-the Character set card with all six contests (§3), run with one caller at
-a time or a pile-up (§4); your own sending, the receiver muted while you
+the Character set card with all six contests (§3), and POTA beside them
+(as built, 2026-11-02), run with one caller at a time or a pile-up (§4); your own sending, the receiver muted while you
 send, flutter and QRM (§5); the run screen, its keys and the keypad (§4.5,
 §7); Hear a QSO, the presets and a guided tour of the run (§2, §8);
 callers whose speed follows your copy (§6.6); and the results, History,
@@ -28,7 +28,8 @@ North American ones.
 Contest is a sixth mode in the Character set card, after Koch, Digits,
 Mixed, Callsigns and Words. Pick it and the card shows contest types
 instead of an alphabet: Sprint, ARRL DX, WPX, CQ WW, Field Day and Simple
-QSO. Your callsign and exchange go on a Your station card, once.
+QSO, and as built, POTA (§3). Your callsign and exchange go on a Your
+station card, once.
 
 A run is a timed session on the training screen. You call CQ, a station
 answers, you send its call and your exchange, copy its exchange, and send
@@ -318,13 +319,13 @@ you type into two fields, Call and Exchange, as
 in the screenshot, with exchange items in any order and a later item of a
 kind replacing an earlier one (11.7).
 
-| | Sprint | ARRL DX | WPX | CQ WW | Field Day | Simple QSO |
-|---|---|---|---|---|---|---|
-| Real contest | NCJ NA Sprint | ARRL International DX | CQ WPX | CQ WW DX | ARRL Field Day | an everyday QSO |
-| RST, serial | no, yes | yes, no | yes, yes | yes, no | no, no | yes, no |
-| You copy | NR NAME ST | ST or PWR | NR | ZN | CL SEC | RST NAME |
-| Callers | US, Canada | the other side | world | world | US, Canada, ~1% DX | world |
-| Phase | 2 | 3 | 1 | 3 | 3 | 1 |
+| | Sprint | ARRL DX | WPX | CQ WW | Field Day | Simple QSO | POTA |
+|---|---|---|---|---|---|---|---|
+| Real contest | NCJ NA Sprint | ARRL International DX | CQ WPX | CQ WW DX | ARRL Field Day | an everyday QSO | a Parks on the Air activation |
+| RST, serial | no, yes | yes, no | yes, yes | yes, no | no, no | yes, no | yes, no |
+| You copy | NR NAME ST | ST or PWR | NR | ZN | CL SEC | RST NAME | RST ST |
+| Callers | US, Canada | the other side | world | world | US, Canada, ~1% DX | world | US, Canada |
+| Phase | 2 | 3 | 1 | 3 | 3 | 1 | after 5 |
 
 ### WPX (`wpx`), the default
 
@@ -502,6 +503,59 @@ later contests, is the world-wide one.
   card says "Simplified: one band, so a station counts once; and no power
   multiplier or bonus points, which score the entry, not the copying."
   With no call yet, Hear a QSO stands in as K1ABC in EMA ("K1ABC 1D EMA").
+
+### POTA (`pota`)
+
+Added after phase 5 (2026-11-02), at the user's request, from the POTA
+exchange cheat sheet they gave: you are the activator, in a park, and
+hunters call you. The pill reads "POTA" and comes last, after Simple QSO,
+the other run that is no contest.
+
+- **On the air.** `CQ CQ POTA DE K1ABC K` · `W7XYZ` ·
+  `W7XYZ TU GA UR 5NN 5NN MA MA BK` · `BK TU UR 579 579 OR OR BK` ·
+  `BK TU OR OR 73 EE` · `EE` (the cheat sheet's `dit dit`). Logged: RST
+  579, ST OR.
+- **The greeting.** Your exchange greets the hunter by the time of day
+  where you are, `GM` from 4 in the morning, `GA` from noon and `GE` from
+  6 in the evening on through the night (`greeting`, `rules.rs`). The
+  machine keeps to its own clock, so the runtime gives it the local hour
+  as a run starts (`ContestMachine::set_local_hour`), and Hear a QSO is
+  given it too (`hear_qsos`); a run never given one greets `GA`, as the
+  cheat sheet's example does, and the card's example QSO greets as a run
+  started now would.
+- **Your side.** From the US's 48 states, DC and Canada (W/VE, `Side`) you
+  send your report and your state, which Home and Your station ask for as
+  in the Sprint. From anywhere else you send your report alone,
+  `TU GA UR 5NN 5NN BK`, as the cheat sheet has DX stations do, and are
+  asked for no state. The card's line under "You send" says which: "You
+  are W/VE: you send your report and your state", or "You are DX: you send
+  your report alone, as DX activators do"; Your station's call line ends
+  "you are W/VE" or "you are DX", as in ARRL DX. Alaska and Hawaii are DX
+  here, as Dust's sides have them, and the card says so.
+- **Hunters.** US and Canadian stations (`Countries::UsAndCanada`), each
+  sending its report twice and its state or province twice, both copied:
+  the report drawn from §11.5's shares and sent as habits send it (§11.6:
+  plain under easy habits, `57N` and now and then `ENN` under real and
+  rough ones), the state where its call puts it. A hunter answers your CQ
+  with its call alone (twice from a pile-up caller that calls twice), and
+  leads its first exchange with `BK TU` nine times in ten and `BK` with
+  your call and `TU` otherwise (`BK K1ABC TU`, the cheat sheet's example);
+  sent again, its exchange goes alone, `UR 579 579 OR OR BK`. One that has
+  its call but not your exchange asks `AGN`, and F12 sends `AGN`: there is
+  no serial. A DX hunter would send its report alone, which one set of
+  copied fields cannot hold, so none calls; the card says so.
+- **TU.** Your TU sends back the state the Exchange field reads, twice
+  (`{hisstate}`), and ends `73 EE`; DX goes back as nothing. It brings the
+  next hunter, as a pile-up of hunters calls an activator, once the one
+  you worked has signed off with `EE` (§4.1); your call in TU is yours to
+  choose as in any contest whose TU brings callers (§8), and goes after
+  `EE` as an ID, `BK TU OR OR 73 EE K1ABC`.
+- **Rules.** No contest score, as in Simple QSO: QSOs, minutes per QSO and
+  accuracy per field. A hunter you worked does not call again, as no dupes
+  come where nothing scores. The card says "Simplified: every hunter is in
+  the US or Canada and sends its state (a DX hunter sends a report alone);
+  Alaska and Hawaii send a report alone, as DX does here; and no park
+  references."
 
 **Later contests,** in order of value: K1USN SST (with Farnsworth), CWops
 CWT, NAQP, IARU HF, Sweepstakes, and an HST-style preset with fixed
@@ -3991,8 +4045,8 @@ no QRM, which it shows as a line of its own; and in the Sprint, 120 seeds
 of each habit and style log three clean QSOs in under 40 turns.
 
 **Soak** (`soak.rs`, seeds of its own: as built, 3,000 runs of single
-callers and 4,500 of pile-ups, 14, shared among the contests that have
-shipped, each held to a floor of QSOs logged of its own; from 4a, callers
+callers and 4,500 of pile-ups, 14, and 6,000 of pile-ups since POTA
+joined (2026-11-02), shared among the contests that have shipped, each held to a floor of QSOs logged of its own; from 4a, callers
 of any habits, each habit held to a floor of QSOs logged, and in each
 style numbers cut and `ENN` heard often enough under real and rough
 habits, and fumbled serials, exchanges sent early and messages of QRM
@@ -4515,6 +4569,15 @@ ending on a bare `TU` where a run station sends `TU` and its call:
     third chosen now saves as `everyThird`. The example QSO ends
     `TU DL1ABC`. This replaces item 12's default, and its single caller
     that never signs (§3, §8).
+
+Asked for by the user on 2026-11-02, with a POTA exchange cheat sheet:
+
+15. A POTA mode, a seventh pill on the contest card: you activate a park
+    and US and Canadian hunters call you, the QSO as the cheat sheet has
+    it, your greeting by the local time of day, your state sent from W/VE
+    and your report alone from DX, as its footnote has DX stations do;
+    their report and state copied and their state sent back in your TU;
+    no score (§3, POTA).
 
 ## 16. Risks
 

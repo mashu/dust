@@ -17,7 +17,7 @@ use dioxus::prelude::*;
 
 use crate::player::{AudioError, Lease, SendNews};
 use crate::state::AppCtx;
-use crate::time::{mono_ms, seed_rng};
+use crate::time::{local_hour, mono_ms, seed_rng};
 
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
@@ -268,7 +268,7 @@ pub fn start_qsos(ctx: AppCtx) {
     let mut dialogue = ctx.dialogue;
     start_preview(ctx, Preview::Qsos, |lease, settings| {
         let sampler = ctx.sampler(&settings, seed_rng());
-        let heard = hear_qsos(seed_rng(), &settings, sampler, HEAR_QSOS);
+        let heard = hear_qsos(seed_rng(), &settings, sampler, HEAR_QSOS, local_hour());
         let kind = settings.contest.contest_kind;
         dialogue.set(Some(Dialogue {
             kind,

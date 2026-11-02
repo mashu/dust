@@ -123,7 +123,8 @@ fn call_reading(
         let wpx = wpx_prefix(call).unwrap_or_default();
         parts.push(format!("WPX prefix {wpx}"));
     }
-    if kind == ContestKind::ArrlDx {
+    // Your side, where it changes the contest: ARRL DX's, and POTA's.
+    if kind.rules().sided() {
         parts.push(format!("you are {}", Side::of_call(call).label()));
     }
     let parts: Vec<String> = parts
