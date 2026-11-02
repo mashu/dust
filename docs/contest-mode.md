@@ -554,57 +554,59 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
 - **Hunter styles.** Each hunter keeps to one of eight whole replies for
   its QSO (`their_replies`): it starts `BK`, your call and `TU`, or `BK
   TU`, `R TU` or `TU`, and sends its report and state twice or each once.
-  Each is a corner of an eight-cornered shape, round it from the top so
-  that neighbours are alike: the four starts with each field twice down
-  the right, then back up the left with each once, corner 1 (the card's
-  QSO) beside corner 8, its own once-form. Where you put a dot in the
-  shape sets how often each comes (`hunterStyle`, two numbers, across and
-  down from the middle, the corners one from it): its Wachspress
-  coordinates (`corner_shares`), so the middle has all eight alike, a
-  corner that reply alone, and along an edge only its two corners', by
-  how near each is. Until moved the dot stands up and a little right of
-  the middle (`STYLE_ON_AIR`): about 34, 25, 9, 4, 3, 3, 6 and 16 in a
-  hundred, half the hunters naming you and about one in four sending each
-  field once. A reply can be turned off (`hunterStylesOff`, by corner):
-  none sends it, and the rest are scaled up alike to make a hundred, so
-  they keep their proportions to one another and in the middle are alike
-  (`shares_without`), or share alike where the dot sits on its corner;
-  the last reply on stays on (`toggle_corner`). A hunter decides as it first sends its exchange and
-  keeps to it for repeats.
+  Each is a corner of an eight-cornered shape standing on an edge
+  (`shape_corners`, the first corner just right of the top), clockwise
+  from the top right: the four starts with each field twice down the
+  right, then back up the left with each once. So the shape reads as a
+  map: the right side sends report and state twice and the left each
+  once, and each row across starts alike, your call at the top and `TU`
+  alone at the bottom. Where you put the knob in the shape sets how often
+  each comes (`hunterStyle`, two numbers, across and down from the
+  middle, the corners one from it): its Wachspress coordinates
+  (`corner_shares`), so the middle has all eight alike, a corner that
+  reply alone, and along an edge only its two corners', by how near each
+  is. Until moved the knob stands up and right of the middle
+  (`STYLE_ON_AIR`): about 34, 25, 9, 4, 3, 3, 6 and 16 in a hundred, half
+  the hunters naming you and about one in four sending each field once. A
+  reply can be turned off (`hunterStylesOff`, by corner): none sends it,
+  and the rest are scaled up alike to make a hundred, so they keep their
+  proportions to one another and in the middle are alike
+  (`shares_without`), or share alike where the knob sits on its corner;
+  the last reply on stays on (`toggle_corner`). A hunter decides as it
+  first sends its exchange and keeps to it for repeats.
   "Hunter styles" on the contest card folds away under a line that says
   how it is set, as the Band card folds its receiver: "Hunter styles: One
   reply", "8 replies, as on the air", "8 replies, all alike", "6 replies,
   2 off"; it never says "original" or "cheat sheet", which a new user has
-  not seen. Open, a round palette with no lines but its rim: each reply
-  has a colour of its own, the validated categorical palette's in its
-  order round the corners (`--mix-1` to `--mix-8`, stepped for each
-  theme; every adjacent pair, corner 8 beside corner 1 among them, clears
-  the colour-blind and normal-vision floors on the card's surface, and the
-  light theme's three paler colours lean on the numbers beside them), and
-  a soft glow at its corner as large and as strong as its share (by its
-  square root, so a glow's area follows its share and a small share still
-  shows), the glows blending where the replies mix. A ring in its colour
-  marks each corner, with its number; one turned off is a dashed grey
-  ring, crossed out, and casts no glow. The dot sits in the colours. It
-  began as a shaded outline of the mix over spokes, which the user found
-  ugly. A click or a drag inside puts the dot
-  there, as a finger's touch and drag do (`touch-action: none`, so a
-  finger moves the dot rather than the page); a click on a corner's mark
-  turns its reply off, or on again; with a mouse, pointing shows what a
-  click would do without doing it, the glows of the mix it would set, a
-  hollow dot and the list's shares, or the corner a click would turn, and
-  a line under the palette says so. The arrow keys move the dot a tenth, Home
-  to the middle. Under it each reply in full, numbered as its corner,
-  in a ring of its colour, beside how many in a hundred send it, in whole
-  percents that make a hundred, the rows in the corners' order so none
-  moves as the dot does;
-  a reply none sends is left out and one turned off is kept, struck
-  through and marked off, its number a button that turns it on again, as
-  every row's number turns its reply off, for the keyboard and a screen
-  reader. Its ⓘ says what it does. There are no preset buttons: the
-  corners, the middle and Home stand for them. Only POTA offers it
+  not seen. Open, the shape in the app's copper and nothing else: no
+  text and no lines inside it but its rim. Over it each side is headed
+  with how it sends report and state, `Twice` and `UR 579 579 OR OR BK`
+  on the right, `Each once` and `UR 579 OR BK` on the left. At each corner
+  a pill says how many in a hundred send its reply, washed in copper as
+  strongly as its share, the commonest copper through, and the words the
+  reply starts with stand beside it, outward, so the drawing is as wide as
+  they reach and a long call still fits (`ShapeView`). The face is shaded
+  in copper toward each corner as strongly as its share, fading toward the
+  middle, so the shading follows the knob as the replies mix. It began as
+  a shaded outline of the mix over spokes, which the user found ugly, and
+  then as glows in eight colours, which mixed badly; the user picked this
+  from mock-ups. A click or a drag inside puts the knob there, as a
+  finger's touch and drag do (`touch-action: none`, so a finger moves the
+  knob rather than the page); near a corner, or past it, it goes onto the
+  corner, whose place is no round number, and anywhere else it is kept to
+  hundredths. A click on a corner's pill or its words turns its reply off,
+  or on again: its pill says off, dashed, and its words are struck
+  through. With a mouse, pointing shows what a click would do without
+  doing it, the shading and pills of the mix it would set and a dashed
+  ring for the knob, or the corner a click would turn, and a line under
+  the shape says so. The arrow keys move the knob a tenth, Home to the
+  middle; Tab reaches each corner, which Enter or Space turns, for the
+  keyboard and a screen reader. Under it the three replies you'll hear
+  most, in full, beside how many in a hundred send each, dashed while a
+  mouse previews. Its ⓘ says what it does. There are no preset buttons:
+  the corners, the middle and Home stand for them. Only POTA offers it
   (`ContestRules::varies`); every other contest's callers lead as before,
-  drawn exactly as before. The card's Reset puts the dot back, and every
+  drawn exactly as before. The card's Reset puts the knob back, and every
   reply on.
 - **The state is optional** (`ContestRules::optional`). The report alone
   is a complete exchange, so Enter thanks a DX hunter and logs it, and a

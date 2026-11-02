@@ -209,7 +209,8 @@ pub struct ContestRules {
     pub their_exchange: PerSide<&'static str>,
     /// The whole replies callers keep to, one each, where they vary as you
     /// set them, as POTA's hunters do: each a corner of the shape you place
-    /// the dot in ([`Self::reply_shares`]), in order round it from the top.
+    /// the dot in ([`Self::reply_shares`]), in order clockwise from the top
+    /// right ([`shape_corners`]).
     /// Empty where every caller sends [`Self::their_exchange`] after a lead
     /// drawn from [`Self::their_lead`].
     pub their_replies: &'static [Reply],
@@ -589,10 +590,11 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Pota)),
         answer: "{his}",
         their_exchange: PerSide::both("UR {rst} {rst} {st} {st} BK"),
-        // Round the shape from the top, so that neighbours are alike: each
+        // Clockwise from the top right, so the shape reads as a map: each
         // way of starting with report and state twice down the right, then
-        // back up the left with each once, the first and the last naming
-        // you.
+        // back up the left with each once, so that each row across has one
+        // way of starting, naming you at the top and TU alone at the
+        // bottom, the right side twice and the left once.
         their_replies: &[
             Reply {
                 lead: "BK {my} TU",
@@ -670,23 +672,25 @@ pub struct Reply {
     pub exchange: &'static str,
 }
 
-/// Where the dot stands until you move it: up and a little right of the
-/// middle, toward the first reply and the second, so most hunters send
-/// those, as heard on the air, and every reply comes: of POTA's eight,
-/// about 34, 25, 9, 4, 3, 3, 6 and 16 in a hundred, half of them naming
-/// you and about one in four sending each field once.
-pub const STYLE_ON_AIR: [f64; 2] = [0.1, -0.55];
+/// Where the dot stands until you move it: up and right of the middle,
+/// toward the first reply and the second, so most hunters send those, as
+/// heard on the air, and every reply comes: of POTA's eight, about 34, 25,
+/// 9, 4, 3, 3, 6 and 16 in a hundred, half of them naming you and about
+/// one in four sending each field once.
+pub const STYLE_ON_AIR: [f64; 2] = [0.3, -0.47];
 
 /// The middle of the shape: every reply as often as the others.
 pub const STYLE_EVEN: [f64; 2] = [0.0, 0.0];
 
 /// The corners of a regular shape of `corners` corners, its middle at
-/// nothing and each corner one from it, the first at the top and the rest
-/// clockwise, as a screen draws it, down being positive.
+/// nothing and each corner one from it, standing on an edge with an edge
+/// at the top: the first just right of the top and the rest clockwise, as
+/// a screen draws it, down being positive. Of an even number, each corner
+/// on the right has one level with it on the left, the last first.
 pub fn shape_corners(corners: usize) -> Vec<[f64; 2]> {
     (0..corners)
         .map(|at| {
-            let angle = std::f64::consts::TAU * at as f64 / corners as f64;
+            let angle = std::f64::consts::TAU * (at as f64 + 0.5) / corners as f64;
             [angle.sin(), -angle.cos()]
         })
         .collect()
@@ -805,12 +809,18 @@ pub fn toggle_corner(off: &[usize], corner: usize, corners: usize) -> Vec<usize>
     off
 }
 
-/// The replies a contest's callers send, as the card lists them beside the
+/// The replies a contest's callers send, as the card shows them round the
 /// shape you place the dot in: each first exchange whole, as sent to you,
-/// with the share of callers that send it, in the order of the corners.
+/// with the share of callers that send it, in the order of the corners;
+/// and each apart, as its corner names it: the words it starts with and
+/// the exchange after them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallerStyles {
     pub replies: Vec<(String, f64)>,
+    /// The words each reply starts with, your call in them.
+    pub leads: Vec<String>,
+    /// Each reply's exchange after its first words.
+    pub exchanges: Vec<String>,
 }
 
 /// How you sign off in a TU that holds a farewell: `73`, and now and then
@@ -1195,20 +1205,25 @@ impl ContestRules {
             .iter()
             .map(|field| (*field, field.example().to_string()))
             .collect();
-        let replies = self
+        let exchanges: Vec<String> = (0..self.their_replies.len())
+            .map(|at| self.their_reply_text(side, Some(at), my_call, "W7XYZ", &fields))
+            .collect();
+        let leads: Vec<String> = self
             .their_replies
             .iter()
-            .enumerate()
-            .zip(self.reply_shares(at, off))
-            .map(|((at, reply), share)| {
-                let body = self.their_reply_text(side, Some(at), my_call, "W7XYZ", &fields);
-                (
-                    self.their_first_exchange_led(reply.lead, my_call, &body),
-                    share,
-                )
-            })
+            .map(|reply| self.their_first_exchange_led(reply.lead, my_call, ""))
             .collect();
-        Some(CallerStyles { replies })
+        let replies = leads
+            .iter()
+            .zip(&exchanges)
+            .zip(self.reply_shares(at, off))
+            .map(|((lead, body), share)| (squeeze(&format!("{lead} {body}")), share))
+            .collect();
+        Some(CallerStyles {
+            replies,
+            leads,
+            exchanges,
+        })
     }
 
     /// A first QSO of this contest as it goes out, with `me` as you: who
@@ -1858,8 +1873,21 @@ mod tests {
     #[test]
     fn the_dot_shares_the_replies_among_the_corners() {
         let corners = shape_corners(5);
-        assert!((corners[0][0]).abs() < 1e-12 && (corners[0][1] + 1.0).abs() < 1e-12);
+        assert!(corners[0][0] > 0.5 && corners[0][1] < -0.8, "{corners:?}");
         assert!(corners[1][0] > 0.9, "clockwise on a screen: {corners:?}");
+        // An edge at the top, the first corner and the last level across it.
+        assert!((corners[0][0] + corners[4][0]).abs() < 1e-12);
+        assert!((corners[0][1] - corners[4][1]).abs() < 1e-12);
+        // Of eight, each on the right has one level with it on the left.
+        let eight = shape_corners(8);
+        for at in 0..4 {
+            let (right, left) = (eight[at], eight[7 - at]);
+            assert!(
+                right[0] > 0.3 && (right[0] + left[0]).abs() < 1e-12,
+                "{eight:?}"
+            );
+            assert!((right[1] - left[1]).abs() < 1e-12, "{eight:?}");
+        }
         for share in corner_shares(5, STYLE_EVEN) {
             assert!((share - 0.2).abs() < 1e-12, "{share}");
         }
@@ -1909,9 +1937,10 @@ mod tests {
             }
         }
         assert_eq!(into_shape(5, [0.1, 0.2]), [0.1, 0.2]);
+        // Straight up, the top edge.
         let far = into_shape(5, [0.0, -9.0]);
         assert!(
-            (far[0]).abs() < 1e-9 && (far[1] + 1.0).abs() < 1e-9,
+            (far[0]).abs() < 1e-9 && (far[1] - corners[0][1]).abs() < 1e-9,
             "{far:?}"
         );
         assert_eq!(into_shape(5, [f64::NAN, 0.0]), STYLE_EVEN);
@@ -1989,6 +2018,26 @@ mod tests {
         );
         let sum: f64 = on_air.iter().map(|(_, share)| share).sum();
         assert!((sum - 1.0).abs() < 1e-9, "{sum}");
+        // Each corner names its reply apart: the words it starts with, and
+        // the exchange after them.
+        let styles = pota()
+            .caller_styles(Side::Dx, "SA0KAM", STYLE_ON_AIR, &[])
+            .expect("POTA's hunters vary");
+        assert_eq!(
+            styles.leads,
+            [
+                "BK SA0KAM TU",
+                "BK TU",
+                "R TU",
+                "TU",
+                "TU",
+                "R TU",
+                "BK TU",
+                "BK SA0KAM TU"
+            ]
+        );
+        assert_eq!(styles.exchanges[0], "UR 579 579 OR OR BK");
+        assert_eq!(styles.exchanges[7], "UR 579 OR BK");
         let one = replies(shape_corners(8)[0]);
         assert!((one[0].1 - 1.0).abs() < 1e-9);
         for (_, share) in replies(STYLE_EVEN) {

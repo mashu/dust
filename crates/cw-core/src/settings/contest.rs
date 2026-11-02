@@ -1370,7 +1370,7 @@ mod tests {
         let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
         assert_eq!(json["contestTuCall"], "every");
         assert_eq!(json["hunterStylesOff"], serde_json::json!([]));
-        assert_eq!(json["hunterStyle"], serde_json::json!([0.1, -0.55]));
+        assert_eq!(json["hunterStyle"], serde_json::json!([0.3, -0.47]));
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -3);
     }

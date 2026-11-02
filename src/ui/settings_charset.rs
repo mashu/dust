@@ -199,19 +199,25 @@ impl ContestCard {
 
 /// How POTA hunters reply, as the card shows it: where you put the dot in
 /// the shape of their replies, which you turned off, how many of the
-/// hundred send each, and each reply whole as sent to you, a corner each,
-/// in the corners' order.
+/// hundred send each, and each reply, a corner each, in the corners' order:
+/// whole, and apart as its corner names it.
 #[derive(Clone, PartialEq)]
 struct StylesCard {
     /// Where the dot stands, across and down from the middle.
     at: [f64; 2],
-    /// The replies turned off, by their corners from the top, from nought.
+    /// The replies turned off, by their corners from the top right, from
+    /// nought.
     off: Vec<usize>,
     /// The share of hunters that send each reply, exactly, for the shape.
     shares: Vec<f64>,
     /// Each reply, whole, and how many in a hundred send it, in whole
     /// percents that make a hundred.
     replies: Vec<(String, u32)>,
+    /// The words each reply starts with, beside its corner.
+    leads: Vec<String>,
+    /// Each reply's exchange after its first words: the right side's and
+    /// the left's head the shape.
+    exchanges: Vec<String>,
 }
 
 impl StylesCard {
@@ -222,18 +228,26 @@ impl StylesCard {
             off: off.to_vec(),
             shares,
             replies: in_percent(styles.replies),
+            leads: styles.leads,
+            exchanges: styles.exchanges,
         }
     }
 
+    /// The share of hunters that would send each reply, the dot standing
+    /// `at` instead: what the shape and the list show while a mouse is over
+    /// it.
+    fn shares_at(&self, at: [f64; 2]) -> Vec<f64> {
+        shares_without(&corner_shares(self.replies.len(), at), &self.off)
+    }
+
     /// Each reply and how many in a hundred would send it, the dot standing
-    /// `at` instead: what the list shows while a mouse is over the shape.
+    /// `at` instead.
     fn at_point(&self, at: [f64; 2]) -> Vec<(String, u32)> {
-        let shares = shares_without(&corner_shares(self.replies.len(), at), &self.off);
         let named = self
             .replies
             .iter()
             .map(|(reply, _)| reply.clone())
-            .zip(shares)
+            .zip(self.shares_at(at))
             .collect();
         in_percent(named)
     }
@@ -283,42 +297,149 @@ fn in_percent(shares: Vec<(String, f64)>) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// How wide and high the shape is drawn, in CSS pixels, as `.style-shape`
-/// has it: the pointer's place on it is read in these.
-const SHAPE_PX: f64 = 240.0;
+/// How wide the drawing is, in CSS pixels: narrow enough for a phone's
+/// card. Its height follows from what it shows ([`ShapeView`]), so the
+/// pointer's place on it reads in its own units.
+const SHAPE_PX: f64 = 288.0;
 
-/// How far the drawing reaches from the middle either way, in the shape's
-/// own units, its corners being one from the middle: room for the corners'
-/// marks round it.
-const SHAPE_REACH: f64 = 1.3;
+/// Each corner's pill, in the shape's units, its corners being one from
+/// the middle: its width and height.
+const PILL_W: f64 = 0.32;
+const PILL_H: f64 = 0.18;
+
+/// The size of the words beside each pill, in the shape's units, and the
+/// width of each of their letters, the code face's being six tenths of it.
+const LABEL_SIZE: f64 = 0.112;
+const LABEL_LETTER: f64 = 0.6 * LABEL_SIZE;
+
+/// The gap between a pill and the words beside it.
+const LABEL_GAP: f64 = 0.05;
+
+/// The size of each side's exchange over the shape, and of its letters.
+const CAPTION_SIZE: f64 = 0.095;
+const CAPTION_LETTER: f64 = 0.6 * CAPTION_SIZE;
+
+/// Where the drawing starts above the middle, with room for the sides'
+/// heads over the top pills, and where it ends below, past the bottom ones.
+const SHAPE_TOP: f64 = -1.46;
+const SHAPE_BOTTOM: f64 = 1.08;
 
 /// How far an arrow key moves the dot, in the shape's units.
 const SHAPE_STEP: f64 = 0.1;
 
-/// How near a corner the pointer must be, in the shape's units, for a click
-/// to turn its reply off or on rather than move the dot: about its mark.
-const CORNER_HIT: f64 = 0.2;
+/// How the replies' sides are headed: the right side's report and state go
+/// twice, the left side's each once, POTA's replies going twice down the
+/// right and back up the left once ([`cw_core::ContestRules::their_replies`]).
+const SIDE_HEADS: [&str; 2] = ["Twice", "Each once"];
 
-/// The shape's point `x` and `y` pixels across and down the drawing, where
-/// it is, in or out of the shape.
-fn shape_unit(x: f64, y: f64) -> [f64; 2] {
-    let unit = |px: f64| px / SHAPE_PX * 2.0 * SHAPE_REACH - SHAPE_REACH;
-    [unit(x), unit(y)]
+/// The part of the shape's own units the drawing shows: as wide as the
+/// words beside its widest pill reach either way, so a long call still
+/// fits, and from the sides' heads down past the bottom pills.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ShapeView {
+    /// How far it reaches either side of the middle.
+    half: f64,
 }
 
-/// The point of the shape of `corners` corners under the pointer, `x` and
-/// `y` pixels across and down the drawing, brought inside it.
-fn shape_point(corners: usize, x: f64, y: f64) -> [f64; 2] {
-    tidy(into_shape(corners, shape_unit(x, y)))
+impl ShapeView {
+    fn of(leads: &[String], exchanges: &[String]) -> Self {
+        let corners = shape_corners(leads.len());
+        let labels = corners.iter().zip(leads).map(|(corner, lead)| {
+            corner[0].abs() + PILL_W / 2.0 + LABEL_GAP + lead.chars().count() as f64 * LABEL_LETTER
+        });
+        let captions = exchanges
+            .iter()
+            .map(|exchange| exchange.chars().count() as f64 * CAPTION_LETTER);
+        let half = labels.chain(captions).fold(1.2, f64::max) + 0.04;
+        Self { half }
+    }
+
+    fn width(self) -> f64 {
+        2.0 * self.half
+    }
+
+    fn height(self) -> f64 {
+        SHAPE_BOTTOM - SHAPE_TOP
+    }
+
+    /// Its height in CSS pixels, at [`SHAPE_PX`] wide.
+    fn height_px(self) -> f64 {
+        SHAPE_PX * self.height() / self.width()
+    }
+
+    fn view_box(self) -> String {
+        format!(
+            "{} {} {} {}",
+            -self.half,
+            SHAPE_TOP,
+            self.width(),
+            self.height()
+        )
+    }
+
+    /// The shape's point `x` and `y` pixels across and down the drawing,
+    /// where it is, in or out of the shape.
+    fn unit(self, x: f64, y: f64) -> [f64; 2] {
+        let scale = self.width() / SHAPE_PX;
+        [-self.half + x * scale, SHAPE_TOP + y * scale]
+    }
+
+    /// The point of the shape of `corners` corners under the pointer, `x`
+    /// and `y` pixels across and down the drawing, brought inside it
+    /// ([`settle`]).
+    fn point(self, corners: usize, x: f64, y: f64) -> [f64; 2] {
+        settle(corners, self.unit(x, y))
+    }
+
+    /// Where on the drawing, in pixels across and down, the shape's point
+    /// `at` is: what a test points at.
+    #[cfg(test)]
+    pub(crate) fn px(self, at: [f64; 2]) -> (f64, f64) {
+        let scale = SHAPE_PX / self.width();
+        ((at[0] + self.half) * scale, (at[1] - SHAPE_TOP) * scale)
+    }
 }
 
-/// The corner of the shape of `corners` corners whose mark the pointer is
-/// on, `x` and `y` pixels across and down the drawing, if any.
-fn corner_under(corners: usize, x: f64, y: f64) -> Option<usize> {
-    let [px, py] = shape_unit(x, y);
+/// How POTA's card draws the shape for `my_call`: what a test points at.
+#[cfg(test)]
+pub(crate) fn pota_view(my_call: &str) -> ShapeView {
+    let styles = ContestKind::Pota
+        .rules()
+        .caller_styles(cw_core::Side::Dx, my_call, STYLE_ON_AIR, &[])
+        .expect("POTA's hunters vary");
+    ShapeView::of(&styles.leads, &styles.exchanges)
+}
+
+/// How near a corner, in the shape's units, the knob goes onto it: a
+/// corner's place is no round number, and the knob there sends that reply
+/// alone.
+const CORNER_SNAP: f64 = 0.05;
+
+/// `at` as the knob takes it, in the shape of `corners` corners: brought
+/// inside it, onto a corner where it is that near one, and anywhere else
+/// kept to hundredths, so a save holds it as it reads.
+fn settle(corners: usize, at: [f64; 2]) -> [f64; 2] {
+    let at = into_shape(corners, at);
     shape_corners(corners)
-        .iter()
-        .position(|[cx, cy]| (px - cx).hypot(py - cy) <= CORNER_HIT)
+        .into_iter()
+        .find(|corner| (corner[0] - at[0]).hypot(corner[1] - at[1]) < CORNER_SNAP)
+        .unwrap_or_else(|| tidy(at))
+}
+
+/// The corner whose pill, or the words beside it, `at` is on, of the
+/// replies starting with `leads`, if any: a click there turns its reply
+/// rather than moving the dot.
+fn corner_under(leads: &[String], at: [f64; 2]) -> Option<usize> {
+    let corners = shape_corners(leads.len());
+    corners.iter().zip(leads).position(|(corner, lead)| {
+        let (across, down) = (at[0] - corner[0], (at[1] - corner[1]).abs());
+        let on_pill = across.abs() <= PILL_W / 2.0 + 0.04 && down <= PILL_H / 2.0 + 0.04;
+        // The words go outward, away from the middle.
+        let out = across * corner[0].signum();
+        let reach = PILL_W / 2.0 + LABEL_GAP + lead.chars().count() as f64 * LABEL_LETTER;
+        let on_label = out > 0.0 && out <= reach && down <= PILL_H / 2.0;
+        on_pill || on_label
+    })
 }
 
 /// A point kept to hundredths, so a save holds it as it reads.
@@ -326,31 +447,33 @@ fn tidy(at: [f64; 2]) -> [f64; 2] {
     at.map(|value| (value * 100.0).round() / 100.0)
 }
 
-/// How far the round palette the replies mix in reaches from its middle, in
-/// the shape's units: just past the corners, so their glows sit at its rim.
-const PALETTE_REACH: f64 = 1.12;
-
-/// The colour of each reply, by its corner, as the stylesheet names them:
-/// each sets the colour its corner's mark, glow and number are drawn in.
-const MIX_COLOURS: [&str; 8] = [
-    "mix-1", "mix-2", "mix-3", "mix-4", "mix-5", "mix-6", "mix-7", "mix-8",
-];
-
-/// The colour of the reply at corner `number`, from nought.
-fn mix_colour(number: usize) -> &'static str {
-    MIX_COLOURS.get(number).copied().unwrap_or_default()
-}
-
-/// How a reply's glow is drawn for its share, `share` against the largest
-/// `most`: its reach from its corner and how strong it is, both by the
-/// square root of the share, so a glow's area follows its share and a
-/// small share still shows. None for a reply no hunter sends.
-fn glow(share: f64, most: f64) -> Option<(f64, f64)> {
+/// How strongly the face is shaded toward a reply's corner for its share,
+/// `share` against the largest `most`: at the corner, and at the middle,
+/// where it fades to little. None for a reply no hunter sends.
+fn shade(share: f64, most: f64) -> Option<(f64, f64)> {
     if share <= 0.0 || most <= 0.0 {
         return None;
     }
-    let part = (share / most).sqrt();
-    Some((0.35 + 0.95 * part, 0.25 + 0.75 * part))
+    let corner = 0.08 + 0.62 * share / most;
+    Some((corner, 0.15 * corner))
+}
+
+/// How a corner's pill is tinted for its share against the largest: the
+/// largest is copper through, the rest a wash of it as strong as their
+/// share.
+fn tint(share: f64, most: f64) -> f64 {
+    if most <= 0.0 {
+        0.0
+    } else {
+        0.08 + 0.5 * share / most
+    }
+}
+
+/// The reply at `corner`, of `count`, turned off, or on again if it was
+/// off; never the last one on ([`toggle_corner`]).
+fn turn_corner(mut settings: Signal<TrainingSettings>, corner: usize, count: usize) {
+    let off = settings.peek().contest.hunter_styles_off.clone();
+    settings.write().contest.hunter_styles_off = toggle_corner(&off, corner, count);
 }
 
 /// What a mouse over the shape is on: a point a click would put the dot
@@ -361,84 +484,97 @@ enum Pointing {
     Corner(usize),
 }
 
-/// Where the hunters' replies are set: a round palette with a reply at each
-/// of its corners, numbered as the list under it numbers them and each in
-/// a colour of its own, its glow as large and as strong as its share, so
-/// the colours blend where the replies mix; and a dot inside it. In the
-/// middle every reply on comes as often as the others; at a corner, that
-/// one alone. A click on a corner's mark turns its reply off, or on again;
-/// anywhere else a click or a drag puts the dot there, as a finger's touch
-/// and drag do. A mouse over it shows what a click would do without doing
-/// it (`hover`): the glows of the mix it would set and a hollow dot, or the
-/// corner it would turn. The arrow keys move the dot, and Home brings it to
-/// the middle. The colours are the validated categorical palette's, in its
-/// order round the corners, each corner's number beside its colour.
+/// Where the hunters' replies are set: an eight-cornered shape standing on
+/// an edge, a reply at each corner with a pill saying how many in a hundred
+/// send it and the words it starts with beside it, the right side sending
+/// report and state twice and the left side each once, as the heads over
+/// it say, so each row across starts alike; and a knob inside it. The face
+/// is shaded in copper toward each corner as strongly as its share, so the
+/// shading follows the knob as the replies mix. In the middle every reply
+/// on comes as often as the others; at a corner, that one alone. A click on
+/// a corner's pill or words turns its reply off, or on again; anywhere else
+/// a click or a drag puts the knob there, as a finger's touch and drag do.
+/// A mouse over it shows what a click would do without doing it (`hover`):
+/// the mix it would set and a dashed ring, or the corner it would turn. The
+/// arrow keys move the knob and Home brings it to the middle; Tab reaches
+/// each corner, and Enter or Space turns it.
 #[component]
 fn StyleShape(
     settings: Signal<TrainingSettings>,
-    at: [f64; 2],
-    off: Vec<usize>,
-    shares: Vec<f64>,
+    styles: StylesCard,
     hover: Signal<Option<Pointing>>,
 ) -> Element {
     let mut hover = hover;
     let mut dragging = use_signal(|| false);
-    let count = shares.len();
+    let count = styles.shares.len();
+    let at = styles.at;
+    let off = styles.off.clone();
+    let view = ShapeView::of(&styles.leads, &styles.exchanges);
     let mut place = move |point: [f64; 2]| settings.write().contest.hunter_style = point;
-    let turned = off.clone();
-    let mut turn = move |corner: usize| {
-        settings.write().contest.hunter_styles_off = toggle_corner(&turned, corner, count);
-    };
+    let leads = styles.leads.clone();
+    let pointed_leads = styles.leads.clone();
     let corners = shape_corners(count);
-    // What the mouse would set, where it is over the palette and not where
-    // the dot already stands: its mix is the one drawn while it is there.
+    let outline = corners
+        .iter()
+        .map(|[x, y]| format!("{x:.4},{y:.4}"))
+        .collect::<Vec<String>>()
+        .join(" ");
+    // What the mouse would set, where it is over the shape and not where
+    // the knob already stands: its mix is the one drawn while it is there.
     let ghost = match hover() {
         Some(Pointing::At(point)) if point != at => Some(point),
         _ => None,
     };
     let shown = match ghost {
-        Some(point) => shares_without(&corner_shares(count, point), &off),
-        None => shares,
+        Some(point) => styles.shares_at(point),
+        None => styles.shares.clone(),
     };
+    let shown_pct = in_percent(shown.iter().map(|share| (String::new(), *share)).collect());
     let most = shown.iter().copied().fold(0.0, f64::max);
     let hot = match hover() {
         Some(Pointing::Corner(corner)) => Some(corner),
         _ => None,
     };
-    let view = format!(
-        "{} {} {} {}",
-        -SHAPE_REACH,
-        -SHAPE_REACH,
-        2.0 * SHAPE_REACH,
-        2.0 * SHAPE_REACH
+    let (right, left) = (
+        styles.exchanges.first().cloned().unwrap_or_default(),
+        styles.exchanges.last().cloned().unwrap_or_default(),
     );
+    let edge = view.half - 0.02;
     rsx! {
         svg {
             id: control_id("shape", "hunter styles"),
             class: if hot.is_some() { "style-shape on-corner" } else { "style-shape" },
-            view_box: "{view}",
+            view_box: "{view.view_box()}",
+            width: "{SHAPE_PX}",
+            height: "{view.height_px():.1}",
             tabindex: "0",
             role: "group",
-            "aria-label": "Where the dot stands sets how often each reply comes: drag it, or move it with the arrow keys; a click on a numbered mark turns its reply off or on",
+            "aria-label": "Where the knob stands sets how often each reply comes: drag it, or move it with the arrow keys. Tab to a corner and press Enter to turn its reply off or on",
             onpointerdown: move |e: PointerEvent| {
                 let point = e.element_coordinates();
                 hover.set(None);
-                if let Some(corner) = corner_under(count, point.x, point.y) {
-                    turn(corner);
+                if let Some(corner) = corner_under(&leads, view.unit(point.x, point.y)) {
+                    turn_corner(settings, corner, count);
                     return;
                 }
                 dragging.set(true);
-                place(shape_point(count, point.x, point.y));
+                place(view.point(count, point.x, point.y));
             },
             onpointermove: move |e: PointerEvent| {
                 let point = e.element_coordinates();
                 if dragging() {
-                    place(shape_point(count, point.x, point.y));
+                    place(view.point(count, point.x, point.y));
                 } else if e.pointer_type() == "mouse" {
-                    hover.set(Some(match corner_under(count, point.x, point.y) {
-                        Some(corner) => Pointing::Corner(corner),
-                        None => Pointing::At(shape_point(count, point.x, point.y)),
-                    }));
+                    let under = corner_under(&pointed_leads, view.unit(point.x, point.y));
+                    hover
+                        .set(
+                            Some(
+                                match under {
+                                    Some(corner) => Pointing::Corner(corner),
+                                    None => Pointing::At(view.point(count, point.x, point.y)),
+                                },
+                            ),
+                        );
                 }
             },
             onpointerup: move |_| dragging.set(false),
@@ -457,104 +593,184 @@ fn StyleShape(
                     _ => return,
                 };
                 e.prevent_default();
-                place(tidy(into_shape(count, moved)));
+                place(settle(count, moved));
             },
             defs {
-                for number in 0..count {
-                    radialGradient {
-                        id: "mix-glow-{number + 1}",
-                        class: "{mix_colour(number)}",
-                        stop {
-                            class: "mix-stop",
-                            offset: "0",
-                            "stop-opacity": "0.9",
-                        }
-                        stop {
-                            class: "mix-stop",
-                            offset: "0.45",
-                            "stop-opacity": "0.4",
-                        }
-                        stop {
-                            class: "mix-stop",
-                            offset: "1",
-                            "stop-opacity": "0",
-                        }
-                    }
+                radialGradient {
+                    id: "style-face",
+                    cx: "0",
+                    cy: "0",
+                    r: "1",
+                    "gradientUnits": "userSpaceOnUse",
+                    stop { class: "style-face-in", offset: "0" }
+                    stop { class: "style-face-out", offset: "1" }
                 }
-                clipPath { id: "mix-palette",
-                    circle { r: "{PALETTE_REACH}" }
-                }
-            }
-            circle { class: "mix-disc", r: "{PALETTE_REACH}" }
-            g { "clip-path": "url(#mix-palette)",
                 for (number , (corner , share)) in corners.iter().zip(&shown).enumerate() {
-                    if let Some((reach, strength)) = glow(*share, most) {
-                        circle {
-                            cx: "{corner[0]}",
-                            cy: "{corner[1]}",
-                            r: "{reach:.3}",
-                            fill: "url(#mix-glow-{number + 1})",
-                            opacity: "{strength:.3}",
+                    if let Some((strong, faint)) = shade(*share, most) {
+                        linearGradient {
+                            id: "style-shade-{number + 1}",
+                            "gradientUnits": "userSpaceOnUse",
+                            x1: "0",
+                            y1: "0",
+                            x2: "{corner[0]:.4}",
+                            y2: "{corner[1]:.4}",
+                            stop {
+                                class: "style-shade",
+                                offset: "0",
+                                "stop-opacity": "{faint:.3}",
+                            }
+                            stop {
+                                class: "style-shade",
+                                offset: "1",
+                                "stop-opacity": "{strong:.3}",
+                            }
                         }
                     }
                 }
             }
-            circle { class: "mix-rim", r: "{PALETTE_REACH}" }
+            text { class: "style-head", x: "{edge}", y: "-1.36", "text-anchor": "end",
+                "{SIDE_HEADS[0]}"
+            }
+            text { class: "style-side", x: "{edge}", y: "-1.22", "text-anchor": "end",
+                "{right}"
+            }
+            text { class: "style-head", x: "{-edge}", y: "-1.36", "{SIDE_HEADS[1]}" }
+            text { class: "style-side", x: "{-edge}", y: "-1.22", "{left}" }
+            polygon { class: "style-face", points: "{outline}" }
+            // Each corner's part of the face, from the middle out to the
+            // corner and halfway along each edge from it, shaded toward it.
             for (number , corner) in corners.iter().enumerate() {
-                circle {
-                    class: match (off.contains(&number), hot == Some(number)) {
-                        (true, true) => "mix-marker off hot".to_string(),
-                        (true, false) => "mix-marker off".to_string(),
-                        (false, true) => format!("mix-marker hot {}", mix_colour(number)),
-                        (false, false) => format!("mix-marker {}", mix_colour(number)),
-                    },
-                    cx: "{corner[0]}",
-                    cy: "{corner[1]}",
-                    r: "0.13",
+                if shade(shown[number], most).is_some() {
+                    {
+                        let before = corners[(number + count - 1) % count];
+                        let after = corners[(number + 1) % count];
+                        let half = |other: [f64; 2]| {
+                            [(corner[0] + other[0]) / 2.0, (corner[1] + other[1]) / 2.0]
+                        };
+                        let ([ax, ay], [bx, by]) = (half(before), half(after));
+                        rsx! {
+                            path {
+                                fill: "url(#style-shade-{number + 1})",
+                                d: "M0,0 L{ax:.4},{ay:.4} L{corner[0]:.4},{corner[1]:.4} L{bx:.4},{by:.4} Z",
+                            }
+                        }
+                    }
                 }
-                text {
-                    class: if off.contains(&number) { "mix-marker-number off" } else { "mix-marker-number" },
-                    x: "{corner[0]}",
-                    y: "{corner[1]}",
-                    "{number + 1}"
-                }
-                if off.contains(&number) {
-                    line {
-                        class: "mix-marker-cross",
-                        x1: "{corner[0] - 0.09}",
-                        y1: "{corner[1] + 0.09}",
-                        x2: "{corner[0] + 0.09}",
-                        y2: "{corner[1] - 0.09}",
+            }
+            polygon { class: "style-rim", points: "{outline}" }
+            for (number , corner) in corners.iter().enumerate() {
+                {
+                    let is_off = off.contains(&number);
+                    let is_top = !is_off && shown[number] >= most && most > 0.0;
+                    let pill = match (is_off, is_top, hot == Some(number)) {
+                        (true, _, true) => "style-pill off hot",
+                        (true, _, false) => "style-pill off",
+                        (false, true, true) => "style-pill top hot",
+                        (false, true, false) => "style-pill top",
+                        (false, false, true) => "style-pill hot",
+                        (false, false, false) => "style-pill",
+                    };
+                    let outward = if corner[0] < 0.0 { -1.0 } else { 1.0 };
+                    let label_x = corner[0] + outward * (PILL_W / 2.0 + LABEL_GAP);
+                    let lead = styles.leads.get(number).cloned().unwrap_or_default();
+                    let pct = shown_pct.get(number).map_or(0, |(_, pct)| *pct);
+                    let shown_number = number + 1;
+                    let label = if is_off {
+                        format!("Turn reply {shown_number}, {lead}, on again")
+                    } else {
+                        format!("Turn reply {shown_number}, {lead}, off")
+                    };
+                    rsx! {
+                        g {
+                            id: control_id("corner", &shown_number.to_string()),
+                            class: "style-corner",
+                            tabindex: "0",
+                            role: "button",
+                            "aria-label": "{label}",
+                            "aria-pressed": if is_off { "false" } else { "true" },
+                            onkeydown: move |e: KeyboardEvent| {
+                                if matches!(e.key(), Key::Enter) || e.key() == Key::Character(" ".to_string()) {
+                                    e.prevent_default();
+                                    e.stop_propagation();
+                                    turn_corner(settings, number, count);
+                                }
+                            },
+                            rect {
+                                class: "{pill}",
+                                x: "{corner[0] - PILL_W / 2.0:.4}",
+                                y: "{corner[1] - PILL_H / 2.0:.4}",
+                                width: "{PILL_W}",
+                                height: "{PILL_H}",
+                                rx: "{PILL_H / 2.0}",
+                            }
+                            if !is_off && !is_top {
+                                rect {
+                                    class: "style-pill-tint",
+                                    x: "{corner[0] - PILL_W / 2.0:.4}",
+                                    y: "{corner[1] - PILL_H / 2.0:.4}",
+                                    width: "{PILL_W}",
+                                    height: "{PILL_H}",
+                                    rx: "{PILL_H / 2.0}",
+                                    "fill-opacity": "{tint(shown[number], most):.3}",
+                                }
+                            }
+                            text {
+                                class: match (is_off, is_top) {
+                                    (true, _) => "style-pct off",
+                                    (false, true) => "style-pct top",
+                                    (false, false) => "style-pct",
+                                },
+                                x: "{corner[0]:.4}",
+                                y: "{corner[1]:.4}",
+                                if is_off {
+                                    "off"
+                                } else {
+                                    "{pct}%"
+                                }
+                            }
+                            text {
+                                class: match (is_off, is_top) {
+                                    (true, _) => "style-lead off",
+                                    (false, true) => "style-lead top",
+                                    (false, false) => "style-lead",
+                                },
+                                x: "{label_x:.4}",
+                                y: "{corner[1]:.4}",
+                                "text-anchor": if outward < 0.0 { "end" } else { "start" },
+                                "{lead}"
+                            }
+                        }
                     }
                 }
             }
             if let Some(point) = ghost {
                 circle {
-                    class: "style-dot ghost",
+                    class: "style-knob ghost",
                     cx: "{point[0]}",
                     cy: "{point[1]}",
-                    r: "0.075",
+                    r: "0.09",
                 }
             }
             circle {
-                class: "style-dot",
+                class: "style-knob",
                 cx: "{at[0]}",
                 cy: "{at[1]}",
-                r: "0.075",
+                r: "0.09",
             }
         }
     }
 }
 
+/// How many of the commonest replies the card writes out in full.
+const HEARD_MOST: usize = 3;
+
 /// How POTA hunters reply, folded away under a line that says how it is
 /// set, as the Band card folds its receiver. Open, the shape with a reply
-/// at each corner and the dot that sets how often each comes, a line
-/// saying what a click would do, and each reply whole, numbered as its
-/// corner, beside how many in a hundred send it: one line at a corner,
-/// every reply alike in the middle, one turned off kept in the list and
-/// marked so. Each number turns its reply off or on, as a click on its
-/// corner does. While a mouse is over the shape, the list shows the mix
-/// it would set, marked as not set yet. What it does is in its ⓘ.
+/// at each corner and the knob that sets how often each comes, a line
+/// saying what a click would do, and the replies you will hear most, whole,
+/// beside how many in a hundred send each. While a mouse is over the
+/// shape, they are the ones of the mix it would set, marked as not set
+/// yet. What it does is in its ⓘ.
 #[component]
 fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Element {
     let mut open = use_signal(|| false);
@@ -563,7 +779,7 @@ fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Eleme
     let reading = styles.reading();
     let count = styles.replies.len();
     // The mix the mouse would set, while it is over the shape somewhere
-    // else than the dot and its corners.
+    // else than the knob and its corners.
     let preview = match hover() {
         Some(Pointing::At(point)) if point != styles.at => Some(point),
         _ => None,
@@ -572,19 +788,21 @@ fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Eleme
         Some(point) => styles.at_point(point),
         None => styles.replies.clone(),
     };
+    let mut most: Vec<(String, u32)> = rows.into_iter().filter(|(_, pct)| *pct > 0).collect();
+    most.sort_by_key(|(_, pct)| std::cmp::Reverse(*pct));
+    most.truncate(HEARD_MOST);
+    let lead = |corner: usize| styles.leads.get(corner).cloned().unwrap_or_default();
     let line = match hover() {
         Some(Pointing::Corner(corner)) if styles.off.contains(&corner) => {
-            format!("Click to turn reply {} on again", corner + 1)
+            format!("Click to turn {} back on", lead(corner))
         }
-        Some(Pointing::Corner(corner)) if styles.off.len() + 1 >= count => {
-            format!("Reply {} is the last one on", corner + 1)
+        Some(Pointing::Corner(_)) if styles.off.len() + 1 >= count => {
+            "This is the last reply on".to_string()
         }
-        Some(Pointing::Corner(corner)) => format!("Click to turn reply {} off", corner + 1),
+        Some(Pointing::Corner(corner)) => format!("Click to turn this {} off", lead(corner)),
         _ if preview.is_some() => "Click to set this mix".to_string(),
-        _ => {
-            "Drag the dot toward the replies you want more of; click a corner to turn its reply off"
-                .to_string()
-        }
+        _ => "Drag the knob toward the replies you want more of; tap a corner to turn it off"
+            .to_string(),
     };
     rsx! {
         div { class: "card-title-row",
@@ -614,78 +832,21 @@ fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Eleme
         }
         if open() {
             div { id: "hunter-styles", class: "stack-sm",
-                StyleShape {
-                    settings,
-                    at: styles.at,
-                    off: styles.off.clone(),
-                    shares: styles.shares.clone(),
-                    hover,
-                }
+                StyleShape { settings, styles: styles.clone(), hover }
                 p { class: "muted hint style-preview-line", "{line}" }
+                div { class: "eyebrow", "You'll hear most" }
                 ol {
                     class: if preview.is_some() { "qso style-replies preview" } else { "qso style-replies" },
-                    aria_label: "The replies hunters send, and how often",
-                    for (number , (reply , pct)) in rows.iter().enumerate() {
-                        if styles.off.contains(&number) || *pct > 0 {
-                            ReplyRow {
-                                settings,
-                                number,
-                                count,
-                                reply: reply.clone(),
-                                pct: *pct,
-                                off: styles.off.clone(),
+                    aria_label: "The replies you'll hear most, and how often",
+                    for (reply , pct) in most {
+                        li { class: "qso-line they",
+                            span { class: "qso-who tiny", "{pct}%" }
+                            span { class: "qso-sends",
+                                span { class: "call", "{reply}" }
                             }
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-/// One reply in the list: its number, a button that turns it off or on
-/// again as a click on its corner does, how many in a hundred send it, or
-/// that it is off, and the reply whole.
-#[component]
-fn ReplyRow(
-    settings: Signal<TrainingSettings>,
-    number: usize,
-    count: usize,
-    reply: String,
-    pct: u32,
-    off: Vec<usize>,
-) -> Element {
-    let is_off = off.contains(&number);
-    let shown = number + 1;
-    let label = if is_off {
-        format!("Turn reply {shown} on again")
-    } else {
-        format!("Turn reply {shown} off")
-    };
-    rsx! {
-        li { class: if is_off { "qso-line they style-reply off" } else { "qso-line they style-reply" },
-            span { class: "qso-who tiny",
-                button {
-                    id: control_id("reply", &shown.to_string()),
-                    // Its corner's colour, round its number.
-                    class: if is_off { "style-number off".to_string() } else { format!("style-number {}", mix_colour(number)) },
-                    r#type: "button",
-                    title: "{label}",
-                    aria_label: "{label}",
-                    aria_pressed: if is_off { "false" } else { "true" },
-                    onclick: move |_| {
-                        settings.write().contest.hunter_styles_off = toggle_corner(&off, number, count);
-                    },
-                    "{shown}"
-                }
-                if is_off {
-                    "off"
-                } else {
-                    "{pct}%"
-                }
-            }
-            span { class: "qso-sends",
-                span { class: "call", "{reply}" }
             }
         }
     }
@@ -1342,7 +1503,10 @@ fn WordCount(
 
 #[cfg(test)]
 mod tests {
-    use super::{SHAPE_PX, SHAPE_REACH, StylesCard, corner_under, glow, in_percent, shape_point};
+    use super::{
+        LABEL_LETTER, PILL_W, SHAPE_PX, SHAPE_TOP, ShapeView, StylesCard, corner_under, in_percent,
+        shade, tint,
+    };
     use cw_core::{STYLE_EVEN, STYLE_ON_AIR, shape_corners};
 
     /// Shares read as whole percents that add up to 100, the rest going to
@@ -1417,43 +1581,84 @@ mod tests {
         );
     }
 
-    /// A reply's glow grows with the square root of its share, all the way
-    /// for the largest, and a reply no hunter sends has none.
+    /// The face is shaded toward a reply's corner as strongly as its share,
+    /// fading toward the middle, and a pill's wash follows its share; a
+    /// reply no hunter sends has no shade.
     #[test]
-    fn a_glow_follows_its_share() {
-        let (largest, full) = glow(0.5, 0.5).expect("a glow");
-        assert!((largest - 1.3).abs() < 1e-9 && (full - 1.0).abs() < 1e-9);
-        let (quarter, strength) = glow(0.125, 0.5).expect("a glow");
-        assert!((quarter - (0.35 + 0.95 * 0.5)).abs() < 1e-9);
-        assert!((strength - (0.25 + 0.75 * 0.5)).abs() < 1e-9);
-        assert_eq!(glow(0.0, 0.5), None);
-        assert_eq!(glow(0.2, 0.0), None);
+    fn the_shade_follows_its_share() {
+        let (corner, middle) = shade(0.5, 0.5).expect("a shade");
+        assert!((corner - 0.7).abs() < 1e-9 && (middle - 0.105).abs() < 1e-9);
+        let (half, _) = shade(0.25, 0.5).expect("a shade");
+        assert!((half - 0.39).abs() < 1e-9);
+        assert_eq!(shade(0.0, 0.5), None);
+        assert_eq!(shade(0.2, 0.0), None);
+        assert!(tint(0.5, 0.5) > tint(0.1, 0.5));
+        assert_eq!(tint(0.1, 0.0), 0.0);
     }
 
-    /// A corner's mark is where a click turns its reply: on it, or near
-    /// enough; not the middle, nor between two corners.
-    #[test]
-    fn a_corner_is_under_the_pointer_on_its_mark() {
-        let at = |unit: [f64; 2]| {
-            let px = |value: f64| (value + SHAPE_REACH) / (2.0 * SHAPE_REACH) * SHAPE_PX;
-            corner_under(8, px(unit[0]), px(unit[1]))
-        };
-        assert_eq!(at([0.0, -1.0]), Some(0));
-        assert_eq!(at([0.1, -0.95]), Some(0));
-        assert_eq!(at([1.0, 0.0]), Some(2));
-        assert_eq!(at([0.0, 0.0]), None);
-        assert_eq!(at([0.0, -0.6]), None);
+    fn pota_card(my_call: &str) -> StylesCard {
+        let styles = cw_core::ContestKind::Pota
+            .rules()
+            .caller_styles(cw_core::Side::Dx, my_call, STYLE_ON_AIR, &[])
+            .expect("POTA's hunters vary");
+        StylesCard::of(styles, STYLE_ON_AIR, &[])
     }
 
-    /// The pointer's place on the drawing is the shape's point under it:
-    /// the drawing's middle is the shape's, and its top edge past the top
-    /// corner, which a point beyond is brought back to.
+    /// A corner's pill, or the words beside it, is where a click turns its
+    /// reply: on it, or near enough; not the middle, nor the face between
+    /// two corners, nor past the words.
     #[test]
-    fn the_pointer_places_the_dot_under_it() {
-        assert_eq!(shape_point(8, SHAPE_PX / 2.0, SHAPE_PX / 2.0), [0.0, 0.0]);
-        assert_eq!(shape_point(8, SHAPE_PX / 2.0, 0.0), [0.0, -1.0]);
-        let right = shape_point(8, SHAPE_PX, SHAPE_PX / 2.0);
-        assert_eq!(right, [1.0, 0.0], "an octagon has a corner there");
-        assert_eq!(shape_point(8, SHAPE_PX * 0.75, SHAPE_PX / 2.0), [0.65, 0.0]);
+    fn a_corner_is_under_the_pointer_on_its_pill_or_words() {
+        let card = pota_card("SA0KAM");
+        let corners = shape_corners(8);
+        let under = |at: [f64; 2]| corner_under(&card.leads, at);
+        for (number, corner) in corners.iter().enumerate() {
+            assert_eq!(under(*corner), Some(number), "{number}");
+        }
+        // Its words go outward: right of a right corner, left of a left one.
+        let [x, y] = corners[0];
+        assert_eq!(under([x + PILL_W / 2.0 + 0.3, y]), Some(0));
+        assert_eq!(under([x + PILL_W / 2.0 + 0.95, y]), None, "past the words");
+        let [x, y] = corners[7];
+        assert_eq!(under([x - PILL_W / 2.0 - 0.3, y]), Some(7));
+        assert_eq!(under([x + 0.3, y + 0.2]), None, "into the face");
+        assert_eq!(under([0.0, 0.0]), None);
+        assert_eq!(under([0.0, -0.6]), None);
+    }
+
+    /// The drawing is as wide as the words beside its corners reach, so a
+    /// long call widens it; the pointer's place on it is the shape's point
+    /// under it, brought inside the shape.
+    #[test]
+    fn the_pointer_places_the_knob_under_it() {
+        let card = pota_card("SA0KAM");
+        let view = ShapeView::of(&card.leads, &card.exchanges);
+        let longer = pota_card("VE3/SA0KAM/P");
+        let wider = ShapeView::of(&longer.leads, &longer.exchanges);
+        assert!(wider.half > view.half + 0.3, "{view:?} {wider:?}");
+        // Every pill's words fit inside it.
+        let corners = shape_corners(8);
+        for (corner, lead) in corners.iter().zip(&card.leads) {
+            let reach = corner[0].abs() + PILL_W / 2.0 + lead.len() as f64 * LABEL_LETTER;
+            assert!(reach < view.half, "{lead}");
+        }
+        assert!((view.height_px() / SHAPE_PX - view.height() / view.width()).abs() < 1e-12);
+        // The drawing's middle across, at the shape's height of nought.
+        let down = -SHAPE_TOP / view.width() * SHAPE_PX;
+        assert_eq!(view.point(8, SHAPE_PX / 2.0, down), [0.0, 0.0]);
+        assert_eq!(view.unit(0.0, 0.0), [-view.half, SHAPE_TOP]);
+        // Far right, to the shape's right edge; far up, its top edge.
+        let right = view.point(8, SHAPE_PX, down);
+        assert_eq!(right, [0.92, 0.0], "an edge stands there");
+        let top = view.point(8, SHAPE_PX / 2.0, 0.0);
+        assert_eq!(top, [0.0, -0.92]);
+        // Near a corner, or past it, onto it exactly: that reply alone.
+        let corner = shape_corners(8)[1];
+        let (x, y) = view.px([corner[0] - 0.03, corner[1] + 0.02]);
+        assert_eq!(view.point(8, x, y), corner);
+        let (x, y) = view.px([corner[0] * 1.3, corner[1] * 1.3]);
+        assert_eq!(view.point(8, x, y), corner);
+        let (x, y) = view.px([0.1, 0.2]);
+        assert_eq!(view.point(8, x, y), [0.1, 0.2]);
     }
 }
