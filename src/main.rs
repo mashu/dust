@@ -52,14 +52,43 @@ use crate::app::App;
 #[cfg(not(feature = "web"))]
 pub(crate) const KEEP_RUNNING_JS: &str = include_str!("keep_running.js");
 
+/// The paper the app is drawn on, as a webview paints it before the page
+/// has loaded: the light theme's page colour, so a window or a phone's
+/// screen never shows white, or black, before the app's own colours.
+#[cfg(any(feature = "desktop", all(target_os = "android", not(feature = "web"))))]
+const PAPER: (u8, u8, u8, u8) = (243, 234, 217, 255);
+
+/// The app's stylesheet, inlined in a webview's head. The webview reads the
+/// head before it paints anything, so the first frame, and every one after
+/// it, is drawn styled however long the app takes to start; put in from the
+/// app once it has mounted, as the phones used to have it, the sheet came
+/// after the screen it styles, which drew raw for a moment.
+#[cfg(not(feature = "web"))]
+fn stylesheet_head() -> String {
+    format!("<style>{}</style>", crate::app::STYLESHEET)
+}
+
+/// The type faces' sheet, linked from a webview's head, so the faces are
+/// asked for as the page loads rather than once the app has mounted: they
+/// are `display=optional`, used only if they arrive in time for the first
+/// text. It must not hold up the first paint, which a phone with no network
+/// would wait on, so it loads as print media and switches itself on once it
+/// has arrived; until then, and offline, the system's faces stand in.
+#[cfg(not(feature = "web"))]
+fn font_head() -> String {
+    format!(
+        r#"<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="{}" media="print" onload="this.media='all'">"#,
+        crate::app::FONT_CSS_URL
+    )
+}
+
 #[cfg(feature = "desktop")]
 fn themed_document_head() -> String {
     let mut head = String::from("<script>");
     head.push_str(KEEP_RUNNING_JS);
     head.push_str(menus::FIELD_MENU_JS);
-    head.push_str("</script><style>");
-    head.push_str(crate::app::STYLESHEET);
-    head.push_str("</style>");
+    head.push_str("</script>");
+    head.push_str(&stylesheet_head());
     // WebKitGTK composites a fixed root background as a window-sized layer of
     // its own on every frame, and with compositing off it repaints the whole
     // window on every scroll step. Letting the paper scroll with the document
@@ -72,20 +101,26 @@ fn themed_document_head() -> String {
     head.push_str(
         "<style>html { background-attachment: scroll; background-repeat: no-repeat; }</style>",
     );
-    // The font sheet must not hold up the first paint: it loads as print
-    // media and switches itself on once it has arrived.
-    head.push_str(&format!(
-        r#"<link rel="stylesheet" href="{}" media="print" onload="this.media='all'">"#,
-        crate::app::FONT_CSS_URL
-    ));
+    head.push_str(&font_head());
     head
 }
 
-/// The phone's page head: only what keeps the app running out of sight.
-/// The stylesheet and the fonts go in from the app itself (`AppHead`).
+/// The phone's page head: what keeps the app running out of sight, the
+/// viewport the app is laid out in, its stylesheet and its fonts, all there
+/// before the first paint. The viewport is the app's own, edge to edge
+/// (`viewport-fit=cover`), from the start: given only once the app had
+/// mounted, an iPhone laid the first frames out inside the safe area and
+/// then moved everything under the notch.
 #[cfg(not(any(feature = "desktop", feature = "web")))]
 fn mobile_document_head() -> String {
-    format!("<script>{KEEP_RUNNING_JS}</script>")
+    let mut head = format!("<script>{KEEP_RUNNING_JS}</script>");
+    head.push_str(&format!(
+        r#"<meta name="viewport" content="{}">"#,
+        crate::app::VIEWPORT
+    ));
+    head.push_str(&stylesheet_head());
+    head.push_str(&font_head());
+    head
 }
 
 #[cfg(all(test, not(any(feature = "desktop", feature = "web"))))]
@@ -97,10 +132,28 @@ mod mobile_tests {
     #[test]
     fn the_mobile_head_does_not_wait_on_frames_a_hidden_page_never_gets() {
         let head = super::mobile_document_head();
-        assert!(head.starts_with("<script>"));
-        assert!(head.ends_with("</script>"));
-        assert!(head.contains("window.requestAnimationFrame ="));
-        assert!(head.contains("document.hidden"));
+        let script = &head[..head.find("</script>").expect("a script first")];
+        assert!(script.starts_with("<script>"));
+        assert!(script.contains("window.requestAnimationFrame ="));
+        assert!(script.contains("document.hidden"));
+    }
+
+    /// A phone draws its first frame styled: the stylesheet is in the
+    /// page's head, whole, before the app mounts, and the font sheet with
+    /// it, which never holds up that frame. The viewport is the app's from
+    /// the start.
+    #[test]
+    fn the_mobile_head_carries_the_stylesheet_the_fonts_and_the_viewport() {
+        let head = super::mobile_document_head();
+        let sheet = format!("<style>{}</style>", crate::app::STYLESHEET);
+        assert!(head.contains(&sheet), "the app stylesheet is inlined whole");
+        assert!(head.contains(crate::app::FONT_CSS_URL));
+        assert!(head.contains("media=\"print\""), "the fonts never block");
+        assert!(head.contains(&format!(
+            r#"<meta name="viewport" content="{}">"#,
+            crate::app::VIEWPORT
+        )));
+        assert!(crate::app::VIEWPORT.contains("viewport-fit=cover"));
     }
 }
 
@@ -110,9 +163,9 @@ mod tests {
     fn the_desktop_head_carries_the_stylesheet_and_the_fonts() {
         let head = super::themed_document_head();
         assert!(head.starts_with("<script>"));
-        assert!(head.contains("<style>"));
-        assert!(head.contains(".app-root"), "the app stylesheet is inlined");
-        assert!(head.contains("fonts.googleapis.com"));
+        let sheet = format!("<style>{}</style>", crate::app::STYLESHEET);
+        assert!(head.contains(&sheet), "the app stylesheet is inlined whole");
+        assert!(head.contains(crate::app::FONT_CSS_URL));
         // The font sheet must not block the first paint.
         assert!(head.contains("media=\"print\""));
     }
@@ -182,7 +235,7 @@ fn launch_desktop() {
                 .with_disable_dma_buf_on_wayland(false)
                 // The Mac's, with Edit; none elsewhere (src/menus.rs).
                 .with_menu(menus::menu_bar())
-                .with_background_color((243, 234, 217, 255))
+                .with_background_color(PAPER)
                 .with_custom_head(themed_document_head())
                 .with_window(
                     WindowBuilder::new()
@@ -199,9 +252,14 @@ fn launch_desktop() {
 /// owns.
 #[cfg(not(any(feature = "desktop", feature = "web")))]
 fn launch_mobile() {
-    dioxus::LaunchBuilder::mobile()
-        .with_cfg(dioxus::mobile::Config::new().with_custom_head(mobile_document_head()))
-        .launch(App);
+    let config = dioxus::mobile::Config::new().with_custom_head(mobile_document_head());
+    // Android's webview is white until the page has loaded; it is paper, as
+    // the desktop window is. iOS keeps its own: wry turns the webview
+    // translucent there to colour it, a change to how every frame is drawn
+    // that no phone has tried.
+    #[cfg(target_os = "android")]
+    let config = config.with_background_color(PAPER);
+    dioxus::LaunchBuilder::mobile().with_cfg(config).launch(App);
 }
 
 /// How often Android's event loop is woken whatever else wakes it: well

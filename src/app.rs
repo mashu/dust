@@ -21,17 +21,27 @@ use crate::ui::paddle::use_paddle_keys;
 use crate::ui::tour::{TourButton, TourDock};
 use crate::ui::widgets::{Icon, IconName, control_id, keep_focus};
 
-// Desktop inlines this in the window head. Web loads it through `asset!` so
-// `dx bundle` copies the file; compiling the sheet into wasm would ship it
-// twice. Mobile has neither, so it injects this string from AppHead.
+// Every build has the stylesheet before its first paint, so no frame is ever
+// drawn unstyled. Desktop and the phones inline this in the webview's head
+// (src/main.rs). Web loads it through `asset!` so `dx bundle` copies the
+// file and links it from the head of index.html; compiling the sheet into
+// wasm would ship it twice.
 #[cfg(not(feature = "web"))]
 pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
+
+/// The viewport the app is laid out in: the device's width, edge to edge
+/// under a notch or a rounded corner, which the app's own padding keeps
+/// clear of. A phone has it in the page's head from the start (src/main.rs).
+pub(crate) const VIEWPORT: &str = "width=device-width, initial-scale=1, viewport-fit=cover";
 
 /// How long the settings have to sit still on their screen before they are
 /// stored: a slider being dragged changes them every frame.
 pub(crate) const SETTINGS_SAVE_DELAY_MS: u32 = 250;
 
-/// The type faces, from Google Fonts. Every build links the same sheet.
+/// The type faces, from Google Fonts. Every build links the same sheet from
+/// its page's head, before the app mounts: desktop and the phones from the
+/// webview's (src/main.rs), the web from index.html's, as a test checks.
+#[cfg(any(test, not(feature = "web")))]
 pub(crate) const FONT_CSS_URL: &str = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional";
 
 // The web stylesheet, written into the page's `<head>` by `dx bundle`.
@@ -50,48 +60,18 @@ const _: Asset = asset!(
     AssetOptions::css().with_static_head(true)
 );
 
-fn injected_stylesheet() -> Element {
-    // Desktop has the sheet inlined in its window head, and the web in the
-    // page head; only mobile needs it put in from here.
-    #[cfg(any(feature = "desktop", feature = "web"))]
-    {
-        rsx! {}
-    }
-    #[cfg(not(any(feature = "desktop", feature = "web")))]
-    {
-        rsx! {
-            document::Style { { STYLESHEET } }
-        }
-    }
-}
-
-fn font_link() -> Element {
-    #[cfg(feature = "desktop")]
-    {
-        rsx! {}
-    }
-    #[cfg(not(feature = "desktop"))]
-    {
-        rsx! {
-            document::Link { rel: "stylesheet", href: FONT_CSS_URL }
-        }
-    }
-}
-
 /// Head tags are injected once, on mount. They live in their own component so
 /// that App re-renders do not re-run them — `dioxus-document` warns on every
 /// prop update of a head element ("Changing the props of `Style {}` is not
-/// supported"), and a component with no props is memoized.
+/// supported"), and a component with no props is memoized. Nothing a frame
+/// needs to be drawn as it should is put in from here, which comes only
+/// once the app has drawn: the stylesheet, the fonts and a phone's viewport
+/// are in the page's head before then.
 #[component]
 fn AppHead() -> Element {
     rsx! {
         document::Title { "Dust" }
-        {injected_stylesheet()}
-        {font_link()}
-        document::Meta {
-            name: "viewport",
-            content: "width=device-width, initial-scale=1, viewport-fit=cover",
-        }
+        document::Meta { name: "viewport", content: VIEWPORT }
         document::Meta { name: "theme-color", content: "#1b2436" }
         document::Meta { name: "mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
@@ -406,7 +386,22 @@ fn toggle_fullscreen() {
 
 #[cfg(test)]
 mod tests {
-    use super::FONT_CSS_URL;
+    use super::{FONT_CSS_URL, VIEWPORT};
+
+    /// The web page links the same font sheet as every other build, from
+    /// its head, before the app mounts, and never holds up its first paint
+    /// for it; and it lays out in the app's viewport from the start.
+    #[test]
+    fn the_web_page_links_the_fonts_from_its_head() {
+        let page = include_str!("../index.html");
+        let head = &page[..page.find("</head>").expect("a head")];
+        let href = FONT_CSS_URL.replace('&', "&amp;");
+        let link = format!(
+            r#"<link rel="stylesheet" href="{href}" media="print" onload="this.media='all'" />"#
+        );
+        assert!(head.contains(&link), "{head}");
+        assert!(head.contains(&format!(r#"<meta name="viewport" content="{VIEWPORT}" />"#)));
+    }
 
     /// Each face the font sheet asks for gives a value for every axis its
     /// family names (`opsz,wght@9..144,600`): Google Fonts refuses the whole
