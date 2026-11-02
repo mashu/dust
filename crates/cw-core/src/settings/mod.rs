@@ -1085,7 +1085,7 @@ mod tests {
         s.contest.contest_minutes = 9_000;
         s.contest.contest_show_copy = true;
         s.contest.contest_tu_call = crate::contest::TuCall::Never;
-        s.contest.hunter_variety = 9_000;
+        s.contest.hunter_style = [9_000.0, 0.0];
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 9_000;
         s.contest.my_sending_db = 9_000;
@@ -1203,7 +1203,8 @@ mod tests {
             crate::callsign::CALLSIGN_TIER_MAX
         );
         assert_eq!(s.contest.contest_minutes, CONTEST_MINUTES_MAX);
-        assert_eq!(s.contest.hunter_variety, crate::contest::VARIETY_MAX);
+        // Far right: to the shape's right edge.
+        assert!(s.contest.hunter_style[0] <= 1.0 && s.contest.hunter_style[0] > 0.8);
         assert_eq!(s.contest.my_call, "DL1/ABC/QRP");
         assert_eq!(s.contest.my_name, "JEANLUCMAX");
         assert_eq!(s.contest.my_state, "QC");
@@ -1839,7 +1840,7 @@ mod tests {
         assert_eq!(contest.contest.contest_kind, d.contest_kind);
         assert_eq!(contest.contest.contest_style, d.contest_style);
         assert_eq!(contest.contest.contest_tu_call, d.contest_tu_call);
-        assert_eq!(contest.contest.hunter_variety, d.hunter_variety);
+        assert_eq!(contest.contest.hunter_style, d.hunter_style);
     }
 
     /// Undo after a reset puts that card back as it was, and only that one:
@@ -2048,7 +2049,7 @@ mod tests {
         s.contest.contest_minutes = 25;
         s.contest.contest_show_copy = true;
         s.contest.contest_tu_call = crate::contest::TuCall::Third;
-        s.contest.hunter_variety = 80;
+        s.contest.hunter_style = [-0.5, 0.3];
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 34;
         s.contest.my_sending_db = -21;
@@ -2176,7 +2177,7 @@ mod tests {
                 "{section:?}"
             );
             assert_eq!(
-                s.contest.hunter_variety == crate::contest::VARIETY_ON_AIR,
+                s.contest.hunter_style == crate::contest::STYLE_ON_AIR,
                 section == SettingsSection::CharacterSet,
                 "{section:?}"
             );

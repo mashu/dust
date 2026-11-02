@@ -1499,6 +1499,33 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
 .qso-sends { display: flex; flex-wrap: wrap; gap: 0.3rem; min-width: 0; }
 /* Each QSO heard set apart from the one before. */
 .qso-line.qso-next { border-top: 1px dashed var(--line-strong); padding-top: 0.45rem; margin-top: 0.15rem; }
+/* POTA's hunter styles: a reply at each corner of a five-cornered shape,
+   numbered as the list under it, and a dot dragged inside it. The drawing
+   is a fixed size, so the pointer's place on it reads in its own units;
+   nothing drawn in it takes the pointer, so the place is always the
+   drawing's, and a finger on it moves the dot rather than the page. */
+.style-shape { display: block; width: 240px; height: 240px; margin: 0 auto; touch-action: none; cursor: crosshair; }
+.style-shape * { pointer-events: none; }
+.style-shape:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; border-radius: 12px; }
+.style-edge { fill: var(--surface-sunken); stroke: var(--line-strong); stroke-width: 0.02px; stroke-linejoin: round; }
+.style-spoke { stroke: var(--line-strong); stroke-width: 0.012px; stroke-dasharray: 0.04px 0.04px; }
+.style-mix { fill: var(--copper-soft); stroke: var(--copper); stroke-width: 0.02px; stroke-linejoin: round; }
+.style-corner { fill: var(--surface); stroke: var(--copper); stroke-width: 0.02px; }
+.style-corner.faint { stroke: var(--line-strong); }
+.style-corner-number { fill: var(--ink); font-size: 0.13px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+.style-dot { fill: var(--copper); stroke: var(--surface); stroke-width: 0.03px; }
+/* Each reply under it, numbered as its corner, with how many send it. */
+.style-reply .qso-who { display: inline-flex; align-items: center; gap: 0.3rem; width: 3.8rem; }
+.style-number {
+  display: inline-grid;
+  place-items: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 50%;
+  border: 1px solid var(--copper);
+  color: var(--ink);
+  font-weight: 700;
+}
 /* The eyebrow over a QSO, with Hear a QSO or Stop beside it. */
 .qso-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.75rem; }
 /* QSOs heard scroll in a box of their own, kept on the newest line: a

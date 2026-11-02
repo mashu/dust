@@ -14,7 +14,7 @@ use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
 use crate::contest::{
-    CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall, VARIETY_ON_AIR,
+    CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, STYLE_ON_AIR, Side, TuCall,
 };
 
 /// The longest run, in minutes, and where a run left open ends.
@@ -120,13 +120,14 @@ pub struct ContestSettings {
     /// not sign by its own rules: every QSO, every third, or never. Set on
     /// the contest card, with the run style.
     pub contest_tu_call: TuCall,
-    /// How much POTA hunters' styles vary, from 0 to
-    /// [`crate::contest::VARIETY_MAX`]: none, every hunter as on the cheat
-    /// sheet; [`VARIETY_ON_AIR`], as heard on the air; the most, every style
-    /// alike. Set on the contest card, where the contest lets you
+    /// Where the dot stands in the shape that sets how often POTA hunters
+    /// send each of their replies, one at each corner: the middle has them
+    /// all alike, a corner that one alone ([`crate::contest::corner_shares`]).
+    /// [`STYLE_ON_AIR`] until moved, as heard on the air. Set on the contest
+    /// card, where the contest lets you
     /// ([`crate::contest::ContestRules::varies`]).
-    #[serde(deserialize_with = "forgiving_variety")]
-    pub hunter_variety: u32,
+    #[serde(deserialize_with = "forgiving_style")]
+    pub hunter_style: [f64; 2],
     /// Each new caller's speed drawn from your copy speed in contests, within
     /// the Speed card's ranges: faster as you copy calls and numbers clean,
     /// slower as you miss them. Off, it is drawn evenly from the ranges. A
@@ -190,7 +191,7 @@ impl Default for ContestSettings {
             contest_minutes: 10,
             contest_show_copy: false,
             contest_tu_call: TuCall::Every,
-            hunter_variety: VARIETY_ON_AIR,
+            hunter_style: STYLE_ON_AIR,
             contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
@@ -243,11 +244,21 @@ fn forgiving_number<'de, D: serde::Deserializer<'de>, T>(
         .map_or(fallback, |number| whole(number.round())))
 }
 
-/// The hunters' variety as saved: anything but a number reads as on the
-/// air; a number past the most is clamped to it with the rest.
-fn forgiving_variety<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
-    // A float cast to an integer saturates at its ends.
-    forgiving_number(deserializer, |variety| variety as u32, VARIETY_ON_AIR)
+/// Where the hunters' dot stands, as saved: two numbers, across and down;
+/// anything else reads as where it stands until moved. A point outside the
+/// shape is brought into it with the rest of the clamp.
+fn forgiving_style<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[f64; 2], D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let read = || -> Option<[f64; 2]> {
+        let [x, y] = value.as_array()?.as_slice() else {
+            return None;
+        };
+        let (x, y) = (x.as_f64()?, y.as_f64()?);
+        (x.is_finite() && y.is_finite()).then_some([x, y])
+    };
+    Ok(read().unwrap_or(STYLE_ON_AIR))
 }
 
 /// Your speed as saved: a speed of your own, or 0 for the middle of the
@@ -1305,22 +1316,24 @@ mod tests {
         assert_eq!((wild.my_wpm, wild.my_sending_db), (0, i32::MAX));
         let rounded = read(serde_json::json!({ "myWpm": 29.6, "mySendingDb": -8.6 }));
         assert_eq!((rounded.my_wpm, rounded.my_sending_db), (30, -9));
-        // The hunters' variety: as on the air until set, and anything but
-        // a number read as that; a number kept, clamped with the rest.
-        assert_eq!(missing.hunter_variety, VARIETY_ON_AIR);
-        let varied = read(serde_json::json!({ "hunterVariety": 70 }));
-        assert_eq!(varied.hunter_variety, 70);
-        for odd in [serde_json::json!("lots"), serde_json::Value::Null] {
-            let read = read(serde_json::json!({ "hunterVariety": odd }));
-            assert_eq!(read.hunter_variety, VARIETY_ON_AIR, "{odd}");
+        // The hunters' dot: where it stands until moved, and anything but
+        // two numbers read as that; a point kept, brought into the shape
+        // with the rest of the clamp.
+        assert_eq!(missing.hunter_style, STYLE_ON_AIR);
+        let moved = read(serde_json::json!({ "hunterStyle": [-0.2, 0.3] }));
+        assert_eq!(moved.hunter_style, [-0.2, 0.3]);
+        for odd in [
+            serde_json::json!("lots"),
+            serde_json::Value::Null,
+            serde_json::json!([1.0]),
+            serde_json::json!([1.0, "x"]),
+        ] {
+            let read = read(serde_json::json!({ "hunterStyle": odd }));
+            assert_eq!(read.hunter_style, STYLE_ON_AIR, "{odd}");
         }
-        assert_eq!(
-            read(serde_json::json!({ "hunterVariety": -3 })).hunter_variety,
-            0
-        );
         let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
         assert_eq!(json["contestTuCall"], "every");
-        assert_eq!(json["hunterVariety"], 50);
+        assert_eq!(json["hunterStyle"], serde_json::json!([0.15, -0.4]));
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -3);
     }

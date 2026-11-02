@@ -441,15 +441,15 @@ pub fn character_set() -> Element {
 pub fn hunter_styles() -> Element {
     rsx! {
         p {
-            "How POTA hunters reply to your exchange. Each hunter keeps one reply for its QSO: how it starts, and whether it sends its report and state twice or once. The slider sets how much they vary; under it is each reply hunters send, with how many in a hundred send it."
+            "How POTA hunters reply to your exchange. There are five replies, one at each numbered corner, and each hunter keeps to one for its QSO. Drag the dot, tap where you want it, or move it with the arrow keys: the nearer it is to a corner, the more hunters send that reply. The list under it gives each reply in full and how many in a hundred send it."
         }
         dl { class: "help-terms",
             dt { "One reply" }
-            dd { "At the left every hunter sends the same reply, as in the QSO above: BK, your call and TU, then its report and state twice." }
+            dd { "The dot on corner 1: every hunter sends the reply in the QSO above, BK, your call and TU, then its report and state twice." }
             dt { "As on the air" }
-            dd { "In the middle, where it starts: most name you after BK; some start BK TU, R TU or TU alone; three in ten send each field once." }
-            dt { "More variety" }
-            dd { "Further right the rare replies come more often, until at the right end every reply comes as often as the others." }
+            dd { "Where the dot starts: most hunters send the first two replies, and every reply comes now and then." }
+            dt { "All alike" }
+            dd { "The dot in the middle: each reply comes as often as the others. Home puts it there." }
             dt { "DX hunters" }
             dd { "About one hunter in four is outside the US and Canada and sends its report alone, whatever its reply: log it without a state." }
         }

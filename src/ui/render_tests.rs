@@ -1041,16 +1041,15 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
     }
 }
 
-/// Settings in Contest mode for POTA as SA0KAM, hunters varying as
-/// `variety` has them.
-fn pota_settings_at(variety: u32) -> String {
+/// Settings in Contest mode for POTA as SA0KAM, the hunters' dot `at`.
+fn pota_settings_at(at: [f64; 2]) -> String {
     #[component]
-    fn PotaSettings(variety: u32) -> Element {
+    fn PotaSettings(at: [f64; 2]) -> Element {
         let settings = use_signal(|| {
             let mut settings = crate::testing::contest_settings();
             settings.contest.contest_kind = cw_core::ContestKind::Pota;
             settings.contest.my_call = "SA0KAM".to_string();
-            settings.contest.hunter_variety = variety;
+            settings.contest.hunter_style = at;
             settings
         });
         rsx! {
@@ -1066,28 +1065,28 @@ fn pota_settings_at(variety: u32) -> String {
             }
         }
     }
-    render_props(PotaSettings, PotaSettingsProps { variety })
+    render_props(PotaSettings, PotaSettingsProps { at })
 }
 
-/// POTA's card folds how hunters vary their reply under a line that says
-/// how it is set: one reply, the original, at the left; eight as on the air
-/// in the middle; eight alike at the right. Its ⓘ is beside it. No other
-/// contest has it.
+/// POTA's card folds how hunters reply under a line that says how it is
+/// set: one reply with the dot at a corner, five as on the air where it
+/// stands until moved, five alike in the middle. Its ⓘ is beside it. No
+/// other contest has it.
 #[test]
 fn pota_folds_its_hunter_styles_under_a_line_that_says_how_they_are_set() {
     for (variety, line) in [
-        (0, "Hunter styles: One reply<"),
+        (cw_core::shape_corners(5)[0], "Hunter styles: One reply<"),
         (
-            cw_core::VARIETY_ON_AIR,
-            "Hunter styles: 8 replies, as on the air",
+            cw_core::STYLE_ON_AIR,
+            "Hunter styles: 5 replies, as on the air",
         ),
-        (cw_core::VARIETY_MAX, "Hunter styles: 8 replies, all alike"),
+        (cw_core::STYLE_EVEN, "Hunter styles: 5 replies, all alike"),
     ] {
         let html = pota_settings_at(variety);
         assert!(html.contains(line), "no {line:?} in {html}");
         assert!(html.contains(r#"id="disclosure-hunter-styles""#), "{html}");
         assert!(html.contains(r#"id="help-hunter-styles""#), "{html}");
-        assert!(!html.contains("slider-variety"), "folded: {html}");
+        assert!(!html.contains("style-shape"), "folded: {html}");
     }
     let wpx = render(|| {
         let settings = use_signal(crate::testing::contest_settings);
@@ -4079,68 +4078,62 @@ mod interactions {
         }
     }
 
-    /// Hunter styles open from their line: a Variety slider from one reply
-    /// to more variety, and each reply hunters send, whole, beside its
-    /// share. At the left one line, the original; at the right eight alike;
-    /// the line they fold under follows. The ⓘ says what it does.
+    /// Hunter styles open from their line: the shape the dot is placed
+    /// in, a press each for one reply, as on the air and all alike, and
+    /// each reply whole, numbered as its corner, beside its share. The arrow
+    /// keys move the dot and Home brings it to the middle; the line it
+    /// folds under follows. The ⓘ says what it does.
     #[test]
-    fn pota_hunter_styles_open_and_follow_the_slider() {
-        let reply = |pct: u32, text: &str| {
+    fn pota_hunter_styles_open_and_follow_the_dot() {
+        let reply = |number: u32, pct: u32, text: &str| {
             format!(
-                r#"<span class="qso-who tiny">{pct}%</span><span class="qso-sends"><span class="call">{text}</span>"#
+                r#"<span class="style-number">{number}</span>{pct}%</span><span class="qso-sends"><span class="call">{text}</span>"#
             )
         };
         let rows = |ui: &Ui| {
             ui.html()
-                .matches(r#"%</span><span class="qso-sends">"#)
+                .matches(r#"<li class="qso-line they style-reply">"#)
                 .count()
         };
         let mut ui = Ui::new(PotaCharsetHarness, ());
         assert!(
-            ui.has("Hunter styles: 8 replies, as on the air"),
+            ui.has("Hunter styles: 5 replies, as on the air"),
             "{}",
             ui.html()
         );
-        assert!(!ui.has("slider-variety"));
+        assert!(!ui.has("style-shape"));
         ui.click("disclosure-hunter-styles");
         assert!(ui.input_tag("disclosure-hunter-styles").contains("open"));
-        assert!(ui.has(r#"id="slider-variety""#), "{}", ui.html());
-        assert!(ui.has("One reply") && ui.has("More variety"));
-        assert_eq!(rows(&ui), 8);
-        for (pct, text) in [
-            (32, "BK SA0KAM TU UR 579 579 OR OR BK"),
-            (21, "BK TU UR 579 579 OR OR BK"),
-            (3, "TU UR 579 OR BK"),
-        ] {
-            assert!(ui.has(&reply(pct, text)), "{pct} {text}: {}", ui.html());
-        }
-        // All the way left: one reply.
-        for _ in 0..10 {
-            ui.click("less-slider-variety");
-        }
-        assert!(ui.has("Hunter styles: One reply<"));
+        assert!(ui.has(r#"id="shape-hunter-styles""#), "{}", ui.html());
+        assert!(ui.input_tag("styles-as-on-the-air").contains("active"));
+        assert_eq!(rows(&ui), 5);
+        // One reply: the first corner's alone.
+        ui.click("styles-one-reply");
+        assert!(ui.has("Hunter styles: One reply<"), "{}", ui.html());
         assert_eq!(rows(&ui), 1);
-        assert!(ui.has(&reply(100, "BK SA0KAM TU UR 579 579 OR OR BK")));
-        // A little to the right: more replies come.
-        for _ in 0..5 {
-            ui.click("more-slider-variety");
+        assert!(ui.has(&reply(1, 100, "BK SA0KAM TU UR 579 579 OR OR BK")));
+        // All alike: five, a fifth each, in the corners' order.
+        ui.click("styles-all-alike");
+        assert!(ui.has("Hunter styles: 5 replies, all alike"));
+        assert_eq!(rows(&ui), 5);
+        assert!(ui.has(&reply(4, 20, "R TU UR 579 OR BK")), "{}", ui.html());
+        // The arrow keys move the dot, toward the top corner here, and
+        // Home brings it back to the middle.
+        for _ in 0..3 {
+            ui.press_key("shape-hunter-styles", Key::ArrowUp, Code::ArrowUp);
         }
-        assert!((2..8).contains(&rows(&ui)), "{}", rows(&ui));
-        // All the way right: every reply alike.
-        for _ in 0..15 {
-            ui.click("more-slider-variety");
-        }
-        assert!(ui.has("Hunter styles: 8 replies, all alike"));
-        assert_eq!(rows(&ui), 8);
-        assert!(ui.has(&reply(12, "TU UR 579 OR BK")), "{}", ui.html());
+        assert!(ui.has("Hunter styles: 5 replies<"), "{}", ui.html());
+        assert!(!ui.input_tag("styles-all-alike").contains("active"));
+        ui.press_key("shape-hunter-styles", Key::Home, Code::Home);
+        assert!(ui.has("Hunter styles: 5 replies, all alike"));
         // The ⓘ says what it does, and folds away again.
-        assert!(!ui.has("At the left every hunter sends the same reply"));
+        assert!(!ui.has("Drag the dot"));
         ui.click("help-hunter-styles");
-        assert!(ui.has("At the left every hunter sends the same reply"));
+        assert!(ui.has("Drag the dot"), "{}", ui.html());
         ui.click("help-hunter-styles");
-        assert!(!ui.has("At the left every hunter sends the same reply"));
+        assert!(!ui.has("Drag the dot"));
         ui.click("disclosure-hunter-styles");
-        assert!(!ui.has("slider-variety"));
+        assert!(!ui.has("style-shape"));
     }
 
     /// The band card on a 400-600 Hz side-tone range, which the 300 Hz

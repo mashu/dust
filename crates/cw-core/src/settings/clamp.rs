@@ -124,7 +124,9 @@ impl TrainingSettings {
         // break-in are switches, on or off, and need nothing either.
         let k = &mut self.contest;
         k.contest_minutes = k.contest_minutes.min(CONTEST_MINUTES_MAX);
-        k.hunter_variety = k.hunter_variety.min(crate::contest::VARIETY_MAX);
+        // The dot stays in the shape of POTA's five replies, the one shape
+        // that has it.
+        k.hunter_style = crate::contest::into_shape(5, k.hunter_style);
         // Zero is no speed of your own: the middle of the callers' range.
         if k.my_wpm != 0 {
             k.my_wpm = k.my_wpm.clamp(MY_WPM_MIN, MY_WPM_MAX);

@@ -551,29 +551,35 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   again, its exchange goes alone, `UR 579 579 OR OR BK` or `UR 579 OR BK`
   as it keeps to. One that has its call but not your exchange asks
   `AGN`, and F12 sends `AGN`: there is no serial.
-- **Hunter styles.** Each hunter keeps to a style of its own for its QSO:
-  the word it leads its first exchange with, `BK`, your call and `TU`
-  (45%), `BK TU` (30%), `R TU` (15%) or `TU` (10%), and whether it sends
-  each field twice, `UR 579 579 OR OR BK` (70%), or once, `UR 579 OR BK`
-  (30%), decided once and kept for repeats (`their_lead`, `their_short`).
-  The shares are a choice, so a run hears every style. "Hunter styles" on
-  the contest card sets how much they vary (`hunterVariety`, 0 to 100,
-  50 until set), folded away under a line that says how it is set, as
-  the Band card folds its receiver: "Hunter styles: One reply", "8
-  replies, as on the air", "8 replies, all alike", or how many come
-  between; it never says "original" or "cheat sheet", which a new user
-  has not seen. Open, a Variety slider from "One reply" on the left
-  to "More variety" on the right, and under it each reply hunters send,
-  whole, as sent to you, beside the share that do, in whole percents that
-  make a hundred, the commonest first; a reply none sends at the variety
-  set is left out, so one reply stands alone at the left, the QSO's, and
-  more come as the slider goes right. Its ⓘ says what it does. One rule
-  tempers both choices (`tempered`): each share is raised to the power
-  (1 − v) / v, v the variety as a fraction, and made to sum to one again,
-  so 0 sends every hunter as on the cheat sheet, 50 the shares above
-  exactly, 100 every reply alike, and between, their order holds. Only
-  POTA offers it (`ContestRules::varies`); every other contest's callers
-  lead as before, drawn exactly as before. The card's Reset puts it back
+- **Hunter styles.** Each hunter keeps to one of five whole replies for
+  its QSO (`their_replies`), each a corner of a five-cornered shape, in
+  order round it from the top: `BK`, your call and `TU` with its report and
+  state twice (the card's QSO); `BK TU` with each twice; `BK`, your call
+  and `TU` with each once; `R TU` with each once; `TU` with each once.
+  Where you put a dot in the shape sets how often each comes
+  (`hunterStyle`, two numbers, across and down from the middle, the
+  corners one from it): its Wachspress coordinates (`corner_shares`), so
+  the middle has all five alike, a corner that reply alone, and along an
+  edge only its two corners' replies, by how near each is. Until moved
+  the dot stands up and a little right of the middle (`STYLE_ON_AIR`), so
+  most hunters send the first two replies and each of the others comes
+  now and then, about 40, 29, 9, 7 and 15 in a hundred. A hunter decides
+  as it first sends its exchange and keeps to it for repeats.
+  "Hunter styles" on the contest card folds away under a line that says
+  how it is set, as the Band card folds its receiver: "Hunter styles: One
+  reply", "5 replies, as on the air", "5 replies, all alike", or "5
+  replies"; it never says "original" or "cheat sheet", which a new user
+  has not seen. Open, the shape: each corner numbered, its mark as large
+  as its reply's share, a shaded outline of the mix the dot makes, and the
+  dot, dragged or tapped (`touch-action: none`, so a finger moves it
+  rather than the page) or moved a tenth with the arrow keys, Home taking
+  it to the middle. Under it a press each for "One reply" (corner 1), "As
+  on the air" and "All alike", and each reply in full, numbered as its
+  corner, beside how many in a hundred send it, in whole percents that
+  make a hundred, a reply none sends left out, the rows in the corners'
+  order so none moves as the dot does. Its ⓘ says what it does. Only POTA
+  offers it (`ContestRules::varies`); every other contest's callers lead
+  as before, drawn exactly as before. The card's Reset puts the dot back
   with the contest.
 - **The state is optional** (`ContestRules::optional`). The report alone
   is a complete exchange, so Enter thanks a DX hunter and logs it, and a
@@ -4628,12 +4634,14 @@ Put right by the user the same day, from an example QSO they wrote out:
     names you after its `BK` (`BK SA0KAM TU UR 579 579 OR OR BK`); your TU
     never signs with your call; and you now and then sign off `73 44`.
     Alaska and Hawaii, in the US, send a state (§3, POTA).
-17. Hunters each keep a style of their own, from several real ones,
-    rather than one reply with a fixed exception; and a Variety slider on
-    the contest card sets how much they vary, from the cheat sheet's one
-    reply through the mix heard on the air to every style alike, folded
-    under a line that says how it is set, with each whole reply's share
-    shown beside it and what it does in its ⓘ (§3, POTA).
+17. Hunters each keep to one of five whole replies, rather than one reply
+    with a fixed exception; and a dot in a five-cornered shape on the
+    contest card, a reply at each corner, sets how often each comes, the
+    middle all alike and a corner that one alone, folded under a line that
+    says how it is set, with each reply's share beside it and what it does
+    in its ⓘ (§3, POTA). It began as a Variety slider from one reply to
+    every reply alike; the user asked for the shape instead, as easier to
+    relate to the replies it sets.
 
 ## 16. Risks
 

@@ -1,9 +1,9 @@
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill, GROUP_SIZE_MAX,
-    LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
-    SequenceChoice, SettingsSection, TrainingSettings, TuCall, VARIETY_MAX, VARIETY_ON_AIR,
-    WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window, greeting, parse_callsign,
-    tier_examples, unlocked_practice_count,
+    LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS,
+    STYLE_EVEN, STYLE_ON_AIR, Sender, SequenceChoice, SettingsSection, TrainingSettings, TuCall,
+    WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window, greeting, into_shape,
+    parse_callsign, shape_corners, tier_examples, unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
@@ -16,8 +16,8 @@ use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
 use crate::ui::paddle::use_typed_field;
 use crate::ui::widgets::{
-    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, SliderField, TextDraft,
-    TextField, control_id, range_label, whole,
+    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, TextDraft, TextField,
+    control_id, range_label, whole,
 };
 
 /// The largest file read as a word list. The longest list kept is a few
@@ -185,42 +185,52 @@ impl ContestCard {
                 .caller_styles(
                     side,
                     call_or_stand_in(&contest.my_call),
-                    contest.hunter_variety,
+                    contest.hunter_style,
                 )
-                .map(|styles| StylesCard::of(styles, contest.hunter_variety)),
+                .map(|styles| StylesCard::of(styles, contest.hunter_style)),
             preset,
         }
     }
 }
 
-/// How POTA hunters vary their reply, as the card shows it: the variety you
-/// set, and each reply that some hunters send, whole, beside the share that
-/// do, in whole percents, the commonest first. A reply none sends at this
-/// variety is left out, so the one reply of the cheat sheet stands alone
-/// at the left and more come as the slider goes right.
+/// How POTA hunters reply, as the card shows it: where you put the dot in
+/// the shape of their five replies, how many of the hundred send each, and
+/// each reply whole as sent to you, a corner each, in the corners' order.
 #[derive(Clone, PartialEq)]
 struct StylesCard {
-    variety: u32,
+    /// Where the dot stands, across and down from the middle.
+    at: [f64; 2],
+    /// The share of hunters that send each reply, exactly, for the shape.
+    shares: Vec<f64>,
+    /// Each reply, whole, and how many in a hundred send it, in whole
+    /// percents that make a hundred.
     replies: Vec<(String, u32)>,
 }
 
 impl StylesCard {
-    fn of(styles: cw_core::CallerStyles, variety: u32) -> Self {
-        let replies = in_percent(styles.replies)
-            .into_iter()
-            .filter(|(_, pct)| *pct > 0)
-            .collect();
-        Self { variety, replies }
+    fn of(styles: cw_core::CallerStyles, at: [f64; 2]) -> Self {
+        let shares = styles.replies.iter().map(|(_, share)| *share).collect();
+        Self {
+            at,
+            shares,
+            replies: in_percent(styles.replies),
+        }
     }
 
-    /// What the slider stands at, in a few words: how many replies come,
-    /// and where that is against one reply, the air and every reply alike. It heads the folded line, so the setting reads closed too.
+    /// How many replies come at all, a hundredth or more of them.
+    fn replies_heard(&self) -> usize {
+        self.replies.iter().filter(|(_, pct)| *pct > 0).count()
+    }
+
+    /// Where the dot stands, in a few words: how many replies come, and
+    /// whether that is as on the air or all alike. It heads the folded
+    /// line, so the setting reads closed too.
     fn reading(&self) -> String {
-        let count = self.replies.len();
-        match self.variety {
+        let count = self.replies_heard();
+        match self.at {
             _ if count <= 1 => "One reply".to_string(),
-            VARIETY_ON_AIR => format!("{count} replies, as on the air"),
-            VARIETY_MAX.. => format!("{count} replies, all alike"),
+            STYLE_ON_AIR => format!("{count} replies, as on the air"),
+            STYLE_EVEN => format!("{count} replies, all alike"),
             _ => format!("{count} replies"),
         }
     }
@@ -248,12 +258,152 @@ fn in_percent(shares: Vec<(String, f64)>) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// How much POTA hunters vary their reply, folded away under a line that
-/// says how it is set, as the Band card folds its receiver. Open, a slider
-/// from one reply, the cheat sheet's original, on the left to more variety
-/// on the right, and under it each reply some hunters send, whole, beside
-/// the share that do: one line at the left, more as the slider goes right.
-/// What it does is in its ⓘ.
+/// How wide and high the shape is drawn, in CSS pixels, as `.style-shape`
+/// has it: the pointer's place on it is read in these.
+const SHAPE_PX: f64 = 240.0;
+
+/// How far the drawing reaches from the middle either way, in the shape's
+/// own units, its corners being one from the middle: room for the corners'
+/// marks round it.
+const SHAPE_REACH: f64 = 1.3;
+
+/// How far an arrow key moves the dot, in the shape's units.
+const SHAPE_STEP: f64 = 0.1;
+
+/// The point of the shape under the pointer, `x` and `y` pixels across and
+/// down the drawing, brought inside it.
+fn shape_point(x: f64, y: f64) -> [f64; 2] {
+    let unit = |px: f64| px / SHAPE_PX * 2.0 * SHAPE_REACH - SHAPE_REACH;
+    tidy(into_shape(HUNTER_REPLIES, [unit(x), unit(y)]))
+}
+
+/// A point kept to hundredths, so a save holds it as it reads.
+fn tidy(at: [f64; 2]) -> [f64; 2] {
+    at.map(|value| (value * 100.0).round() / 100.0)
+}
+
+/// How many replies POTA's hunters keep to: the shape's corners.
+const HUNTER_REPLIES: usize = 5;
+
+/// Points of the drawing as SVG writes them: `x,y x,y …`.
+fn svg_points(points: impl Iterator<Item = [f64; 2]>) -> String {
+    points
+        .map(|[x, y]| format!("{x:.3},{y:.3}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The three places the dot is most often wanted, a press each: one reply
+/// (the first corner), as on the air, and all alike (the middle).
+fn style_presets() -> [(&'static str, [f64; 2]); 3] {
+    [
+        ("One reply", shape_corners(HUNTER_REPLIES)[0]),
+        ("As on the air", STYLE_ON_AIR),
+        ("All alike", STYLE_EVEN),
+    ]
+}
+
+/// Where the hunters' replies are set: a shape with a reply at each
+/// corner, numbered as the list under it numbers them, and a dot dragged,
+/// tapped or moved with the arrow keys inside it. In the middle every
+/// reply comes as often as the others; at a corner, that one alone; and
+/// the shaded shape inside shows the mix the dot makes, each corner's mark
+/// as large as its share.
+#[component]
+fn StyleShape(settings: Signal<TrainingSettings>, at: [f64; 2], shares: Vec<f64>) -> Element {
+    let mut dragging = use_signal(|| false);
+    let mut place = move |point: [f64; 2]| settings.write().contest.hunter_style = point;
+    let corners = shape_corners(HUNTER_REPLIES);
+    let most = shares.iter().copied().fold(0.0, f64::max).max(1e-9);
+    let edge = svg_points(corners.iter().copied());
+    let mix = svg_points(
+        corners
+            .iter()
+            .zip(&shares)
+            .map(|(corner, share)| corner.map(|value| value * share / most * 0.92)),
+    );
+    let view = format!(
+        "{} {} {} {}",
+        -SHAPE_REACH,
+        -SHAPE_REACH,
+        2.0 * SHAPE_REACH,
+        2.0 * SHAPE_REACH
+    );
+    rsx! {
+        svg {
+            id: control_id("shape", "hunter styles"),
+            class: "style-shape",
+            view_box: "{view}",
+            tabindex: "0",
+            role: "group",
+            "aria-label": "Where the dot stands sets how often each reply comes: drag it, or move it with the arrow keys",
+            onpointerdown: move |e: PointerEvent| {
+                dragging.set(true);
+                let point = e.element_coordinates();
+                place(shape_point(point.x, point.y));
+            },
+            onpointermove: move |e: PointerEvent| {
+                if dragging() {
+                    let point = e.element_coordinates();
+                    place(shape_point(point.x, point.y));
+                }
+            },
+            onpointerup: move |_| dragging.set(false),
+            onpointerleave: move |_| dragging.set(false),
+            onkeydown: move |e: KeyboardEvent| {
+                let [x, y] = at;
+                let moved = match e.key() {
+                    Key::ArrowLeft => [x - SHAPE_STEP, y],
+                    Key::ArrowRight => [x + SHAPE_STEP, y],
+                    Key::ArrowUp => [x, y - SHAPE_STEP],
+                    Key::ArrowDown => [x, y + SHAPE_STEP],
+                    Key::Home => STYLE_EVEN,
+                    _ => return,
+                };
+                e.prevent_default();
+                place(tidy(into_shape(HUNTER_REPLIES, moved)));
+            },
+            polygon { class: "style-edge", points: "{edge}" }
+            for corner in corners.iter() {
+                line {
+                    class: "style-spoke",
+                    x1: "0",
+                    y1: "0",
+                    x2: "{corner[0]}",
+                    y2: "{corner[1]}",
+                }
+            }
+            polygon { class: "style-mix", points: "{mix}" }
+            for (number , (corner , share)) in corners.iter().zip(&shares).enumerate() {
+                circle {
+                    class: if *share > 0.005 { "style-corner" } else { "style-corner faint" },
+                    cx: "{corner[0]}",
+                    cy: "{corner[1]}",
+                    r: "{0.11 + 0.1 * share / most}",
+                }
+                text {
+                    class: "style-corner-number",
+                    x: "{corner[0]}",
+                    y: "{corner[1]}",
+                    "{number + 1}"
+                }
+            }
+            circle {
+                class: "style-dot",
+                cx: "{at[0]}",
+                cy: "{at[1]}",
+                r: "0.075",
+            }
+        }
+    }
+}
+
+/// How POTA hunters reply, folded away under a line that says how it is
+/// set, as the Band card folds its receiver. Open, the shape with a reply
+/// at each corner and the dot that sets how often each comes, a press each
+/// for the places most wanted, and under them each reply whole, numbered
+/// as its corner, beside how many in a hundred send it: one line at a
+/// corner, five alike in the middle. What it does is in its ⓘ.
 #[component]
 fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Element {
     let mut open = use_signal(|| false);
@@ -287,29 +437,33 @@ fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Eleme
         }
         if open() {
             div { id: "hunter-styles", class: "stack-sm",
-                SliderField {
-                    label: "Variety",
-                    long_label: "How much hunters vary their reply",
-                    value_label: reading.clone(),
-                    value: f64::from(styles.variety),
-                    min: 0.0,
-                    max: f64::from(VARIETY_MAX),
-                    step: 5.0,
-                    disabled: false,
-                    onchange: move |value: f64| {
-                        settings.write().contest.hunter_variety = (value.round() as u32).min(VARIETY_MAX);
-                    },
+                StyleShape {
+                    settings,
+                    at: styles.at,
+                    shares: styles.shares.clone(),
                 }
-                div { class: "slider-head",
-                    span { class: "muted tiny", "One reply" }
-                    span { class: "muted tiny", "More variety" }
+                div { class: "mode-pills", role: "group", aria_label: "Hunter styles",
+                    for (label , point) in style_presets() {
+                        Seg {
+                            label,
+                            id: control_id("styles", label),
+                            pill: true,
+                            active: styles.at == point,
+                            onclick: move |_| settings.write().contest.hunter_style = point,
+                        }
+                    }
                 }
                 ol { class: "qso", aria_label: "The replies hunters send, and how often",
-                    for (reply, pct) in styles.replies.iter() {
-                        li { class: "qso-line they",
-                            span { class: "qso-who tiny", "{pct}%" }
-                            span { class: "qso-sends",
-                                span { class: "call", "{reply}" }
+                    for (number , (reply , pct)) in styles.replies.iter().enumerate() {
+                        if *pct > 0 {
+                            li { class: "qso-line they style-reply",
+                                span { class: "qso-who tiny",
+                                    span { class: "style-number", "{number + 1}" }
+                                    "{pct}%"
+                                }
+                                span { class: "qso-sends",
+                                    span { class: "call", "{reply}" }
+                                }
                             }
                         }
                     }
@@ -970,8 +1124,8 @@ fn WordCount(
 
 #[cfg(test)]
 mod tests {
-    use super::{StylesCard, in_percent};
-    use cw_core::{VARIETY_MAX, VARIETY_ON_AIR};
+    use super::{HUNTER_REPLIES, SHAPE_PX, StylesCard, in_percent, shape_point, style_presets};
+    use cw_core::{STYLE_EVEN, STYLE_ON_AIR, shape_corners};
 
     /// Shares read as whole percents that add up to 100, the rest going to
     /// the largest remainders.
@@ -990,39 +1144,51 @@ mod tests {
         }
     }
 
-    /// The folded line and the slider say how many replies come and where
-    /// that stands: one reply, the original, at the left; as on the air in
-    /// the middle; all alike at the right; a reply none sends left out.
+    /// The folded line says how many replies come and where the dot
+    /// stands: one reply at a corner, five as on the air where it stands
+    /// until moved, five alike in the middle; the list keeps the corners'
+    /// order and makes a hundred.
     #[test]
     fn the_styles_read_by_the_replies_that_come() {
-        let card = |variety| {
+        let card = |at| {
             let styles = cw_core::ContestKind::Pota
                 .rules()
-                .caller_styles(cw_core::Side::Dx, "SA0KAM", variety)
+                .caller_styles(cw_core::Side::Dx, "SA0KAM", at)
                 .expect("POTA's hunters vary");
-            StylesCard::of(styles, variety)
+            StylesCard::of(styles, at)
         };
-        let one = card(0);
+        let one = card(shape_corners(HUNTER_REPLIES)[0]);
         assert_eq!(one.reading(), "One reply");
+        assert_eq!(one.replies_heard(), 1);
         assert_eq!(
-            one.replies,
-            [("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 100)]
+            one.replies[0],
+            ("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 100)
         );
-        assert_eq!(card(5).reading(), "One reply");
-        let on_air = card(VARIETY_ON_AIR);
-        assert_eq!(on_air.reading(), "8 replies, as on the air");
+        let on_air = card(STYLE_ON_AIR);
+        assert_eq!(on_air.reading(), "5 replies, as on the air");
         assert_eq!(on_air.replies.iter().map(|(_, pct)| pct).sum::<u32>(), 100);
-        assert_eq!(
-            on_air.replies[0],
-            ("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 32)
-        );
-        assert_eq!(card(VARIETY_MAX).reading(), "8 replies, all alike");
-        let some = card(25);
-        assert!(
-            some.replies.len() > 1 && some.replies.len() < 8,
-            "{}",
-            some.replies.len()
-        );
-        assert_eq!(some.reading(), format!("{} replies", some.replies.len()));
+        assert_eq!(on_air.replies[0].0, "BK SA0KAM TU UR 579 579 OR OR BK");
+        assert_eq!(on_air.replies[4].0, "TU UR 579 OR BK");
+        let even = card(STYLE_EVEN);
+        assert_eq!(even.reading(), "5 replies, all alike");
+        assert!(even.replies.iter().all(|(_, pct)| *pct == 20));
+        assert_eq!(card([0.2, 0.3]).reading(), "5 replies");
+    }
+
+    /// The pointer's place on the drawing is the shape's point under it:
+    /// the drawing's middle is the shape's, its top edge past the top
+    /// corner, which a point beyond is brought back to, and the presets are
+    /// one reply's corner, where the dot stands until moved, and the middle.
+    #[test]
+    fn the_pointer_places_the_dot_under_it() {
+        assert_eq!(shape_point(SHAPE_PX / 2.0, SHAPE_PX / 2.0), [0.0, 0.0]);
+        assert_eq!(shape_point(SHAPE_PX / 2.0, 0.0), [0.0, -1.0]);
+        let right = shape_point(SHAPE_PX, SHAPE_PX / 2.0);
+        assert!(right[0] > 0.7 && right[0] <= 1.0, "{right:?}");
+        let quarter = shape_point(SHAPE_PX * 0.75, SHAPE_PX / 2.0);
+        assert_eq!(quarter, [0.65, 0.0]);
+        let presets = style_presets();
+        assert_eq!(presets[0].1, shape_corners(HUNTER_REPLIES)[0]);
+        assert_eq!((presets[1].1, presets[2].1), (STYLE_ON_AIR, STYLE_EVEN));
     }
 }

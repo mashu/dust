@@ -207,14 +207,16 @@ pub struct ContestRules {
     pub answer: &'static str,
     /// A caller's exchange as it sends it, on your side.
     pub their_exchange: PerSide<&'static str>,
-    /// A shorter exchange some operators keep to, each field once, and the
-    /// share of callers that do, each deciding once and keeping to it: a
-    /// POTA hunter's `UR 579 OR BK` beside `UR 579 579 OR OR BK`. None
-    /// where every caller sends the one exchange.
-    pub their_short: Option<(PerSide<&'static str>, f64)>,
+    /// The whole replies callers keep to, one each, where they vary as you
+    /// set them, as POTA's hunters do: each a corner of the shape you place
+    /// the dot in ([`Self::reply_shares`]), in order round it from the top.
+    /// Empty where every caller sends [`Self::their_exchange`] after a lead
+    /// drawn from [`Self::their_lead`].
+    pub their_replies: &'static [Reply],
     /// What a caller sends before its exchange the first time, each with
     /// the share of callers that lead with it, the shares making one,
-    /// `{my}` your call in it. Sent again, the exchange goes alone.
+    /// `{my}` your call in it, where callers do not keep to replies of
+    /// their own. Sent again, the exchange goes alone.
     pub their_lead: &'static [(&'static str, f64)],
     /// What a caller that has its call but not your exchange asks with:
     /// the first as often as `caller.rs`'s `FIRST_QUERY` has it, the second
@@ -308,7 +310,7 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{his}",
         their_exchange: PerSide::both("{rst} {nr}"),
-        their_short: None,
+        their_replies: &[],
         their_lead: &[("TU", 0.9), ("R", 0.1)],
         their_query: ["NR?", "AGN"],
         signoff: None,
@@ -354,7 +356,7 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::UsAndCanada)),
         answer: "{his}",
         their_exchange: PerSide::both("{my} {nr} {name} {st}"),
-        their_short: None,
+        their_replies: &[],
         their_lead: &[("", 1.0)],
         their_query: ["NR?", "AGN"],
         signoff: None,
@@ -396,7 +398,7 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{his}",
         their_exchange: PerSide::both("{rst} {zn}"),
-        their_short: None,
+        their_replies: &[],
         their_lead: &[("TU", 0.9), ("R", 0.1)],
         their_query: ["NR?", "AGN"],
         signoff: None,
@@ -449,7 +451,7 @@ pub(super) const RULES: &[ContestRules] = &[
             wve: "{rst} {pwr}",
             dx: "{rst} {st}",
         },
-        their_short: None,
+        their_replies: &[],
         their_lead: &[("TU", 0.9), ("R", 0.1)],
         their_query: ["NR?", "AGN"],
         signoff: None,
@@ -494,7 +496,7 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::FieldDay)),
         answer: "{his}",
         their_exchange: PerSide::both("{cl} {sec}"),
-        their_short: None,
+        their_replies: &[],
         their_lead: &[("R", 0.9), ("TU", 0.1)],
         their_query: ["NR?", "AGN"],
         signoff: None,
@@ -535,7 +537,7 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{my} DE {his} K",
         their_exchange: PerSide::both("UR {rst} {rst} NAME {name} {name} BK"),
-        their_short: None,
+        their_replies: &[],
         their_lead: &[("R TNX", 1.0)],
         their_query: ["AGN", "AGN"],
         signoff: Some("73 EE"),
@@ -554,10 +556,10 @@ pub(super) const RULES: &[ContestRules] = &[
     // and Canada send their report and their state or province, which you
     // copy, and your TU sends the state back; about one in four is DX and
     // sends its report alone, as DX stations do, so its state is optional.
-    // Each hunter keeps to a style of its own: it leads with `BK`, your call
-    // and `TU`, or `BK TU`, `R TU` or `TU`, and sends its report and state
-    // twice, or each once (`UR 579 OR BK`). The shares are a choice, so a
-    // run hears them all. Your TU ends with `EE`, never your call, for the
+    // Each hunter keeps to one of five whole replies: `BK`, your call and
+    // `TU` with its report and state twice, or each once; `BK TU` with each
+    // twice; `R TU` or `TU` with each once. How often each comes is where
+    // you put the dot in the five-cornered shape on the card. Your TU ends with `EE`, never your call, for the
     // hunter to answer with its own `EE`. From outside the US and
     // Canada, Alaska and Hawaii being in them, you send your report alone,
     // and your TU sends no state back: `BK TU 73 EE`. Your TU brings the
@@ -587,13 +589,29 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Pota)),
         answer: "{his}",
         their_exchange: PerSide::both("UR {rst} {rst} {st} {st} BK"),
-        their_short: Some((PerSide::both("UR {rst} {st} BK"), 0.3)),
-        their_lead: &[
-            ("BK {my} TU", 0.45),
-            ("BK TU", 0.3),
-            ("R TU", 0.15),
-            ("TU", 0.1),
+        their_replies: &[
+            Reply {
+                lead: "BK {my} TU",
+                exchange: "UR {rst} {rst} {st} {st} BK",
+            },
+            Reply {
+                lead: "BK TU",
+                exchange: "UR {rst} {rst} {st} {st} BK",
+            },
+            Reply {
+                lead: "BK {my} TU",
+                exchange: "UR {rst} {st} BK",
+            },
+            Reply {
+                lead: "R TU",
+                exchange: "UR {rst} {st} BK",
+            },
+            Reply {
+                lead: "TU",
+                exchange: "UR {rst} {st} BK",
+            },
         ],
+        their_lead: &[("BK {my} TU", 1.0)],
         their_query: ["AGN", "AGN"],
         signoff: Some("EE"),
         tu_calls: true,
@@ -626,43 +644,110 @@ pub fn greeting(hour: u32) -> &'static str {
 /// afternoon, `GA`, as the greeting most often heard in examples.
 pub const GREETING_HOUR: u32 = 12;
 
-/// How much callers' styles vary, where a contest lets you set it
-/// ([`ContestRules::varies`]): from none, every caller in the most common
-/// style, through [`VARIETY_ON_AIR`], the shares as the row gives them, as
-/// heard on the air, to [`VARIETY_MAX`], every style alike.
-pub const VARIETY_MAX: u32 = 100;
-pub const VARIETY_ON_AIR: u32 = 50;
-
-/// `shares` at `variety` ([`VARIETY_MAX`]): each raised to the power
-/// (1 − v) / v, v being the variety as a fraction of the most, and made to
-/// sum to one again. At none every caller is in the most common style; at
-/// the middle the shares are exactly as given; at the most they are all
-/// alike; and between, the order of the styles never changes, the common
-/// ones growing commoner below the middle and the rare ones less rare above
-/// it.
-pub fn tempered(shares: &[f64], variety: u32) -> Vec<f64> {
-    if variety == VARIETY_ON_AIR {
-        return shares.to_vec();
-    }
-    let v = f64::from(variety.min(VARIETY_MAX)) / f64::from(VARIETY_MAX);
-    if v <= 0.0 {
-        let top = shares.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let tops = shares.iter().filter(|share| **share == top).count() as f64;
-        return shares
-            .iter()
-            .map(|share| if *share == top { 1.0 / tops } else { 0.0 })
-            .collect();
-    }
-    let power = (1.0 - v) / v;
-    let raised: Vec<f64> = shares.iter().map(|share| share.powf(power)).collect();
-    let sum: f64 = raised.iter().sum();
-    raised.iter().map(|share| share / sum).collect()
+/// A whole reply a caller keeps to, where callers vary as you set them: the
+/// word it leads its first exchange with, `{my}` your call in it, and its
+/// exchange, each field its name in braces, as [`ContestRules::their_exchange`]
+/// has them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reply {
+    pub lead: &'static str,
+    pub exchange: &'static str,
 }
 
-/// The replies a contest's callers send, as the card shows them beside the
-/// variety you set: each first exchange whole, as sent to you, its lead
-/// and its form together, with the share of callers that send it, the
-/// commonest first.
+/// Where the dot stands until you move it: up and a little right of the
+/// middle, toward the first reply and the second, so most hunters send
+/// those, as heard on the air, and every reply comes.
+pub const STYLE_ON_AIR: [f64; 2] = [0.15, -0.4];
+
+/// The middle of the shape: every reply as often as the others.
+pub const STYLE_EVEN: [f64; 2] = [0.0, 0.0];
+
+/// The corners of a regular shape of `corners` corners, its middle at
+/// nothing and each corner one from it, the first at the top and the rest
+/// clockwise, as a screen draws it, down being positive.
+pub fn shape_corners(corners: usize) -> Vec<[f64; 2]> {
+    (0..corners)
+        .map(|at| {
+            let angle = std::f64::consts::TAU * at as f64 / corners as f64;
+            [angle.sin(), -angle.cos()]
+        })
+        .collect()
+}
+
+/// `at` brought inside the shape of `corners` corners: as it is where it
+/// is inside, or the nearest point of the shape's edge where it is not. A
+/// point that is no point, not a number, is the middle.
+pub fn into_shape(corners: usize, at: [f64; 2]) -> [f64; 2] {
+    if !at.iter().all(|value| value.is_finite()) {
+        return STYLE_EVEN;
+    }
+    let shape = shape_corners(corners);
+    let edges = || (0..corners).map(|i| (shape[i], shape[(i + 1) % corners]));
+    // Inside, or on the edge to within what arithmetic leaves of a point
+    // brought to it.
+    if edges().all(|(a, b)| cross(a, b, at) >= -1e-12) {
+        return at;
+    }
+    edges()
+        .map(|(a, b)| nearest_on_edge(a, b, at))
+        .min_by(|p, q| distance2(*p, at).total_cmp(&distance2(*q, at)))
+        .unwrap_or(STYLE_EVEN)
+}
+
+/// How much of the dot at `at` each corner of the shape of `corners`
+/// corners has: its Wachspress coordinates, which make one together, all
+/// alike in the middle, all of a corner at it, and along an edge shared by
+/// its two corners alone, by how near each is. A dot outside is taken to
+/// the shape's edge first ([`into_shape`]).
+pub fn corner_shares(corners: usize, at: [f64; 2]) -> Vec<f64> {
+    let shape = shape_corners(corners);
+    let at = into_shape(corners, at);
+    let area = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| cross(a, b, c).abs() / 2.0;
+    // On an edge, or at a corner: the edge's two corners share it.
+    for i in 0..corners {
+        let (a, b) = (shape[i], shape[(i + 1) % corners]);
+        if area(at, a, b) < 1e-9 {
+            let length = distance2(a, b);
+            let along = ((at[0] - a[0]) * (b[0] - a[0]) + (at[1] - a[1]) * (b[1] - a[1])) / length;
+            let along = along.clamp(0.0, 1.0);
+            let mut shares = vec![0.0; corners];
+            shares[i] = 1.0 - along;
+            shares[(i + 1) % corners] += along;
+            return shares;
+        }
+    }
+    let weights: Vec<f64> = (0..corners)
+        .map(|i| {
+            let before = shape[(i + corners - 1) % corners];
+            let after = shape[(i + 1) % corners];
+            area(before, shape[i], after) / (area(at, before, shape[i]) * area(at, shape[i], after))
+        })
+        .collect();
+    let sum: f64 = weights.iter().sum();
+    weights.iter().map(|weight| weight / sum).collect()
+}
+
+/// Twice the area of the triangle `a`, `b`, `c`, signed: more than nothing
+/// where `c` is right of the way from `a` to `b` on a screen, down being
+/// positive, as each corner of the shape follows the one before.
+fn cross(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+}
+
+fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {
+    (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)
+}
+
+/// The point of the edge from `a` to `b` nearest `at`.
+fn nearest_on_edge(a: [f64; 2], b: [f64; 2], at: [f64; 2]) -> [f64; 2] {
+    let along = ((at[0] - a[0]) * (b[0] - a[0]) + (at[1] - a[1]) * (b[1] - a[1])) / distance2(a, b);
+    let along = along.clamp(0.0, 1.0);
+    [a[0] + (b[0] - a[0]) * along, a[1] + (b[1] - a[1]) * along]
+}
+
+/// The replies a contest's callers send, as the card lists them beside the
+/// shape you place the dot in: each first exchange whole, as sent to you,
+/// with the share of callers that send it, in the order of the corners.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallerStyles {
     pub replies: Vec<(String, f64)>,
@@ -937,23 +1022,22 @@ impl ContestRules {
         his_call: &str,
         fields: &[(Field, String)],
     ) -> String {
-        self.their_exchange_as(side, false, my_call, his_call, fields)
+        self.their_reply_text(side, None, my_call, his_call, fields)
     }
 
-    /// The same, in its short form ([`Self::their_short`]) where `short`
-    /// and the contest has one.
-    pub(super) fn their_exchange_as(
+    /// The same, as the `reply`th of [`Self::their_replies`] sends it where
+    /// a caller keeps to one.
+    pub(super) fn their_reply_text(
         &self,
         side: Side,
-        short: bool,
+        reply: Option<usize>,
         my_call: &str,
         his_call: &str,
         fields: &[(Field, String)],
     ) -> String {
-        let template = match self.their_short {
-            Some((form, _)) if short => form.on(side),
-            _ => self.their_exchange.on(side),
-        };
+        let template = reply
+            .and_then(|reply| self.their_replies.get(reply))
+            .map_or_else(|| self.their_exchange.on(side), |reply| reply.exchange);
         let report = fields
             .iter()
             .find(|(field, _)| *field == Field::Rst)
@@ -976,81 +1060,86 @@ impl ContestRules {
     /// the contest leads it with, the `lead`th of [`Self::their_lead`];
     /// alone in a contest that leads it with none.
     pub(super) fn their_first_exchange(&self, lead: usize, my_call: &str, body: &str) -> String {
-        let lead = self.their_lead[lead].0.replace("{my}", my_call);
+        self.their_first_exchange_led(self.their_lead[lead].0, my_call, body)
+    }
+
+    /// The same, led by `lead`, a reply's own ([`Reply::lead`]).
+    pub(super) fn their_first_exchange_led(&self, lead: &str, my_call: &str, body: &str) -> String {
+        let lead = lead.replace("{my}", my_call);
         squeeze(&format!("{lead} {body}"))
     }
 
-    /// Which of [`Self::their_lead`] a caller leads with at `variety`, for
-    /// `draw`, drawn evenly from nothing up to one: each takes its share of
-    /// the range ([`Self::lead_shares`]), in order.
-    pub(super) fn lead_at(&self, draw: f64, variety: u32) -> usize {
+    /// Which of [`Self::their_lead`] a caller leads with, for `draw`, drawn
+    /// evenly from nothing up to one: each takes its share of the range, in
+    /// order, so the first is the one drawn below its share.
+    pub(super) fn lead_at(&self, draw: f64) -> usize {
         let mut upto = 0.0;
-        let shares = self.lead_shares(variety);
-        for (at, share) in shares.iter().enumerate() {
+        for (at, (_, share)) in self.their_lead.iter().enumerate() {
             upto += share;
             if draw < upto {
                 return at;
             }
         }
-        shares.len() - 1
+        self.their_lead.len() - 1
     }
 
-    /// Whether its callers' styles vary as you set them: a contest whose
-    /// callers keep to a style of their own, a long or a short exchange
-    /// among it, as POTA's hunters do. Elsewhere they lead as the row has
-    /// it, whatever the variety.
+    /// Whether its callers keep to whole replies that vary as you set them
+    /// ([`Self::their_replies`]), as POTA's hunters do.
     pub fn varies(&self) -> bool {
-        self.their_short.is_some()
+        !self.their_replies.is_empty()
     }
 
-    /// The share of callers that lead with each of [`Self::their_lead`] at
-    /// `variety` ([`tempered`]).
-    pub fn lead_shares(&self, variety: u32) -> Vec<f64> {
-        let shares: Vec<f64> = self.their_lead.iter().map(|(_, share)| *share).collect();
-        tempered(&shares, variety)
+    /// The share of callers that keep to each of [`Self::their_replies`],
+    /// the dot standing `at` in the shape whose corners they are
+    /// ([`corner_shares`]). Empty where callers do not vary.
+    pub fn reply_shares(&self, at: [f64; 2]) -> Vec<f64> {
+        if !self.varies() {
+            return Vec::new();
+        }
+        corner_shares(self.their_replies.len(), at)
     }
 
-    /// The share of callers that send the short exchange at `variety`, as
-    /// the long one and the short are tempered together; none in a contest
-    /// without one.
-    pub fn short_share(&self, variety: u32) -> Option<f64> {
-        let (_, share) = self.their_short?;
-        Some(tempered(&[1.0 - share, share], variety)[1])
+    /// Which of [`Self::their_replies`] a caller keeps to, the dot standing
+    /// `at`, for `draw`, drawn evenly from nothing up to one; none where
+    /// callers do not vary.
+    pub(super) fn reply_at(&self, draw: f64, at: [f64; 2]) -> Option<usize> {
+        let shares = self.reply_shares(at);
+        let mut upto = 0.0;
+        for (reply, share) in shares.iter().enumerate() {
+            upto += share;
+            if draw < upto {
+                return Some(reply);
+            }
+        }
+        shares.len().checked_sub(1)
     }
 
-    /// The replies its callers send at `variety`, as the card shows them,
-    /// to you as `my_call` on `side`: every lead with the exchange each
-    /// field twice and each once, from a caller in Oregon with the report
-    /// and state the card's QSO has, each with its share, the lead's and
-    /// the form's together, the commonest first. None where they do not
-    /// vary.
-    pub fn caller_styles(&self, side: Side, my_call: &str, variety: u32) -> Option<CallerStyles> {
-        let short = self.short_share(variety)?;
+    /// The replies its callers send, the dot standing `at`, as the card
+    /// lists them, to you as `my_call` on `side`: each whole, from a caller
+    /// in Oregon with the report and state the card's QSO has, with its
+    /// share, in the order of the corners. None where they do not vary.
+    pub fn caller_styles(&self, side: Side, my_call: &str, at: [f64; 2]) -> Option<CallerStyles> {
+        if !self.varies() {
+            return None;
+        }
         let fields: Vec<(Field, String)> = self
             .copied(side)
             .iter()
             .map(|field| (*field, field.example().to_string()))
             .collect();
-        let forms = [(false, 1.0 - short), (true, short)].map(|(short, share)| {
-            let form = self.their_exchange_as(side, short, my_call, "W7XYZ", &fields);
-            (form, share)
-        });
-        let mut replies: Vec<(String, f64)> = self
-            .lead_shares(variety)
-            .into_iter()
+        let replies = self
+            .their_replies
+            .iter()
             .enumerate()
-            .flat_map(|(lead, lead_share)| {
-                forms
-                    .iter()
-                    .map(move |(form, form_share)| (lead, lead_share, form, form_share))
-            })
-            .map(|(lead, lead_share, form, form_share)| {
-                let reply = self.their_first_exchange(lead, my_call, form);
-                (reply, lead_share * form_share)
+            .zip(self.reply_shares(at))
+            .map(|((at, reply), share)| {
+                let body = self.their_reply_text(side, Some(at), my_call, "W7XYZ", &fields);
+                (
+                    self.their_first_exchange_led(reply.lead, my_call, &body),
+                    share,
+                )
             })
             .collect();
-        // The commonest first; alike, as the row lists them.
-        replies.sort_by(|a, b| b.1.total_cmp(&a.1));
         Some(CallerStyles { replies })
     }
 
@@ -1607,52 +1696,30 @@ mod tests {
         ];
         let body = rules.their_exchange_text(Side::WVe, "K1ABC", "W4XYZ", &theirs);
         assert_eq!(body, "UR 57N 57N FL FL BK");
-        // Nine times in ten it names you after its BK.
+        // The card's QSO names you after its BK.
         assert_eq!(
             rules.their_first_exchange(0, "K1ABC", &body),
             "BK K1ABC TU UR 57N 57N FL FL BK"
         );
+        // Each hunter keeps to one of five whole replies, a corner each.
+        let replies: Vec<String> = (0..5)
+            .map(|reply| {
+                let body =
+                    rules.their_reply_text(Side::WVe, Some(reply), "K1ABC", "W4XYZ", &theirs);
+                rules.their_first_exchange_led(rules.their_replies[reply].lead, "K1ABC", &body)
+            })
+            .collect();
         assert_eq!(
-            rules.their_first_exchange(1, "K1ABC", &body),
-            "BK TU UR 57N 57N FL FL BK"
-        );
-        // Each hunter keeps to a style: four leads, by their shares.
-        assert_eq!(
-            rules.their_lead,
+            replies,
             [
-                ("BK {my} TU", 0.45),
-                ("BK TU", 0.3),
-                ("R TU", 0.15),
-                ("TU", 0.1)
+                "BK K1ABC TU UR 57N 57N FL FL BK",
+                "BK TU UR 57N 57N FL FL BK",
+                "BK K1ABC TU UR 57N FL BK",
+                "R TU UR 57N FL BK",
+                "TU UR 57N FL BK"
             ]
         );
-        assert_eq!(
-            (0..4)
-                .map(|lead| rules.their_first_exchange(lead, "K1ABC", "UR 579 OR BK"))
-                .collect::<Vec<_>>(),
-            [
-                "BK K1ABC TU UR 579 OR BK",
-                "BK TU UR 579 OR BK",
-                "R TU UR 579 OR BK",
-                "TU UR 579 OR BK"
-            ]
-        );
-        for (draw, lead) in [
-            (0.0, 0),
-            (0.44, 0),
-            (0.46, 1),
-            (0.8, 2),
-            (0.95, 3),
-            (0.999, 3),
-        ] {
-            assert_eq!(rules.lead_at(draw, VARIETY_ON_AIR), lead, "{draw}");
-        }
-        // Or each field once, as three hunters in ten do.
-        assert_eq!(
-            rules.their_exchange_as(Side::WVe, true, "K1ABC", "W4XYZ", &theirs),
-            "UR 57N FL BK"
-        );
-        assert_eq!(rules.their_short.map(|(_, share)| share), Some(0.3));
+        assert!(rules.varies() && !wpx().varies());
         // A DX hunter's: its report alone, and no gap where a state would be.
         let dx_theirs = [(Field::Rst, "57N".to_string())];
         assert_eq!(
@@ -1660,7 +1727,7 @@ mod tests {
             "UR 57N 57N BK"
         );
         assert_eq!(
-            rules.their_exchange_as(Side::Dx, true, "SA0KAM", "DL1XYZ", &dx_theirs),
+            rules.their_reply_text(Side::Dx, Some(4), "SA0KAM", "DL1XYZ", &dx_theirs),
             "UR 57N BK"
         );
         assert_eq!(rules.signoff, Some("EE"));
@@ -1713,74 +1780,103 @@ mod tests {
         );
     }
 
-    /// Variety tempers the shares: none puts every caller in the most
-    /// common style, the middle leaves them exactly as given, the most makes
-    /// them alike, and between, their order holds, the common ones commoner
-    /// below the middle and the rare ones less rare above it.
+    /// The dot's place in the shape shares the callers among its corners:
+    /// all alike in the middle, all to a corner at it, the two corners of
+    /// an edge alone along it, and the shares always make one. A dot
+    /// outside is brought to the edge.
     #[test]
-    fn variety_tempers_the_shares_of_the_styles() {
-        let shares = [0.45, 0.3, 0.15, 0.1];
-        assert_eq!(tempered(&shares, VARIETY_ON_AIR), shares);
-        assert_eq!(tempered(&shares, 0), [1.0, 0.0, 0.0, 0.0]);
-        for share in tempered(&shares, VARIETY_MAX) {
-            assert!((share - 0.25).abs() < 1e-12, "{share}");
+    fn the_dot_shares_the_replies_among_the_corners() {
+        let corners = shape_corners(5);
+        assert!((corners[0][0]).abs() < 1e-12 && (corners[0][1] + 1.0).abs() < 1e-12);
+        assert!(corners[1][0] > 0.9, "clockwise on a screen: {corners:?}");
+        for share in corner_shares(5, STYLE_EVEN) {
+            assert!((share - 0.2).abs() < 1e-12, "{share}");
         }
-        for variety in [0, 10, 25, 40, 50, 60, 75, 90, 100] {
-            let at = tempered(&shares, variety);
-            let sum: f64 = at.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-9, "{variety}: {sum}");
-            assert!(
-                at.windows(2).all(|pair| pair[0] >= pair[1]),
-                "{variety}: {at:?}"
-            );
+        for (at, corner) in corners.iter().enumerate() {
+            let shares = corner_shares(5, *corner);
+            for (other, share) in shares.iter().enumerate() {
+                let all = if other == at { 1.0 } else { 0.0 };
+                assert!((share - all).abs() < 1e-9, "{at} {other}: {share}");
+            }
         }
-        let low = tempered(&shares, 25);
-        let high = tempered(&shares, 75);
-        assert!(low[0] > 0.45 && low[3] < 0.1, "{low:?}");
-        assert!(high[0] < 0.45 && high[3] > 0.1, "{high:?}");
-        // Every contest's leads stay as the row has them where the variety
-        // is not yours to set, and POTA's follow it.
-        assert!(pota().varies() && !wpx().varies());
-        assert_eq!(wpx().lead_shares(VARIETY_ON_AIR), [0.9, 0.1]);
-        assert_eq!(pota().short_share(VARIETY_ON_AIR), Some(0.3));
-        assert_eq!(pota().short_share(0), Some(0.0));
-        assert_eq!(pota().short_share(VARIETY_MAX), Some(0.5));
-        assert_eq!(wpx().short_share(VARIETY_ON_AIR), None);
+        // Halfway along the first edge: its two corners, half each.
+        let half = [
+            (corners[0][0] + corners[1][0]) / 2.0,
+            (corners[0][1] + corners[1][1]) / 2.0,
+        ];
+        let shares = corner_shares(5, half);
+        assert!((shares[0] - 0.5).abs() < 1e-9 && (shares[1] - 0.5).abs() < 1e-9);
+        assert!(
+            shares[2..].iter().all(|share| share.abs() < 1e-9),
+            "{shares:?}"
+        );
+        // As heard on the air: every reply, the first the commonest.
+        let on_air = corner_shares(5, STYLE_ON_AIR);
+        assert!(on_air.iter().all(|share| *share > 0.05), "{on_air:?}");
+        assert!(on_air[0] > 0.35 && on_air[0] > on_air[1], "{on_air:?}");
+        // Anywhere, they make one and none is below nothing; and a dot
+        // outside comes to the edge, a point that is none to the middle.
+        for x in -12..=12 {
+            for y in -12..=12 {
+                let at = [f64::from(x) / 10.0, f64::from(y) / 10.0];
+                let shares = corner_shares(5, at);
+                let sum: f64 = shares.iter().sum();
+                assert!((sum - 1.0).abs() < 1e-9, "{at:?}: {sum}");
+                assert!(
+                    shares.iter().all(|share| *share >= 0.0),
+                    "{at:?}: {shares:?}"
+                );
+                let inside = into_shape(5, at);
+                assert_eq!(into_shape(5, inside), inside, "{at:?}");
+            }
+        }
+        assert_eq!(into_shape(5, [0.1, 0.2]), [0.1, 0.2]);
+        let far = into_shape(5, [0.0, -9.0]);
+        assert!(
+            (far[0]).abs() < 1e-9 && (far[1] + 1.0).abs() < 1e-9,
+            "{far:?}"
+        );
+        assert_eq!(into_shape(5, [f64::NAN, 0.0]), STYLE_EVEN);
+        // Callers that do not vary have none to share.
+        assert!(wpx().reply_shares(STYLE_ON_AIR).is_empty());
+        assert_eq!(wpx().reply_at(0.5, STYLE_ON_AIR), None);
+        assert_eq!(pota().reply_at(0.0, STYLE_ON_AIR), Some(0));
+        assert_eq!(pota().reply_at(0.999_999, STYLE_ON_AIR), Some(4));
     }
 
-    /// The card shows each reply a POTA hunter sends, whole, as sent to
-    /// you, with its share at the variety set, the commonest first: one
-    /// reply at none, the cheat sheet's; eight as on the air; eight alike
-    /// at the most.
+    /// The card lists each reply a POTA hunter sends, whole, as sent to
+    /// you, with its share, in the order of the corners: one reply at a
+    /// corner, five alike in the middle.
     #[test]
     fn the_card_shows_each_reply_with_its_share() {
-        let replies = |variety| {
+        let replies = |at| {
             pota()
-                .caller_styles(Side::Dx, "SA0KAM", variety)
+                .caller_styles(Side::Dx, "SA0KAM", at)
                 .expect("POTA's hunters vary")
                 .replies
         };
-        let on_air = replies(VARIETY_ON_AIR);
-        assert_eq!(on_air.len(), 8);
-        assert_eq!(on_air[0].0, "BK SA0KAM TU UR 579 579 OR OR BK");
-        assert!((on_air[0].1 - 0.45 * 0.7).abs() < 1e-12);
-        assert_eq!(on_air[1].0, "BK TU UR 579 579 OR OR BK");
-        assert_eq!(on_air[7].0, "TU UR 579 OR BK");
-        assert!((on_air[7].1 - 0.1 * 0.3).abs() < 1e-12);
+        let on_air = replies(STYLE_ON_AIR);
+        let texts: Vec<&str> = on_air.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "BK SA0KAM TU UR 579 579 OR OR BK",
+                "BK TU UR 579 579 OR OR BK",
+                "BK SA0KAM TU UR 579 OR BK",
+                "R TU UR 579 OR BK",
+                "TU UR 579 OR BK"
+            ]
+        );
         let sum: f64 = on_air.iter().map(|(_, share)| share).sum();
         assert!((sum - 1.0).abs() < 1e-9, "{sum}");
-        let one = replies(0);
-        assert_eq!(
-            one[0],
-            ("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 1.0)
-        );
-        assert!(one[1..].iter().all(|(_, share)| *share == 0.0));
-        for (_, share) in replies(VARIETY_MAX) {
-            assert!((share - 0.125).abs() < 1e-12);
+        let one = replies(shape_corners(5)[0]);
+        assert!((one[0].1 - 1.0).abs() < 1e-9);
+        for (_, share) in replies(STYLE_EVEN) {
+            assert!((share - 0.2).abs() < 1e-12);
         }
         assert!(
             wpx()
-                .caller_styles(Side::Dx, "DL1ABC", VARIETY_ON_AIR)
+                .caller_styles(Side::Dx, "DL1ABC", STYLE_ON_AIR)
                 .is_none()
         );
     }
@@ -2018,15 +2114,18 @@ mod tests {
                 for field in rules.optional {
                     assert!(rules.copied(side).contains(field), "{:?}", rules.kind);
                 }
-                // A short exchange sends what the long one does.
-                if let Some((short, share)) = rules.their_short {
-                    let short = short.on(side);
+                // Every reply a caller keeps to sends what the exchange does.
+                for reply in rules.their_replies {
                     for field in rules.copied(side) {
                         let held = format!("{{{}}}", field.name());
-                        assert!(short.contains(&held), "{:?}", rules.kind);
+                        assert!(reply.exchange.contains(&held), "{:?}", rules.kind);
                     }
-                    assert_eq!(short.contains("{rst}"), rules.rst, "{:?}", rules.kind);
-                    assert!((0.0..1.0).contains(&share), "{:?}", rules.kind);
+                    assert_eq!(
+                        reply.exchange.contains("{rst}"),
+                        rules.rst,
+                        "{:?}",
+                        rules.kind
+                    );
                 }
             }
             assert!(rules.cq.contains("{my}"), "{:?}", rules.kind);

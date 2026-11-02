@@ -5342,8 +5342,9 @@ mod tests {
         }
     }
 
-    /// POTA hunters each keep to a style: every lead comes, by its share,
-    /// and the short form, each field once, about three times in ten.
+    /// POTA hunters each keep to a reply: with the dot where it stands until
+    /// moved, every lead comes, by its share, and each field sent once about
+    /// three times in ten.
     /// Asked again, a hunter sends its exchange alone, in its own form.
     #[test]
     fn pota_hunters_each_keep_a_style_of_their_own() {
@@ -5377,26 +5378,27 @@ mod tests {
         let count = |lead: &str| leads.get(lead).copied().unwrap_or(0);
         assert!(count("BK N4BKY TU") > count("BK TU"), "{leads:?}");
         assert!(count("BK TU") > count("TU"), "{leads:?}");
+        assert!(count("TU") > count("R TU"), "{leads:?}");
         for lead in ["BK N4BKY TU", "BK TU", "R TU", "TU"] {
             assert!(count(lead) > 5, "{lead}: {leads:?}");
         }
         assert!(short > 30 && long > 100, "{short} short, {long} long");
     }
 
-    /// The variety you set reaches the hunters: at none every hunter leads
-    /// with `BK`, your call and `TU`, and sends each field twice, as the
-    /// cheat sheet has it; at the most every lead comes about as often as
-    /// the others, and the short form about half the time.
+    /// Where you put the dot reaches the hunters: at the first corner every
+    /// hunter sends the first reply, its report and state twice after `BK`,
+    /// your call and `TU`; in the middle every reply comes about as often as
+    /// the others.
     #[test]
-    fn hunters_vary_as_you_set_them() {
-        let firsts = |variety: u32| -> Vec<String> {
-            (1..120)
+    fn hunters_reply_as_you_place_the_dot() {
+        let firsts = |at: [f64; 2]| -> Vec<String> {
+            (1..150)
                 .map(|seed| {
                     let mut settings = run_settings(25.0);
                     settings.contest.contest_kind = crate::contest::ContestKind::Pota;
                     settings.contest.my_call = "N4BKY".to_string();
                     settings.contest.my_state = "AL".to_string();
-                    settings.contest.hunter_variety = variety;
+                    settings.contest.hunter_style = at;
                     let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["W7XYZ"]));
                     runtime.finish_turn();
                     runtime.key(OpKey::Esm, "W7XYZ", "");
@@ -5404,29 +5406,34 @@ mod tests {
                 })
                 .collect()
         };
-        for first in firsts(0) {
+        for first in firsts(crate::contest::shape_corners(5)[0]) {
             let (rst, st) = pota_hunter(&first, "N4BKY");
             let st = st.expect("a US hunter's state");
             assert_eq!(first, format!("BK N4BKY TU UR {rst} {rst} {st} {st} BK"));
         }
-        let all = firsts(crate::contest::VARIETY_MAX);
-        let led = |lead: &str| {
-            all.iter()
-                .filter(|first| first.starts_with(&format!("{lead} UR ")))
-                .count()
-        };
-        for lead in ["BK N4BKY TU", "BK TU", "R TU", "TU"] {
-            assert!((15..50).contains(&led(lead)), "{lead}: {}", led(lead));
-        }
-        let short = all
+        let even = firsts(crate::contest::STYLE_EVEN);
+        let shapes: Vec<String> = even
             .iter()
-            .filter(|first| first.split_whitespace().count() <= 6 + 2)
-            .filter(|first| {
-                let (rst, _) = pota_hunter(first, "N4BKY");
-                first.matches(rst).count() == 1
+            .map(|first| {
+                let (rst, st) = pota_hunter(first, "N4BKY");
+                let st = st.expect("a US hunter's state");
+                first.replace(rst, "R").replace(st, "S")
             })
-            .count();
-        assert!((35..85).contains(&short), "{short} of {} short", all.len());
+            .collect();
+        for reply in [
+            "BK N4BKY TU UR R R S S BK",
+            "BK TU UR R R S S BK",
+            "BK N4BKY TU UR R S BK",
+            "R TU UR R S BK",
+            "TU UR R S BK",
+        ] {
+            let count = shapes.iter().filter(|shape| *shape == reply).count();
+            assert!(
+                (15..50).contains(&count),
+                "{reply}: {count} of {}",
+                shapes.len()
+            );
+        }
     }
 
     /// A POTA QSO, line by line as the cheat sheet has it: your CQ POTA,

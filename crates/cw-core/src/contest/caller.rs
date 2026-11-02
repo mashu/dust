@@ -15,7 +15,7 @@ use super::data::zones::draw_zone;
 use super::esm::MessagePart;
 use super::exchange::{Field, send_5nn, send_power, send_report, send_serial, send_zone};
 use super::place::Placement;
-use super::rules::{ContestRules, Side, VARIETY_MAX, VARIETY_ON_AIR};
+use super::rules::{ContestRules, STYLE_ON_AIR, Side};
 use super::serial::SerialModel;
 use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
@@ -365,13 +365,13 @@ pub(super) struct Caller {
     serial_sent: Option<(u32, u64)>,
     /// Its exchange as it sends it, fixed the first time it is needed.
     exchange: Option<Vec<(Field, String)>>,
-    /// It keeps to the contest's short exchange, each field once, where the
-    /// contest has one: decided the first time it sends its exchange, and
-    /// never drawn in a contest without one.
-    short: Option<bool>,
-    /// How much callers' styles vary, as you set it where the contest lets
-    /// you ([`ContestRules::varies`]); as on the air elsewhere.
-    variety: u32,
+    /// The whole reply it keeps to, where callers vary as you set them
+    /// ([`ContestRules::their_replies`]): decided the first time it sends
+    /// its exchange, and never drawn in a contest whose callers do not.
+    reply: Option<usize>,
+    /// Where you put the dot that sets how often each reply comes, where
+    /// callers vary; where it stands until moved elsewhere.
+    style_at: [f64; 2],
     /// How it operates: how it sends its numbers, and under rough habits
     /// whether it is careless.
     habits: CallerHabits,
@@ -479,11 +479,11 @@ impl Caller {
             serial,
             serial_sent: None,
             exchange: None,
-            short: None,
-            variety: if rules.varies() {
-                settings.contest.hunter_variety.min(VARIETY_MAX)
+            reply: None,
+            style_at: if rules.varies() {
+                settings.contest.hunter_style
             } else {
-                VARIETY_ON_AIR
+                STYLE_ON_AIR
             },
             habits,
             cuts_serial: rules.serial_cut,
@@ -1099,8 +1099,14 @@ impl Caller {
                 let text = if self.exchanges_sent > 0 {
                     body
                 } else {
-                    let lead = rules.lead_at(self.rng.f64(), self.variety);
-                    rules.their_first_exchange(lead, my_call, &body)
+                    match self.reply.and_then(|reply| rules.their_replies.get(reply)) {
+                        // Its own reply's word, kept to.
+                        Some(reply) => rules.their_first_exchange_led(reply.lead, my_call, &body),
+                        None => {
+                            let lead = rules.lead_at(self.rng.f64());
+                            rules.their_first_exchange(lead, my_call, &body)
+                        }
+                    }
                 };
                 self.exchanges_sent += 1;
                 (text, Says::Exchange)
@@ -1214,17 +1220,11 @@ impl Caller {
         {
             *token = format!("{wrong}{FUMBLE_MARK} {token}");
         }
-        // Its own form, long or short, kept to once decided.
-        let short = match (rules.short_share(self.variety), self.short) {
-            (None, _) => false,
-            (Some(_), Some(short)) => short,
-            (Some(share), None) => {
-                let short = self.rng.f64() < share;
-                self.short = Some(short);
-                short
-            }
-        };
-        rules.their_exchange_as(side, short, my_call, &self.call.text, &fields)
+        // Its own reply, kept to once decided, where callers vary.
+        if self.reply.is_none() && rules.varies() {
+            self.reply = rules.reply_at(self.rng.f64(), self.style_at);
+        }
+        rules.their_reply_text(side, self.reply, my_call, &self.call.text, &fields)
     }
 
     /// How long it waits for you before it tries again, in milliseconds,
