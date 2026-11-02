@@ -1305,8 +1305,22 @@ mod tests {
         assert_eq!((wild.my_wpm, wild.my_sending_db), (0, i32::MAX));
         let rounded = read(serde_json::json!({ "myWpm": 29.6, "mySendingDb": -8.6 }));
         assert_eq!((rounded.my_wpm, rounded.my_sending_db), (30, -9));
+        // The hunters' variety: as on the air until set, and anything but
+        // a number read as that; a number kept, clamped with the rest.
+        assert_eq!(missing.hunter_variety, VARIETY_ON_AIR);
+        let varied = read(serde_json::json!({ "hunterVariety": 70 }));
+        assert_eq!(varied.hunter_variety, 70);
+        for odd in [serde_json::json!("lots"), serde_json::Value::Null] {
+            let read = read(serde_json::json!({ "hunterVariety": odd }));
+            assert_eq!(read.hunter_variety, VARIETY_ON_AIR, "{odd}");
+        }
+        assert_eq!(
+            read(serde_json::json!({ "hunterVariety": -3 })).hunter_variety,
+            0
+        );
         let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
         assert_eq!(json["contestTuCall"], "every");
+        assert_eq!(json["hunterVariety"], 50);
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -3);
     }
