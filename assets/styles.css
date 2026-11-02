@@ -1499,6 +1499,48 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
 .qso-sends { display: flex; flex-wrap: wrap; gap: 0.3rem; min-width: 0; }
 /* Each QSO heard set apart from the one before. */
 .qso-line.qso-next { border-top: 1px dashed var(--line-strong); padding-top: 0.45rem; margin-top: 0.15rem; }
+/* POTA's hunter styles: an eight-cornered shape with a reply at each
+   corner and a knob dragged inside it. Its size is set on it, so the
+   pointer's place on it reads in its own units; nothing drawn in it takes
+   the pointer, so the place is always the drawing's, and a finger on it
+   moves the knob rather than the page. */
+.style-shape { display: block; margin: 0 auto; touch-action: none; cursor: crosshair; overflow: visible; }
+.style-shape * { pointer-events: none; }
+.style-shape:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; border-radius: 12px; }
+.style-shape.on-corner { cursor: pointer; }
+/* Its face, lit a little in the middle, shaded in copper toward each
+   corner as strongly as its share, and a quiet rim round it. */
+.style-face-in { stop-color: var(--surface-2); }
+.style-face-out { stop-color: var(--surface-sunken); }
+.style-face { fill: url(#style-face); }
+.style-shade { stop-color: var(--copper); }
+.style-rim { fill: none; stroke: var(--line-strong); stroke-width: 0.012px; stroke-linejoin: round; }
+/* Each side's head over it: twice on the right, each once on the left. */
+.style-head { fill: var(--ink-dim); font-family: Figtree, system-ui, sans-serif; font-size: 0.08px; font-weight: 700; letter-spacing: 0.012px; text-transform: uppercase; }
+.style-side { fill: var(--ink-soft); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.095px; font-weight: 600; }
+/* Each corner's pill, saying how many in a hundred send its reply, washed
+   in copper as strongly as its share, the commonest copper through; the
+   words it starts with beside it; and one turned off, dashed, its words
+   struck through. */
+.style-pill { fill: var(--surface); stroke: var(--line-strong); stroke-width: 0.012px; }
+.style-pill.top { fill: var(--copper); stroke: var(--copper); }
+.style-pill.off { stroke-dasharray: 0.025px 0.02px; }
+.style-pill.hot { stroke: var(--copper); stroke-width: 0.03px; }
+.style-pill-tint { fill: var(--copper); }
+.style-pct { fill: var(--ink); font-family: Figtree, system-ui, sans-serif; font-size: 0.1px; font-weight: 700; text-anchor: middle; dominant-baseline: central; font-variant-numeric: tabular-nums; }
+.style-pct.top { fill: var(--surface); }
+.style-pct.off { fill: var(--ink-dim); font-weight: 600; }
+.style-lead { fill: var(--ink-soft); font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.112px; font-weight: 600; dominant-baseline: central; }
+.style-lead.top { fill: var(--ink); font-weight: 700; }
+.style-lead.off { fill: var(--ink-dim); text-decoration: line-through; }
+.style-corner { outline: none; }
+.style-corner:focus-visible .style-pill { stroke: var(--copper); stroke-width: 0.035px; }
+/* The knob, as the sliders' is; and where a mouse over the shape would put
+   it, dashed, set by nothing until a click. */
+.style-knob { fill: var(--surface); stroke: var(--copper); stroke-width: 0.032px; }
+.style-knob.ghost { fill: none; stroke-width: 0.02px; stroke-dasharray: 0.035px 0.025px; }
+.style-preview-line { margin: 0; text-align: center; }
+.style-replies.preview .call { border-style: dashed; }
 /* The eyebrow over a QSO, with Hear a QSO or Stop beside it. */
 .qso-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.75rem; }
 /* QSOs heard scroll in a box of their own, kept on the newest line: a

@@ -490,6 +490,26 @@ so unlock or close it from the main window.
 The see-through background needs a compositor, which every Wayland desktop
 has; without one it is drawn solid.
 
+## The first frame
+
+Every build has the stylesheet before it paints anything, so the app is
+never drawn unstyled, however long it takes to start. Desktop and the phones
+inline it in the webview's head (`src/main.rs`), which the webview reads
+before its first paint; the web links it from the head of `index.html`, a
+static-head `asset!` (`src/app.rs`), and shows its boot screen until the app
+mounts. The phones used to put the sheet in from the app once it had
+mounted, and Android drew the first frames raw before it arrived.
+
+The rest of what a frame needs is in the head too: a phone's viewport, edge
+to edge from the start, and every build's link to the type faces, which are
+asked for as the page loads. The faces never hold up the first paint: the
+sheet loads as print media and switches itself on, and its faces are
+`display=optional`, so a face that is late, or a phone offline, leaves the
+system's for that page rather than swapping it in under the reader. Before
+the page has loaded, the desktop window and Android's webview are the light
+theme's paper, not white; iOS keeps its webview's own colour, which wry
+would make translucent to change.
+
 ## Where your progress lives
 
 Dust syncs nothing. Each install keeps its own history, in the place that

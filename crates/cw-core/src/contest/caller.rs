@@ -15,7 +15,7 @@ use super::data::zones::draw_zone;
 use super::esm::MessagePart;
 use super::exchange::{Field, send_5nn, send_power, send_report, send_serial, send_zone};
 use super::place::Placement;
-use super::rules::{ContestRules, Side};
+use super::rules::{ContestRules, STYLE_ON_AIR, Side};
 use super::serial::SerialModel;
 use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
@@ -284,11 +284,6 @@ pub(crate) const FLUTTER_DEPTH: (f64, f64) = (0.5, 0.75);
 /// drawn from, apart from the rest of its draws.
 const FLUTTER_STREAM: u64 = u64::MAX;
 
-/// How often the first exchange a caller sends starts with the first of
-/// the contest's words for it rather than the second: `TU 5NN 214` rather
-/// than `R 5NN 214`.
-const FIRST_LEAD: f64 = 0.9;
-
 /// How many operators, putting your call right once they have your
 /// exchange, send their own with it, as MorseRunner's do five in six
 /// (`DxOper.pas:851-867`).
@@ -370,6 +365,15 @@ pub(super) struct Caller {
     serial_sent: Option<(u32, u64)>,
     /// Its exchange as it sends it, fixed the first time it is needed.
     exchange: Option<Vec<(Field, String)>>,
+    /// The whole reply it keeps to, where callers vary as you set them
+    /// ([`ContestRules::their_replies`]): decided the first time it sends
+    /// its exchange, and never drawn in a contest whose callers do not.
+    reply: Option<usize>,
+    /// Where you put the dot that sets how often each reply comes, where
+    /// callers vary; where it stands until moved elsewhere.
+    style_at: [f64; 2],
+    /// The replies you turned off, which it never keeps to.
+    styles_off: Vec<usize>,
     /// How it operates: how it sends its numbers, and under rough habits
     /// whether it is careless.
     habits: CallerHabits,
@@ -477,6 +481,17 @@ impl Caller {
             serial,
             serial_sent: None,
             exchange: None,
+            reply: None,
+            style_at: if rules.varies() {
+                settings.contest.hunter_style
+            } else {
+                STYLE_ON_AIR
+            },
+            styles_off: if rules.varies() {
+                settings.contest.hunter_styles_off.clone()
+            } else {
+                Vec::new()
+            },
             habits,
             cuts_serial: rules.serial_cut,
             fumbles,
@@ -1086,12 +1101,19 @@ impl Caller {
                 let body = self.exchange_text(rules, side, my_call, run_ms);
                 // The first time with a word in front of it, as operators
                 // send it; a repeat is the exchange alone.
+                // The word is the contest's, by the share of callers that
+                // lead with each.
                 let text = if self.exchanges_sent > 0 {
                     body
-                } else if self.rng.f64() < FIRST_LEAD {
-                    rules.their_first_exchange(0, my_call, &body)
                 } else {
-                    rules.their_first_exchange(1, my_call, &body)
+                    match self.reply.and_then(|reply| rules.their_replies.get(reply)) {
+                        // Its own reply's word, kept to.
+                        Some(reply) => rules.their_first_exchange_led(reply.lead, my_call, &body),
+                        None => {
+                            let lead = rules.lead_at(self.rng.f64());
+                            rules.their_first_exchange(lead, my_call, &body)
+                        }
+                    }
                 };
                 self.exchanges_sent += 1;
                 (text, Says::Exchange)
@@ -1151,10 +1173,16 @@ impl Caller {
                         // Where its call puts it, Labrador apart where the
                         // contest counts it so; a station with no state or
                         // province sends DX, as one outside North America
-                        // does.
-                        Field::St => draw_place(&self.call.text, rules.labrador, &mut self.rng)
-                            .unwrap_or(DX)
-                            .to_string(),
+                        // does, or nothing where the state is optional, as
+                        // a POTA hunter outside the US and Canada sends its
+                        // report alone.
+                        Field::St => {
+                            match draw_place(&self.call.text, rules.labrador, &mut self.rng) {
+                                Some(place) => place.to_string(),
+                                None if rules.optional(Field::St) => return None,
+                                None => DX.to_string(),
+                            }
+                        }
                         // Where its call puts it.
                         Field::Zn => {
                             let zone = draw_zone(&self.call.text, &mut self.rng)?;
@@ -1199,7 +1227,11 @@ impl Caller {
         {
             *token = format!("{wrong}{FUMBLE_MARK} {token}");
         }
-        rules.their_exchange_text(side, my_call, &self.call.text, &fields)
+        // Its own reply, kept to once decided, where callers vary.
+        if self.reply.is_none() && rules.varies() {
+            self.reply = rules.reply_at(self.rng.f64(), self.style_at, &self.styles_off);
+        }
+        rules.their_reply_text(side, self.reply, my_call, &self.call.text, &fields)
     }
 
     /// How long it waits for you before it tries again, in milliseconds,

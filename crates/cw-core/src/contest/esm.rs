@@ -303,14 +303,16 @@ const SPACE_BACK: &str = ". Space goes back to it";
 /// rather than typing a space, as MorseRunner's and N1MM's space bar
 /// toggles between the two fields, so going back to fix a call is one key:
 /// always where the exchange has one item to type; where it has more, once
-/// the items typed read whole, or the field is empty or ends in a space
-/// already. Otherwise it types the space that separates the next item, so
-/// no space it types is one the reading would only drop.
+/// every item reads, an optional one too, or the field is empty or ends in a
+/// space already. Otherwise it types the space that separates the next
+/// item, so no space it types is one the reading would only drop: a POTA
+/// report typed goes on to the state, which a DX hunter does not send.
 pub fn space_to_call(exch: &str, rules: &ContestRules, side: Side) -> bool {
-    rules.copied(side).len() <= 1
-        || exch.is_empty()
-        || exch.ends_with(char::is_whitespace)
-        || parse_exchange(rules, side, exch).state == ExchangeState::Complete
+    let copied = rules.copied(side);
+    copied.len() <= 1 || exch.is_empty() || exch.ends_with(char::is_whitespace) || {
+        let reading = parse_exchange(rules, side, exch);
+        reading.state == ExchangeState::Complete && reading.fields.len() == copied.len()
+    }
 }
 
 /// Whether the fields hold a QSO that a key can log without Enter, as TU
@@ -463,11 +465,13 @@ fn enter_does(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side)
     if e == ExchangeState::Complete && v && (c || n) {
         message.push(MessagePart::Tu);
     }
+    // What is still to copy: once some is, only what every caller sends.
     let missing: Vec<Field> = rules
         .copied(side)
         .iter()
         .copied()
         .filter(|field| reading.value(*field).is_none())
+        .filter(|field| e == ExchangeState::Empty || !rules.optional(*field))
         .collect();
     let focus = if message.contains(&MessagePart::Tu) {
         Some(EntryField::Call)
@@ -598,7 +602,7 @@ pub fn message_text(
             MessagePart::HisCall(call) => call.clone(),
             MessagePart::Exchange => rules.exchange_text(side, me),
             MessagePart::Again => "?".to_string(),
-            MessagePart::Tu => rules.tu_text(me),
+            MessagePart::Tu => rules.tu_text(side, me),
             MessagePart::MyCall => me.my_call.to_string(),
             MessagePart::B4 => "QSO B4".to_string(),
             MessagePart::Nil => "NIL".to_string(),
@@ -877,6 +881,51 @@ mod tests {
         for hint in hints {
             assert!(hint.chars().count() <= HINT_LEN_MAX, "{hint:?}");
         }
+    }
+
+    /// In POTA the state is optional, as a DX hunter sends none: the report
+    /// alone is complete and Enter thanks and logs, the state alone asks
+    /// for the report; and Space after the report types the space before
+    /// the state rather than going back to the call.
+    #[test]
+    fn a_pota_report_alone_is_complete_and_space_goes_on_to_the_state() {
+        let rules = ContestKind::Pota.rules();
+        let read = |exch: &str| crate::contest::parse_exchange(rules, Side::WVe, exch).state;
+        assert_eq!(read("579"), ExchangeState::Complete);
+        assert_eq!(read("57N FL"), ExchangeState::Complete);
+        assert_eq!(read("FL"), ExchangeState::Missing);
+        assert_eq!(read(""), ExchangeState::Empty);
+        assert!(!space_to_call("579", rules, Side::WVe), "on to the state");
+        assert!(space_to_call("579 FL", rules, Side::WVe));
+        assert!(space_to_call("579 ", rules, Side::WVe));
+        let enter = |exch: &str| {
+            let qso = QsoState {
+                call_sent: "W7XYZ".to_string(),
+                exchange_sent: true,
+                ..QsoState::default()
+            };
+            let fields = Fields {
+                call: "W7XYZ".to_string(),
+                exch: exch.to_string(),
+                ..Fields::default()
+            };
+            esm(&qso, &fields, rules, Side::WVe)
+        };
+        assert_eq!(enter("579").message, [MessagePart::Tu]);
+        assert_eq!(enter("579 OR").message, [MessagePart::Tu]);
+        let state_alone = enter("OR");
+        assert_eq!(state_alone.message, [MessagePart::Again]);
+        assert!(
+            state_alone.hint.starts_with("Still to copy: their report"),
+            "{}",
+            state_alone.hint
+        );
+        // With nothing copied yet, both are asked for.
+        assert!(
+            enter("").hint.contains("report and state"),
+            "{}",
+            enter("").hint
+        );
     }
 
     /// In a Simple QSO the report is part of what you copy: Enter asks

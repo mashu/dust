@@ -323,8 +323,8 @@ kind replacing an earlier one (11.7).
 |---|---|---|---|---|---|---|---|
 | Real contest | NCJ NA Sprint | ARRL International DX | CQ WPX | CQ WW DX | ARRL Field Day | an everyday QSO | a Parks on the Air activation |
 | RST, serial | no, yes | yes, no | yes, yes | yes, no | no, no | yes, no | yes, no |
-| You copy | NR NAME ST | ST or PWR | NR | ZN | CL SEC | RST NAME | RST ST |
-| Callers | US, Canada | the other side | world | world | US, Canada, ~1% DX | world | US, Canada |
+| You copy | NR NAME ST | ST or PWR | NR | ZN | CL SEC | RST NAME | RST ST, ST optional |
+| Callers | US, Canada | the other side | world | world | US, Canada, ~1% DX | world | US, Canada, ~25% DX |
 | Phase | 2 | 3 | 1 | 3 | 3 | 1 | after 5 |
 
 ### WPX (`wpx`), the default
@@ -509,12 +509,17 @@ later contests, is the world-wide one.
 Added after phase 5 (2026-11-02), at the user's request, from the POTA
 exchange cheat sheet they gave: you are the activator, in a park, and
 hunters call you. The pill reads "POTA" and comes last, after Simple QSO,
-the other run that is no contest.
+the other run that is no contest. As built, the same day, the user put the
+QSO right: a DX activator sends no state back, a DX hunter sends its
+report alone, the hunter names you after its `BK`, your TU never signs
+with your call, and you now and then sign off `73 44` (§15.2 item 16).
 
 - **On the air.** `CQ CQ POTA DE K1ABC K` · `W7XYZ` ·
-  `W7XYZ TU GA UR 5NN 5NN MA MA BK` · `BK TU UR 579 579 OR OR BK` ·
+  `W7XYZ TU GA UR 5NN 5NN MA MA BK` · `BK K1ABC TU UR 579 579 OR OR BK` ·
   `BK TU OR OR 73 EE` · `EE` (the cheat sheet's `dit dit`). Logged: RST
-  579, ST OR.
+  579, ST OR. From outside the US and Canada, as SA0KAM:
+  `W7XYZ TU GA UR 5NN 5NN BK` · `BK SA0KAM TU UR 579 579 OR OR BK` ·
+  `BK TU 73 44 EE` · `EE`.
 - **The greeting.** Your exchange greets the hunter by the time of day
   where you are, `GM` from 4 in the morning, `GA` from noon and `GE` from
   6 in the evening on through the night (`greeting`, `rules.rs`). The
@@ -523,39 +528,108 @@ the other run that is no contest.
   given it too (`hear_qsos`); a run never given one greets `GA`, as the
   cheat sheet's example does, and the card's example QSO greets as a run
   started now would.
-- **Your side.** From the US's 48 states, DC and Canada (W/VE, `Side`) you
-  send your report and your state, which Home and Your station ask for as
-  in the Sprint. From anywhere else you send your report alone,
-  `TU GA UR 5NN 5NN BK`, as the cheat sheet has DX stations do, and are
-  asked for no state. The card's line under "You send" says which: "You
-  are W/VE: you send your report and your state", or "You are DX: you send
-  your report alone, as DX activators do"; Your station's call line ends
-  "you are W/VE" or "you are DX", as in ARRL DX. Alaska and Hawaii are DX
-  here, as Dust's sides have them, and the card says so.
-- **Hunters.** US and Canadian stations (`Countries::UsAndCanada`), each
-  sending its report twice and its state or province twice, both copied:
-  the report drawn from §11.5's shares and sent as habits send it (§11.6:
-  plain under easy habits, `57N` and now and then `ENN` under real and
-  rough ones), the state where its call puts it. A hunter answers your CQ
-  with its call alone (twice from a pile-up caller that calls twice), and
-  leads its first exchange with `BK TU` nine times in ten and `BK` with
-  your call and `TU` otherwise (`BK K1ABC TU`, the cheat sheet's example);
-  sent again, its exchange goes alone, `UR 579 579 OR OR BK`. One that has
-  its call but not your exchange asks `AGN`, and F12 sends `AGN`: there is
-  no serial. A DX hunter would send its report alone, which one set of
-  copied fields cannot hold, so none calls; the card says so.
-- **TU.** Your TU sends back the state the Exchange field reads, twice
-  (`{hisstate}`), and ends `73 EE`; DX goes back as nothing. It brings the
-  next hunter, as a pile-up of hunters calls an activator, once the one
-  you worked has signed off with `EE` (§4.1); your call in TU is yours to
-  choose as in any contest whose TU brings callers (§8), and goes after
-  `EE` as an ID, `BK TU OR OR 73 EE K1ABC`.
+- **Your side.** POTA draws the line between the sides at the US and
+  Canada, Alaska and Hawaii among them (`Sides::UsAndCanada`, where ARRL
+  DX's W/VE leaves them out). There you send your report and your state,
+  which Home and Your station ask for as in the Sprint, and your TU sends
+  back the hunter's. Anywhere else you send your report alone,
+  `TU GA UR 5NN 5NN BK`, as the cheat sheet has DX stations do, are asked
+  for no state, and your TU sends none back, whatever the hunter sent:
+  `BK TU 73 EE`. The card's line under "You send" says which: "You are
+  W/VE: you send your report and state, and send back the hunter's state",
+  or "You are DX: you send your report alone, and no state back"; Your
+  station's call line ends "you are W/VE" or "you are DX", as in ARRL DX.
+- **Hunters.** US and Canadian stations, each sending its report twice and
+  its state or province twice, and about one in four from anywhere else,
+  sending its report twice and no state, as DX stations do
+  (`Countries::Pota`, `POTA_DX`; the share is a choice, so a short run has
+  some). The report is drawn from §11.5's shares and sent as habits send
+  it (§11.6: plain under easy habits, `57N` and now and then `ENN` under
+  real and rough ones), the state where its call puts it. A hunter answers
+  your CQ with its call alone (twice from a pile-up caller that calls
+  twice), and leads its first exchange in its own style (below); sent
+  again, its exchange goes alone, `UR 579 579 OR OR BK` or `UR 579 OR BK`
+  as it keeps to. One that has its call but not your exchange asks
+  `AGN`, and F12 sends `AGN`: there is no serial.
+- **Hunter styles.** Each hunter keeps to one of eight whole replies for
+  its QSO (`their_replies`): it starts `BK`, your call and `TU`, or `BK
+  TU`, `R TU` or `TU`, and sends its report and state twice or each once.
+  Each is a corner of an eight-cornered shape standing on an edge
+  (`shape_corners`, the first corner just right of the top), clockwise
+  from the top right: the four starts with each field twice down the
+  right, then back up the left with each once. So the shape reads as a
+  map: the right side sends report and state twice and the left each
+  once, and each row across starts alike, your call at the top and `TU`
+  alone at the bottom. Where you put the knob in the shape sets how often
+  each comes (`hunterStyle`, two numbers, across and down from the
+  middle, the corners one from it): its Wachspress coordinates
+  (`corner_shares`), so the middle has all eight alike, a corner that
+  reply alone, and along an edge only its two corners', by how near each
+  is. Until moved the knob stands up and right of the middle
+  (`STYLE_ON_AIR`): about 34, 25, 9, 4, 3, 3, 6 and 16 in a hundred, half
+  the hunters naming you and about one in four sending each field once. A
+  reply can be turned off (`hunterStylesOff`, by corner): none sends it,
+  and the rest are scaled up alike to make a hundred, so they keep their
+  proportions to one another and in the middle are alike
+  (`shares_without`), or share alike where the knob sits on its corner;
+  the last reply on stays on (`toggle_corner`). A hunter decides as it
+  first sends its exchange and keeps to it for repeats.
+  "Hunter styles" on the contest card folds away under a line that says
+  how it is set, as the Band card folds its receiver: "Hunter styles: One
+  reply", "8 replies, as on the air", "8 replies, all alike", "6 replies,
+  2 off"; it never says "original" or "cheat sheet", which a new user has
+  not seen. Open, the shape in the app's copper and nothing else: no
+  text and no lines inside it but its rim. Over it each side is headed
+  with how it sends report and state, `Twice` and `UR 579 579 OR OR BK`
+  on the right, `Each once` and `UR 579 OR BK` on the left. At each corner
+  a pill says how many in a hundred send its reply, washed in copper as
+  strongly as its share, the commonest copper through, and the words the
+  reply starts with stand beside it, outward, so the drawing is as wide as
+  they reach and a long call still fits (`ShapeView`). The face is shaded
+  in copper toward each corner as strongly as its share, fading toward the
+  middle, so the shading follows the knob as the replies mix. It began as
+  a shaded outline of the mix over spokes, which the user found ugly, and
+  then as glows in eight colours, which mixed badly; the user picked this
+  from mock-ups. A click or a drag inside puts the knob there, as a
+  finger's touch and drag do (`touch-action: none`, so a finger moves the
+  knob rather than the page); near a corner, or past it, it goes onto the
+  corner, whose place is no round number, and anywhere else it is kept to
+  hundredths. A click on a corner's pill or its words turns its reply off,
+  or on again: its pill says off, dashed, and its words are struck
+  through. With a mouse, pointing shows what a click would do without
+  doing it, the shading and pills of the mix it would set and a dashed
+  ring for the knob, or the corner a click would turn, and a line under
+  the shape says so. The arrow keys move the knob a tenth, Home to the
+  middle; Tab reaches each corner, which Enter or Space turns, for the
+  keyboard and a screen reader. Under it the three replies you'll hear
+  most, in full, beside how many in a hundred send each, dashed while a
+  mouse previews. Its ⓘ says what it does. There are no preset buttons:
+  the corners, the middle and Home stand for them. Only POTA offers it
+  (`ContestRules::varies`); every other contest's callers lead as before,
+  drawn exactly as before. The card's Reset puts the knob back, and every
+  reply on.
+- **The state is optional** (`ContestRules::optional`). The report alone
+  is a complete exchange, so Enter thanks a DX hunter and logs it, and a
+  state it never sent is not checked; one a US hunter sent and you left
+  out is a wrong ST. Space after the report types the space before the
+  state rather than going back to the call (`space_to_call`), and goes
+  back once the state is typed too. A DX hunter's QSO owns two groups, its
+  call and its report, and its results list its ST empty.
+- **TU.** In the US or Canada your TU sends back the state the Exchange
+  field reads, twice (`{hisstate}`); none for a DX hunter, and DX goes
+  back as nothing. It ends with your farewell, `73`, and about one time in
+  four `73 44` (`FAREWELLS`, drawn from a stream of the run's own so
+  nothing else it draws moves), then `EE`, and never your call: "Your call
+  in TU" is not offered (`ContestRules::tu_call`). The card's example
+  signs off `73 44`, the user's example. It brings the next hunter, as a
+  pile-up of hunters calls an activator, once the one you worked has
+  signed off with `EE` (§4.1), and the hunters it brings keep clear of the
+  pitch of the one signing off.
 - **Rules.** No contest score, as in Simple QSO: QSOs, minutes per QSO and
   accuracy per field. A hunter you worked does not call again, as no dupes
-  come where nothing scores. The card says "Simplified: every hunter is in
-  the US or Canada and sends its state (a DX hunter sends a report alone);
-  Alaska and Hawaii send a report alone, as DX does here; and no park
-  references."
+  come where nothing scores. The card says "Hunters in the US and Canada
+  send their report and state; about one in four is DX and sends a report
+  alone, so leave its state out. Simplified: no park references."
 
 **Later contests,** in order of value: K1USN SST (with Farnsworth), CWops
 CWT, NAQP, IARU HF, Sweepstakes, and an HST-style preset with fixed
@@ -4578,6 +4652,25 @@ Asked for by the user on 2026-11-02, with a POTA exchange cheat sheet:
     and your report alone from DX, as its footnote has DX stations do;
     their report and state copied and their state sent back in your TU;
     no score (§3, POTA).
+
+Put right by the user the same day, from an example QSO they wrote out:
+
+16. In POTA a DX activator's TU sends no state back (`BK TU 73 EE`); about
+    one hunter in four is DX and sends its report alone, so the state is
+    optional and only a US or Canadian hunter's is sent back; the hunter
+    names you after its `BK` (`BK SA0KAM TU UR 579 579 OR OR BK`); your TU
+    never signs with your call; and you now and then sign off `73 44`.
+    Alaska and Hawaii, in the US, send a state (§3, POTA).
+17. Hunters each keep to one of eight whole replies, rather than one reply
+    with a fixed exception; and a dot in an eight-cornered shape on the
+    contest card, a reply at each corner, sets how often each comes, the
+    middle all alike and a corner that one alone; a click on a corner turns
+    its reply off or on; a mouse shows what a click would set before it
+    sets it; folded under a line that says how it is set, with each reply's
+    share beside it and what it does in its ⓘ, and no preset buttons (§3,
+    POTA). It began as a Variety slider from one reply to every reply
+    alike, then a pentagon of five; the user asked for the shape, as easier
+    to relate to the replies it sets, and for every reply to stay in it.
 
 ## 16. Risks
 

@@ -22,11 +22,12 @@ pub fn normalize_call(text: &str) -> String {
 pub enum ExchangeState {
     /// Nothing typed.
     Empty,
-    /// Some of the fields, not all.
+    /// Some of the fields, not all those a caller always sends.
     Missing,
     /// A token nothing can read.
     Invalid,
-    /// Every field.
+    /// Every field a caller always sends: an optional one may be left out
+    /// ([`ContestRules::optional`]).
     Complete,
 }
 
@@ -168,11 +169,17 @@ pub fn parse_exchange(rules: &ContestRules, side: Side, text: &str) -> Reading {
             unreadable.push(token.clone());
         }
     }
+    // Complete once every field a caller always sends is read: one it may
+    // leave out, as a DX hunter's state in POTA, is up to you.
+    let required = copied
+        .iter()
+        .filter(|field| !rules.optional(**field))
+        .all(|field| fields.iter().any(|read| read.field == *field));
     let state = if tokens.is_empty() {
         ExchangeState::Empty
     } else if !unreadable.is_empty() {
         ExchangeState::Invalid
-    } else if fields.len() == copied.len() {
+    } else if required {
         ExchangeState::Complete
     } else {
         ExchangeState::Missing

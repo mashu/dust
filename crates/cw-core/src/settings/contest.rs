@@ -13,7 +13,9 @@ use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_can
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall};
+use crate::contest::{
+    CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, STYLE_ON_AIR, Side, TuCall,
+};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -118,6 +120,19 @@ pub struct ContestSettings {
     /// not sign by its own rules: every QSO, every third, or never. Set on
     /// the contest card, with the run style.
     pub contest_tu_call: TuCall,
+    /// Where the dot stands in the shape that sets how often POTA hunters
+    /// send each of their replies, one at each corner: the middle has them
+    /// all alike, a corner that one alone ([`crate::contest::corner_shares`]).
+    /// [`STYLE_ON_AIR`] until moved, as heard on the air. Set on the contest
+    /// card, where the contest lets you
+    /// ([`crate::contest::ContestRules::varies`]).
+    #[serde(deserialize_with = "forgiving_style")]
+    pub hunter_style: [f64; 2],
+    /// The POTA replies you turned off, by their corners from the top, the
+    /// first nought: hunters never keep to them. Never every one: the last
+    /// on stays on. Set on the contest card, a click on a corner.
+    #[serde(deserialize_with = "forgiving_off_styles")]
+    pub hunter_styles_off: Vec<usize>,
     /// Each new caller's speed drawn from your copy speed in contests, within
     /// the Speed card's ranges: faster as you copy calls and numbers clean,
     /// slower as you miss them. Off, it is drawn evenly from the ranges. A
@@ -181,6 +196,8 @@ impl Default for ContestSettings {
             contest_minutes: 10,
             contest_show_copy: false,
             contest_tu_call: TuCall::Every,
+            hunter_style: STYLE_ON_AIR,
+            hunter_styles_off: Vec::new(),
             contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
@@ -231,6 +248,40 @@ fn forgiving_number<'de, D: serde::Deserializer<'de>, T>(
         .as_f64()
         .filter(|number| number.is_finite())
         .map_or(fallback, |number| whole(number.round())))
+}
+
+/// Where the hunters' dot stands, as saved: two numbers, across and down;
+/// anything else reads as where it stands until moved. A point outside the
+/// shape is brought into it with the rest of the clamp.
+fn forgiving_style<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[f64; 2], D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let read = || -> Option<[f64; 2]> {
+        let [x, y] = value.as_array()?.as_slice() else {
+            return None;
+        };
+        let (x, y) = (x.as_f64()?, y.as_f64()?);
+        (x.is_finite() && y.is_finite()).then_some([x, y])
+    };
+    Ok(read().unwrap_or(STYLE_ON_AIR))
+}
+
+/// The replies turned off, as saved: whole numbers; anything else, and any
+/// entry that is not one, reads as none turned off. Ones past the corners
+/// there are go with the rest of the clamp.
+fn forgiving_off_styles<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<usize>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let read = || -> Option<Vec<usize>> {
+        value
+            .as_array()?
+            .iter()
+            .map(|entry| entry.as_u64().and_then(|at| usize::try_from(at).ok()))
+            .collect()
+    };
+    Ok(read().unwrap_or_default())
 }
 
 /// Your speed as saved: a speed of your own, or 0 for the middle of the
@@ -318,9 +369,10 @@ impl ContestSettings {
         self.my_section = clean_section(typed);
     }
 
-    /// Your side of the ARRL DX contest, from your call.
+    /// Your side, from your call, as the contest draws the line: ARRL DX's
+    /// W/VE and DX, or POTA's US and Canada and everywhere else.
     pub fn side(&self) -> Side {
-        Side::of_call(&self.my_call)
+        self.contest_kind.rules().side_of(&self.my_call)
     }
 
     /// The CQ zone your call reads as: by your state or province where you
@@ -1287,8 +1339,38 @@ mod tests {
         assert_eq!((wild.my_wpm, wild.my_sending_db), (0, i32::MAX));
         let rounded = read(serde_json::json!({ "myWpm": 29.6, "mySendingDb": -8.6 }));
         assert_eq!((rounded.my_wpm, rounded.my_sending_db), (30, -9));
+        // The hunters' dot: where it stands until moved, and anything but
+        // two numbers read as that; a point kept, brought into the shape
+        // with the rest of the clamp.
+        assert_eq!(missing.hunter_style, STYLE_ON_AIR);
+        let moved = read(serde_json::json!({ "hunterStyle": [-0.2, 0.3] }));
+        assert_eq!(moved.hunter_style, [-0.2, 0.3]);
+        for odd in [
+            serde_json::json!("lots"),
+            serde_json::Value::Null,
+            serde_json::json!([1.0]),
+            serde_json::json!([1.0, "x"]),
+        ] {
+            let read = read(serde_json::json!({ "hunterStyle": odd }));
+            assert_eq!(read.hunter_style, STYLE_ON_AIR, "{odd}");
+        }
+        // The replies turned off: none until a corner is clicked, and
+        // anything but whole numbers read as none.
+        assert!(missing.hunter_styles_off.is_empty());
+        let off = read(serde_json::json!({ "hunterStylesOff": [2, 5] }));
+        assert_eq!(off.hunter_styles_off, [2, 5]);
+        for odd in [
+            serde_json::json!("two"),
+            serde_json::json!([1, -2]),
+            serde_json::json!([0.5]),
+        ] {
+            let read = read(serde_json::json!({ "hunterStylesOff": odd }));
+            assert!(read.hunter_styles_off.is_empty(), "{odd}");
+        }
         let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
         assert_eq!(json["contestTuCall"], "every");
+        assert_eq!(json["hunterStylesOff"], serde_json::json!([]));
+        assert_eq!(json["hunterStyle"], serde_json::json!([0.3, -0.47]));
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -3);
     }

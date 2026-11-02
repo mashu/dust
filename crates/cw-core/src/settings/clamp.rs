@@ -124,6 +124,20 @@ impl TrainingSettings {
         // break-in are switches, on or off, and need nothing either.
         let k = &mut self.contest;
         k.contest_minutes = k.contest_minutes.min(CONTEST_MINUTES_MAX);
+        // The dot stays in the shape of POTA's replies, the one shape that
+        // has it.
+        let replies = crate::contest::ContestKind::Pota
+            .rules()
+            .their_replies
+            .len();
+        k.hunter_style = crate::contest::into_shape(replies, k.hunter_style);
+        // Only corners there are, each once, and never every one.
+        k.hunter_styles_off.retain(|at| *at < replies);
+        k.hunter_styles_off.sort_unstable();
+        k.hunter_styles_off.dedup();
+        if k.hunter_styles_off.len() >= replies {
+            k.hunter_styles_off.clear();
+        }
         // Zero is no speed of your own: the middle of the callers' range.
         if k.my_wpm != 0 {
             k.my_wpm = k.my_wpm.clamp(MY_WPM_MIN, MY_WPM_MAX);

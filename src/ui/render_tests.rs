@@ -973,8 +973,11 @@ fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
 /// POTA has its pill and its dialogue from its row, as an activator works
 /// a hunter: your CQ POTA, its call, your greeting, report and state, its
 /// report and state, your TU sending its state back, and its `EE`. In the
-/// US or Canada you send your state, and Your station asks for it; outside
-/// them, your report alone, and the card says so. The greeting goes by the
+/// US or Canada, Alaska among them, you send your state, and Your station
+/// asks for it; outside them, your report alone and no state back, and the
+/// card says so. The hunter names you after its BK; your TU ends `73 44
+/// EE`, as the card shows the farewell a run sends now and then, never with
+/// your call, and the card offers no call in TU. The greeting goes by the
 /// hour, so only what is around it is checked.
 #[test]
 fn pota_shows_an_activators_dialogue_and_your_side() {
@@ -989,13 +992,13 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
         "Contest · POTA",
         r#"id="contest-pota" class="pill active""#,
         "You send 5NN + state\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}ST",
-        "You are W/VE: you send your report and your state",
-        "Simplified: every hunter is in the US or Canada and sends its state",
+        "You are W/VE: you send your report and state, and send back the hunter",
+        "about one in four is DX and sends a report alone",
         ">CQ CQ POTA DE K1ABC K<",
         ">W7XYZ<",
         " UR 5NN 5NN MA MA BK<",
-        ">BK TU UR 579 579 OR OR BK<",
-        ">BK TU OR OR 73 EE K1ABC<",
+        ">BK K1ABC TU UR 579 579 OR OR BK<",
+        ">BK TU OR OR 73 44 EE<",
         ">EE<",
         r#"for="field-your-state-or-province""#,
         "you\u{a0}are\u{a0}W/VE",
@@ -1004,6 +1007,7 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
         assert!(html.contains(shown), "no {shown:?} in {html}");
     }
     assert!(html.contains(">W7XYZ TU G"), "a greeting first: {html}");
+    assert!(!html.contains("Your call in TU"), "{html}");
     // A state is asked for in the US or Canada until given.
     let asked = station_settings(cw_core::ContestKind::Pota, called("K1ABC"));
     assert!(
@@ -1014,9 +1018,11 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
     let dx = station_settings(cw_core::ContestKind::Pota, called("SO5KM"));
     for shown in [
         "You send 5NN\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}ST",
-        "You are DX: you send your report alone, as DX activators do",
+        "You are DX: you send your report alone, and no state back",
         ">CQ CQ POTA DE SO5KM K<",
         " UR 5NN 5NN BK<",
+        ">BK SO5KM TU UR 579 579 OR OR BK<",
+        ">BK TU 73 44 EE<",
         "you\u{a0}are\u{a0}DX",
         "Signing SO5KM<",
     ] {
@@ -1024,6 +1030,80 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
     }
     assert!(!dx.contains("field-your-state"), "{dx}");
     assert!(!dx.contains("Add your"), "{dx}");
+    // Alaska is in the US: it sends its state, which is asked for.
+    let alaska = station_settings(cw_core::ContestKind::Pota, called("KL7XYZ"));
+    for shown in [
+        "You are W/VE: you send your report and state",
+        "you\u{a0}are\u{a0}W/VE",
+        "Add your state or province to start a POTA",
+    ] {
+        assert!(alaska.contains(shown), "no {shown:?} in {alaska}");
+    }
+}
+
+/// Settings in Contest mode for POTA as SA0KAM, the hunters' dot `at`.
+fn pota_settings_at(at: [f64; 2]) -> String {
+    #[component]
+    fn PotaSettings(at: [f64; 2]) -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Pota;
+            settings.contest.my_call = "SA0KAM".to_string();
+            settings.contest.hunter_style = at;
+            settings
+        });
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    }
+    render_props(PotaSettings, PotaSettingsProps { at })
+}
+
+/// POTA's card folds how hunters reply under a line that says how it is
+/// set: one reply with the dot at a corner, eight as on the air where it
+/// stands until moved, eight alike in the middle. Its ⓘ is beside it. No
+/// other contest has it.
+#[test]
+fn pota_folds_its_hunter_styles_under_a_line_that_says_how_they_are_set() {
+    for (variety, line) in [
+        (cw_core::shape_corners(8)[0], "Hunter styles: One reply<"),
+        (
+            cw_core::STYLE_ON_AIR,
+            "Hunter styles: 8 replies, as on the air",
+        ),
+        (cw_core::STYLE_EVEN, "Hunter styles: 8 replies, all alike"),
+    ] {
+        let html = pota_settings_at(variety);
+        assert!(html.contains(line), "no {line:?} in {html}");
+        assert!(html.contains(r#"id="disclosure-hunter-styles""#), "{html}");
+        assert!(html.contains(r#"id="help-hunter-styles""#), "{html}");
+        assert!(!html.contains("style-shape"), "folded: {html}");
+    }
+    let wpx = render(|| {
+        let settings = use_signal(crate::testing::contest_settings);
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    });
+    assert!(!wpx.contains("Hunter styles"), "{wpx}");
 }
 
 /// Settings in Contest mode for the NA Sprint as `my_call`, called
@@ -3982,6 +4062,165 @@ mod interactions {
             }
         });
         assert!(html.is_empty());
+    }
+
+    /// The character set card in POTA, as SA0KAM.
+    #[component]
+    fn PotaCharsetHarness() -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Pota;
+            settings.contest.my_call = "SA0KAM".to_string();
+            settings
+        });
+        rsx! {
+            crate::ui::settings_charset::CharsetCard { settings }
+        }
+    }
+
+    /// Hunter styles open from their line: the shape the knob is placed in,
+    /// a pill at each corner saying how many in a hundred send its reply
+    /// with the words it starts with beside it, the sides headed twice and
+    /// each once, and the replies you'll hear most, whole. A mouse over the
+    /// shape shows the mix it would set, dashed, and sets nothing until it
+    /// clicks; a finger sets it as it touches and drags, onto a corner
+    /// where it ends near one. The arrow keys move the knob and Home brings
+    /// it to the middle. A click on a corner's pill turns its reply off,
+    /// and Enter on a corner from the keyboard turns it too, never the last
+    /// one on. The line it folds under follows. The ⓘ says what it does.
+    #[test]
+    fn pota_hunter_styles_open_and_follow_the_knob() {
+        let shape = "shape-hunter-styles";
+        let view = crate::ui::settings_charset::pota_view("SA0KAM");
+        let corners = cw_core::shape_corners(8);
+        let middle = view.px([0.0, 0.0]);
+        let heard = |pct: u32, text: &str| {
+            format!(r#"{pct}%</span><span class="qso-sends"><span class="call">{text}</span>"#)
+        };
+        let rows = |ui: &Ui| {
+            let html = ui.html();
+            let list = html.split("qso style-replies").nth(1).unwrap_or_default();
+            let list = list.split("</ol>").next().unwrap_or_default();
+            list.matches(r#"<li class="qso-line they">"#).count()
+        };
+        let mut ui = Ui::new(PotaCharsetHarness, ());
+        assert!(
+            ui.has("Hunter styles: 8 replies, as on the air"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("style-shape"));
+        ui.click("disclosure-hunter-styles");
+        assert!(ui.input_tag("disclosure-hunter-styles").contains("open"));
+        assert!(ui.has(r#"id="shape-hunter-styles""#), "{}", ui.html());
+        // The sides' heads, each corner's pill and words, and the three
+        // replies heard most, the commonest first.
+        assert!(ui.has(">Twice</text>") && ui.has(">Each once</text>"));
+        assert!(ui.has(">UR 579 579 OR OR BK</text>") && ui.has(">UR 579 OR BK</text>"));
+        assert_eq!(ui.html().matches(">BK SA0KAM TU</text>").count(), 2);
+        assert_eq!(ui.html().matches(r#"class="style-pill""#).count(), 7);
+        assert_eq!(ui.html().matches(r#"class="style-pill top""#).count(), 1);
+        assert!(
+            ui.has(">34%</text>") && ui.has(">16%</text>"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(rows(&ui), 3);
+        assert!(ui.has(&heard(34, "BK SA0KAM TU UR 579 579 OR OR BK")));
+        assert!(ui.has(&heard(25, "BK TU UR 579 579 OR OR BK")));
+        assert!(!ui.has("style-knob ghost"));
+        // A mouse over the middle shows its mix, all alike, and sets
+        // nothing.
+        ui.pointer_on("pointermove", shape, "mouse", middle);
+        assert!(ui.has("style-knob ghost"));
+        assert!(ui.has("qso style-replies preview"), "{}", ui.html());
+        assert!(ui.has("Click to set this mix"));
+        // An eighth each: 13 for the first four, 12 for the rest.
+        assert!(ui.has(&heard(13, "BK SA0KAM TU UR 579 579 OR OR BK")));
+        assert_eq!(ui.html().matches(">13%</text>").count(), 4);
+        assert!(ui.has("Hunter styles: 8 replies, as on the air"));
+        // Off the shape, what is set again.
+        ui.point_away(shape);
+        assert!(!ui.has("style-knob ghost") && !ui.has("qso style-replies preview"));
+        // A click sets it.
+        ui.pointer_on("pointermove", shape, "mouse", middle);
+        ui.pointer_on("pointerdown", shape, "mouse", middle);
+        ui.pointer_on("pointerup", shape, "mouse", middle);
+        assert!(
+            ui.has("Hunter styles: 8 replies, all alike"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("qso style-replies preview"));
+        // A finger touches the middle and drags out past the top right
+        // corner: each place it passes is set, and it ends on the corner.
+        ui.pointer_on("pointerdown", shape, "touch", middle);
+        let past = view.px([corners[0][0] * 1.25, corners[0][1] * 1.08]);
+        ui.pointer_on("pointermove", shape, "touch", past);
+        ui.pointer_on("pointerup", shape, "touch", past);
+        assert!(ui.has("Hunter styles: One reply<"), "{}", ui.html());
+        assert_eq!(rows(&ui), 1);
+        assert!(ui.has(&heard(100, "BK SA0KAM TU UR 579 579 OR OR BK")));
+        // A mouse moving after the drag shows, and does not set.
+        ui.pointer_on("pointermove", shape, "mouse", middle);
+        assert!(ui.has("Hunter styles: One reply<"));
+        assert!(ui.has("qso style-replies preview"));
+        ui.point_away(shape);
+        // The arrow keys move the knob, down from the corner here, and Home
+        // brings it to the middle.
+        for _ in 0..3 {
+            ui.press_key(shape, Key::ArrowDown, Code::ArrowDown);
+        }
+        assert!(ui.has("Hunter styles: 8 replies<"), "{}", ui.html());
+        ui.press_key(shape, Key::Home, Code::Home);
+        assert!(ui.has("Hunter styles: 8 replies, all alike"));
+        // A click on the second corner's pill turns its reply off: none
+        // sends it, its pill says so and its words are struck through.
+        // Pointing at it first says what a click would do.
+        let second = view.px(corners[1]);
+        ui.pointer_on("pointermove", shape, "mouse", second);
+        assert!(ui.has("Click to turn this BK TU off"), "{}", ui.html());
+        assert!(
+            !ui.has("style-knob ghost"),
+            "a corner is no place for the knob"
+        );
+        ui.pointer_on("pointerdown", shape, "mouse", second);
+        ui.pointer_on("pointerup", shape, "mouse", second);
+        assert!(ui.has("Hunter styles: 7 replies, 1 off"), "{}", ui.html());
+        assert!(ui.has(">off</text>"));
+        assert!(ui.has(r#"class="style-lead off""#));
+        assert!(ui.input_tag("corner-2").contains(r#"aria-pressed="false""#));
+        // The words beside a corner turn it too: these, on again.
+        let words = view.px([corners[1][0] + 0.4, corners[1][1]]);
+        ui.pointer_on("pointerdown", shape, "mouse", words);
+        assert!(
+            ui.has("Hunter styles: 8 replies, all alike"),
+            "{}",
+            ui.html()
+        );
+        // From the keyboard, Enter on a corner; never the last one on.
+        for number in 1..=7 {
+            ui.press_key(&format!("corner-{number}"), Key::Enter, Code::Enter);
+        }
+        assert!(ui.has("Hunter styles: One reply, 7 off"), "{}", ui.html());
+        ui.press_key("corner-8", Key::Enter, Code::Enter);
+        assert!(ui.has("Hunter styles: One reply, 7 off"));
+        assert!(
+            ui.has(&heard(100, "BK SA0KAM TU UR 579 OR BK")),
+            "{}",
+            ui.html()
+        );
+        for number in 1..=7 {
+            ui.press_key(&format!("corner-{number}"), Key::Enter, Code::Enter);
+        }
+        assert!(ui.has("Hunter styles: 8 replies, all alike"));
+        // The ⓘ says what it does, and folds away again.
+        assert!(!ui.has("One reply always stays on"));
+        ui.click("help-hunter-styles");
+        assert!(ui.has("One reply always stays on"), "{}", ui.html());
+        ui.click("help-hunter-styles");
+        ui.click("disclosure-hunter-styles");
+        assert!(!ui.has("style-shape"));
     }
 
     /// The band card on a 400-600 Hz side-tone range, which the 300 Hz
