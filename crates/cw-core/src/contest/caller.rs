@@ -372,6 +372,8 @@ pub(super) struct Caller {
     /// Where you put the dot that sets how often each reply comes, where
     /// callers vary; where it stands until moved elsewhere.
     style_at: [f64; 2],
+    /// The replies you turned off, which it never keeps to.
+    styles_off: Vec<usize>,
     /// How it operates: how it sends its numbers, and under rough habits
     /// whether it is careless.
     habits: CallerHabits,
@@ -484,6 +486,11 @@ impl Caller {
                 settings.contest.hunter_style
             } else {
                 STYLE_ON_AIR
+            },
+            styles_off: if rules.varies() {
+                settings.contest.hunter_styles_off.clone()
+            } else {
+                Vec::new()
             },
             habits,
             cuts_serial: rules.serial_cut,
@@ -1222,7 +1229,7 @@ impl Caller {
         }
         // Its own reply, kept to once decided, where callers vary.
         if self.reply.is_none() && rules.varies() {
-            self.reply = rules.reply_at(self.rng.f64(), self.style_at);
+            self.reply = rules.reply_at(self.rng.f64(), self.style_at, &self.styles_off);
         }
         rules.their_reply_text(side, self.reply, my_call, &self.call.text, &fields)
     }

@@ -1367,6 +1367,14 @@ impl Ui {
         self.fire("pointerenter", id, Box::new(pointer));
     }
 
+    /// A pointer of `kind` ("mouse", "touch") doing `event` ("pointerdown",
+    /// "pointermove", "pointerup") on the control with this id, at
+    /// `in_control` inside it.
+    pub fn pointer_on(&mut self, event: &str, id: &str, kind: &str, in_control: (f64, f64)) {
+        let pointer = Self::pointer(kind, in_control, in_control);
+        self.fire(event, id, Box::new(pointer));
+    }
+
     /// Move a mouse off the control with this id.
     pub fn point_away(&mut self, id: &str) {
         let pointer = Self::pointer("mouse", (0.0, 0.0), (0.0, 0.0));

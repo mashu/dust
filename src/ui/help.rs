@@ -441,15 +441,19 @@ pub fn character_set() -> Element {
 pub fn hunter_styles() -> Element {
     rsx! {
         p {
-            "How POTA hunters reply to your exchange. There are five replies, one at each numbered corner, and each hunter keeps to one for its QSO. Drag the dot, tap where you want it, or move it with the arrow keys: the nearer it is to a corner, the more hunters send that reply. The list under it gives each reply in full and how many in a hundred send it."
+            "How POTA hunters reply to your exchange. Each reply is at a numbered corner, and each hunter keeps to one for its QSO: it starts BK with your call, BK, R or TU alone, then sends its report and state twice or once. The nearer the dot is to a corner, the more hunters send that reply; the list under it gives each reply in full and how many in a hundred send it."
         }
         dl { class: "help-terms",
-            dt { "One reply" }
-            dd { "The dot on corner 1: every hunter sends the reply in the QSO above, BK, your call and TU, then its report and state twice." }
-            dt { "As on the air" }
-            dd { "Where the dot starts: most hunters send the first two replies, and every reply comes now and then." }
-            dt { "All alike" }
-            dd { "The dot in the middle: each reply comes as often as the others. Home puts it there." }
+            dt { "Moving the dot" }
+            dd { "Drag it, or click or tap where you want it. With a mouse, pointing shows the mix a click would set, dashed, without setting it. The arrow keys move it too, and Home puts it in the middle." }
+            dt { "At a corner" }
+            dd { "Every hunter sends that one reply. Corner 1 is the reply in the QSO above." }
+            dt { "Turning a reply off" }
+            dd { "Click a corner, or the reply's number in the list, to turn it off: no hunter sends it, and its share goes to the others. Click again to turn it back on. One reply always stays on." }
+            dt { "In the middle" }
+            dd { "Every reply comes as often as the others." }
+            dt { "Where it starts" }
+            dd { "As heard on the air: most hunters send the first two replies, and every reply comes now and then." }
             dt { "DX hunters" }
             dd { "About one hunter in four is outside the US and Canada and sends its report alone, whatever its reply: log it without a state." }
         }

@@ -2,8 +2,9 @@ use cw_core::{
     CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill, GROUP_SIZE_MAX,
     LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS,
     STYLE_EVEN, STYLE_ON_AIR, Sender, SequenceChoice, SettingsSection, TrainingSettings, TuCall,
-    WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window, greeting, into_shape,
-    parse_callsign, shape_corners, tier_examples, unlocked_practice_count,
+    WORD_LIST_MAX, WordList, compute_char_pool, corner_shares, current_practice_window, greeting,
+    into_shape, parse_callsign, shape_corners, shares_without, tier_examples, toggle_corner,
+    unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
@@ -186,20 +187,26 @@ impl ContestCard {
                     side,
                     call_or_stand_in(&contest.my_call),
                     contest.hunter_style,
+                    &contest.hunter_styles_off,
                 )
-                .map(|styles| StylesCard::of(styles, contest.hunter_style)),
+                .map(|styles| {
+                    StylesCard::of(styles, contest.hunter_style, &contest.hunter_styles_off)
+                }),
             preset,
         }
     }
 }
 
 /// How POTA hunters reply, as the card shows it: where you put the dot in
-/// the shape of their five replies, how many of the hundred send each, and
-/// each reply whole as sent to you, a corner each, in the corners' order.
+/// the shape of their replies, which you turned off, how many of the
+/// hundred send each, and each reply whole as sent to you, a corner each,
+/// in the corners' order.
 #[derive(Clone, PartialEq)]
 struct StylesCard {
     /// Where the dot stands, across and down from the middle.
     at: [f64; 2],
+    /// The replies turned off, by their corners from the top, from nought.
+    off: Vec<usize>,
     /// The share of hunters that send each reply, exactly, for the shape.
     shares: Vec<f64>,
     /// Each reply, whole, and how many in a hundred send it, in whole
@@ -208,13 +215,27 @@ struct StylesCard {
 }
 
 impl StylesCard {
-    fn of(styles: cw_core::CallerStyles, at: [f64; 2]) -> Self {
+    fn of(styles: cw_core::CallerStyles, at: [f64; 2], off: &[usize]) -> Self {
         let shares = styles.replies.iter().map(|(_, share)| *share).collect();
         Self {
             at,
+            off: off.to_vec(),
             shares,
             replies: in_percent(styles.replies),
         }
+    }
+
+    /// Each reply and how many in a hundred would send it, the dot standing
+    /// `at` instead: what the list shows while a mouse is over the shape.
+    fn at_point(&self, at: [f64; 2]) -> Vec<(String, u32)> {
+        let shares = shares_without(&corner_shares(self.replies.len(), at), &self.off);
+        let named = self
+            .replies
+            .iter()
+            .map(|(reply, _)| reply.clone())
+            .zip(shares)
+            .collect();
+        in_percent(named)
     }
 
     /// How many replies come at all, a hundredth or more of them.
@@ -227,11 +248,15 @@ impl StylesCard {
     /// line, so the setting reads closed too.
     fn reading(&self) -> String {
         let count = self.replies_heard();
+        let off = match self.off.len() {
+            0 => String::new(),
+            turned => format!(", {turned} off"),
+        };
         match self.at {
-            _ if count <= 1 => "One reply".to_string(),
-            STYLE_ON_AIR => format!("{count} replies, as on the air"),
-            STYLE_EVEN => format!("{count} replies, all alike"),
-            _ => format!("{count} replies"),
+            _ if count <= 1 => format!("One reply{off}"),
+            STYLE_ON_AIR if self.off.is_empty() => format!("{count} replies, as on the air"),
+            STYLE_EVEN if self.off.is_empty() => format!("{count} replies, all alike"),
+            _ => format!("{count} replies{off}"),
         }
     }
 }
@@ -270,20 +295,36 @@ const SHAPE_REACH: f64 = 1.3;
 /// How far an arrow key moves the dot, in the shape's units.
 const SHAPE_STEP: f64 = 0.1;
 
-/// The point of the shape under the pointer, `x` and `y` pixels across and
-/// down the drawing, brought inside it.
-fn shape_point(x: f64, y: f64) -> [f64; 2] {
+/// How near a corner the pointer must be, in the shape's units, for a click
+/// to turn its reply off or on rather than move the dot: about its mark.
+const CORNER_HIT: f64 = 0.2;
+
+/// The shape's point `x` and `y` pixels across and down the drawing, where
+/// it is, in or out of the shape.
+fn shape_unit(x: f64, y: f64) -> [f64; 2] {
     let unit = |px: f64| px / SHAPE_PX * 2.0 * SHAPE_REACH - SHAPE_REACH;
-    tidy(into_shape(HUNTER_REPLIES, [unit(x), unit(y)]))
+    [unit(x), unit(y)]
+}
+
+/// The point of the shape of `corners` corners under the pointer, `x` and
+/// `y` pixels across and down the drawing, brought inside it.
+fn shape_point(corners: usize, x: f64, y: f64) -> [f64; 2] {
+    tidy(into_shape(corners, shape_unit(x, y)))
+}
+
+/// The corner of the shape of `corners` corners whose mark the pointer is
+/// on, `x` and `y` pixels across and down the drawing, if any.
+fn corner_under(corners: usize, x: f64, y: f64) -> Option<usize> {
+    let [px, py] = shape_unit(x, y);
+    shape_corners(corners)
+        .iter()
+        .position(|[cx, cy]| (px - cx).hypot(py - cy) <= CORNER_HIT)
 }
 
 /// A point kept to hundredths, so a save holds it as it reads.
 fn tidy(at: [f64; 2]) -> [f64; 2] {
     at.map(|value| (value * 100.0).round() / 100.0)
 }
-
-/// How many replies POTA's hunters keep to: the shape's corners.
-const HUNTER_REPLIES: usize = 5;
 
 /// Points of the drawing as SVG writes them: `x,y x,y …`.
 fn svg_points(points: impl Iterator<Item = [f64; 2]>) -> String {
@@ -293,35 +334,69 @@ fn svg_points(points: impl Iterator<Item = [f64; 2]>) -> String {
         .join(" ")
 }
 
-/// The three places the dot is most often wanted, a press each: one reply
-/// (the first corner), as on the air, and all alike (the middle).
-fn style_presets() -> [(&'static str, [f64; 2]); 3] {
-    [
-        ("One reply", shape_corners(HUNTER_REPLIES)[0]),
-        ("As on the air", STYLE_ON_AIR),
-        ("All alike", STYLE_EVEN),
-    ]
+/// The mix `shares` make, drawn as an outline inside the shape: each
+/// corner's point as far out as its share against the largest.
+fn mix_points(corners: &[[f64; 2]], shares: &[f64]) -> String {
+    let most = shares.iter().copied().fold(0.0, f64::max).max(1e-9);
+    svg_points(
+        corners
+            .iter()
+            .zip(shares)
+            .map(|(corner, share)| corner.map(|value| value * share / most * 0.92)),
+    )
+}
+
+/// What a mouse over the shape is on: a point a click would put the dot
+/// at, or a corner whose reply a click would turn off or on.
+#[derive(Clone, Copy, PartialEq)]
+enum Pointing {
+    At([f64; 2]),
+    Corner(usize),
 }
 
 /// Where the hunters' replies are set: a shape with a reply at each
-/// corner, numbered as the list under it numbers them, and a dot dragged,
-/// tapped or moved with the arrow keys inside it. In the middle every
-/// reply comes as often as the others; at a corner, that one alone; and
-/// the shaded shape inside shows the mix the dot makes, each corner's mark
-/// as large as its share.
+/// corner, numbered as the list under it numbers them, and a dot inside it.
+/// A click on a corner's mark turns its reply off, or on again; anywhere
+/// else a click or a drag puts the dot there, as a finger's touch and drag
+/// do. A mouse over it shows what a click would do without doing it
+/// (`hover`): a hollow dot and the mix it would make, dashed, or the corner
+/// it would turn. The arrow keys move the dot, and Home brings it to the
+/// middle. In the middle every reply on comes as often as the others; at a
+/// corner, that one alone; each corner's mark is as large as its share,
+/// one turned off crossed out, and the shaded shape inside is the mix.
 #[component]
-fn StyleShape(settings: Signal<TrainingSettings>, at: [f64; 2], shares: Vec<f64>) -> Element {
+fn StyleShape(
+    settings: Signal<TrainingSettings>,
+    at: [f64; 2],
+    off: Vec<usize>,
+    shares: Vec<f64>,
+    hover: Signal<Option<Pointing>>,
+) -> Element {
+    let mut hover = hover;
     let mut dragging = use_signal(|| false);
+    let count = shares.len();
     let mut place = move |point: [f64; 2]| settings.write().contest.hunter_style = point;
-    let corners = shape_corners(HUNTER_REPLIES);
+    let turned = off.clone();
+    let mut turn = move |corner: usize| {
+        settings.write().contest.hunter_styles_off = toggle_corner(&turned, corner, count);
+    };
+    let corners = shape_corners(count);
     let most = shares.iter().copied().fold(0.0, f64::max).max(1e-9);
     let edge = svg_points(corners.iter().copied());
-    let mix = svg_points(
-        corners
-            .iter()
-            .zip(&shares)
-            .map(|(corner, share)| corner.map(|value| value * share / most * 0.92)),
-    );
+    let mix = mix_points(&corners, &shares);
+    // What the mouse would set, where it is over the shape and not where
+    // the dot already stands.
+    let ghost = match hover() {
+        Some(Pointing::At(point)) if point != at => {
+            let shares = shares_without(&corner_shares(count, point), &off);
+            Some((point, mix_points(&corners, &shares)))
+        }
+        _ => None,
+    };
+    let hot = match hover() {
+        Some(Pointing::Corner(corner)) => Some(corner),
+        _ => None,
+    };
     let view = format!(
         "{} {} {} {}",
         -SHAPE_REACH,
@@ -332,24 +407,37 @@ fn StyleShape(settings: Signal<TrainingSettings>, at: [f64; 2], shares: Vec<f64>
     rsx! {
         svg {
             id: control_id("shape", "hunter styles"),
-            class: "style-shape",
+            class: if hot.is_some() { "style-shape on-corner" } else { "style-shape" },
             view_box: "{view}",
             tabindex: "0",
             role: "group",
-            "aria-label": "Where the dot stands sets how often each reply comes: drag it, or move it with the arrow keys",
+            "aria-label": "Where the dot stands sets how often each reply comes: drag it, or move it with the arrow keys; a click on a corner turns its reply off or on",
             onpointerdown: move |e: PointerEvent| {
-                dragging.set(true);
                 let point = e.element_coordinates();
-                place(shape_point(point.x, point.y));
+                hover.set(None);
+                if let Some(corner) = corner_under(count, point.x, point.y) {
+                    turn(corner);
+                    return;
+                }
+                dragging.set(true);
+                place(shape_point(count, point.x, point.y));
             },
             onpointermove: move |e: PointerEvent| {
+                let point = e.element_coordinates();
                 if dragging() {
-                    let point = e.element_coordinates();
-                    place(shape_point(point.x, point.y));
+                    place(shape_point(count, point.x, point.y));
+                } else if e.pointer_type() == "mouse" {
+                    hover.set(Some(match corner_under(count, point.x, point.y) {
+                        Some(corner) => Pointing::Corner(corner),
+                        None => Pointing::At(shape_point(count, point.x, point.y)),
+                    }));
                 }
             },
             onpointerup: move |_| dragging.set(false),
-            onpointerleave: move |_| dragging.set(false),
+            onpointerleave: move |_| {
+                dragging.set(false);
+                hover.set(None);
+            },
             onkeydown: move |e: KeyboardEvent| {
                 let [x, y] = at;
                 let moved = match e.key() {
@@ -361,7 +449,7 @@ fn StyleShape(settings: Signal<TrainingSettings>, at: [f64; 2], shares: Vec<f64>
                     _ => return,
                 };
                 e.prevent_default();
-                place(tidy(into_shape(HUNTER_REPLIES, moved)));
+                place(tidy(into_shape(count, moved)));
             },
             polygon { class: "style-edge", points: "{edge}" }
             for corner in corners.iter() {
@@ -374,18 +462,44 @@ fn StyleShape(settings: Signal<TrainingSettings>, at: [f64; 2], shares: Vec<f64>
                 }
             }
             polygon { class: "style-mix", points: "{mix}" }
+            if let Some((_, ghost_mix)) = ghost.as_ref() {
+                polygon { class: "style-mix ghost", points: "{ghost_mix}" }
+            }
             for (number , (corner , share)) in corners.iter().zip(&shares).enumerate() {
                 circle {
-                    class: if *share > 0.005 { "style-corner" } else { "style-corner faint" },
+                    class: match (off.contains(&number), hot == Some(number)) {
+                        (true, true) => "style-corner off hot",
+                        (true, false) => "style-corner off",
+                        (false, true) => "style-corner hot",
+                        (false, false) if *share > 0.005 => "style-corner",
+                        (false, false) => "style-corner faint",
+                    },
                     cx: "{corner[0]}",
                     cy: "{corner[1]}",
-                    r: "{0.11 + 0.1 * share / most}",
+                    r: "{0.1 + 0.08 * share / most}",
                 }
                 text {
-                    class: "style-corner-number",
+                    class: if off.contains(&number) { "style-corner-number off" } else { "style-corner-number" },
                     x: "{corner[0]}",
                     y: "{corner[1]}",
                     "{number + 1}"
+                }
+                if off.contains(&number) {
+                    line {
+                        class: "style-corner-cross",
+                        x1: "{corner[0] - 0.09}",
+                        y1: "{corner[1] + 0.09}",
+                        x2: "{corner[0] + 0.09}",
+                        y2: "{corner[1] - 0.09}",
+                    }
+                }
+            }
+            if let Some((point, _)) = ghost {
+                circle {
+                    class: "style-dot ghost",
+                    cx: "{point[0]}",
+                    cy: "{point[1]}",
+                    r: "0.075",
                 }
             }
             circle {
@@ -400,15 +514,44 @@ fn StyleShape(settings: Signal<TrainingSettings>, at: [f64; 2], shares: Vec<f64>
 
 /// How POTA hunters reply, folded away under a line that says how it is
 /// set, as the Band card folds its receiver. Open, the shape with a reply
-/// at each corner and the dot that sets how often each comes, a press each
-/// for the places most wanted, and under them each reply whole, numbered
-/// as its corner, beside how many in a hundred send it: one line at a
-/// corner, five alike in the middle. What it does is in its ⓘ.
+/// at each corner and the dot that sets how often each comes, a line
+/// saying what a click would do, and each reply whole, numbered as its
+/// corner, beside how many in a hundred send it: one line at a corner,
+/// every reply alike in the middle, one turned off kept in the list and
+/// marked so. Each number turns its reply off or on, as a click on its
+/// corner does. While a mouse is over the shape, the list shows the mix
+/// it would set, marked as not set yet. What it does is in its ⓘ.
 #[component]
 fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Element {
     let mut open = use_signal(|| false);
     let mut help = use_signal(|| false);
+    let hover = use_signal(|| None::<Pointing>);
     let reading = styles.reading();
+    let count = styles.replies.len();
+    // The mix the mouse would set, while it is over the shape somewhere
+    // else than the dot and its corners.
+    let preview = match hover() {
+        Some(Pointing::At(point)) if point != styles.at => Some(point),
+        _ => None,
+    };
+    let rows = match preview {
+        Some(point) => styles.at_point(point),
+        None => styles.replies.clone(),
+    };
+    let line = match hover() {
+        Some(Pointing::Corner(corner)) if styles.off.contains(&corner) => {
+            format!("Click to turn reply {} on again", corner + 1)
+        }
+        Some(Pointing::Corner(corner)) if styles.off.len() + 1 >= count => {
+            format!("Reply {} is the last one on", corner + 1)
+        }
+        Some(Pointing::Corner(corner)) => format!("Click to turn reply {} off", corner + 1),
+        _ if preview.is_some() => "Click to set this mix".to_string(),
+        _ => {
+            "Drag the dot toward the replies you want more of; click a corner to turn its reply off"
+                .to_string()
+        }
+    };
     rsx! {
         div { class: "card-title-row",
             button {
@@ -440,34 +583,74 @@ fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Eleme
                 StyleShape {
                     settings,
                     at: styles.at,
+                    off: styles.off.clone(),
                     shares: styles.shares.clone(),
+                    hover,
                 }
-                div { class: "mode-pills", role: "group", aria_label: "Hunter styles",
-                    for (label , point) in style_presets() {
-                        Seg {
-                            label,
-                            id: control_id("styles", label),
-                            pill: true,
-                            active: styles.at == point,
-                            onclick: move |_| settings.write().contest.hunter_style = point,
-                        }
-                    }
-                }
-                ol { class: "qso", aria_label: "The replies hunters send, and how often",
-                    for (number , (reply , pct)) in styles.replies.iter().enumerate() {
-                        if *pct > 0 {
-                            li { class: "qso-line they style-reply",
-                                span { class: "qso-who tiny",
-                                    span { class: "style-number", "{number + 1}" }
-                                    "{pct}%"
-                                }
-                                span { class: "qso-sends",
-                                    span { class: "call", "{reply}" }
-                                }
+                p { class: "muted hint style-preview-line", "{line}" }
+                ol {
+                    class: if preview.is_some() { "qso style-replies preview" } else { "qso style-replies" },
+                    aria_label: "The replies hunters send, and how often",
+                    for (number , (reply , pct)) in rows.iter().enumerate() {
+                        if styles.off.contains(&number) || *pct > 0 {
+                            ReplyRow {
+                                settings,
+                                number,
+                                count,
+                                reply: reply.clone(),
+                                pct: *pct,
+                                off: styles.off.clone(),
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// One reply in the list: its number, a button that turns it off or on
+/// again as a click on its corner does, how many in a hundred send it, or
+/// that it is off, and the reply whole.
+#[component]
+fn ReplyRow(
+    settings: Signal<TrainingSettings>,
+    number: usize,
+    count: usize,
+    reply: String,
+    pct: u32,
+    off: Vec<usize>,
+) -> Element {
+    let is_off = off.contains(&number);
+    let shown = number + 1;
+    let label = if is_off {
+        format!("Turn reply {shown} on again")
+    } else {
+        format!("Turn reply {shown} off")
+    };
+    rsx! {
+        li { class: if is_off { "qso-line they style-reply off" } else { "qso-line they style-reply" },
+            span { class: "qso-who tiny",
+                button {
+                    id: control_id("reply", &shown.to_string()),
+                    class: if is_off { "style-number off" } else { "style-number" },
+                    r#type: "button",
+                    title: "{label}",
+                    aria_label: "{label}",
+                    aria_pressed: if is_off { "false" } else { "true" },
+                    onclick: move |_| {
+                        settings.write().contest.hunter_styles_off = toggle_corner(&off, number, count);
+                    },
+                    "{shown}"
+                }
+                if is_off {
+                    "off"
+                } else {
+                    "{pct}%"
+                }
+            }
+            span { class: "qso-sends",
+                span { class: "call", "{reply}" }
             }
         }
     }
@@ -1124,7 +1307,7 @@ fn WordCount(
 
 #[cfg(test)]
 mod tests {
-    use super::{HUNTER_REPLIES, SHAPE_PX, StylesCard, in_percent, shape_point, style_presets};
+    use super::{SHAPE_PX, SHAPE_REACH, StylesCard, corner_under, in_percent, shape_point};
     use cw_core::{STYLE_EVEN, STYLE_ON_AIR, shape_corners};
 
     /// Shares read as whole percents that add up to 100, the rest going to
@@ -1145,19 +1328,20 @@ mod tests {
     }
 
     /// The folded line says how many replies come and where the dot
-    /// stands: one reply at a corner, five as on the air where it stands
-    /// until moved, five alike in the middle; the list keeps the corners'
-    /// order and makes a hundred.
+    /// stands: one reply at a corner, eight as on the air where it stands
+    /// until moved, eight alike in the middle; the list keeps the corners'
+    /// order and makes a hundred, and a point the mouse is over gives the
+    /// shares it would set.
     #[test]
     fn the_styles_read_by_the_replies_that_come() {
         let card = |at| {
             let styles = cw_core::ContestKind::Pota
                 .rules()
-                .caller_styles(cw_core::Side::Dx, "SA0KAM", at)
+                .caller_styles(cw_core::Side::Dx, "SA0KAM", at, &[])
                 .expect("POTA's hunters vary");
-            StylesCard::of(styles, at)
+            StylesCard::of(styles, at, &[])
         };
-        let one = card(shape_corners(HUNTER_REPLIES)[0]);
+        let one = card(shape_corners(8)[0]);
         assert_eq!(one.reading(), "One reply");
         assert_eq!(one.replies_heard(), 1);
         assert_eq!(
@@ -1165,30 +1349,63 @@ mod tests {
             ("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 100)
         );
         let on_air = card(STYLE_ON_AIR);
-        assert_eq!(on_air.reading(), "5 replies, as on the air");
+        assert_eq!(on_air.reading(), "8 replies, as on the air");
         assert_eq!(on_air.replies.iter().map(|(_, pct)| pct).sum::<u32>(), 100);
         assert_eq!(on_air.replies[0].0, "BK SA0KAM TU UR 579 579 OR OR BK");
-        assert_eq!(on_air.replies[4].0, "TU UR 579 OR BK");
+        assert_eq!(on_air.replies[7].0, "BK SA0KAM TU UR 579 OR BK");
         let even = card(STYLE_EVEN);
-        assert_eq!(even.reading(), "5 replies, all alike");
-        assert!(even.replies.iter().all(|(_, pct)| *pct == 20));
-        assert_eq!(card([0.2, 0.3]).reading(), "5 replies");
+        assert_eq!(even.reading(), "8 replies, all alike");
+        assert!(even.replies.iter().all(|(_, pct)| (12..=13).contains(pct)));
+        assert_eq!(card([0.2, 0.3]).reading(), "8 replies");
+        // What the mouse would set: the middle's from where it stands.
+        assert_eq!(on_air.at_point(STYLE_EVEN), even.replies);
+        assert_eq!(on_air.at_point(shape_corners(8)[0]), one.replies);
+    }
+
+    /// Replies turned off are said on the folded line, and the mouse's
+    /// preview leaves them out too.
+    #[test]
+    fn replies_turned_off_are_said_and_left_out() {
+        let off = [1, 2];
+        let styles = cw_core::ContestKind::Pota
+            .rules()
+            .caller_styles(cw_core::Side::Dx, "SA0KAM", STYLE_ON_AIR, &off)
+            .expect("POTA's hunters vary");
+        let card = StylesCard::of(styles, STYLE_ON_AIR, &off);
+        assert_eq!(card.reading(), "6 replies, 2 off");
+        assert_eq!((card.replies[1].1, card.replies[2].1), (0, 0));
+        let even = card.at_point(STYLE_EVEN);
+        assert_eq!((even[1].1, even[2].1), (0, 0));
+        assert!(
+            even.iter()
+                .all(|(_, pct)| *pct == 0 || (16..=17).contains(pct))
+        );
+    }
+
+    /// A corner's mark is where a click turns its reply: on it, or near
+    /// enough; not the middle, nor between two corners.
+    #[test]
+    fn a_corner_is_under_the_pointer_on_its_mark() {
+        let at = |unit: [f64; 2]| {
+            let px = |value: f64| (value + SHAPE_REACH) / (2.0 * SHAPE_REACH) * SHAPE_PX;
+            corner_under(8, px(unit[0]), px(unit[1]))
+        };
+        assert_eq!(at([0.0, -1.0]), Some(0));
+        assert_eq!(at([0.1, -0.95]), Some(0));
+        assert_eq!(at([1.0, 0.0]), Some(2));
+        assert_eq!(at([0.0, 0.0]), None);
+        assert_eq!(at([0.0, -0.6]), None);
     }
 
     /// The pointer's place on the drawing is the shape's point under it:
-    /// the drawing's middle is the shape's, its top edge past the top
-    /// corner, which a point beyond is brought back to, and the presets are
-    /// one reply's corner, where the dot stands until moved, and the middle.
+    /// the drawing's middle is the shape's, and its top edge past the top
+    /// corner, which a point beyond is brought back to.
     #[test]
     fn the_pointer_places_the_dot_under_it() {
-        assert_eq!(shape_point(SHAPE_PX / 2.0, SHAPE_PX / 2.0), [0.0, 0.0]);
-        assert_eq!(shape_point(SHAPE_PX / 2.0, 0.0), [0.0, -1.0]);
-        let right = shape_point(SHAPE_PX, SHAPE_PX / 2.0);
-        assert!(right[0] > 0.7 && right[0] <= 1.0, "{right:?}");
-        let quarter = shape_point(SHAPE_PX * 0.75, SHAPE_PX / 2.0);
-        assert_eq!(quarter, [0.65, 0.0]);
-        let presets = style_presets();
-        assert_eq!(presets[0].1, shape_corners(HUNTER_REPLIES)[0]);
-        assert_eq!((presets[1].1, presets[2].1), (STYLE_ON_AIR, STYLE_EVEN));
+        assert_eq!(shape_point(8, SHAPE_PX / 2.0, SHAPE_PX / 2.0), [0.0, 0.0]);
+        assert_eq!(shape_point(8, SHAPE_PX / 2.0, 0.0), [0.0, -1.0]);
+        let right = shape_point(8, SHAPE_PX, SHAPE_PX / 2.0);
+        assert_eq!(right, [1.0, 0.0], "an octagon has a corner there");
+        assert_eq!(shape_point(8, SHAPE_PX * 0.75, SHAPE_PX / 2.0), [0.65, 0.0]);
     }
 }

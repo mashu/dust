@@ -1069,18 +1069,18 @@ fn pota_settings_at(at: [f64; 2]) -> String {
 }
 
 /// POTA's card folds how hunters reply under a line that says how it is
-/// set: one reply with the dot at a corner, five as on the air where it
-/// stands until moved, five alike in the middle. Its ⓘ is beside it. No
+/// set: one reply with the dot at a corner, eight as on the air where it
+/// stands until moved, eight alike in the middle. Its ⓘ is beside it. No
 /// other contest has it.
 #[test]
 fn pota_folds_its_hunter_styles_under_a_line_that_says_how_they_are_set() {
     for (variety, line) in [
-        (cw_core::shape_corners(5)[0], "Hunter styles: One reply<"),
+        (cw_core::shape_corners(8)[0], "Hunter styles: One reply<"),
         (
             cw_core::STYLE_ON_AIR,
-            "Hunter styles: 5 replies, as on the air",
+            "Hunter styles: 8 replies, as on the air",
         ),
-        (cw_core::STYLE_EVEN, "Hunter styles: 5 replies, all alike"),
+        (cw_core::STYLE_EVEN, "Hunter styles: 8 replies, all alike"),
     ] {
         let html = pota_settings_at(variety);
         assert!(html.contains(line), "no {line:?} in {html}");
@@ -4079,15 +4079,18 @@ mod interactions {
     }
 
     /// Hunter styles open from their line: the shape the dot is placed
-    /// in, a press each for one reply, as on the air and all alike, and
-    /// each reply whole, numbered as its corner, beside its share. The arrow
-    /// keys move the dot and Home brings it to the middle; the line it
-    /// folds under follows. The ⓘ says what it does.
+    /// in and each reply whole, numbered as its corner, beside its share.
+    /// A mouse over the shape shows the mix it would set, dashed, and sets
+    /// nothing until it clicks; a finger sets it as it touches and drags.
+    /// The arrow keys move the dot and Home brings it to the middle; the
+    /// line it folds under follows. The ⓘ says what it does.
     #[test]
     fn pota_hunter_styles_open_and_follow_the_dot() {
+        let shape = "shape-hunter-styles";
+        let (middle, top) = ((120.0, 120.0), (120.0, 0.0));
         let reply = |number: u32, pct: u32, text: &str| {
             format!(
-                r#"<span class="style-number">{number}</span>{pct}%</span><span class="qso-sends"><span class="call">{text}</span>"#
+                r#">{number}</button>{pct}%</span><span class="qso-sends"><span class="call">{text}</span>"#
             )
         };
         let rows = |ui: &Ui| {
@@ -4097,7 +4100,7 @@ mod interactions {
         };
         let mut ui = Ui::new(PotaCharsetHarness, ());
         assert!(
-            ui.has("Hunter styles: 5 replies, as on the air"),
+            ui.has("Hunter styles: 8 replies, as on the air"),
             "{}",
             ui.html()
         );
@@ -4105,33 +4108,103 @@ mod interactions {
         ui.click("disclosure-hunter-styles");
         assert!(ui.input_tag("disclosure-hunter-styles").contains("open"));
         assert!(ui.has(r#"id="shape-hunter-styles""#), "{}", ui.html());
-        assert!(ui.input_tag("styles-as-on-the-air").contains("active"));
-        assert_eq!(rows(&ui), 5);
-        // One reply: the first corner's alone.
-        ui.click("styles-one-reply");
+        assert!(!ui.has("styles-one-reply"), "no presets");
+        assert_eq!(rows(&ui), 8);
+        assert!(!ui.has("style-dot ghost"));
+        // A mouse over the middle shows its mix, all alike, and sets
+        // nothing.
+        ui.pointer_on("pointermove", shape, "mouse", middle);
+        assert!(ui.has("style-dot ghost") && ui.has("style-mix ghost"));
+        assert!(ui.has("qso style-replies preview"), "{}", ui.html());
+        assert!(ui.has("Click to set this mix"));
+        // An eighth each: 13, 13, 13, 13, then 12 for the rest, to make 100.
+        assert!(ui.has(&reply(1, 13, "BK SA0KAM TU UR 579 579 OR OR BK")));
+        assert!(ui.has(&reply(5, 12, "TU UR 579 OR BK")), "{}", ui.html());
+        assert!(ui.has("Hunter styles: 8 replies, as on the air"));
+        // Off the shape, the list is what is set again.
+        ui.point_away(shape);
+        assert!(!ui.has("style-dot ghost") && !ui.has("qso style-replies preview"));
+        // A click sets it.
+        ui.pointer_on("pointermove", shape, "mouse", middle);
+        ui.pointer_on("pointerdown", shape, "mouse", middle);
+        ui.pointer_on("pointerup", shape, "mouse", middle);
+        assert!(
+            ui.has("Hunter styles: 8 replies, all alike"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("qso style-replies preview"));
+        // A finger touches the top corner and drags to the middle: each
+        // place it passes is set.
+        ui.pointer_on("pointerdown", shape, "touch", top);
         assert!(ui.has("Hunter styles: One reply<"), "{}", ui.html());
         assert_eq!(rows(&ui), 1);
         assert!(ui.has(&reply(1, 100, "BK SA0KAM TU UR 579 579 OR OR BK")));
-        // All alike: five, a fifth each, in the corners' order.
-        ui.click("styles-all-alike");
-        assert!(ui.has("Hunter styles: 5 replies, all alike"));
-        assert_eq!(rows(&ui), 5);
-        assert!(ui.has(&reply(4, 20, "R TU UR 579 OR BK")), "{}", ui.html());
+        ui.pointer_on("pointermove", shape, "touch", middle);
+        assert!(ui.has("Hunter styles: 8 replies, all alike"));
+        ui.pointer_on("pointerup", shape, "touch", middle);
+        // A mouse moving after the drag shows, and does not set.
+        ui.pointer_on("pointermove", shape, "mouse", top);
+        assert!(ui.has("Hunter styles: 8 replies, all alike"));
+        assert!(ui.has("qso style-replies preview"));
+        ui.point_away(shape);
         // The arrow keys move the dot, toward the top corner here, and
         // Home brings it back to the middle.
         for _ in 0..3 {
-            ui.press_key("shape-hunter-styles", Key::ArrowUp, Code::ArrowUp);
+            ui.press_key(shape, Key::ArrowUp, Code::ArrowUp);
         }
-        assert!(ui.has("Hunter styles: 5 replies<"), "{}", ui.html());
-        assert!(!ui.input_tag("styles-all-alike").contains("active"));
-        ui.press_key("shape-hunter-styles", Key::Home, Code::Home);
-        assert!(ui.has("Hunter styles: 5 replies, all alike"));
+        assert!(ui.has("Hunter styles: 8 replies<"), "{}", ui.html());
+        ui.press_key(shape, Key::Home, Code::Home);
+        assert!(ui.has("Hunter styles: 8 replies, all alike"));
+        // A click on corner 2's mark turns its reply off: none sends it,
+        // its mark is crossed out and its row says so. Pointing at it first
+        // says what a click would do.
+        let corner_2 = (120.0 + 0.707 * 120.0 / 1.3, 120.0 - 0.707 * 120.0 / 1.3);
+        ui.pointer_on("pointermove", shape, "mouse", corner_2);
+        assert!(ui.has("Click to turn reply 2 off"), "{}", ui.html());
+        assert!(
+            !ui.has("style-dot ghost"),
+            "a corner is no place for the dot"
+        );
+        ui.pointer_on("pointerdown", shape, "mouse", corner_2);
+        ui.pointer_on("pointerup", shape, "mouse", corner_2);
+        assert!(ui.has("Hunter styles: 7 replies, 1 off"), "{}", ui.html());
+        assert!(ui.has("style-corner-cross"));
+        assert!(ui.has(r#"<li class="qso-line they style-reply off">"#));
+        assert!(ui.input_tag("reply-2").contains("style-number off"));
+        // Its number turns it on again, as the corner would.
+        ui.click("reply-2");
+        assert!(
+            ui.has("Hunter styles: 8 replies, all alike"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("style-corner-cross"));
+        // Never the last one on: with seven off, the eighth stays.
+        for number in 1..=7 {
+            ui.click(&format!("reply-{number}"));
+        }
+        assert!(ui.has("Hunter styles: One reply, 7 off"), "{}", ui.html());
+        ui.click("reply-8");
+        assert!(ui.has("Hunter styles: One reply, 7 off"));
+        assert!(
+            ui.has(&reply(8, 100, "BK SA0KAM TU UR 579 OR BK")),
+            "{}",
+            ui.html()
+        );
+        for number in 1..=7 {
+            ui.click(&format!("reply-{number}"));
+        }
+        assert!(ui.has("Hunter styles: 8 replies, all alike"));
         // The ⓘ says what it does, and folds away again.
-        assert!(!ui.has("Drag the dot"));
+        assert!(!ui.has("pointing shows the mix a click would set"));
         ui.click("help-hunter-styles");
-        assert!(ui.has("Drag the dot"), "{}", ui.html());
+        assert!(
+            ui.has("pointing shows the mix a click would set"),
+            "{}",
+            ui.html()
+        );
         ui.click("help-hunter-styles");
-        assert!(!ui.has("Drag the dot"));
         ui.click("disclosure-hunter-styles");
         assert!(!ui.has("style-shape"));
     }

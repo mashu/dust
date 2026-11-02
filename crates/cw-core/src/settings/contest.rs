@@ -128,6 +128,11 @@ pub struct ContestSettings {
     /// ([`crate::contest::ContestRules::varies`]).
     #[serde(deserialize_with = "forgiving_style")]
     pub hunter_style: [f64; 2],
+    /// The POTA replies you turned off, by their corners from the top, the
+    /// first nought: hunters never keep to them. Never every one: the last
+    /// on stays on. Set on the contest card, a click on a corner.
+    #[serde(deserialize_with = "forgiving_off_styles")]
+    pub hunter_styles_off: Vec<usize>,
     /// Each new caller's speed drawn from your copy speed in contests, within
     /// the Speed card's ranges: faster as you copy calls and numbers clean,
     /// slower as you miss them. Off, it is drawn evenly from the ranges. A
@@ -192,6 +197,7 @@ impl Default for ContestSettings {
             contest_show_copy: false,
             contest_tu_call: TuCall::Every,
             hunter_style: STYLE_ON_AIR,
+            hunter_styles_off: Vec::new(),
             contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
@@ -259,6 +265,23 @@ fn forgiving_style<'de, D: serde::Deserializer<'de>>(
         (x.is_finite() && y.is_finite()).then_some([x, y])
     };
     Ok(read().unwrap_or(STYLE_ON_AIR))
+}
+
+/// The replies turned off, as saved: whole numbers; anything else, and any
+/// entry that is not one, reads as none turned off. Ones past the corners
+/// there are go with the rest of the clamp.
+fn forgiving_off_styles<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<usize>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let read = || -> Option<Vec<usize>> {
+        value
+            .as_array()?
+            .iter()
+            .map(|entry| entry.as_u64().and_then(|at| usize::try_from(at).ok()))
+            .collect()
+    };
+    Ok(read().unwrap_or_default())
 }
 
 /// Your speed as saved: a speed of your own, or 0 for the middle of the
@@ -1331,9 +1354,23 @@ mod tests {
             let read = read(serde_json::json!({ "hunterStyle": odd }));
             assert_eq!(read.hunter_style, STYLE_ON_AIR, "{odd}");
         }
+        // The replies turned off: none until a corner is clicked, and
+        // anything but whole numbers read as none.
+        assert!(missing.hunter_styles_off.is_empty());
+        let off = read(serde_json::json!({ "hunterStylesOff": [2, 5] }));
+        assert_eq!(off.hunter_styles_off, [2, 5]);
+        for odd in [
+            serde_json::json!("two"),
+            serde_json::json!([1, -2]),
+            serde_json::json!([0.5]),
+        ] {
+            let read = read(serde_json::json!({ "hunterStylesOff": odd }));
+            assert!(read.hunter_styles_off.is_empty(), "{odd}");
+        }
         let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
         assert_eq!(json["contestTuCall"], "every");
-        assert_eq!(json["hunterStyle"], serde_json::json!([0.15, -0.4]));
+        assert_eq!(json["hunterStylesOff"], serde_json::json!([]));
+        assert_eq!(json["hunterStyle"], serde_json::json!([0.1, -0.55]));
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -3);
     }

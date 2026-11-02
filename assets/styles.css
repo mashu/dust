@@ -1514,18 +1514,37 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
 .style-corner.faint { stroke: var(--line-strong); }
 .style-corner-number { fill: var(--ink); font-size: 0.13px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
 .style-dot { fill: var(--copper); stroke: var(--surface); stroke-width: 0.03px; }
+/* Where a mouse over the shape would put the dot, and the mix it would
+   make: hollow and dashed, set by nothing until a click. */
+.style-dot.ghost { fill: none; stroke: var(--copper); stroke-width: 0.025px; }
+.style-mix.ghost { fill: none; stroke: var(--ink-soft); stroke-width: 0.018px; stroke-dasharray: 0.05px 0.04px; }
+.style-preview-line { margin: 0; text-align: center; }
+.style-replies.preview .call { border-style: dashed; }
+/* A corner a click would turn, and one turned off: hunters never send its
+   reply, its mark crossed out and its row struck through. */
+.style-shape.on-corner { cursor: pointer; }
+.style-corner.hot { stroke-width: 0.04px; }
+.style-corner.off { fill: var(--surface-sunken); stroke: var(--line-strong); stroke-dasharray: 0.03px 0.025px; }
+.style-corner-number.off { fill: var(--ink-dim); }
+.style-corner-cross { stroke: var(--ink-dim); stroke-width: 0.02px; stroke-linecap: round; }
+.style-reply.off .call { text-decoration: line-through; color: var(--ink-dim); }
 /* Each reply under it, numbered as its corner, with how many send it. */
 .style-reply .qso-who { display: inline-flex; align-items: center; gap: 0.3rem; width: 3.8rem; }
 .style-number {
   display: inline-grid;
   place-items: center;
-  width: 1.15rem;
-  height: 1.15rem;
+  flex: none;
+  width: 1.35rem;
+  height: 1.35rem;
+  padding: 0;
   border-radius: 50%;
   border: 1px solid var(--copper);
+  background: var(--surface);
   color: var(--ink);
   font-weight: 700;
 }
+.style-number:hover { background: var(--copper-soft); }
+.style-number.off { border-style: dashed; border-color: var(--line-strong); color: var(--ink-dim); text-decoration: line-through; }
 /* The eyebrow over a QSO, with Hear a QSO or Stop beside it. */
 .qso-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.75rem; }
 /* QSOs heard scroll in a box of their own, kept on the newest line: a

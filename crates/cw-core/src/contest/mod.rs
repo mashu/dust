@@ -73,7 +73,7 @@ pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummar
 pub use rules::{
     CallerStyles, ContestRules, FAREWELLS, Fill, GREETING_HOUR, Multiplier, PerSide, Points, Reply,
     STYLE_EVEN, STYLE_ON_AIR, Scoring, Side, Sides, corner_shares, greeting, into_shape,
-    shape_corners,
+    shape_corners, shares_without, toggle_corner,
 };
 pub use score::{ContestScore, MyStation, Placed, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};

@@ -5378,7 +5378,7 @@ mod tests {
         let count = |lead: &str| leads.get(lead).copied().unwrap_or(0);
         assert!(count("BK N4BKY TU") > count("BK TU"), "{leads:?}");
         assert!(count("BK TU") > count("TU"), "{leads:?}");
-        assert!(count("TU") > count("R TU"), "{leads:?}");
+        assert!(count("R TU") > count("TU"), "{leads:?}");
         for lead in ["BK N4BKY TU", "BK TU", "R TU", "TU"] {
             assert!(count(lead) > 5, "{lead}: {leads:?}");
         }
@@ -5387,8 +5387,8 @@ mod tests {
 
     /// Where you put the dot reaches the hunters: at the first corner every
     /// hunter sends the first reply, its report and state twice after `BK`,
-    /// your call and `TU`; in the middle every reply comes about as often as
-    /// the others.
+    /// your call and `TU`; in the middle each of the eight comes about as
+    /// often as the others.
     #[test]
     fn hunters_reply_as_you_place_the_dot() {
         let firsts = |at: [f64; 2]| -> Vec<String> {
@@ -5406,7 +5406,7 @@ mod tests {
                 })
                 .collect()
         };
-        for first in firsts(crate::contest::shape_corners(5)[0]) {
+        for first in firsts(crate::contest::shape_corners(8)[0]) {
             let (rst, st) = pota_hunter(&first, "N4BKY");
             let st = st.expect("a US hunter's state");
             assert_eq!(first, format!("BK N4BKY TU UR {rst} {rst} {st} {st} BK"));
@@ -5423,13 +5423,17 @@ mod tests {
         for reply in [
             "BK N4BKY TU UR R R S S BK",
             "BK TU UR R R S S BK",
-            "BK N4BKY TU UR R S BK",
-            "R TU UR R S BK",
+            "R TU UR R R S S BK",
+            "TU UR R R S S BK",
             "TU UR R S BK",
+            "R TU UR R S BK",
+            "BK TU UR R S BK",
+            "BK N4BKY TU UR R S BK",
         ] {
             let count = shapes.iter().filter(|shape| *shape == reply).count();
+            // An eighth each, about 19 of 149.
             assert!(
-                (15..50).contains(&count),
+                (8..35).contains(&count),
                 "{reply}: {count} of {}",
                 shapes.len()
             );

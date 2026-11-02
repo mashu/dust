@@ -556,10 +556,10 @@ pub(super) const RULES: &[ContestRules] = &[
     // and Canada send their report and their state or province, which you
     // copy, and your TU sends the state back; about one in four is DX and
     // sends its report alone, as DX stations do, so its state is optional.
-    // Each hunter keeps to one of five whole replies: `BK`, your call and
-    // `TU` with its report and state twice, or each once; `BK TU` with each
-    // twice; `R TU` or `TU` with each once. How often each comes is where
-    // you put the dot in the five-cornered shape on the card. Your TU ends with `EE`, never your call, for the
+    // Each hunter keeps to one of eight whole replies: it starts `BK`, your
+    // call and `TU`, or `BK TU`, `R TU` or `TU`, and sends its report and
+    // state twice or each once. How often each comes is where you put the
+    // dot in the eight-cornered shape on the card. Your TU ends with `EE`, never your call, for the
     // hunter to answer with its own `EE`. From outside the US and
     // Canada, Alaska and Hawaii being in them, you send your report alone,
     // and your TU sends no state back: `BK TU 73 EE`. Your TU brings the
@@ -589,6 +589,10 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Pota)),
         answer: "{his}",
         their_exchange: PerSide::both("UR {rst} {rst} {st} {st} BK"),
+        // Round the shape from the top, so that neighbours are alike: each
+        // way of starting with report and state twice down the right, then
+        // back up the left with each once, the first and the last naming
+        // you.
         their_replies: &[
             Reply {
                 lead: "BK {my} TU",
@@ -599,7 +603,15 @@ pub(super) const RULES: &[ContestRules] = &[
                 exchange: "UR {rst} {rst} {st} {st} BK",
             },
             Reply {
-                lead: "BK {my} TU",
+                lead: "R TU",
+                exchange: "UR {rst} {rst} {st} {st} BK",
+            },
+            Reply {
+                lead: "TU",
+                exchange: "UR {rst} {rst} {st} {st} BK",
+            },
+            Reply {
+                lead: "TU",
                 exchange: "UR {rst} {st} BK",
             },
             Reply {
@@ -607,7 +619,11 @@ pub(super) const RULES: &[ContestRules] = &[
                 exchange: "UR {rst} {st} BK",
             },
             Reply {
-                lead: "TU",
+                lead: "BK TU",
+                exchange: "UR {rst} {st} BK",
+            },
+            Reply {
+                lead: "BK {my} TU",
                 exchange: "UR {rst} {st} BK",
             },
         ],
@@ -656,8 +672,10 @@ pub struct Reply {
 
 /// Where the dot stands until you move it: up and a little right of the
 /// middle, toward the first reply and the second, so most hunters send
-/// those, as heard on the air, and every reply comes.
-pub const STYLE_ON_AIR: [f64; 2] = [0.15, -0.4];
+/// those, as heard on the air, and every reply comes: of POTA's eight,
+/// about 34, 25, 9, 4, 3, 3, 6 and 16 in a hundred, half of them naming
+/// you and about one in four sending each field once.
+pub const STYLE_ON_AIR: [f64; 2] = [0.1, -0.55];
 
 /// The middle of the shape: every reply as often as the others.
 pub const STYLE_EVEN: [f64; 2] = [0.0, 0.0];
@@ -743,6 +761,47 @@ fn nearest_on_edge(a: [f64; 2], b: [f64; 2], at: [f64; 2]) -> [f64; 2] {
     let along = ((at[0] - a[0]) * (b[0] - a[0]) + (at[1] - a[1]) * (b[1] - a[1])) / distance2(a, b);
     let along = along.clamp(0.0, 1.0);
     [a[0] + (b[0] - a[0]) * along, a[1] + (b[1] - a[1]) * along]
+}
+
+/// `shares` with the corners `off` taken out: each of theirs nothing, and
+/// what was theirs shared among the rest as they stand, so the nearest
+/// corners take most of it. Where nothing is left to share, the dot being
+/// at a corner turned off, the rest share alike. With every corner off, or
+/// none, the shares are as they were: one at least is always on.
+pub fn shares_without(shares: &[f64], off: &[usize]) -> Vec<f64> {
+    let on = |at: usize| !off.contains(&at);
+    if off.is_empty() || !(0..shares.len()).any(on) {
+        return shares.to_vec();
+    }
+    let kept: Vec<f64> = shares
+        .iter()
+        .enumerate()
+        .map(|(at, share)| if on(at) { *share } else { 0.0 })
+        .collect();
+    let sum: f64 = kept.iter().sum();
+    if sum > 1e-12 {
+        return kept.iter().map(|share| share / sum).collect();
+    }
+    let left = (0..shares.len()).filter(|at| on(*at)).count() as f64;
+    (0..shares.len())
+        .map(|at| if on(at) { 1.0 / left } else { 0.0 })
+        .collect()
+}
+
+/// `off` with `corner` turned the other way, of `corners` in all: on again
+/// if it was off, off if it was on, unless it is the last on, which stays.
+/// Kept in order, each once.
+pub fn toggle_corner(off: &[usize], corner: usize, corners: usize) -> Vec<usize> {
+    let mut off: Vec<usize> = off.iter().copied().filter(|at| *at < corners).collect();
+    off.sort_unstable();
+    off.dedup();
+    if let Some(at) = off.iter().position(|held| *held == corner) {
+        off.remove(at);
+    } else if corner < corners && off.len() + 1 < corners {
+        off.push(corner);
+        off.sort_unstable();
+    }
+    off
 }
 
 /// The replies a contest's callers send, as the card lists them beside the
@@ -1091,19 +1150,20 @@ impl ContestRules {
 
     /// The share of callers that keep to each of [`Self::their_replies`],
     /// the dot standing `at` in the shape whose corners they are
-    /// ([`corner_shares`]). Empty where callers do not vary.
-    pub fn reply_shares(&self, at: [f64; 2]) -> Vec<f64> {
+    /// ([`corner_shares`]), the replies `off` sent by none
+    /// ([`shares_without`]). Empty where callers do not vary.
+    pub fn reply_shares(&self, at: [f64; 2], off: &[usize]) -> Vec<f64> {
         if !self.varies() {
             return Vec::new();
         }
-        corner_shares(self.their_replies.len(), at)
+        shares_without(&corner_shares(self.their_replies.len(), at), off)
     }
 
     /// Which of [`Self::their_replies`] a caller keeps to, the dot standing
-    /// `at`, for `draw`, drawn evenly from nothing up to one; none where
-    /// callers do not vary.
-    pub(super) fn reply_at(&self, draw: f64, at: [f64; 2]) -> Option<usize> {
-        let shares = self.reply_shares(at);
+    /// `at` and the replies `off` sent by none, for `draw`, drawn evenly
+    /// from nothing up to one; none where callers do not vary.
+    pub(super) fn reply_at(&self, draw: f64, at: [f64; 2], off: &[usize]) -> Option<usize> {
+        let shares = self.reply_shares(at, off);
         let mut upto = 0.0;
         for (reply, share) in shares.iter().enumerate() {
             upto += share;
@@ -1114,11 +1174,18 @@ impl ContestRules {
         shares.len().checked_sub(1)
     }
 
-    /// The replies its callers send, the dot standing `at`, as the card
-    /// lists them, to you as `my_call` on `side`: each whole, from a caller
-    /// in Oregon with the report and state the card's QSO has, with its
-    /// share, in the order of the corners. None where they do not vary.
-    pub fn caller_styles(&self, side: Side, my_call: &str, at: [f64; 2]) -> Option<CallerStyles> {
+    /// The replies its callers send, the dot standing `at` and the replies
+    /// `off` sent by none, as the card lists them, to you as `my_call` on
+    /// `side`: each whole, from a caller in Oregon with the report and state
+    /// the card's QSO has, with its share, in the order of the corners. None
+    /// where they do not vary.
+    pub fn caller_styles(
+        &self,
+        side: Side,
+        my_call: &str,
+        at: [f64; 2],
+        off: &[usize],
+    ) -> Option<CallerStyles> {
         if !self.varies() {
             return None;
         }
@@ -1131,7 +1198,7 @@ impl ContestRules {
             .their_replies
             .iter()
             .enumerate()
-            .zip(self.reply_shares(at))
+            .zip(self.reply_shares(at, off))
             .map(|((at, reply), share)| {
                 let body = self.their_reply_text(side, Some(at), my_call, "W7XYZ", &fields);
                 (
@@ -1701,8 +1768,8 @@ mod tests {
             rules.their_first_exchange(0, "K1ABC", &body),
             "BK K1ABC TU UR 57N 57N FL FL BK"
         );
-        // Each hunter keeps to one of five whole replies, a corner each.
-        let replies: Vec<String> = (0..5)
+        // Each hunter keeps to one of eight whole replies, a corner each.
+        let replies: Vec<String> = (0..8)
             .map(|reply| {
                 let body =
                     rules.their_reply_text(Side::WVe, Some(reply), "K1ABC", "W4XYZ", &theirs);
@@ -1714,9 +1781,12 @@ mod tests {
             [
                 "BK K1ABC TU UR 57N 57N FL FL BK",
                 "BK TU UR 57N 57N FL FL BK",
-                "BK K1ABC TU UR 57N FL BK",
+                "R TU UR 57N 57N FL FL BK",
+                "TU UR 57N 57N FL FL BK",
+                "TU UR 57N FL BK",
                 "R TU UR 57N FL BK",
-                "TU UR 57N FL BK"
+                "BK TU UR 57N FL BK",
+                "BK K1ABC TU UR 57N FL BK"
             ]
         );
         assert!(rules.varies() && !wpx().varies());
@@ -1810,10 +1880,17 @@ mod tests {
             shares[2..].iter().all(|share| share.abs() < 1e-9),
             "{shares:?}"
         );
-        // As heard on the air: every reply, the first the commonest.
-        let on_air = corner_shares(5, STYLE_ON_AIR);
-        assert!(on_air.iter().all(|share| *share > 0.05), "{on_air:?}");
-        assert!(on_air[0] > 0.35 && on_air[0] > on_air[1], "{on_air:?}");
+        // As heard on the air, among POTA's eight: every reply, the first
+        // the commonest, half naming you, about one in four each field once.
+        let on_air = corner_shares(8, STYLE_ON_AIR);
+        assert!(on_air.iter().all(|share| *share > 0.02), "{on_air:?}");
+        assert!(on_air[0] > 0.3 && on_air[0] > on_air[1], "{on_air:?}");
+        assert!(
+            (0.45..0.55).contains(&(on_air[0] + on_air[7])),
+            "{on_air:?}"
+        );
+        let once: f64 = on_air[4..].iter().sum();
+        assert!((0.2..0.35).contains(&once), "{on_air:?}");
         // Anywhere, they make one and none is below nothing; and a dot
         // outside comes to the edge, a point that is none to the middle.
         for x in -12..=12 {
@@ -1838,20 +1915,59 @@ mod tests {
         );
         assert_eq!(into_shape(5, [f64::NAN, 0.0]), STYLE_EVEN);
         // Callers that do not vary have none to share.
-        assert!(wpx().reply_shares(STYLE_ON_AIR).is_empty());
-        assert_eq!(wpx().reply_at(0.5, STYLE_ON_AIR), None);
-        assert_eq!(pota().reply_at(0.0, STYLE_ON_AIR), Some(0));
-        assert_eq!(pota().reply_at(0.999_999, STYLE_ON_AIR), Some(4));
+        assert!(wpx().reply_shares(STYLE_ON_AIR, &[]).is_empty());
+        assert_eq!(wpx().reply_at(0.5, STYLE_ON_AIR, &[]), None);
+        assert_eq!(pota().reply_at(0.0, STYLE_ON_AIR, &[]), Some(0));
+        assert_eq!(pota().reply_at(0.999_999, STYLE_ON_AIR, &[]), Some(7));
+        // A reply turned off is drawn by none.
+        assert_eq!(pota().reply_at(0.0, STYLE_ON_AIR, &[0]), Some(1));
+        assert_eq!(pota().reply_at(0.999_999, STYLE_ON_AIR, &[7]), Some(6));
+    }
+
+    /// A reply turned off is sent by none: what was its share goes to the
+    /// rest as they stand, its neighbours taking most; where none is left,
+    /// the dot at its corner, the rest share alike; and the last reply on
+    /// stays on.
+    #[test]
+    fn a_reply_turned_off_is_sent_by_none() {
+        let on_air = corner_shares(8, STYLE_ON_AIR);
+        let without = shares_without(&on_air, &[0]);
+        assert_eq!(without[0], 0.0);
+        let sum: f64 = without.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9);
+        for at in 1..8 {
+            assert!((without[at] - on_air[at] / (1.0 - on_air[0])).abs() < 1e-9);
+        }
+        let at_corner = corner_shares(8, shape_corners(8)[0]);
+        let alike = shares_without(&at_corner, &[0, 4]);
+        for (at, share) in alike.iter().enumerate() {
+            let want = if [0, 4].contains(&at) { 0.0 } else { 1.0 / 6.0 };
+            assert!((share - want).abs() < 1e-9, "{at}: {share}");
+        }
+        let all: Vec<usize> = (0..8).collect();
+        assert_eq!(shares_without(&on_air, &all), on_air);
+        // Turned off and on again; never the last one on.
+        assert_eq!(toggle_corner(&[], 2, 8), [2]);
+        assert_eq!(toggle_corner(&[2], 2, 8), Vec::<usize>::new());
+        assert_eq!(toggle_corner(&[5, 2], 0, 8), [0, 2, 5]);
+        let seven: Vec<usize> = (1..8).collect();
+        assert_eq!(toggle_corner(&seven, 0, 8), seven, "the last one on stays");
+        assert_eq!(toggle_corner(&[9, 3, 3], 1, 8), [1, 3]);
+        let styles = pota()
+            .caller_styles(Side::Dx, "SA0KAM", STYLE_ON_AIR, &[1, 2])
+            .expect("POTA varies");
+        assert_eq!(styles.replies[1].1, 0.0);
+        assert_eq!(styles.replies[2].1, 0.0);
     }
 
     /// The card lists each reply a POTA hunter sends, whole, as sent to
     /// you, with its share, in the order of the corners: one reply at a
-    /// corner, five alike in the middle.
+    /// corner, eight alike in the middle.
     #[test]
     fn the_card_shows_each_reply_with_its_share() {
         let replies = |at| {
             pota()
-                .caller_styles(Side::Dx, "SA0KAM", at)
+                .caller_styles(Side::Dx, "SA0KAM", at, &[])
                 .expect("POTA's hunters vary")
                 .replies
         };
@@ -1862,21 +1978,24 @@ mod tests {
             [
                 "BK SA0KAM TU UR 579 579 OR OR BK",
                 "BK TU UR 579 579 OR OR BK",
-                "BK SA0KAM TU UR 579 OR BK",
+                "R TU UR 579 579 OR OR BK",
+                "TU UR 579 579 OR OR BK",
+                "TU UR 579 OR BK",
                 "R TU UR 579 OR BK",
-                "TU UR 579 OR BK"
+                "BK TU UR 579 OR BK",
+                "BK SA0KAM TU UR 579 OR BK"
             ]
         );
         let sum: f64 = on_air.iter().map(|(_, share)| share).sum();
         assert!((sum - 1.0).abs() < 1e-9, "{sum}");
-        let one = replies(shape_corners(5)[0]);
+        let one = replies(shape_corners(8)[0]);
         assert!((one[0].1 - 1.0).abs() < 1e-9);
         for (_, share) in replies(STYLE_EVEN) {
-            assert!((share - 0.2).abs() < 1e-12);
+            assert!((share - 0.125).abs() < 1e-12);
         }
         assert!(
             wpx()
-                .caller_styles(Side::Dx, "DL1ABC", STYLE_ON_AIR)
+                .caller_styles(Side::Dx, "DL1ABC", STYLE_ON_AIR, &[])
                 .is_none()
         );
     }

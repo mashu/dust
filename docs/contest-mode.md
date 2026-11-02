@@ -551,36 +551,50 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   again, its exchange goes alone, `UR 579 579 OR OR BK` or `UR 579 OR BK`
   as it keeps to. One that has its call but not your exchange asks
   `AGN`, and F12 sends `AGN`: there is no serial.
-- **Hunter styles.** Each hunter keeps to one of five whole replies for
-  its QSO (`their_replies`), each a corner of a five-cornered shape, in
-  order round it from the top: `BK`, your call and `TU` with its report and
-  state twice (the card's QSO); `BK TU` with each twice; `BK`, your call
-  and `TU` with each once; `R TU` with each once; `TU` with each once.
-  Where you put a dot in the shape sets how often each comes
-  (`hunterStyle`, two numbers, across and down from the middle, the
-  corners one from it): its Wachspress coordinates (`corner_shares`), so
-  the middle has all five alike, a corner that reply alone, and along an
-  edge only its two corners' replies, by how near each is. Until moved
-  the dot stands up and a little right of the middle (`STYLE_ON_AIR`), so
-  most hunters send the first two replies and each of the others comes
-  now and then, about 40, 29, 9, 7 and 15 in a hundred. A hunter decides
-  as it first sends its exchange and keeps to it for repeats.
+- **Hunter styles.** Each hunter keeps to one of eight whole replies for
+  its QSO (`their_replies`): it starts `BK`, your call and `TU`, or `BK
+  TU`, `R TU` or `TU`, and sends its report and state twice or each once.
+  Each is a corner of an eight-cornered shape, round it from the top so
+  that neighbours are alike: the four starts with each field twice down
+  the right, then back up the left with each once, corner 1 (the card's
+  QSO) beside corner 8, its own once-form. Where you put a dot in the
+  shape sets how often each comes (`hunterStyle`, two numbers, across and
+  down from the middle, the corners one from it): its Wachspress
+  coordinates (`corner_shares`), so the middle has all eight alike, a
+  corner that reply alone, and along an edge only its two corners', by
+  how near each is. Until moved the dot stands up and a little right of
+  the middle (`STYLE_ON_AIR`): about 34, 25, 9, 4, 3, 3, 6 and 16 in a
+  hundred, half the hunters naming you and about one in four sending each
+  field once. A reply can be turned off (`hunterStylesOff`, by corner):
+  none sends it, and what was its share goes to the rest as they stand,
+  its neighbours taking most (`shares_without`), or to all the rest alike
+  where the dot sits on its corner; the last reply on stays on
+  (`toggle_corner`). A hunter decides as it first sends its exchange and
+  keeps to it for repeats.
   "Hunter styles" on the contest card folds away under a line that says
   how it is set, as the Band card folds its receiver: "Hunter styles: One
-  reply", "5 replies, as on the air", "5 replies, all alike", or "5
-  replies"; it never says "original" or "cheat sheet", which a new user
-  has not seen. Open, the shape: each corner numbered, its mark as large
-  as its reply's share, a shaded outline of the mix the dot makes, and the
-  dot, dragged or tapped (`touch-action: none`, so a finger moves it
-  rather than the page) or moved a tenth with the arrow keys, Home taking
-  it to the middle. Under it a press each for "One reply" (corner 1), "As
-  on the air" and "All alike", and each reply in full, numbered as its
-  corner, beside how many in a hundred send it, in whole percents that
-  make a hundred, a reply none sends left out, the rows in the corners'
-  order so none moves as the dot does. Its ⓘ says what it does. Only POTA
-  offers it (`ContestRules::varies`); every other contest's callers lead
-  as before, drawn exactly as before. The card's Reset puts the dot back
-  with the contest.
+  reply", "8 replies, as on the air", "8 replies, all alike", "6 replies,
+  2 off"; it never says "original" or "cheat sheet", which a new user has
+  not seen. Open, the shape: each corner numbered, its mark as large as
+  its reply's share, one turned off dashed and crossed out, a shaded
+  outline of the mix, and the dot. A click or a drag inside puts the dot
+  there, as a finger's touch and drag do (`touch-action: none`, so a
+  finger moves the dot rather than the page); a click on a corner's mark
+  turns its reply off, or on again; with a mouse, pointing shows what a
+  click would do without doing it, a hollow dot and the mix it would set,
+  dashed, with the list's shares, or the corner a click would turn, and a
+  line under the shape says so. The arrow keys move the dot a tenth, Home
+  to the middle. Under it each reply in full, numbered as its corner,
+  beside how many in a hundred send it, in whole percents that make a
+  hundred, the rows in the corners' order so none moves as the dot does;
+  a reply none sends is left out and one turned off is kept, struck
+  through and marked off, its number a button that turns it on again, as
+  every row's number turns its reply off, for the keyboard and a screen
+  reader. Its ⓘ says what it does. There are no preset buttons: the
+  corners, the middle and Home stand for them. Only POTA offers it
+  (`ContestRules::varies`); every other contest's callers lead as before,
+  drawn exactly as before. The card's Reset puts the dot back, and every
+  reply on.
 - **The state is optional** (`ContestRules::optional`). The report alone
   is a complete exchange, so Enter thanks a DX hunter and logs it, and a
   state it never sent is not checked; one a US hunter sent and you left
@@ -4634,14 +4648,16 @@ Put right by the user the same day, from an example QSO they wrote out:
     names you after its `BK` (`BK SA0KAM TU UR 579 579 OR OR BK`); your TU
     never signs with your call; and you now and then sign off `73 44`.
     Alaska and Hawaii, in the US, send a state (§3, POTA).
-17. Hunters each keep to one of five whole replies, rather than one reply
-    with a fixed exception; and a dot in a five-cornered shape on the
+17. Hunters each keep to one of eight whole replies, rather than one reply
+    with a fixed exception; and a dot in an eight-cornered shape on the
     contest card, a reply at each corner, sets how often each comes, the
-    middle all alike and a corner that one alone, folded under a line that
-    says how it is set, with each reply's share beside it and what it does
-    in its ⓘ (§3, POTA). It began as a Variety slider from one reply to
-    every reply alike; the user asked for the shape instead, as easier to
-    relate to the replies it sets.
+    middle all alike and a corner that one alone; a click on a corner turns
+    its reply off or on; a mouse shows what a click would set before it
+    sets it; folded under a line that says how it is set, with each reply's
+    share beside it and what it does in its ⓘ, and no preset buttons (§3,
+    POTA). It began as a Variety slider from one reply to every reply
+    alike, then a pentagon of five; the user asked for the shape, as easier
+    to relate to the replies it sets, and for every reply to stay in it.
 
 ## 16. Risks
 

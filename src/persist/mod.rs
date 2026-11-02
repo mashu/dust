@@ -794,6 +794,7 @@ pub(crate) mod tests {
         k.contest_show_copy = true;
         k.contest_tu_call = cw_core::TuCall::Third;
         k.hunter_style = [-0.5, 0.3];
+        k.hunter_styles_off = vec![3];
         k.contest_adapt_speed = false;
         k.my_wpm = 34;
         k.my_sending_db = -21;

@@ -74,7 +74,8 @@ pub use contest::{
     corner_shares, cut_power, cut_serial, cut_zone, esm, filter_capacity, greeting, hear_qsos,
     home_continent, home_country, into_shape, keyed_token, loggable, message_text, normalize_call,
     parse_exchange, place_name, plan_turn, rate_at, read_number, section_name, send_power,
-    send_report, send_serial, send_zone, shape_corners, space_to_call,
+    send_report, send_serial, send_zone, shape_corners, shares_without, space_to_call,
+    toggle_corner,
 };
 pub use endurance::{
     DROP_POINTS, ENDURANCE_MIN_SESSIONS, Endurance, EndurancePoint, GROUPS_A_STRETCH,
