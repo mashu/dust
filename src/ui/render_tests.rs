@@ -1069,52 +1069,25 @@ fn pota_settings_at(variety: u32) -> String {
     render_props(PotaSettings, PotaSettingsProps { variety })
 }
 
-/// POTA's card shows how hunters vary their reply: a Variety slider, and
-/// under it each style as a hunter sends it to you beside its share, the
-/// shares following the slider: as on the air in the middle, the cheat
-/// sheet's one reply at the left, every style alike at the right. No other
+/// POTA's card folds how hunters vary their reply under a line that says
+/// how it is set: one reply, the original, at the left; eight as on the air
+/// in the middle; eight alike at the right. Its ⓘ is beside it. No other
 /// contest has it.
 #[test]
-fn pota_shows_each_hunter_style_beside_its_share() {
-    let line = |pct: u32, text: &str| {
-        format!(
-            r#"<span class="qso-who tiny">{pct}%</span><span class="qso-sends"><span class="call">{text}</span>"#
-        )
-    };
-    let on_air = pota_settings_at(cw_core::VARIETY_ON_AIR);
-    for shown in [
-        ">Hunter styles<".to_string(),
-        "As on the air".to_string(),
-        r#"id="slider-variety""#.to_string(),
-        line(45, "BK SA0KAM TU UR …"),
-        line(30, "BK TU UR …"),
-        line(15, "R TU UR …"),
-        line(10, "TU UR …"),
-        line(70, "UR 579 579 OR OR BK"),
-        line(30, "UR 579 OR BK"),
+fn pota_folds_its_hunter_styles_under_a_line_that_says_how_they_are_set() {
+    for (variety, line) in [
+        (0, "Hunter styles: One reply, the original"),
+        (
+            cw_core::VARIETY_ON_AIR,
+            "Hunter styles: 8 replies, as on the air",
+        ),
+        (cw_core::VARIETY_MAX, "Hunter styles: 8 replies, all alike"),
     ] {
-        assert!(on_air.contains(&shown), "no {shown:?} in {on_air}");
-    }
-    let cheat_sheet = pota_settings_at(0);
-    for shown in [
-        "Cheat sheet only".to_string(),
-        line(100, "BK SA0KAM TU UR …"),
-        line(0, "TU UR …"),
-        line(100, "UR 579 579 OR OR BK"),
-        line(0, "UR 579 OR BK"),
-    ] {
-        assert!(
-            cheat_sheet.contains(&shown),
-            "no {shown:?} in {cheat_sheet}"
-        );
-    }
-    let alike = pota_settings_at(cw_core::VARIETY_MAX);
-    for shown in [
-        "Every style alike".to_string(),
-        line(25, "R TU UR …"),
-        line(50, "UR 579 OR BK"),
-    ] {
-        assert!(alike.contains(&shown), "no {shown:?} in {alike}");
+        let html = pota_settings_at(variety);
+        assert!(html.contains(line), "no {line:?} in {html}");
+        assert!(html.contains(r#"id="disclosure-hunter-styles""#), "{html}");
+        assert!(html.contains(r#"id="help-hunter-styles""#), "{html}");
+        assert!(!html.contains("slider-variety"), "folded: {html}");
     }
     let wpx = render(|| {
         let settings = use_signal(crate::testing::contest_settings);
@@ -4090,6 +4063,84 @@ mod interactions {
             }
         });
         assert!(html.is_empty());
+    }
+
+    /// The character set card in POTA, as SA0KAM.
+    #[component]
+    fn PotaCharsetHarness() -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Pota;
+            settings.contest.my_call = "SA0KAM".to_string();
+            settings
+        });
+        rsx! {
+            crate::ui::settings_charset::CharsetCard { settings }
+        }
+    }
+
+    /// Hunter styles open from their line: a Variety slider from one reply
+    /// to more variety, and each reply hunters send, whole, beside its
+    /// share. At the left one line, the original; at the right eight alike;
+    /// the line they fold under follows. The ⓘ says what it does.
+    #[test]
+    fn pota_hunter_styles_open_and_follow_the_slider() {
+        let reply = |pct: u32, text: &str| {
+            format!(
+                r#"<span class="qso-who tiny">{pct}%</span><span class="qso-sends"><span class="call">{text}</span>"#
+            )
+        };
+        let rows = |ui: &Ui| {
+            ui.html()
+                .matches(r#"%</span><span class="qso-sends">"#)
+                .count()
+        };
+        let mut ui = Ui::new(PotaCharsetHarness, ());
+        assert!(
+            ui.has("Hunter styles: 8 replies, as on the air"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("slider-variety"));
+        ui.click("disclosure-hunter-styles");
+        assert!(ui.input_tag("disclosure-hunter-styles").contains("open"));
+        assert!(ui.has(r#"id="slider-variety""#), "{}", ui.html());
+        assert!(ui.has("One reply") && ui.has("More variety"));
+        assert_eq!(rows(&ui), 8);
+        for (pct, text) in [
+            (32, "BK SA0KAM TU UR 579 579 OR OR BK"),
+            (21, "BK TU UR 579 579 OR OR BK"),
+            (3, "TU UR 579 OR BK"),
+        ] {
+            assert!(ui.has(&reply(pct, text)), "{pct} {text}: {}", ui.html());
+        }
+        // All the way left: one reply, the original.
+        for _ in 0..10 {
+            ui.click("less-slider-variety");
+        }
+        assert!(ui.has("Hunter styles: One reply, the original"));
+        assert_eq!(rows(&ui), 1);
+        assert!(ui.has(&reply(100, "BK SA0KAM TU UR 579 579 OR OR BK")));
+        // A little to the right: more replies come.
+        for _ in 0..5 {
+            ui.click("more-slider-variety");
+        }
+        assert!((2..8).contains(&rows(&ui)), "{}", rows(&ui));
+        // All the way right: every reply alike.
+        for _ in 0..15 {
+            ui.click("more-slider-variety");
+        }
+        assert!(ui.has("Hunter styles: 8 replies, all alike"));
+        assert_eq!(rows(&ui), 8);
+        assert!(ui.has(&reply(12, "TU UR 579 OR BK")), "{}", ui.html());
+        // The ⓘ says what it does, and folds away again.
+        assert!(!ui.has("At the left every hunter sends the original"));
+        ui.click("help-hunter-styles");
+        assert!(ui.has("At the left every hunter sends the original"));
+        ui.click("help-hunter-styles");
+        assert!(!ui.has("At the left every hunter sends the original"));
+        ui.click("disclosure-hunter-styles");
+        assert!(!ui.has("slider-variety"));
     }
 
     /// The band card on a 400-600 Hz side-tone range, which the 300 Hz

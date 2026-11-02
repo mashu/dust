@@ -187,26 +187,44 @@ impl ContestCard {
                     call_or_stand_in(&contest.my_call),
                     contest.hunter_variety,
                 )
-                .map(|styles| StylesCard {
-                    variety: contest.hunter_variety,
-                    leads: in_percent(styles.leads),
-                    forms: in_percent(styles.forms),
-                }),
+                .map(|styles| StylesCard::of(styles, contest.hunter_variety)),
             preset,
         }
     }
 }
 
 /// How POTA hunters vary their reply, as the card shows it: the variety you
-/// set, and each style beside the share of hunters that send in it, in
-/// whole percent.
+/// set, and each reply that some hunters send, whole, beside the share that
+/// do, in whole percents, the commonest first. A reply none sends at this
+/// variety is left out, so the one reply of the cheat sheet stands alone
+/// at the left and more come as the slider goes right.
 #[derive(Clone, PartialEq)]
 struct StylesCard {
     variety: u32,
-    /// Each word a hunter leads its exchange with, as sent to you.
-    leads: Vec<(String, u32)>,
-    /// Its exchange, each field twice and once.
-    forms: Vec<(String, u32)>,
+    replies: Vec<(String, u32)>,
+}
+
+impl StylesCard {
+    fn of(styles: cw_core::CallerStyles, variety: u32) -> Self {
+        let replies = in_percent(styles.replies)
+            .into_iter()
+            .filter(|(_, pct)| *pct > 0)
+            .collect();
+        Self { variety, replies }
+    }
+
+    /// What the slider stands at, in a few words: how many replies come,
+    /// and where that is against the cheat sheet, the air and every reply
+    /// alike. It heads the folded line, so the setting reads closed too.
+    fn reading(&self) -> String {
+        let count = self.replies.len();
+        match self.variety {
+            _ if count <= 1 => "One reply, the original".to_string(),
+            VARIETY_ON_AIR => format!("{count} replies, as on the air"),
+            VARIETY_MAX.. => format!("{count} replies, all alike"),
+            _ => format!("{count} replies"),
+        }
+    }
 }
 
 /// Shares as whole percents that add up to 100, each rounded down and the
@@ -231,61 +249,70 @@ fn in_percent(shares: Vec<(String, f64)>) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// The variety as the slider says it, by where it stands against the
-/// cheat sheet, the air and every style alike.
-fn variety_label(variety: u32) -> &'static str {
-    match variety {
-        0 => "Cheat sheet only",
-        VARIETY_ON_AIR => "As on the air",
-        VARIETY_MAX.. => "Every style alike",
-        v if v < VARIETY_ON_AIR => "Less than on the air",
-        _ => "More than on the air",
-    }
-}
-
-/// How much POTA hunters vary their reply, and what that comes to: a
-/// slider from the cheat sheet's one reply through the mix heard on the air
-/// to every style alike, and under it each style as a hunter sends it to
-/// you beside the share of hunters that do, so moving the slider shows at
-/// once what it moves. Each hunter keeps one style for its QSO.
+/// How much POTA hunters vary their reply, folded away under a line that
+/// says how it is set, as the Band card folds its receiver. Open, a slider
+/// from one reply, the cheat sheet's original, on the left to more variety
+/// on the right, and under it each reply some hunters send, whole, beside
+/// the share that do: one line at the left, more as the slider goes right.
+/// What it does is in its ⓘ.
 #[component]
 fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Element {
+    let mut open = use_signal(|| false);
+    let mut help = use_signal(|| false);
+    let reading = styles.reading();
     rsx! {
-        div { class: "eyebrow", "Hunter styles" }
-        SliderField {
-            label: "Variety",
-            long_label: "How much hunters vary their reply",
-            value_label: variety_label(styles.variety).to_string(),
-            value: f64::from(styles.variety),
-            min: 0.0,
-            max: f64::from(VARIETY_MAX),
-            step: 5.0,
-            disabled: false,
-            onchange: move |value: f64| {
-                settings.write().contest.hunter_variety = (value.round() as u32).min(VARIETY_MAX);
-            },
-        }
-        p { class: "muted hint",
-            "How often hunters reply in each style. Left: all as on the cheat sheet. Middle: as heard on the air. Right: every style alike."
-        }
-        p { class: "muted hint", "How they start" }
-        ol { class: "qso", aria_label: "How hunters start their reply",
-            for (lead, pct) in styles.leads.iter() {
-                li { class: "qso-line they",
-                    span { class: "qso-who tiny", "{pct}%" }
-                    span { class: "qso-sends",
-                        span { class: "call", "{lead}" }
-                    }
-                }
+        div { class: "card-title-row",
+            button {
+                id: control_id(DISCLOSURE, "hunter styles"),
+                class: if open() { "link-toggle open" } else { "link-toggle" },
+                r#type: "button",
+                aria_expanded: if open() { "true" } else { "false" },
+                aria_controls: "hunter-styles",
+                onclick: move |_| open.toggle(),
+                "Hunter styles: {reading}"
+                Icon { name: IconName::Chevron }
+            }
+            button {
+                id: control_id("help", "hunter styles"),
+                class: if help() { "icon-btn help-btn on" } else { "icon-btn help-btn" },
+                r#type: "button",
+                title: if help() { "Hide the help" } else { "What does this mean?" },
+                aria_label: if help() { "Hide the help on hunter styles" } else { "Help on hunter styles" },
+                aria_expanded: help(),
+                onclick: move |_| help.toggle(),
+                Icon { name: if help() { IconName::X } else { IconName::Info } }
             }
         }
-        p { class: "muted hint", "Then their report and state, twice or once" }
-        ol { class: "qso", aria_label: "How hunters send their report and state",
-            for (form, pct) in styles.forms.iter() {
-                li { class: "qso-line they",
-                    span { class: "qso-who tiny", "{pct}%" }
-                    span { class: "qso-sends",
-                        span { class: "call", "{form}" }
+        if help() {
+            div { class: "help-note", role: "note", {help::hunter_styles()} }
+        }
+        if open() {
+            div { id: "hunter-styles", class: "stack-sm",
+                SliderField {
+                    label: "Variety",
+                    long_label: "How much hunters vary their reply",
+                    value_label: reading.clone(),
+                    value: f64::from(styles.variety),
+                    min: 0.0,
+                    max: f64::from(VARIETY_MAX),
+                    step: 5.0,
+                    disabled: false,
+                    onchange: move |value: f64| {
+                        settings.write().contest.hunter_variety = (value.round() as u32).min(VARIETY_MAX);
+                    },
+                }
+                div { class: "slider-head",
+                    span { class: "muted tiny", "One reply" }
+                    span { class: "muted tiny", "More variety" }
+                }
+                ol { class: "qso", aria_label: "The replies hunters send, and how often",
+                    for (reply, pct) in styles.replies.iter() {
+                        li { class: "qso-line they",
+                            span { class: "qso-who tiny", "{pct}%" }
+                            span { class: "qso-sends",
+                                span { class: "call", "{reply}" }
+                            }
+                        }
                     }
                 }
             }
@@ -944,7 +971,7 @@ fn WordCount(
 
 #[cfg(test)]
 mod tests {
-    use super::{in_percent, variety_label};
+    use super::{StylesCard, in_percent};
     use cw_core::{VARIETY_MAX, VARIETY_ON_AIR};
 
     /// Shares read as whole percents that add up to 100, the rest going to
@@ -964,14 +991,39 @@ mod tests {
         }
     }
 
-    /// The slider says where it stands against the cheat sheet, the air
-    /// and every style alike.
+    /// The folded line and the slider say how many replies come and where
+    /// that stands: one reply, the original, at the left; as on the air in
+    /// the middle; all alike at the right; a reply none sends left out.
     #[test]
-    fn the_variety_reads_by_where_it_stands() {
-        assert_eq!(variety_label(0), "Cheat sheet only");
-        assert_eq!(variety_label(25), "Less than on the air");
-        assert_eq!(variety_label(VARIETY_ON_AIR), "As on the air");
-        assert_eq!(variety_label(80), "More than on the air");
-        assert_eq!(variety_label(VARIETY_MAX), "Every style alike");
+    fn the_styles_read_by_the_replies_that_come() {
+        let card = |variety| {
+            let styles = cw_core::ContestKind::Pota
+                .rules()
+                .caller_styles(cw_core::Side::Dx, "SA0KAM", variety)
+                .expect("POTA's hunters vary");
+            StylesCard::of(styles, variety)
+        };
+        let one = card(0);
+        assert_eq!(one.reading(), "One reply, the original");
+        assert_eq!(
+            one.replies,
+            [("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 100)]
+        );
+        assert_eq!(card(5).reading(), "One reply, the original");
+        let on_air = card(VARIETY_ON_AIR);
+        assert_eq!(on_air.reading(), "8 replies, as on the air");
+        assert_eq!(on_air.replies.iter().map(|(_, pct)| pct).sum::<u32>(), 100);
+        assert_eq!(
+            on_air.replies[0],
+            ("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 32)
+        );
+        assert_eq!(card(VARIETY_MAX).reading(), "8 replies, all alike");
+        let some = card(25);
+        assert!(
+            some.replies.len() > 1 && some.replies.len() < 8,
+            "{}",
+            some.replies.len()
+        );
+        assert_eq!(some.reading(), format!("{} replies", some.replies.len()));
     }
 }

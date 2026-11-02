@@ -659,14 +659,13 @@ pub fn tempered(shares: &[f64], variety: u32) -> Vec<f64> {
     raised.iter().map(|share| share / sum).collect()
 }
 
-/// The ways a contest's callers send their exchange, as the card shows them
-/// beside the variety you set: each word they lead it with, as sent to
-/// you, and its share; and the exchange sent long and short, each field
-/// twice or once, and the share of each.
+/// The replies a contest's callers send, as the card shows them beside the
+/// variety you set: each first exchange whole, as sent to you, its lead
+/// and its form together, with the share of callers that send it, the
+/// commonest first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallerStyles {
-    pub leads: Vec<(String, f64)>,
-    pub forms: Vec<(String, f64)>,
+    pub replies: Vec<(String, f64)>,
 }
 
 /// How you sign off in a TU that holds a farewell: `73`, and now and then
@@ -1019,27 +1018,40 @@ impl ContestRules {
         Some(tempered(&[1.0 - share, share], variety)[1])
     }
 
-    /// The styles its callers send in at `variety`, as the card shows
-    /// them, to you as `my_call` on `side`: each lead, before the rest, and
-    /// the exchange each field twice and once, from a caller in Oregon
-    /// with the report and state the card's QSO has. None where they do
-    /// not vary.
+    /// The replies its callers send at `variety`, as the card shows them,
+    /// to you as `my_call` on `side`: every lead with the exchange each
+    /// field twice and each once, from a caller in Oregon with the report
+    /// and state the card's QSO has, each with its share, the lead's and
+    /// the form's together, the commonest first. None where they do not
+    /// vary.
     pub fn caller_styles(&self, side: Side, my_call: &str, variety: u32) -> Option<CallerStyles> {
         let short = self.short_share(variety)?;
-        let leads = (0..self.their_lead.len())
-            .map(|lead| self.their_first_exchange(lead, my_call, "UR …"))
-            .zip(self.lead_shares(variety))
-            .collect();
         let fields: Vec<(Field, String)> = self
             .copied(side)
             .iter()
             .map(|field| (*field, field.example().to_string()))
             .collect();
-        let form = |short| self.their_exchange_as(side, short, my_call, "W7XYZ", &fields);
-        Some(CallerStyles {
-            leads,
-            forms: vec![(form(false), 1.0 - short), (form(true), short)],
-        })
+        let forms = [(false, 1.0 - short), (true, short)].map(|(short, share)| {
+            let form = self.their_exchange_as(side, short, my_call, "W7XYZ", &fields);
+            (form, share)
+        });
+        let mut replies: Vec<(String, f64)> = self
+            .lead_shares(variety)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(lead, lead_share)| {
+                forms
+                    .iter()
+                    .map(move |(form, form_share)| (lead, lead_share, form, form_share))
+            })
+            .map(|(lead, lead_share, form, form_share)| {
+                let reply = self.their_first_exchange(lead, my_call, form);
+                (reply, lead_share * form_share)
+            })
+            .collect();
+        // The commonest first; alike, as the row lists them.
+        replies.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Some(CallerStyles { replies })
     }
 
     /// A first QSO of this contest as it goes out, with `me` as you: who
@@ -1736,33 +1748,36 @@ mod tests {
         assert_eq!(wpx().short_share(VARIETY_ON_AIR), None);
     }
 
-    /// The card shows each style a POTA hunter sends in, as sent to you,
-    /// with its share at the variety set: four leads, then the exchange with
-    /// each field twice and once.
+    /// The card shows each reply a POTA hunter sends, whole, as sent to
+    /// you, with its share at the variety set, the commonest first: one
+    /// reply at none, the cheat sheet's; eight as on the air; eight alike
+    /// at the most.
     #[test]
-    fn the_card_shows_each_style_with_its_share() {
-        let styles = pota()
-            .caller_styles(Side::Dx, "SA0KAM", VARIETY_ON_AIR)
-            .expect("POTA's hunters vary");
+    fn the_card_shows_each_reply_with_its_share() {
+        let replies = |variety| {
+            pota()
+                .caller_styles(Side::Dx, "SA0KAM", variety)
+                .expect("POTA's hunters vary")
+                .replies
+        };
+        let on_air = replies(VARIETY_ON_AIR);
+        assert_eq!(on_air.len(), 8);
+        assert_eq!(on_air[0].0, "BK SA0KAM TU UR 579 579 OR OR BK");
+        assert!((on_air[0].1 - 0.45 * 0.7).abs() < 1e-12);
+        assert_eq!(on_air[1].0, "BK TU UR 579 579 OR OR BK");
+        assert_eq!(on_air[7].0, "TU UR 579 OR BK");
+        assert!((on_air[7].1 - 0.1 * 0.3).abs() < 1e-12);
+        let sum: f64 = on_air.iter().map(|(_, share)| share).sum();
+        assert!((sum - 1.0).abs() < 1e-9, "{sum}");
+        let one = replies(0);
         assert_eq!(
-            styles.leads,
-            [
-                ("BK SA0KAM TU UR …".to_string(), 0.45),
-                ("BK TU UR …".to_string(), 0.3),
-                ("R TU UR …".to_string(), 0.15),
-                ("TU UR …".to_string(), 0.1),
-            ]
+            one[0],
+            ("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 1.0)
         );
-        assert_eq!(
-            styles.forms,
-            [
-                ("UR 579 579 OR OR BK".to_string(), 0.7),
-                ("UR 579 OR BK".to_string(), 0.3),
-            ]
-        );
-        let none = pota().caller_styles(Side::WVe, "K1ABC", 0).expect("POTA");
-        assert_eq!(none.leads[0].1, 1.0);
-        assert_eq!(none.forms[0].1, 1.0);
+        assert!(one[1..].iter().all(|(_, share)| *share == 0.0));
+        for (_, share) in replies(VARIETY_MAX) {
+            assert!((share - 0.125).abs() < 1e-12);
+        }
         assert!(
             wpx()
                 .caller_styles(Side::Dx, "DL1ABC", VARIETY_ON_AIR)

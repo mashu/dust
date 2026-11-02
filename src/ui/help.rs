@@ -437,6 +437,25 @@ pub fn character_set() -> Element {
     }
 }
 
+/// Hunter styles, on POTA's card.
+pub fn hunter_styles() -> Element {
+    rsx! {
+        p {
+            "How POTA hunters reply to your exchange. Each hunter keeps one reply for its QSO: how it starts, and whether it sends its report and state twice or once. The slider sets how much they vary; under it is each reply hunters send, with how many in a hundred send it."
+        }
+        dl { class: "help-terms",
+            dt { "One reply" }
+            dd { "At the left every hunter sends the original, the cheat sheet's: BK, your call and TU, then its report and state twice." }
+            dt { "As on the air" }
+            dd { "In the middle, where it starts: most name you after BK; some start BK TU, R TU or TU alone; three in ten send each field once." }
+            dt { "More variety" }
+            dd { "Further right the rare replies come more often, until at the right end every reply comes as often as the others." }
+            dt { "DX hunters" }
+            dd { "About one hunter in four is outside the US and Canada and sends its report alone, whatever its reply: log it without a state." }
+        }
+    }
+}
+
 /// Your station.
 pub fn station() -> Element {
     rsx! {

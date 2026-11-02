@@ -558,15 +558,19 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   (30%), decided once and kept for repeats (`their_lead`, `their_short`).
   The shares are a choice, so a run hears every style. "Hunter styles" on
   the contest card sets how much they vary (`hunterVariety`, 0 to 100,
-  50 until set): a Variety slider reading "Cheat sheet only", "Less than
-  on the air", "As on the air", "More than on the air" or "Every style
-  alike", and under it each lead and each form as a hunter sends it to
-  you beside the share of hunters that do, in whole percents that make a
-  hundred, so the slider shows at once what it moves. One rule tempers
-  both choices (`tempered`): each share is raised to the power
+  50 until set), folded away under a line that says how it is set, as
+  the Band card folds its receiver: "Hunter styles: One reply, the
+  original", "8 replies, as on the air", "8 replies, all alike", or how
+  many come between. Open, a Variety slider from "One reply" on the left
+  to "More variety" on the right, and under it each reply hunters send,
+  whole, as sent to you, beside the share that do, in whole percents that
+  make a hundred, the commonest first; a reply none sends at the variety
+  set is left out, so the original stands alone at the left and more
+  replies come as the slider goes right. Its ⓘ says what it does. One rule
+  tempers both choices (`tempered`): each share is raised to the power
   (1 − v) / v, v the variety as a fraction, and made to sum to one again,
   so 0 sends every hunter as on the cheat sheet, 50 the shares above
-  exactly, 100 every style alike, and between, their order holds. Only
+  exactly, 100 every reply alike, and between, their order holds. Only
   POTA offers it (`ContestRules::varies`); every other contest's callers
   lead as before, drawn exactly as before. The card's Reset puts it back
   with the contest.
@@ -4626,8 +4630,9 @@ Put right by the user the same day, from an example QSO they wrote out:
 17. Hunters each keep a style of their own, from several real ones,
     rather than one reply with a fixed exception; and a Variety slider on
     the contest card sets how much they vary, from the cheat sheet's one
-    reply through the mix heard on the air to every style alike, with each
-    style's share shown beside it (§3, POTA).
+    reply through the mix heard on the air to every style alike, folded
+    under a line that says how it is set, with each whole reply's share
+    shown beside it and what it does in its ⓘ (§3, POTA).
 
 ## 16. Risks
 

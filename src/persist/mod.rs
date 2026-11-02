@@ -793,6 +793,7 @@ pub(crate) mod tests {
         k.contest_minutes = 25;
         k.contest_show_copy = true;
         k.contest_tu_call = cw_core::TuCall::Third;
+        k.hunter_variety = 80;
         k.contest_adapt_speed = false;
         k.my_wpm = 34;
         k.my_sending_db = -21;
