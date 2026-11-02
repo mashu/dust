@@ -398,7 +398,7 @@ fn StyleShape(
     };
     let shown = match ghost {
         Some(point) => shares_without(&corner_shares(count, point), &off),
-        None => shares.clone(),
+        None => shares,
     };
     let most = shown.iter().copied().fold(0.0, f64::max);
     let hot = match hover() {
