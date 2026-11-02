@@ -547,10 +547,29 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   it (§11.6: plain under easy habits, `57N` and now and then `ENN` under
   real and rough ones), the state where its call puts it. A hunter answers
   your CQ with its call alone (twice from a pile-up caller that calls
-  twice), and leads its first exchange with `BK`, your call and `TU` nine
-  times in ten, `BK TU` otherwise; sent again, its exchange goes alone,
-  `UR 579 579 OR OR BK`. One that has its call but not your exchange asks
+  twice), and leads its first exchange in its own style (below); sent
+  again, its exchange goes alone, `UR 579 579 OR OR BK` or `UR 579 OR BK`
+  as it keeps to. One that has its call but not your exchange asks
   `AGN`, and F12 sends `AGN`: there is no serial.
+- **Hunter styles.** Each hunter keeps to a style of its own for its QSO:
+  the word it leads its first exchange with, `BK`, your call and `TU`
+  (45%), `BK TU` (30%), `R TU` (15%) or `TU` (10%), and whether it sends
+  each field twice, `UR 579 579 OR OR BK` (70%), or once, `UR 579 OR BK`
+  (30%), decided once and kept for repeats (`their_lead`, `their_short`).
+  The shares are a choice, so a run hears every style. "Hunter styles" on
+  the contest card sets how much they vary (`hunterVariety`, 0 to 100,
+  50 until set): a Variety slider reading "Cheat sheet only", "Less than
+  on the air", "As on the air", "More than on the air" or "Every style
+  alike", and under it each lead and each form as a hunter sends it to
+  you beside the share of hunters that do, in whole percents that make a
+  hundred, so the slider shows at once what it moves. One rule tempers
+  both choices (`tempered`): each share is raised to the power
+  (1 − v) / v, v the variety as a fraction, and made to sum to one again,
+  so 0 sends every hunter as on the cheat sheet, 50 the shares above
+  exactly, 100 every style alike, and between, their order holds. Only
+  POTA offers it (`ContestRules::varies`); every other contest's callers
+  lead as before, drawn exactly as before. The card's Reset puts it back
+  with the contest.
 - **The state is optional** (`ContestRules::optional`). The report alone
   is a complete exchange, so Enter thanks a DX hunter and logs it, and a
   state it never sent is not checked; one a US hunter sent and you left
@@ -4604,6 +4623,11 @@ Put right by the user the same day, from an example QSO they wrote out:
     names you after its `BK` (`BK SA0KAM TU UR 579 579 OR OR BK`); your TU
     never signs with your call; and you now and then sign off `73 44`.
     Alaska and Hawaii, in the US, send a state (§3, POTA).
+17. Hunters each keep a style of their own, from several real ones,
+    rather than one reply with a fixed exception; and a Variety slider on
+    the contest card sets how much they vary, from the cheat sheet's one
+    reply through the mix heard on the air to every style alike, with each
+    style's share shown beside it (§3, POTA).
 
 ## 16. Risks
 

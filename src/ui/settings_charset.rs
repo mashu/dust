@@ -1,9 +1,9 @@
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill, GROUP_SIZE_MAX,
     LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
-    SequenceChoice, SettingsSection, TrainingSettings, TuCall, WORD_LIST_MAX, WordList,
-    compute_char_pool, current_practice_window, greeting, parse_callsign, tier_examples,
-    unlocked_practice_count,
+    SequenceChoice, SettingsSection, TrainingSettings, TuCall, VARIETY_MAX, VARIETY_ON_AIR,
+    WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window, greeting, parse_callsign,
+    tier_examples, unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
@@ -16,8 +16,8 @@ use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
 use crate::ui::paddle::use_typed_field;
 use crate::ui::widgets::{
-    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, TextDraft, TextField,
-    control_id, range_label, whole,
+    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, SliderField, TextDraft,
+    TextField, control_id, range_label, whole,
 };
 
 /// The largest file read as a word list. The longest list kept is a few
@@ -129,6 +129,8 @@ struct ContestCard {
     simplified: Option<&'static str>,
     /// Who sends each line of the QSO, and what.
     qso: Vec<(Sender, String)>,
+    /// How the callers' styles vary, where the contest lets you set it.
+    styles: Option<StylesCard>,
     /// The preset the settings are on, if any.
     preset: Option<ContestPreset>,
 }
@@ -179,7 +181,114 @@ impl ContestCard {
                     ..Fill::default()
                 },
             ),
+            styles: rules
+                .caller_styles(
+                    side,
+                    call_or_stand_in(&contest.my_call),
+                    contest.hunter_variety,
+                )
+                .map(|styles| StylesCard {
+                    variety: contest.hunter_variety,
+                    leads: in_percent(styles.leads),
+                    forms: in_percent(styles.forms),
+                }),
             preset,
+        }
+    }
+}
+
+/// How POTA hunters vary their reply, as the card shows it: the variety you
+/// set, and each style beside the share of hunters that send in it, in
+/// whole percent.
+#[derive(Clone, PartialEq)]
+struct StylesCard {
+    variety: u32,
+    /// Each word a hunter leads its exchange with, as sent to you.
+    leads: Vec<(String, u32)>,
+    /// Its exchange, each field twice and once.
+    forms: Vec<(String, u32)>,
+}
+
+/// Shares as whole percents that add up to 100, each rounded down and the
+/// rest handed out to those with the largest remainders, so a list never
+/// reads 99% or 101% in all.
+fn in_percent(shares: Vec<(String, f64)>) -> Vec<(String, u32)> {
+    let exact: Vec<f64> = shares.iter().map(|(_, share)| share * 100.0).collect();
+    let mut whole: Vec<u32> = exact.iter().map(|pct| pct.floor() as u32).collect();
+    let short = 100u32.saturating_sub(whole.iter().sum());
+    let mut by_remainder: Vec<usize> = (0..exact.len()).collect();
+    by_remainder.sort_by(|a, b| {
+        let rest = |at: usize| exact[at] - exact[at].floor();
+        rest(*b).total_cmp(&rest(*a))
+    });
+    for at in by_remainder.into_iter().take(short as usize) {
+        whole[at] += 1;
+    }
+    shares
+        .into_iter()
+        .map(|(text, _)| text)
+        .zip(whole)
+        .collect()
+}
+
+/// The variety as the slider says it, by where it stands against the
+/// cheat sheet, the air and every style alike.
+fn variety_label(variety: u32) -> &'static str {
+    match variety {
+        0 => "Cheat sheet only",
+        VARIETY_ON_AIR => "As on the air",
+        VARIETY_MAX.. => "Every style alike",
+        v if v < VARIETY_ON_AIR => "Less than on the air",
+        _ => "More than on the air",
+    }
+}
+
+/// How much POTA hunters vary their reply, and what that comes to: a
+/// slider from the cheat sheet's one reply through the mix heard on the air
+/// to every style alike, and under it each style as a hunter sends it to
+/// you beside the share of hunters that do, so moving the slider shows at
+/// once what it moves. Each hunter keeps one style for its QSO.
+#[component]
+fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Element {
+    rsx! {
+        div { class: "eyebrow", "Hunter styles" }
+        SliderField {
+            label: "Variety",
+            long_label: "How much hunters vary their reply",
+            value_label: variety_label(styles.variety).to_string(),
+            value: f64::from(styles.variety),
+            min: 0.0,
+            max: f64::from(VARIETY_MAX),
+            step: 5.0,
+            disabled: false,
+            onchange: move |value: f64| {
+                settings.write().contest.hunter_variety = (value.round() as u32).min(VARIETY_MAX);
+            },
+        }
+        p { class: "muted hint",
+            "How often hunters reply in each style. Left: all as on the cheat sheet. Middle: as heard on the air. Right: every style alike."
+        }
+        p { class: "muted hint", "How they start" }
+        ol { class: "qso", aria_label: "How hunters start their reply",
+            for (lead, pct) in styles.leads.iter() {
+                li { class: "qso-line they",
+                    span { class: "qso-who tiny", "{pct}%" }
+                    span { class: "qso-sends",
+                        span { class: "call", "{lead}" }
+                    }
+                }
+            }
+        }
+        p { class: "muted hint", "Then their report and state, twice or once" }
+        ol { class: "qso", aria_label: "How hunters send their report and state",
+            for (form, pct) in styles.forms.iter() {
+                li { class: "qso-line they",
+                    span { class: "qso-who tiny", "{pct}%" }
+                    span { class: "qso-sends",
+                        span { class: "call", "{form}" }
+                    }
+                }
+            }
         }
     }
 }
@@ -516,6 +625,9 @@ fn ContestBody(
         } else {
             QsoLines { lines: contest.qso.clone() }
         }
+        if let Some(styles) = contest.styles.clone() {
+            HunterStyles { settings, styles }
+        }
         PresetPicker { settings, preset: contest.preset }
     }
 }
@@ -827,5 +939,39 @@ fn WordCount(
     };
     rsx! {
         p { class: "word-report", aria_live: "polite", "{line}" }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{in_percent, variety_label};
+    use cw_core::{VARIETY_MAX, VARIETY_ON_AIR};
+
+    /// Shares read as whole percents that add up to 100, the rest going to
+    /// the largest remainders.
+    #[test]
+    fn shares_read_as_whole_percents_that_make_a_hundred() {
+        let pct = |shares: &[f64]| -> Vec<u32> {
+            let named = shares.iter().map(|share| (String::new(), *share)).collect();
+            in_percent(named).into_iter().map(|(_, pct)| pct).collect()
+        };
+        assert_eq!(pct(&[0.45, 0.3, 0.15, 0.1]), [45, 30, 15, 10]);
+        assert_eq!(pct(&[0.7, 0.3]), [70, 30]);
+        assert_eq!(pct(&[1.0 / 3.0; 3]), [34, 33, 33]);
+        assert_eq!(pct(&[0.004, 0.996]), [0, 100]);
+        for shares in [[0.333, 0.333, 0.334], [0.256, 0.248, 0.496]] {
+            assert_eq!(pct(&shares).iter().sum::<u32>(), 100, "{shares:?}");
+        }
+    }
+
+    /// The slider says where it stands against the cheat sheet, the air
+    /// and every style alike.
+    #[test]
+    fn the_variety_reads_by_where_it_stands() {
+        assert_eq!(variety_label(0), "Cheat sheet only");
+        assert_eq!(variety_label(25), "Less than on the air");
+        assert_eq!(variety_label(VARIETY_ON_AIR), "As on the air");
+        assert_eq!(variety_label(80), "More than on the air");
+        assert_eq!(variety_label(VARIETY_MAX), "Every style alike");
     }
 }

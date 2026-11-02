@@ -1258,8 +1258,8 @@ mod tests {
     }
 
     /// A POTA QSO heard as the cheat sheet has it: you greet the hunter by
-    /// the hour, it thanks you and sends its report and state, your TU
-    /// sends its state back, and it signs off with `EE`.
+    /// the hour, it thanks you and sends its report and state in its own
+    /// style, your TU sends its state back, and it signs off with `EE`.
     #[test]
     fn hear_a_pota_qso_greets_by_the_hour_and_sends_the_state_back() {
         use super::super::ContestKind;
@@ -1298,18 +1298,29 @@ mod tests {
                 format!("{hunter} TU {greet} UR 5NN 5NN AL AL BK"),
                 "{case}"
             );
+            // Its report and state, in its own style; a DX hunter's report
+            // alone.
             let theirs = sent
                 .iter()
                 .filter(|(who, _)| *who != Sender::You)
                 .map(|(_, text)| *text)
-                .find(|text| text.starts_with("BK "))
+                .find(|text| text.split_whitespace().any(|word| word == "UR"))
                 .expect("their exchange");
-            let words: Vec<&str> = theirs.split_whitespace().collect();
-            let st = words[words.len() - 2];
-            assert!(Field::St.canonical(st).is_some(), "{case}");
-            assert_eq!(words.last(), Some(&"BK"), "{case}");
+            assert!(theirs.ends_with(" BK"), "{case}");
+            let Some(Copied::Exchange(copy)) = copy_of(theirs) else {
+                panic!("their exchange reads: {case}");
+            };
+            let back = match copy.split_whitespace().nth(1) {
+                Some(st) => format!(" {st} {st}"),
+                None => String::new(),
+            };
             let tu = mine.last().expect("your TU");
-            assert_eq!(*tu, format!("BK TU {st} {st} 73 EE"), "{case}");
+            assert!(
+                [" 73 EE", " 73 44 EE"]
+                    .iter()
+                    .any(|bye| *tu == format!("BK TU{back}{bye}")),
+                "{case}"
+            );
             assert_eq!(sent.last().map(|(_, text)| *text), Some("EE"), "{case}");
         }
     }

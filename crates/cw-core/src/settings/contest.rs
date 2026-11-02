@@ -13,7 +13,9 @@ use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_can
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall};
+use crate::contest::{
+    CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall, VARIETY_ON_AIR,
+};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -118,6 +120,13 @@ pub struct ContestSettings {
     /// not sign by its own rules: every QSO, every third, or never. Set on
     /// the contest card, with the run style.
     pub contest_tu_call: TuCall,
+    /// How much POTA hunters' styles vary, from 0 to
+    /// [`crate::contest::VARIETY_MAX`]: none, every hunter as on the cheat
+    /// sheet; [`VARIETY_ON_AIR`], as heard on the air; the most, every style
+    /// alike. Set on the contest card, where the contest lets you
+    /// ([`crate::contest::ContestRules::varies`]).
+    #[serde(deserialize_with = "forgiving_variety")]
+    pub hunter_variety: u32,
     /// Each new caller's speed drawn from your copy speed in contests, within
     /// the Speed card's ranges: faster as you copy calls and numbers clean,
     /// slower as you miss them. Off, it is drawn evenly from the ranges. A
@@ -181,6 +190,7 @@ impl Default for ContestSettings {
             contest_minutes: 10,
             contest_show_copy: false,
             contest_tu_call: TuCall::Every,
+            hunter_variety: VARIETY_ON_AIR,
             contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
@@ -231,6 +241,13 @@ fn forgiving_number<'de, D: serde::Deserializer<'de>, T>(
         .as_f64()
         .filter(|number| number.is_finite())
         .map_or(fallback, |number| whole(number.round())))
+}
+
+/// The hunters' variety as saved: anything but a number reads as on the
+/// air; a number past the most is clamped to it with the rest.
+fn forgiving_variety<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    // A float cast to an integer saturates at its ends.
+    forgiving_number(deserializer, |variety| variety as u32, VARIETY_ON_AIR)
 }
 
 /// Your speed as saved: a speed of your own, or 0 for the middle of the

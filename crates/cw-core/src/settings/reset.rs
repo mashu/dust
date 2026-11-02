@@ -111,6 +111,7 @@ impl TrainingSettings {
                 self.contest.contest_kind = from.contest.contest_kind;
                 self.contest.contest_style = from.contest.contest_style;
                 self.contest.contest_tu_call = from.contest.contest_tu_call;
+                self.contest.hunter_variety = from.contest.hunter_variety;
                 // A single caller again, or no contest: the stations a
                 // pile-up opened go back; a pile-up again opens them.
                 self.fit_stations_to_pileup();

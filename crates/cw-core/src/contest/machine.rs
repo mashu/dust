@@ -5321,6 +5321,114 @@ mod tests {
         assert!(result.score > 0.0, "the copy still earns its points");
     }
 
+    /// A POTA hunter's first exchange to you, `my_call`, read: its report,
+    /// and its state where it sends one, once its lead is one of the
+    /// contest's and the rest its long form or its short, each field twice
+    /// or once.
+    fn pota_hunter<'a>(text: &'a str, my_call: &str) -> (&'a str, Option<&'a str>) {
+        let words: Vec<&'a str> = text.split_whitespace().collect();
+        let ur = words.iter().position(|word| *word == "UR").expect("UR");
+        let lead = words[..ur].join(" ");
+        let leads = ["BK {my} TU", "BK TU", "R TU", "TU"].map(|lead| lead.replace("{my}", my_call));
+        assert!(leads.contains(&lead), "{text}");
+        match words[ur..] {
+            ["UR", rst, again, st, st_again, "BK"] if rst == again && st == st_again => {
+                (rst, Some(st))
+            }
+            ["UR", rst, st, "BK"] if Field::St.canonical(st).is_some() => (rst, Some(st)),
+            ["UR", rst, again, "BK"] if rst == again => (rst, None),
+            ["UR", rst, "BK"] => (rst, None),
+            _ => panic!("not a hunter's exchange: {text}"),
+        }
+    }
+
+    /// POTA hunters each keep to a style: every lead comes, by its share,
+    /// and the short form, each field once, about three times in ten.
+    /// Asked again, a hunter sends its exchange alone, in its own form.
+    #[test]
+    fn pota_hunters_each_keep_a_style_of_their_own() {
+        let mut leads = std::collections::BTreeMap::new();
+        let (mut short, mut long) = (0, 0);
+        for seed in 1..200 {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_kind = crate::contest::ContestKind::Pota;
+            settings.contest.my_call = "N4BKY".to_string();
+            settings.contest.my_state = "AL".to_string();
+            let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["W7XYZ"]));
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "W7XYZ", "");
+            let first = replies(runtime.last_turn())[0].to_string();
+            let (rst, st) = pota_hunter(&first, "N4BKY");
+            let st = st.expect("a US hunter's state");
+            let ur = first.find("UR ").expect("UR");
+            *leads.entry(first[..ur].trim().to_string()).or_insert(0) += 1;
+            let body = &first[ur..];
+            if body == format!("UR {rst} {st} BK") {
+                short += 1;
+            } else {
+                long += 1;
+            }
+            // Asked again, its exchange alone, as it sent it.
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "W7XYZ", "");
+            let again = replies(runtime.last_turn())[0].to_string();
+            assert_eq!(again, body, "seed {seed}");
+        }
+        let count = |lead: &str| leads.get(lead).copied().unwrap_or(0);
+        assert!(count("BK N4BKY TU") > count("BK TU"), "{leads:?}");
+        assert!(count("BK TU") > count("TU"), "{leads:?}");
+        for lead in ["BK N4BKY TU", "BK TU", "R TU", "TU"] {
+            assert!(count(lead) > 5, "{lead}: {leads:?}");
+        }
+        assert!(short > 30 && long > 100, "{short} short, {long} long");
+    }
+
+    /// The variety you set reaches the hunters: at none every hunter leads
+    /// with `BK`, your call and `TU`, and sends each field twice, as the
+    /// cheat sheet has it; at the most every lead comes about as often as
+    /// the others, and the short form about half the time.
+    #[test]
+    fn hunters_vary_as_you_set_them() {
+        let firsts = |variety: u32| -> Vec<String> {
+            (1..120)
+                .map(|seed| {
+                    let mut settings = run_settings(25.0);
+                    settings.contest.contest_kind = crate::contest::ContestKind::Pota;
+                    settings.contest.my_call = "N4BKY".to_string();
+                    settings.contest.my_state = "AL".to_string();
+                    settings.contest.hunter_variety = variety;
+                    let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["W7XYZ"]));
+                    runtime.finish_turn();
+                    runtime.key(OpKey::Esm, "W7XYZ", "");
+                    replies(runtime.last_turn())[0].to_string()
+                })
+                .collect()
+        };
+        for first in firsts(0) {
+            let (rst, st) = pota_hunter(&first, "N4BKY");
+            let st = st.expect("a US hunter's state");
+            assert_eq!(first, format!("BK N4BKY TU UR {rst} {rst} {st} {st} BK"));
+        }
+        let all = firsts(crate::contest::VARIETY_MAX);
+        let led = |lead: &str| {
+            all.iter()
+                .filter(|first| first.starts_with(&format!("{lead} UR ")))
+                .count()
+        };
+        for lead in ["BK N4BKY TU", "BK TU", "R TU", "TU"] {
+            assert!((15..50).contains(&led(lead)), "{lead}: {}", led(lead));
+        }
+        let short = all
+            .iter()
+            .filter(|first| first.split_whitespace().count() <= 6 + 2)
+            .filter(|first| {
+                let (rst, _) = pota_hunter(first, "N4BKY");
+                first.matches(rst).count() == 1
+            })
+            .count();
+        assert!((35..85).contains(&short), "{short} of {} short", all.len());
+    }
+
     /// A POTA QSO, line by line as the cheat sheet has it: your CQ POTA,
     /// the hunter's call, its call and your greeting of the hour with your
     /// report and state, its report and state after `BK`, your TU sending
@@ -5346,17 +5454,8 @@ mod tests {
             "N4FFF TU GM UR 5NN 5NN AL AL BK"
         );
         let exchange = replies(runtime.last_turn())[0].to_string();
-        let words: Vec<&str> = exchange.split_whitespace().collect();
-        let ur = words.iter().position(|word| *word == "UR").expect("UR");
-        let (rst, st) = (words[ur + 1], words[ur + 3]);
-        assert!(
-            ["BK TU", "BK N4BKY TU"].contains(&words[..ur].join(" ").as_str()),
-            "{exchange}"
-        );
-        assert_eq!(
-            words[ur..].join(" "),
-            format!("UR {rst} {rst} {st} {st} BK")
-        );
+        let (rst, st) = pota_hunter(&exchange, "N4BKY");
+        let st = st.expect("a US hunter's state");
         // Plain digits, as hunters with easy habits send them, and the
         // state its call puts it in.
         assert!(rst.chars().all(|c| c.is_ascii_digit()), "{rst}");
@@ -5432,13 +5531,8 @@ mod tests {
             "{exchange}"
         );
         let theirs = replies(runtime.last_turn())[0].to_string();
-        let words: Vec<&str> = theirs.split_whitespace().collect();
-        let ur = words.iter().position(|word| *word == "UR").expect("UR");
-        let (rst, st) = (words[ur + 1], words[ur + 3]);
-        assert!(
-            Field::St.canonical(st).is_some(),
-            "a US hunter's state: {theirs}"
-        );
+        let (rst, st) = pota_hunter(&theirs, "SA0KAM");
+        let st = st.expect("a US hunter's state");
         runtime.finish_turn();
         let effects = runtime.key(OpKey::Esm, "W7XYZ", &format!("{rst} {st}"));
         let tu = played(&effects).expect("TU goes out").clone();
@@ -5468,14 +5562,8 @@ mod tests {
         runtime.finish_turn();
         runtime.key(OpKey::Esm, "DL1XYZ", "");
         let theirs = replies(runtime.last_turn())[0].to_string();
-        let words: Vec<&str> = theirs.split_whitespace().collect();
-        let ur = words.iter().position(|word| *word == "UR").expect("UR");
-        let rst = words[ur + 1];
-        assert_eq!(
-            words[ur..].join(" "),
-            format!("UR {rst} {rst} BK"),
-            "no state"
-        );
+        let (rst, st) = pota_hunter(&theirs, "N4BKY");
+        assert_eq!(st, None, "no state: {theirs}");
         runtime.finish_turn();
         // The report alone is complete: Enter thanks it and logs.
         let rules = runtime.machine.rules;
@@ -13787,7 +13875,12 @@ mod tests {
     fn an_exchange_that_never_went_out_keeps_its_lead_word() {
         let led = |runtime: &Runtime<ScriptCalls>, text: &str| {
             let first = text.split_whitespace().next().unwrap_or_default();
-            runtime.machine.rules.their_lead.contains(&first)
+            runtime
+                .machine
+                .rules
+                .their_lead
+                .iter()
+                .any(|(lead, _)| *lead == first)
         };
         // Paused before it began.
         let mut paused = runtime(&["K5XYZ"]);

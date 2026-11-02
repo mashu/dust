@@ -1041,6 +1041,99 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
     }
 }
 
+/// Settings in Contest mode for POTA as SA0KAM, hunters varying as
+/// `variety` has them.
+fn pota_settings_at(variety: u32) -> String {
+    #[component]
+    fn PotaSettings(variety: u32) -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Pota;
+            settings.contest.my_call = "SA0KAM".to_string();
+            settings.contest.hunter_variety = variety;
+            settings
+        });
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    }
+    render_props(PotaSettings, PotaSettingsProps { variety })
+}
+
+/// POTA's card shows how hunters vary their reply: a Variety slider, and
+/// under it each style as a hunter sends it to you beside its share, the
+/// shares following the slider: as on the air in the middle, the cheat
+/// sheet's one reply at the left, every style alike at the right. No other
+/// contest has it.
+#[test]
+fn pota_shows_each_hunter_style_beside_its_share() {
+    let line = |pct: u32, text: &str| {
+        format!(
+            r#"<span class="qso-who tiny">{pct}%</span><span class="qso-sends"><span class="call">{text}</span>"#
+        )
+    };
+    let on_air = pota_settings_at(cw_core::VARIETY_ON_AIR);
+    for shown in [
+        ">Hunter styles<".to_string(),
+        "As on the air".to_string(),
+        r#"id="slider-variety""#.to_string(),
+        line(45, "BK SA0KAM TU UR …"),
+        line(30, "BK TU UR …"),
+        line(15, "R TU UR …"),
+        line(10, "TU UR …"),
+        line(70, "UR 579 579 OR OR BK"),
+        line(30, "UR 579 OR BK"),
+    ] {
+        assert!(on_air.contains(&shown), "no {shown:?} in {on_air}");
+    }
+    let cheat_sheet = pota_settings_at(0);
+    for shown in [
+        "Cheat sheet only".to_string(),
+        line(100, "BK SA0KAM TU UR …"),
+        line(0, "TU UR …"),
+        line(100, "UR 579 579 OR OR BK"),
+        line(0, "UR 579 OR BK"),
+    ] {
+        assert!(
+            cheat_sheet.contains(&shown),
+            "no {shown:?} in {cheat_sheet}"
+        );
+    }
+    let alike = pota_settings_at(cw_core::VARIETY_MAX);
+    for shown in [
+        "Every style alike".to_string(),
+        line(25, "R TU UR …"),
+        line(50, "UR 579 OR BK"),
+    ] {
+        assert!(alike.contains(&shown), "no {shown:?} in {alike}");
+    }
+    let wpx = render(|| {
+        let settings = use_signal(crate::testing::contest_settings);
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    });
+    assert!(!wpx.contains("Hunter styles"), "{wpx}");
+}
+
 /// Settings in Contest mode for the NA Sprint as `my_call`, called
 /// `my_name`, in `my_state`.
 fn sprint_settings(my_call: &'static str, my_name: &'static str, my_state: &'static str) -> String {

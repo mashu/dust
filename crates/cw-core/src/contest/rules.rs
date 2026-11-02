@@ -207,11 +207,15 @@ pub struct ContestRules {
     pub answer: &'static str,
     /// A caller's exchange as it sends it, on your side.
     pub their_exchange: PerSide<&'static str>,
-    /// What a caller sends before its exchange the first time: the first
-    /// of these as often as `caller.rs`'s `FIRST_LEAD` has it, the second
-    /// otherwise, `{my}` your call in it. Sent again, the exchange goes
-    /// alone.
-    pub their_lead: [&'static str; 2],
+    /// A shorter exchange some operators keep to, each field once, and the
+    /// share of callers that do, each deciding once and keeping to it: a
+    /// POTA hunter's `UR 579 OR BK` beside `UR 579 579 OR OR BK`. None
+    /// where every caller sends the one exchange.
+    pub their_short: Option<(PerSide<&'static str>, f64)>,
+    /// What a caller sends before its exchange the first time, each with
+    /// the share of callers that lead with it, the shares making one,
+    /// `{my}` your call in it. Sent again, the exchange goes alone.
+    pub their_lead: &'static [(&'static str, f64)],
     /// What a caller that has its call but not your exchange asks with:
     /// the first as often as `caller.rs`'s `FIRST_QUERY` has it, the second
     /// otherwise.
@@ -304,7 +308,8 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{his}",
         their_exchange: PerSide::both("{rst} {nr}"),
-        their_lead: ["TU", "R"],
+        their_short: None,
+        their_lead: &[("TU", 0.9), ("R", 0.1)],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -349,7 +354,8 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::UsAndCanada)),
         answer: "{his}",
         their_exchange: PerSide::both("{my} {nr} {name} {st}"),
-        their_lead: ["", ""],
+        their_short: None,
+        their_lead: &[("", 1.0)],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -390,7 +396,8 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{his}",
         their_exchange: PerSide::both("{rst} {zn}"),
-        their_lead: ["TU", "R"],
+        their_short: None,
+        their_lead: &[("TU", 0.9), ("R", 0.1)],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -442,7 +449,8 @@ pub(super) const RULES: &[ContestRules] = &[
             wve: "{rst} {pwr}",
             dx: "{rst} {st}",
         },
-        their_lead: ["TU", "R"],
+        their_short: None,
+        their_lead: &[("TU", 0.9), ("R", 0.1)],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -486,7 +494,8 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::FieldDay)),
         answer: "{his}",
         their_exchange: PerSide::both("{cl} {sec}"),
-        their_lead: ["R", "TU"],
+        their_short: None,
+        their_lead: &[("R", 0.9), ("TU", 0.1)],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -526,7 +535,8 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{my} DE {his} K",
         their_exchange: PerSide::both("UR {rst} {rst} NAME {name} {name} BK"),
-        their_lead: ["R TNX", "R TNX"],
+        their_short: None,
+        their_lead: &[("R TNX", 1.0)],
         their_query: ["AGN", "AGN"],
         signoff: Some("73 EE"),
         tu_calls: false,
@@ -544,8 +554,11 @@ pub(super) const RULES: &[ContestRules] = &[
     // and Canada send their report and their state or province, which you
     // copy, and your TU sends the state back; about one in four is DX and
     // sends its report alone, as DX stations do, so its state is optional.
-    // A hunter names you after its BK, nine times in ten. Your TU ends with
-    // `EE`, never your call, for the hunter to answer with its own `EE`. From outside the US and
+    // Each hunter keeps to a style of its own: it leads with `BK`, your call
+    // and `TU`, or `BK TU`, `R TU` or `TU`, and sends its report and state
+    // twice, or each once (`UR 579 OR BK`). The shares are a choice, so a
+    // run hears them all. Your TU ends with `EE`, never your call, for the
+    // hunter to answer with its own `EE`. From outside the US and
     // Canada, Alaska and Hawaii being in them, you send your report alone,
     // and your TU sends no state back: `BK TU 73 EE`. Your TU brings the
     // next hunter once the one you worked has signed off, as a pile-up of
@@ -574,7 +587,13 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Pota)),
         answer: "{his}",
         their_exchange: PerSide::both("UR {rst} {rst} {st} {st} BK"),
-        their_lead: ["BK {my} TU", "BK TU"],
+        their_short: Some((PerSide::both("UR {rst} {st} BK"), 0.3)),
+        their_lead: &[
+            ("BK {my} TU", 0.45),
+            ("BK TU", 0.3),
+            ("R TU", 0.15),
+            ("TU", 0.1),
+        ],
         their_query: ["AGN", "AGN"],
         signoff: Some("EE"),
         tu_calls: true,
@@ -606,6 +625,49 @@ pub fn greeting(hour: u32) -> &'static str {
 /// The hour a greeting goes by where the local time is not known: the
 /// afternoon, `GA`, as the greeting most often heard in examples.
 pub const GREETING_HOUR: u32 = 12;
+
+/// How much callers' styles vary, where a contest lets you set it
+/// ([`ContestRules::varies`]): from none, every caller in the most common
+/// style, through [`VARIETY_ON_AIR`], the shares as the row gives them, as
+/// heard on the air, to [`VARIETY_MAX`], every style alike.
+pub const VARIETY_MAX: u32 = 100;
+pub const VARIETY_ON_AIR: u32 = 50;
+
+/// `shares` at `variety` ([`VARIETY_MAX`]): each raised to the power
+/// (1 − v) / v, v being the variety as a fraction of the most, and made to
+/// sum to one again. At none every caller is in the most common style; at
+/// the middle the shares are exactly as given; at the most they are all
+/// alike; and between, the order of the styles never changes, the common
+/// ones growing commoner below the middle and the rare ones less rare above
+/// it.
+pub fn tempered(shares: &[f64], variety: u32) -> Vec<f64> {
+    if variety == VARIETY_ON_AIR {
+        return shares.to_vec();
+    }
+    let v = f64::from(variety.min(VARIETY_MAX)) / f64::from(VARIETY_MAX);
+    if v <= 0.0 {
+        let top = shares.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let tops = shares.iter().filter(|share| **share == top).count() as f64;
+        return shares
+            .iter()
+            .map(|share| if *share == top { 1.0 / tops } else { 0.0 })
+            .collect();
+    }
+    let power = (1.0 - v) / v;
+    let raised: Vec<f64> = shares.iter().map(|share| share.powf(power)).collect();
+    let sum: f64 = raised.iter().sum();
+    raised.iter().map(|share| share / sum).collect()
+}
+
+/// The ways a contest's callers send their exchange, as the card shows them
+/// beside the variety you set: each word they lead it with, as sent to
+/// you, and its share; and the exchange sent long and short, each field
+/// twice or once, and the share of each.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallerStyles {
+    pub leads: Vec<(String, f64)>,
+    pub forms: Vec<(String, f64)>,
+}
 
 /// How you sign off in a TU that holds a farewell: `73`, and now and then
 /// `73 44`, as often as [`FAREWELL_44`] has it.
@@ -876,13 +938,28 @@ impl ContestRules {
         his_call: &str,
         fields: &[(Field, String)],
     ) -> String {
+        self.their_exchange_as(side, false, my_call, his_call, fields)
+    }
+
+    /// The same, in its short form ([`Self::their_short`]) where `short`
+    /// and the contest has one.
+    pub(super) fn their_exchange_as(
+        &self,
+        side: Side,
+        short: bool,
+        my_call: &str,
+        his_call: &str,
+        fields: &[(Field, String)],
+    ) -> String {
+        let template = match self.their_short {
+            Some((form, _)) if short => form.on(side),
+            _ => self.their_exchange.on(side),
+        };
         let report = fields
             .iter()
             .find(|(field, _)| *field == Field::Rst)
             .map_or(self.report, |(_, token)| token.as_str());
-        let mut text = self
-            .their_exchange
-            .on(side)
+        let mut text = template
             .replace("{my}", my_call)
             .replace("{his}", his_call)
             .replace("{rst}", report);
@@ -900,8 +977,69 @@ impl ContestRules {
     /// the contest leads it with, the `lead`th of [`Self::their_lead`];
     /// alone in a contest that leads it with none.
     pub(super) fn their_first_exchange(&self, lead: usize, my_call: &str, body: &str) -> String {
-        let lead = self.their_lead[lead].replace("{my}", my_call);
+        let lead = self.their_lead[lead].0.replace("{my}", my_call);
         squeeze(&format!("{lead} {body}"))
+    }
+
+    /// Which of [`Self::their_lead`] a caller leads with at `variety`, for
+    /// `draw`, drawn evenly from nothing up to one: each takes its share of
+    /// the range ([`Self::lead_shares`]), in order.
+    pub(super) fn lead_at(&self, draw: f64, variety: u32) -> usize {
+        let mut upto = 0.0;
+        let shares = self.lead_shares(variety);
+        for (at, share) in shares.iter().enumerate() {
+            upto += share;
+            if draw < upto {
+                return at;
+            }
+        }
+        shares.len() - 1
+    }
+
+    /// Whether its callers' styles vary as you set them: a contest whose
+    /// callers keep to a style of their own, a long or a short exchange
+    /// among it, as POTA's hunters do. Elsewhere they lead as the row has
+    /// it, whatever the variety.
+    pub fn varies(&self) -> bool {
+        self.their_short.is_some()
+    }
+
+    /// The share of callers that lead with each of [`Self::their_lead`] at
+    /// `variety` ([`tempered`]).
+    pub fn lead_shares(&self, variety: u32) -> Vec<f64> {
+        let shares: Vec<f64> = self.their_lead.iter().map(|(_, share)| *share).collect();
+        tempered(&shares, variety)
+    }
+
+    /// The share of callers that send the short exchange at `variety`, as
+    /// the long one and the short are tempered together; none in a contest
+    /// without one.
+    pub fn short_share(&self, variety: u32) -> Option<f64> {
+        let (_, share) = self.their_short?;
+        Some(tempered(&[1.0 - share, share], variety)[1])
+    }
+
+    /// The styles its callers send in at `variety`, as the card shows
+    /// them, to you as `my_call` on `side`: each lead, before the rest, and
+    /// the exchange each field twice and once, from a caller in Oregon
+    /// with the report and state the card's QSO has. None where they do
+    /// not vary.
+    pub fn caller_styles(&self, side: Side, my_call: &str, variety: u32) -> Option<CallerStyles> {
+        let short = self.short_share(variety)?;
+        let leads = (0..self.their_lead.len())
+            .map(|lead| self.their_first_exchange(lead, my_call, "UR …"))
+            .zip(self.lead_shares(variety))
+            .collect();
+        let fields: Vec<(Field, String)> = self
+            .copied(side)
+            .iter()
+            .map(|field| (*field, field.example().to_string()))
+            .collect();
+        let form = |short| self.their_exchange_as(side, short, my_call, "W7XYZ", &fields);
+        Some(CallerStyles {
+            leads,
+            forms: vec![(form(false), 1.0 - short), (form(true), short)],
+        })
     }
 
     /// A first QSO of this contest as it goes out, with `me` as you: who
@@ -1158,7 +1296,7 @@ mod tests {
             rules.their_exchange_text(Side::Dx, "DL1ABC", "K5XYZ", &theirs),
             "UR 579 579 NAME BOB BOB BK"
         );
-        assert_eq!(rules.their_lead, ["R TNX", "R TNX"]);
+        assert_eq!(rules.their_lead, [("R TNX", 1.0)]);
         assert_eq!(rules.their_query, ["AGN", "AGN"], "no serial to ask for");
         assert_eq!(rules.signoff, Some("73 EE"));
         assert_eq!(rules.sends(Side::Dx), "599 + name");
@@ -1466,11 +1604,52 @@ mod tests {
             rules.their_first_exchange(1, "K1ABC", &body),
             "BK TU UR 57N 57N FL FL BK"
         );
+        // Each hunter keeps to a style: four leads, by their shares.
+        assert_eq!(
+            rules.their_lead,
+            [
+                ("BK {my} TU", 0.45),
+                ("BK TU", 0.3),
+                ("R TU", 0.15),
+                ("TU", 0.1)
+            ]
+        );
+        assert_eq!(
+            (0..4)
+                .map(|lead| rules.their_first_exchange(lead, "K1ABC", "UR 579 OR BK"))
+                .collect::<Vec<_>>(),
+            [
+                "BK K1ABC TU UR 579 OR BK",
+                "BK TU UR 579 OR BK",
+                "R TU UR 579 OR BK",
+                "TU UR 579 OR BK"
+            ]
+        );
+        for (draw, lead) in [
+            (0.0, 0),
+            (0.44, 0),
+            (0.46, 1),
+            (0.8, 2),
+            (0.95, 3),
+            (0.999, 3),
+        ] {
+            assert_eq!(rules.lead_at(draw, VARIETY_ON_AIR), lead, "{draw}");
+        }
+        // Or each field once, as three hunters in ten do.
+        assert_eq!(
+            rules.their_exchange_as(Side::WVe, true, "K1ABC", "W4XYZ", &theirs),
+            "UR 57N FL BK"
+        );
+        assert_eq!(rules.their_short.map(|(_, share)| share), Some(0.3));
         // A DX hunter's: its report alone, and no gap where a state would be.
         let dx_theirs = [(Field::Rst, "57N".to_string())];
         assert_eq!(
             rules.their_exchange_text(Side::Dx, "SA0KAM", "DL1XYZ", &dx_theirs),
             "UR 57N 57N BK"
+        );
+        assert_eq!(
+            rules.their_exchange_as(Side::Dx, true, "SA0KAM", "DL1XYZ", &dx_theirs),
+            "UR 57N BK"
         );
         assert_eq!(rules.signoff, Some("EE"));
         assert_eq!(rules.their_query, ["AGN", "AGN"], "no serial to ask for");
@@ -1519,6 +1698,75 @@ mod tests {
             rules
                 .long_cq_text("N4XYZ")
                 .starts_with("CQ CQ POTA DE N4XYZ")
+        );
+    }
+
+    /// Variety tempers the shares: none puts every caller in the most
+    /// common style, the middle leaves them exactly as given, the most makes
+    /// them alike, and between, their order holds, the common ones commoner
+    /// below the middle and the rare ones less rare above it.
+    #[test]
+    fn variety_tempers_the_shares_of_the_styles() {
+        let shares = [0.45, 0.3, 0.15, 0.1];
+        assert_eq!(tempered(&shares, VARIETY_ON_AIR), shares);
+        assert_eq!(tempered(&shares, 0), [1.0, 0.0, 0.0, 0.0]);
+        for share in tempered(&shares, VARIETY_MAX) {
+            assert!((share - 0.25).abs() < 1e-12, "{share}");
+        }
+        for variety in [0, 10, 25, 40, 50, 60, 75, 90, 100] {
+            let at = tempered(&shares, variety);
+            let sum: f64 = at.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-9, "{variety}: {sum}");
+            assert!(
+                at.windows(2).all(|pair| pair[0] >= pair[1]),
+                "{variety}: {at:?}"
+            );
+        }
+        let low = tempered(&shares, 25);
+        let high = tempered(&shares, 75);
+        assert!(low[0] > 0.45 && low[3] < 0.1, "{low:?}");
+        assert!(high[0] < 0.45 && high[3] > 0.1, "{high:?}");
+        // Every contest's leads stay as the row has them where the variety
+        // is not yours to set, and POTA's follow it.
+        assert!(pota().varies() && !wpx().varies());
+        assert_eq!(wpx().lead_shares(VARIETY_ON_AIR), [0.9, 0.1]);
+        assert_eq!(pota().short_share(VARIETY_ON_AIR), Some(0.3));
+        assert_eq!(pota().short_share(0), Some(0.0));
+        assert_eq!(pota().short_share(VARIETY_MAX), Some(0.5));
+        assert_eq!(wpx().short_share(VARIETY_ON_AIR), None);
+    }
+
+    /// The card shows each style a POTA hunter sends in, as sent to you,
+    /// with its share at the variety set: four leads, then the exchange with
+    /// each field twice and once.
+    #[test]
+    fn the_card_shows_each_style_with_its_share() {
+        let styles = pota()
+            .caller_styles(Side::Dx, "SA0KAM", VARIETY_ON_AIR)
+            .expect("POTA's hunters vary");
+        assert_eq!(
+            styles.leads,
+            [
+                ("BK SA0KAM TU UR …".to_string(), 0.45),
+                ("BK TU UR …".to_string(), 0.3),
+                ("R TU UR …".to_string(), 0.15),
+                ("TU UR …".to_string(), 0.1),
+            ]
+        );
+        assert_eq!(
+            styles.forms,
+            [
+                ("UR 579 579 OR OR BK".to_string(), 0.7),
+                ("UR 579 OR BK".to_string(), 0.3),
+            ]
+        );
+        let none = pota().caller_styles(Side::WVe, "K1ABC", 0).expect("POTA");
+        assert_eq!(none.leads[0].1, 1.0);
+        assert_eq!(none.forms[0].1, 1.0);
+        assert!(
+            wpx()
+                .caller_styles(Side::Dx, "DL1ABC", VARIETY_ON_AIR)
+                .is_none()
         );
     }
 
@@ -1755,6 +2003,16 @@ mod tests {
                 for field in rules.optional {
                     assert!(rules.copied(side).contains(field), "{:?}", rules.kind);
                 }
+                // A short exchange sends what the long one does.
+                if let Some((short, share)) = rules.their_short {
+                    let short = short.on(side);
+                    for field in rules.copied(side) {
+                        let held = format!("{{{}}}", field.name());
+                        assert!(short.contains(&held), "{:?}", rules.kind);
+                    }
+                    assert_eq!(short.contains("{rst}"), rules.rst, "{:?}", rules.kind);
+                    assert!((0.0..1.0).contains(&share), "{:?}", rules.kind);
+                }
             }
             assert!(rules.cq.contains("{my}"), "{:?}", rules.kind);
             assert!(rules.answer.contains("{his}"), "{:?}", rules.kind);
@@ -1767,6 +2025,9 @@ mod tests {
                 rules.kind
             );
             assert!(!rules.long_cq.contains("{my}"), "{:?}", rules.kind);
+            // The leads' shares make one.
+            let shares: f64 = rules.their_lead.iter().map(|(_, share)| share).sum();
+            assert!((shares - 1.0).abs() < 1e-9, "{:?}: {shares}", rules.kind);
             // The card says who you work exactly where sides change it.
             assert_eq!(rules.works.is_some(), rules.sided(), "{:?}", rules.kind);
         }
