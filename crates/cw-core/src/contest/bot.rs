@@ -252,8 +252,9 @@ fn exchange_of(words: &[&str]) -> Option<String> {
     };
     match (after("UR"), after("NAME")) {
         (Some(rst), Some(name)) => Some(format!("{rst} {name}")),
-        // A POTA hunter's report, sent twice, and then its state.
-        (Some(rst), None) => pota_exchange(words, rst),
+        // A POTA hunter's report, sent twice, and then its state, which a
+        // DX hunter leaves out.
+        (Some(rst), None) => Some(pota_exchange(words, rst)),
         // After the report every caller sends, `5NN` or now and then
         // `ENN`: a serial, a zone or a power, its last word.
         _ if words.iter().any(|word| [CUT_599, ENN].contains(word)) => {
@@ -264,13 +265,20 @@ fn exchange_of(words: &[&str]) -> Option<String> {
 }
 
 /// A POTA hunter's exchange, its report `rst` after `UR`: the report and
-/// the first state after it, `UR 579 579 OR OR BK` read as `579 OR`.
-fn pota_exchange(words: &[&str], rst: &str) -> Option<String> {
-    let from = words.iter().position(|word| *word == "UR")? + 1;
+/// the first state after it, `UR 579 579 OR OR BK` read as `579 OR`, or the
+/// report alone from a DX hunter, which sends no state: `UR 579 579 BK`.
+fn pota_exchange(words: &[&str], rst: &str) -> String {
+    let from = words
+        .iter()
+        .position(|word| *word == "UR")
+        .map_or(words.len(), |at| at + 1);
     let st = words[from..]
         .iter()
-        .find(|word| **word != rst && Field::St.canonical(word).is_some())?;
-    Some(format!("{rst} {st}"))
+        .find(|word| **word != rst && Field::St.canonical(word).is_some());
+    match st {
+        Some(st) => format!("{rst} {st}"),
+        None => rst.to_string(),
+    }
 }
 
 /// A Field Day exchange, after the word that leads it: its class and
@@ -1522,7 +1530,16 @@ mod tests {
             copy_of("DE W4XYZ UR 599 599 FL FL BK"),
             Some(Copied::Correction("W4XYZ", Some("599 FL".to_string())))
         );
-        for nothing in ["73 EE", "EE", "AGN", "NR?", "", "R 3G OR", "UR 579 579 BK"] {
+        // A DX hunter's report alone.
+        for exchange in ["BK TU UR 579 579 BK", "UR 57N 57N BK"] {
+            let rst = exchange.split_whitespace().rev().nth(1).expect("a report");
+            assert_eq!(
+                copy_of(exchange),
+                Some(Copied::Exchange(rst.to_string())),
+                "{exchange}"
+            );
+        }
+        for nothing in ["73 EE", "EE", "AGN", "NR?", "", "R 3G OR"] {
             assert_eq!(copy_of(nothing), None, "{nothing:?}");
         }
     }

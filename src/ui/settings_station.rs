@@ -125,7 +125,7 @@ fn call_reading(
     }
     // Your side, where it changes the contest: ARRL DX's, and POTA's.
     if kind.rules().sided() {
-        parts.push(format!("you are {}", Side::of_call(call).label()));
+        parts.push(format!("you are {}", kind.rules().side_of(call).label()));
     }
     let parts: Vec<String> = parts
         .iter()

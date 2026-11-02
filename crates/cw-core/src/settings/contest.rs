@@ -318,9 +318,10 @@ impl ContestSettings {
         self.my_section = clean_section(typed);
     }
 
-    /// Your side of the ARRL DX contest, from your call.
+    /// Your side, from your call, as the contest draws the line: ARRL DX's
+    /// W/VE and DX, or POTA's US and Canada and everywhere else.
     pub fn side(&self) -> Side {
-        Side::of_call(&self.my_call)
+        self.contest_kind.rules().side_of(&self.my_call)
     }
 
     /// The CQ zone your call reads as: by your state or province where you

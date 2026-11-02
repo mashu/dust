@@ -1151,10 +1151,16 @@ impl Caller {
                         // Where its call puts it, Labrador apart where the
                         // contest counts it so; a station with no state or
                         // province sends DX, as one outside North America
-                        // does.
-                        Field::St => draw_place(&self.call.text, rules.labrador, &mut self.rng)
-                            .unwrap_or(DX)
-                            .to_string(),
+                        // does, or nothing where the state is optional, as
+                        // a POTA hunter outside the US and Canada sends its
+                        // report alone.
+                        Field::St => {
+                            match draw_place(&self.call.text, rules.labrador, &mut self.rng) {
+                                Some(place) => place.to_string(),
+                                None if rules.optional(Field::St) => return None,
+                                None => DX.to_string(),
+                            }
+                        }
                         // Where its call puts it.
                         Field::Zn => {
                             let zone = draw_zone(&self.call.text, &mut self.rng)?;

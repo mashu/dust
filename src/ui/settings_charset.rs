@@ -1,6 +1,6 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, Fill, GROUP_SIZE_MAX, LevelAxis,
-    MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
+    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill, GROUP_SIZE_MAX,
+    LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
     SequenceChoice, SettingsSection, TrainingSettings, TuCall, WORD_LIST_MAX, WordList,
     compute_char_pool, current_practice_window, greeting, parse_callsign, tier_examples,
     unlocked_practice_count,
@@ -171,8 +171,11 @@ impl ContestCard {
                     // The QSO is your first: its TU signs as a run's
                     // first would, with your call in TU every QSO.
                     tu_signed: rules.tu_adds_call(contest.contest_tu_call, 1),
-                    // And it greets as a run started now would.
+                    // And it greets as a run started now would, and signs
+                    // off with the farewell a run sends now and then,
+                    // `73 44`, so the card shows it.
                     greeting: greeting(local_hour()),
+                    farewell: FAREWELLS[1],
                     ..Fill::default()
                 },
             ),

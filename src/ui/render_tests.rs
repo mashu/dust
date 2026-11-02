@@ -973,8 +973,11 @@ fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
 /// POTA has its pill and its dialogue from its row, as an activator works
 /// a hunter: your CQ POTA, its call, your greeting, report and state, its
 /// report and state, your TU sending its state back, and its `EE`. In the
-/// US or Canada you send your state, and Your station asks for it; outside
-/// them, your report alone, and the card says so. The greeting goes by the
+/// US or Canada, Alaska among them, you send your state, and Your station
+/// asks for it; outside them, your report alone and no state back, and the
+/// card says so. The hunter names you after its BK; your TU ends `73 44
+/// EE`, as the card shows the farewell a run sends now and then, never with
+/// your call, and the card offers no call in TU. The greeting goes by the
 /// hour, so only what is around it is checked.
 #[test]
 fn pota_shows_an_activators_dialogue_and_your_side() {
@@ -989,13 +992,13 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
         "Contest · POTA",
         r#"id="contest-pota" class="pill active""#,
         "You send 5NN + state\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}ST",
-        "You are W/VE: you send your report and your state",
-        "Simplified: every hunter is in the US or Canada and sends its state",
+        "You are W/VE: you send your report and state, and send back the hunter",
+        "about one in four is DX and sends a report alone",
         ">CQ CQ POTA DE K1ABC K<",
         ">W7XYZ<",
         " UR 5NN 5NN MA MA BK<",
-        ">BK TU UR 579 579 OR OR BK<",
-        ">BK TU OR OR 73 EE K1ABC<",
+        ">BK K1ABC TU UR 579 579 OR OR BK<",
+        ">BK TU OR OR 73 44 EE<",
         ">EE<",
         r#"for="field-your-state-or-province""#,
         "you\u{a0}are\u{a0}W/VE",
@@ -1004,6 +1007,7 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
         assert!(html.contains(shown), "no {shown:?} in {html}");
     }
     assert!(html.contains(">W7XYZ TU G"), "a greeting first: {html}");
+    assert!(!html.contains("Your call in TU"), "{html}");
     // A state is asked for in the US or Canada until given.
     let asked = station_settings(cw_core::ContestKind::Pota, called("K1ABC"));
     assert!(
@@ -1014,9 +1018,11 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
     let dx = station_settings(cw_core::ContestKind::Pota, called("SO5KM"));
     for shown in [
         "You send 5NN\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}ST",
-        "You are DX: you send your report alone, as DX activators do",
+        "You are DX: you send your report alone, and no state back",
         ">CQ CQ POTA DE SO5KM K<",
         " UR 5NN 5NN BK<",
+        ">BK SO5KM TU UR 579 579 OR OR BK<",
+        ">BK TU 73 44 EE<",
         "you\u{a0}are\u{a0}DX",
         "Signing SO5KM<",
     ] {
@@ -1024,6 +1030,15 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
     }
     assert!(!dx.contains("field-your-state"), "{dx}");
     assert!(!dx.contains("Add your"), "{dx}");
+    // Alaska is in the US: it sends its state, which is asked for.
+    let alaska = station_settings(cw_core::ContestKind::Pota, called("KL7XYZ"));
+    for shown in [
+        "You are W/VE: you send your report and state",
+        "you\u{a0}are\u{a0}W/VE",
+        "Add your state or province to start a POTA",
+    ] {
+        assert!(alaska.contains(shown), "no {shown:?} in {alaska}");
+    }
 }
 
 /// Settings in Contest mode for the NA Sprint as `my_call`, called

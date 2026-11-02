@@ -83,7 +83,18 @@ pub enum Countries {
     FieldDay,
     /// Everyone outside [`Self::NorthAmerica`]: Field Day's DX.
     OutsideNorthAmerica,
+    /// Who hunts a POTA activation: [`Self::UsAndCanada`], each with a
+    /// state or province to send, and now and then a station anywhere else
+    /// ([`POTA_DX`]), which sends its report alone.
+    Pota,
+    /// Everyone outside [`Self::UsAndCanada`]: POTA's DX hunters.
+    OutsideUsAndCanada,
 }
+
+/// The share of POTA hunters outside the US and Canada, in percent: a
+/// choice, not a count, so that a run of a few minutes has some to copy.
+/// Each sends a report and no state, as DX stations do.
+pub(crate) const POTA_DX: f64 = 25.0;
 
 impl Countries {
     /// Whether a station in `country`, by its DXCC primary prefix as the
@@ -93,22 +104,26 @@ impl Countries {
         let states = w_ve || matches!(country, "KL" | "KH6");
         let sections = states || matches!(country, "KP4" | "KP2");
         match self {
-            Self::Any | Self::FieldDay => true,
+            Self::Any | Self::FieldDay | Self::Pota => true,
             Self::WVe => w_ve,
             Self::NotWVe => !w_ve,
             Self::NorthAmerica => sections,
             Self::UsAndCanada => states,
             Self::OutsideNorthAmerica => !sections,
+            Self::OutsideUsAndCanada => !states,
         }
     }
 
     /// The countries one caller is drawn from: a Field Day caller is in
     /// North America but as often as Field Day's entries send DX, when it is
-    /// anywhere else; every other choice is itself, and draws nothing.
+    /// anywhere else; a POTA hunter is in the US or Canada but as often as
+    /// [`POTA_DX`] has it; every other choice is itself, and draws nothing.
     pub(crate) fn for_one_call(self, rng: &mut impl Rng) -> Self {
         match self {
             Self::FieldDay if rng.f64() * 100.0 < FIELD_DAY_DX => Self::OutsideNorthAmerica,
             Self::FieldDay => Self::NorthAmerica,
+            Self::Pota if rng.f64() * 100.0 < POTA_DX => Self::OutsideUsAndCanada,
+            Self::Pota => Self::UsAndCanada,
             countries => countries,
         }
     }
@@ -1633,6 +1648,8 @@ mod tests {
             Countries::UsAndCanada,
             Countries::FieldDay,
             Countries::OutsideNorthAmerica,
+            Countries::Pota,
+            Countries::OutsideUsAndCanada,
         ];
         for countries in all {
             for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
@@ -1682,6 +1699,21 @@ mod tests {
         }
         assert!(Countries::OutsideNorthAmerica.admits("XE"));
         assert!(Countries::FieldDay.admits("DL") && Countries::FieldDay.admits("K"));
+        // POTA's hunters are in the US or Canada, each with a state or a
+        // province to send, but for its DX, about one in four.
+        let pota = generated(3, CallSpec::contest(Countries::Pota), 20_000);
+        let dx = pota
+            .iter()
+            .filter(|call| !Countries::UsAndCanada.admits(call.country))
+            .count();
+        assert!(dx > 4_500 && dx < 5_500, "{dx} of 20000 DX");
+        for country in ["K", "VE", "KL", "KH6"] {
+            assert!(!Countries::OutsideUsAndCanada.admits(country), "{country}");
+        }
+        for country in ["KP4", "XE", "DL"] {
+            assert!(Countries::OutsideUsAndCanada.admits(country), "{country}");
+        }
+        assert!(Countries::Pota.admits("DL") && Countries::Pota.admits("K"));
     }
 
     /// KG4 with two letters is Guantanamo Bay's, so no contest's US caller

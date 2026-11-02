@@ -6,7 +6,7 @@ use crate::alignment::CopyTally;
 use crate::auto_level::judged_copy;
 use crate::belief::{FADE_HORIZON, SESSION_FADE, sessions_faded};
 use crate::callsign::{CallSpec, GeneratedCall, generate_call};
-use crate::contest::{CallSource, Side};
+use crate::contest::CallSource;
 use crate::machine::GroupSource;
 use crate::pool::compute_char_pool;
 use crate::rng::{Rng, SplitMix64, weighted_random_pick};
@@ -602,7 +602,7 @@ pub(crate) fn generate_contest_call(
     config: &CharSamplingConfig,
     rng: &mut impl Rng,
 ) -> String {
-    let side = Side::of_call(&settings.contest.my_call);
+    let side = settings.contest.side();
     let spec = settings.contest.contest_kind.rules().callers(side);
     let call = wanted_call(settings, state, config, rng, spec).text;
     state.count_sent(&call);
