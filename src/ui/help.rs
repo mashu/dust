@@ -445,7 +445,7 @@ pub fn hunter_styles() -> Element {
         }
         dl { class: "help-terms",
             dt { "One reply" }
-            dd { "At the left every hunter sends the original, the cheat sheet's: BK, your call and TU, then its report and state twice." }
+            dd { "At the left every hunter sends the same reply, as in the QSO above: BK, your call and TU, then its report and state twice." }
             dt { "As on the air" }
             dd { "In the middle, where it starts: most name you after BK; some start BK TU, R TU or TU alone; three in ten send each field once." }
             dt { "More variety" }

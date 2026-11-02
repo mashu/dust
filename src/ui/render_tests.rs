@@ -1076,7 +1076,7 @@ fn pota_settings_at(variety: u32) -> String {
 #[test]
 fn pota_folds_its_hunter_styles_under_a_line_that_says_how_they_are_set() {
     for (variety, line) in [
-        (0, "Hunter styles: One reply, the original"),
+        (0, "Hunter styles: One reply<"),
         (
             cw_core::VARIETY_ON_AIR,
             "Hunter styles: 8 replies, as on the air",
@@ -4114,11 +4114,11 @@ mod interactions {
         ] {
             assert!(ui.has(&reply(pct, text)), "{pct} {text}: {}", ui.html());
         }
-        // All the way left: one reply, the original.
+        // All the way left: one reply.
         for _ in 0..10 {
             ui.click("less-slider-variety");
         }
-        assert!(ui.has("Hunter styles: One reply, the original"));
+        assert!(ui.has("Hunter styles: One reply<"));
         assert_eq!(rows(&ui), 1);
         assert!(ui.has(&reply(100, "BK SA0KAM TU UR 579 579 OR OR BK")));
         // A little to the right: more replies come.
@@ -4134,11 +4134,11 @@ mod interactions {
         assert_eq!(rows(&ui), 8);
         assert!(ui.has(&reply(12, "TU UR 579 OR BK")), "{}", ui.html());
         // The ⓘ says what it does, and folds away again.
-        assert!(!ui.has("At the left every hunter sends the original"));
+        assert!(!ui.has("At the left every hunter sends the same reply"));
         ui.click("help-hunter-styles");
-        assert!(ui.has("At the left every hunter sends the original"));
+        assert!(ui.has("At the left every hunter sends the same reply"));
         ui.click("help-hunter-styles");
-        assert!(!ui.has("At the left every hunter sends the original"));
+        assert!(!ui.has("At the left every hunter sends the same reply"));
         ui.click("disclosure-hunter-styles");
         assert!(!ui.has("slider-variety"));
     }

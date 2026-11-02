@@ -214,12 +214,11 @@ impl StylesCard {
     }
 
     /// What the slider stands at, in a few words: how many replies come,
-    /// and where that is against the cheat sheet, the air and every reply
-    /// alike. It heads the folded line, so the setting reads closed too.
+    /// and where that is against one reply, the air and every reply alike. It heads the folded line, so the setting reads closed too.
     fn reading(&self) -> String {
         let count = self.replies.len();
         match self.variety {
-            _ if count <= 1 => "One reply, the original".to_string(),
+            _ if count <= 1 => "One reply".to_string(),
             VARIETY_ON_AIR => format!("{count} replies, as on the air"),
             VARIETY_MAX.. => format!("{count} replies, all alike"),
             _ => format!("{count} replies"),
@@ -1004,12 +1003,12 @@ mod tests {
             StylesCard::of(styles, variety)
         };
         let one = card(0);
-        assert_eq!(one.reading(), "One reply, the original");
+        assert_eq!(one.reading(), "One reply");
         assert_eq!(
             one.replies,
             [("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 100)]
         );
-        assert_eq!(card(5).reading(), "One reply, the original");
+        assert_eq!(card(5).reading(), "One reply");
         let on_air = card(VARIETY_ON_AIR);
         assert_eq!(on_air.reading(), "8 replies, as on the air");
         assert_eq!(on_air.replies.iter().map(|(_, pct)| pct).sum::<u32>(), 100);

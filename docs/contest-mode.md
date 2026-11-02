@@ -559,14 +559,15 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   The shares are a choice, so a run hears every style. "Hunter styles" on
   the contest card sets how much they vary (`hunterVariety`, 0 to 100,
   50 until set), folded away under a line that says how it is set, as
-  the Band card folds its receiver: "Hunter styles: One reply, the
-  original", "8 replies, as on the air", "8 replies, all alike", or how
-  many come between. Open, a Variety slider from "One reply" on the left
+  the Band card folds its receiver: "Hunter styles: One reply", "8
+  replies, as on the air", "8 replies, all alike", or how many come
+  between; it never says "original" or "cheat sheet", which a new user
+  has not seen. Open, a Variety slider from "One reply" on the left
   to "More variety" on the right, and under it each reply hunters send,
   whole, as sent to you, beside the share that do, in whole percents that
   make a hundred, the commonest first; a reply none sends at the variety
-  set is left out, so the original stands alone at the left and more
-  replies come as the slider goes right. Its ⓘ says what it does. One rule
+  set is left out, so one reply stands alone at the left, the QSO's, and
+  more come as the slider goes right. Its ⓘ says what it does. One rule
   tempers both choices (`tempered`): each share is raised to the power
   (1 − v) / v, v the variety as a fraction, and made to sum to one again,
   so 0 sends every hunter as on the cheat sheet, 50 the shares above
