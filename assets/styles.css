@@ -17,6 +17,16 @@
   --surface: #fffdf7;
   --surface-2: #f8f1e3;
   --surface-sunken: #efe5d3;
+  /* The hunters' replies, each a colour of its own where they mix: the
+     validated categorical palette, in its order round the corners. */
+  --mix-1: #2a78d6;
+  --mix-2: #eb6834;
+  --mix-3: #1baf7a;
+  --mix-4: #eda100;
+  --mix-5: #e87ba4;
+  --mix-6: #008300;
+  --mix-7: #6250d6;
+  --mix-8: #e34948;
   --surface-inset: #ffffff;
   --glow: rgba(196, 92, 38, 0.14);
 
@@ -97,6 +107,14 @@
     --surface: #171c27;
     --surface-2: #1d2331;
     --surface-sunken: #12161f;
+    --mix-1: #3987e5;
+    --mix-2: #d95926;
+    --mix-3: #199e70;
+    --mix-4: #c98500;
+    --mix-5: #d55181;
+    --mix-6: #008300;
+    --mix-7: #9085e9;
+    --mix-8: #e66767;
     --surface-inset: #10141c;
     --glow: rgba(255, 139, 76, 0.18);
 
@@ -160,6 +178,14 @@
   --surface: #171c27;
   --surface-2: #1d2331;
   --surface-sunken: #12161f;
+  --mix-1: #3987e5;
+  --mix-2: #d95926;
+  --mix-3: #199e70;
+  --mix-4: #c98500;
+  --mix-5: #d55181;
+  --mix-6: #008300;
+  --mix-7: #9085e9;
+  --mix-8: #e66767;
   --surface-inset: #10141c;
   --glow: rgba(255, 139, 76, 0.18);
 
@@ -1507,26 +1533,35 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
 .style-shape { display: block; width: 240px; height: 240px; margin: 0 auto; touch-action: none; cursor: crosshair; }
 .style-shape * { pointer-events: none; }
 .style-shape:focus-visible { outline: 2px solid var(--copper); outline-offset: 2px; border-radius: 12px; }
-.style-edge { fill: var(--surface-sunken); stroke: var(--line-strong); stroke-width: 0.02px; stroke-linejoin: round; }
-.style-spoke { stroke: var(--line-strong); stroke-width: 0.012px; stroke-dasharray: 0.04px 0.04px; }
-.style-mix { fill: var(--copper-soft); stroke: var(--copper); stroke-width: 0.02px; stroke-linejoin: round; }
-.style-corner { fill: var(--surface); stroke: var(--copper); stroke-width: 0.02px; }
-.style-corner.faint { stroke: var(--line-strong); }
-.style-corner-number { fill: var(--ink); font-size: 0.13px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
-.style-dot { fill: var(--copper); stroke: var(--surface); stroke-width: 0.03px; }
+/* The round palette the replies mix in: each reply's glow, in its own
+   colour, as large and as strong as its share, blending where they meet.
+   No line but its rim, and a ring in each reply's colour at its corner. */
+.mix-1 { --mix: var(--mix-1); }
+.mix-2 { --mix: var(--mix-2); }
+.mix-3 { --mix: var(--mix-3); }
+.mix-4 { --mix: var(--mix-4); }
+.mix-5 { --mix: var(--mix-5); }
+.mix-6 { --mix: var(--mix-6); }
+.mix-7 { --mix: var(--mix-7); }
+.mix-8 { --mix: var(--mix-8); }
+.mix-stop { stop-color: var(--mix); }
+.mix-disc { fill: var(--surface-sunken); }
+.mix-rim { fill: none; stroke: var(--line); stroke-width: 0.015px; }
+.mix-marker { fill: var(--surface); stroke: var(--mix); stroke-width: 0.035px; }
+.mix-marker.hot { stroke-width: 0.06px; }
+.mix-marker.off { stroke: var(--line-strong); stroke-dasharray: 0.03px 0.025px; }
+.mix-marker-number { fill: var(--ink); font-size: 0.13px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+.mix-marker-number.off { fill: var(--ink-dim); }
+.mix-marker-cross { stroke: var(--ink-dim); stroke-width: 0.02px; stroke-linecap: round; }
+.style-dot { fill: var(--ink); stroke: var(--surface); stroke-width: 0.035px; }
 /* Where a mouse over the shape would put the dot, and the mix it would
    make: hollow and dashed, set by nothing until a click. */
-.style-dot.ghost { fill: none; stroke: var(--copper); stroke-width: 0.025px; }
-.style-mix.ghost { fill: none; stroke: var(--ink-soft); stroke-width: 0.018px; stroke-dasharray: 0.05px 0.04px; }
+.style-dot.ghost { fill: none; stroke: var(--ink); stroke-width: 0.025px; stroke-dasharray: 0.03px 0.02px; }
 .style-preview-line { margin: 0; text-align: center; }
 .style-replies.preview .call { border-style: dashed; }
 /* A corner a click would turn, and one turned off: hunters never send its
    reply, its mark crossed out and its row struck through. */
 .style-shape.on-corner { cursor: pointer; }
-.style-corner.hot { stroke-width: 0.04px; }
-.style-corner.off { fill: var(--surface-sunken); stroke: var(--line-strong); stroke-dasharray: 0.03px 0.025px; }
-.style-corner-number.off { fill: var(--ink-dim); }
-.style-corner-cross { stroke: var(--ink-dim); stroke-width: 0.02px; stroke-linecap: round; }
 .style-reply.off .call { text-decoration: line-through; color: var(--ink-dim); }
 /* Each reply under it, numbered as its corner, with how many send it. */
 .style-reply .qso-who { display: inline-flex; align-items: center; gap: 0.3rem; width: 3.8rem; }
@@ -1538,7 +1573,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
   height: 1.35rem;
   padding: 0;
   border-radius: 50%;
-  border: 1px solid var(--copper);
+  border: 2px solid var(--mix, var(--copper));
   background: var(--surface);
   color: var(--ink);
   font-weight: 700;

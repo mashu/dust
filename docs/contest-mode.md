@@ -568,29 +568,36 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   field once. A reply can be turned off (`hunterStylesOff`, by corner):
   none sends it, and the rest are scaled up alike to make a hundred, so
   they keep their proportions to one another and in the middle are alike
-  (`shares_without`), or share alike where the dot sits on its corner; the last reply on stays on
-  (`toggle_corner`). A hunter decides as it first sends its exchange and
+  (`shares_without`), or share alike where the dot sits on its corner;
+  the last reply on stays on (`toggle_corner`). A hunter decides as it first sends its exchange and
   keeps to it for repeats.
   "Hunter styles" on the contest card folds away under a line that says
   how it is set, as the Band card folds its receiver: "Hunter styles: One
   reply", "8 replies, as on the air", "8 replies, all alike", "6 replies,
   2 off"; it never says "original" or "cheat sheet", which a new user has
-  not seen. Open, the shape: each corner numbered, its mark as large as
-  its reply's share, one turned off dashed and crossed out, a shaded
-  outline of the mix, and the dot. The outline reaches out along each
-  spoke by the square root of its share against the largest, so each
-  slice of it grows as its share does and a small share is still seen; a
-  reply turned off has no point on it, so it never loops through the
-  middle. A click or a drag inside puts the dot
+  not seen. Open, a round palette with no lines but its rim: each reply
+  has a colour of its own, the validated categorical palette's in its
+  order round the corners (`--mix-1` to `--mix-8`, stepped for each
+  theme; every adjacent pair, corner 8 beside corner 1 among them, clears
+  the colour-blind and normal-vision floors on the card's surface, and the
+  light theme's three paler colours lean on the numbers beside them), and
+  a soft glow at its corner as large and as strong as its share (by its
+  square root, so a glow's area follows its share and a small share still
+  shows), the glows blending where the replies mix. A ring in its colour
+  marks each corner, with its number; one turned off is a dashed grey
+  ring, crossed out, and casts no glow. The dot sits in the colours. It
+  began as a shaded outline of the mix over spokes, which the user found
+  ugly. A click or a drag inside puts the dot
   there, as a finger's touch and drag do (`touch-action: none`, so a
   finger moves the dot rather than the page); a click on a corner's mark
   turns its reply off, or on again; with a mouse, pointing shows what a
-  click would do without doing it, a hollow dot and the mix it would set,
-  dashed, with the list's shares, or the corner a click would turn, and a
-  line under the shape says so. The arrow keys move the dot a tenth, Home
+  click would do without doing it, the glows of the mix it would set, a
+  hollow dot and the list's shares, or the corner a click would turn, and
+  a line under the palette says so. The arrow keys move the dot a tenth, Home
   to the middle. Under it each reply in full, numbered as its corner,
-  beside how many in a hundred send it, in whole percents that make a
-  hundred, the rows in the corners' order so none moves as the dot does;
+  in a ring of its colour, beside how many in a hundred send it, in whole
+  percents that make a hundred, the rows in the corners' order so none
+  moves as the dot does;
   a reply none sends is left out and one turned off is kept, struck
   through and marked off, its number a button that turns it on again, as
   every row's number turns its reply off, for the keyboard and a screen

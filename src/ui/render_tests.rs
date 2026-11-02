@@ -4114,7 +4114,7 @@ mod interactions {
         // A mouse over the middle shows its mix, all alike, and sets
         // nothing.
         ui.pointer_on("pointermove", shape, "mouse", middle);
-        assert!(ui.has("style-dot ghost") && ui.has("style-mix ghost"));
+        assert!(ui.has("style-dot ghost"));
         assert!(ui.has("qso style-replies preview"), "{}", ui.html());
         assert!(ui.has("Click to set this mix"));
         // An eighth each: 13, 13, 13, 13, then 12 for the rest, to make 100.
@@ -4169,7 +4169,7 @@ mod interactions {
         ui.pointer_on("pointerdown", shape, "mouse", corner_2);
         ui.pointer_on("pointerup", shape, "mouse", corner_2);
         assert!(ui.has("Hunter styles: 7 replies, 1 off"), "{}", ui.html());
-        assert!(ui.has("style-corner-cross"));
+        assert!(ui.has("mix-marker-cross"));
         assert!(ui.has(r#"<li class="qso-line they style-reply off">"#));
         assert!(ui.input_tag("reply-2").contains("style-number off"));
         // Its number turns it on again, as the corner would.
@@ -4179,7 +4179,7 @@ mod interactions {
             "{}",
             ui.html()
         );
-        assert!(!ui.has("style-corner-cross"));
+        assert!(!ui.has("mix-marker-cross"));
         // Never the last one on: with seven off, the eighth stays.
         for number in 1..=7 {
             ui.click(&format!("reply-{number}"));

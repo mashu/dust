@@ -326,37 +326,31 @@ fn tidy(at: [f64; 2]) -> [f64; 2] {
     at.map(|value| (value * 100.0).round() / 100.0)
 }
 
-/// Points of the drawing as SVG writes them: `x,y x,y …`.
-fn svg_points(points: impl Iterator<Item = [f64; 2]>) -> String {
-    points
-        .map(|[x, y]| format!("{x:.3},{y:.3}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// How far the round palette the replies mix in reaches from its middle, in
+/// the shape's units: just past the corners, so their glows sit at its rim.
+const PALETTE_REACH: f64 = 1.12;
+
+/// The colour of each reply, by its corner, as the stylesheet names them:
+/// each sets the colour its corner's mark, glow and number are drawn in.
+const MIX_COLOURS: [&str; 8] = [
+    "mix-1", "mix-2", "mix-3", "mix-4", "mix-5", "mix-6", "mix-7", "mix-8",
+];
+
+/// The colour of the reply at corner `number`, from nought.
+fn mix_colour(number: usize) -> &'static str {
+    MIX_COLOURS.get(number).copied().unwrap_or_default()
 }
 
-/// The mix `shares` make, drawn as an outline inside the shape: each
-/// corner's point out along its spoke by the square root of its share
-/// against the largest, so the slice of the outline round each spoke grows
-/// as its share does and a small share is still seen. The replies `off` have
-/// no point at all: drawn at the middle, they pinched the outline into a
-/// loop there.
-fn mix_points(corners: &[[f64; 2]], shares: &[f64], off: &[usize]) -> String {
-    svg_points(mix_reach(corners, shares, off).into_iter())
-}
-
-/// The points [`mix_points`] draws.
-fn mix_reach(corners: &[[f64; 2]], shares: &[f64], off: &[usize]) -> Vec<[f64; 2]> {
-    let most = shares.iter().copied().fold(0.0, f64::max).max(1e-9);
-    corners
-        .iter()
-        .zip(shares)
-        .enumerate()
-        .filter(|(at, _)| !off.contains(at))
-        .map(|(_, (corner, share))| {
-            let reach = (share / most).sqrt() * 0.92;
-            corner.map(|value| value * reach)
-        })
-        .collect()
+/// How a reply's glow is drawn for its share, `share` against the largest
+/// `most`: its reach from its corner and how strong it is, both by the
+/// square root of the share, so a glow's area follows its share and a
+/// small share still shows. None for a reply no hunter sends.
+fn glow(share: f64, most: f64) -> Option<(f64, f64)> {
+    if share <= 0.0 || most <= 0.0 {
+        return None;
+    }
+    let part = (share / most).sqrt();
+    Some((0.35 + 0.95 * part, 0.25 + 0.75 * part))
 }
 
 /// What a mouse over the shape is on: a point a click would put the dot
@@ -367,16 +361,18 @@ enum Pointing {
     Corner(usize),
 }
 
-/// Where the hunters' replies are set: a shape with a reply at each
-/// corner, numbered as the list under it numbers them, and a dot inside it.
-/// A click on a corner's mark turns its reply off, or on again; anywhere
-/// else a click or a drag puts the dot there, as a finger's touch and drag
-/// do. A mouse over it shows what a click would do without doing it
-/// (`hover`): a hollow dot and the mix it would make, dashed, or the corner
-/// it would turn. The arrow keys move the dot, and Home brings it to the
-/// middle. In the middle every reply on comes as often as the others; at a
-/// corner, that one alone; each corner's mark is as large as its share,
-/// one turned off crossed out, and the shaded shape inside is the mix.
+/// Where the hunters' replies are set: a round palette with a reply at each
+/// of its corners, numbered as the list under it numbers them and each in
+/// a colour of its own, its glow as large and as strong as its share, so
+/// the colours blend where the replies mix; and a dot inside it. In the
+/// middle every reply on comes as often as the others; at a corner, that
+/// one alone. A click on a corner's mark turns its reply off, or on again;
+/// anywhere else a click or a drag puts the dot there, as a finger's touch
+/// and drag do. A mouse over it shows what a click would do without doing
+/// it (`hover`): the glows of the mix it would set and a hollow dot, or the
+/// corner it would turn. The arrow keys move the dot, and Home brings it to
+/// the middle. The colours are the validated categorical palette's, in its
+/// order round the corners, each corner's number beside its colour.
 #[component]
 fn StyleShape(
     settings: Signal<TrainingSettings>,
@@ -394,18 +390,17 @@ fn StyleShape(
         settings.write().contest.hunter_styles_off = toggle_corner(&turned, corner, count);
     };
     let corners = shape_corners(count);
-    let most = shares.iter().copied().fold(0.0, f64::max).max(1e-9);
-    let edge = svg_points(corners.iter().copied());
-    let mix = mix_points(&corners, &shares, &off);
-    // What the mouse would set, where it is over the shape and not where
-    // the dot already stands.
+    // What the mouse would set, where it is over the palette and not where
+    // the dot already stands: its mix is the one drawn while it is there.
     let ghost = match hover() {
-        Some(Pointing::At(point)) if point != at => {
-            let shares = shares_without(&corner_shares(count, point), &off);
-            Some((point, mix_points(&corners, &shares, &off)))
-        }
+        Some(Pointing::At(point)) if point != at => Some(point),
         _ => None,
     };
+    let shown = match ghost {
+        Some(point) => shares_without(&corner_shares(count, point), &off),
+        None => shares.clone(),
+    };
+    let most = shown.iter().copied().fold(0.0, f64::max);
     let hot = match hover() {
         Some(Pointing::Corner(corner)) => Some(corner),
         _ => None,
@@ -424,7 +419,7 @@ fn StyleShape(
             view_box: "{view}",
             tabindex: "0",
             role: "group",
-            "aria-label": "Where the dot stands sets how often each reply comes: drag it, or move it with the arrow keys; a click on a corner turns its reply off or on",
+            "aria-label": "Where the dot stands sets how often each reply comes: drag it, or move it with the arrow keys; a click on a numbered mark turns its reply off or on",
             onpointerdown: move |e: PointerEvent| {
                 let point = e.element_coordinates();
                 hover.set(None);
@@ -464,42 +459,68 @@ fn StyleShape(
                 e.prevent_default();
                 place(tidy(into_shape(count, moved)));
             },
-            polygon { class: "style-edge", points: "{edge}" }
-            for corner in corners.iter() {
-                line {
-                    class: "style-spoke",
-                    x1: "0",
-                    y1: "0",
-                    x2: "{corner[0]}",
-                    y2: "{corner[1]}",
+            defs {
+                for number in 0..count {
+                    radialGradient {
+                        id: "mix-glow-{number + 1}",
+                        class: "{mix_colour(number)}",
+                        stop {
+                            class: "mix-stop",
+                            offset: "0",
+                            "stop-opacity": "0.9",
+                        }
+                        stop {
+                            class: "mix-stop",
+                            offset: "0.45",
+                            "stop-opacity": "0.4",
+                        }
+                        stop {
+                            class: "mix-stop",
+                            offset: "1",
+                            "stop-opacity": "0",
+                        }
+                    }
+                }
+                clipPath { id: "mix-palette",
+                    circle { r: "{PALETTE_REACH}" }
                 }
             }
-            polygon { class: "style-mix", points: "{mix}" }
-            if let Some((_, ghost_mix)) = ghost.as_ref() {
-                polygon { class: "style-mix ghost", points: "{ghost_mix}" }
+            circle { class: "mix-disc", r: "{PALETTE_REACH}" }
+            g { "clip-path": "url(#mix-palette)",
+                for (number , (corner , share)) in corners.iter().zip(&shown).enumerate() {
+                    if let Some((reach, strength)) = glow(*share, most) {
+                        circle {
+                            cx: "{corner[0]}",
+                            cy: "{corner[1]}",
+                            r: "{reach:.3}",
+                            fill: "url(#mix-glow-{number + 1})",
+                            opacity: "{strength:.3}",
+                        }
+                    }
+                }
             }
-            for (number , (corner , share)) in corners.iter().zip(&shares).enumerate() {
+            circle { class: "mix-rim", r: "{PALETTE_REACH}" }
+            for (number , corner) in corners.iter().enumerate() {
                 circle {
                     class: match (off.contains(&number), hot == Some(number)) {
-                        (true, true) => "style-corner off hot",
-                        (true, false) => "style-corner off",
-                        (false, true) => "style-corner hot",
-                        (false, false) if *share > 0.005 => "style-corner",
-                        (false, false) => "style-corner faint",
+                        (true, true) => "mix-marker off hot".to_string(),
+                        (true, false) => "mix-marker off".to_string(),
+                        (false, true) => format!("mix-marker hot {}", mix_colour(number)),
+                        (false, false) => format!("mix-marker {}", mix_colour(number)),
                     },
                     cx: "{corner[0]}",
                     cy: "{corner[1]}",
-                    r: "{0.1 + 0.08 * share / most}",
+                    r: "0.13",
                 }
                 text {
-                    class: if off.contains(&number) { "style-corner-number off" } else { "style-corner-number" },
+                    class: if off.contains(&number) { "mix-marker-number off" } else { "mix-marker-number" },
                     x: "{corner[0]}",
                     y: "{corner[1]}",
                     "{number + 1}"
                 }
                 if off.contains(&number) {
                     line {
-                        class: "style-corner-cross",
+                        class: "mix-marker-cross",
                         x1: "{corner[0] - 0.09}",
                         y1: "{corner[1] + 0.09}",
                         x2: "{corner[0] + 0.09}",
@@ -507,7 +528,7 @@ fn StyleShape(
                     }
                 }
             }
-            if let Some((point, _)) = ghost {
+            if let Some(point) = ghost {
                 circle {
                     class: "style-dot ghost",
                     cx: "{point[0]}",
@@ -646,7 +667,8 @@ fn ReplyRow(
             span { class: "qso-who tiny",
                 button {
                     id: control_id("reply", &shown.to_string()),
-                    class: if is_off { "style-number off" } else { "style-number" },
+                    // Its corner's colour, round its number.
+                    class: if is_off { "style-number off".to_string() } else { format!("style-number {}", mix_colour(number)) },
                     r#type: "button",
                     title: "{label}",
                     aria_label: "{label}",
@@ -1320,9 +1342,7 @@ fn WordCount(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SHAPE_PX, SHAPE_REACH, StylesCard, corner_under, in_percent, mix_reach, shape_point,
-    };
+    use super::{SHAPE_PX, SHAPE_REACH, StylesCard, corner_under, glow, in_percent, shape_point};
     use cw_core::{STYLE_EVEN, STYLE_ON_AIR, shape_corners};
 
     /// Shares read as whole percents that add up to 100, the rest going to
@@ -1397,31 +1417,17 @@ mod tests {
         );
     }
 
-    /// The mix's outline leaves out the replies turned off, so it never
-    /// loops through the middle for them, and reaches out by the square root
-    /// of each share: all the way for the largest, half way for a quarter
-    /// of it, all alike in the middle.
+    /// A reply's glow grows with the square root of its share, all the way
+    /// for the largest, and a reply no hunter sends has none.
     #[test]
-    fn the_mix_is_drawn_without_the_replies_turned_off() {
-        let corners = shape_corners(8);
-        let even = [0.125; 8];
-        let all = mix_reach(&corners, &even, &[]);
-        assert_eq!(all.len(), 8);
-        for point in &all {
-            assert!((point[0].hypot(point[1]) - 0.92).abs() < 1e-9);
-        }
-        let mut shares = [0.0; 8];
-        shares[0] = 0.4;
-        shares[1] = 0.1;
-        shares[7] = 0.5;
-        let some = mix_reach(&corners, &shares, &[2, 5]);
-        assert_eq!(some.len(), 6, "no point for the two off");
-        let reach = |point: [f64; 2]| point[0].hypot(point[1]);
-        assert!(
-            (reach(some[5]) - 0.92).abs() < 1e-9,
-            "the largest, all the way"
-        );
-        assert!((reach(some[1]) - (0.1f64 / 0.5).sqrt() * 0.92).abs() < 1e-9);
+    fn a_glow_follows_its_share() {
+        let (largest, full) = glow(0.5, 0.5).expect("a glow");
+        assert!((largest - 1.3).abs() < 1e-9 && (full - 1.0).abs() < 1e-9);
+        let (quarter, strength) = glow(0.125, 0.5).expect("a glow");
+        assert!((quarter - (0.35 + 0.95 * 0.5)).abs() < 1e-9);
+        assert!((strength - (0.25 + 0.75 * 0.5)).abs() < 1e-9);
+        assert_eq!(glow(0.0, 0.5), None);
+        assert_eq!(glow(0.2, 0.0), None);
     }
 
     /// A corner's mark is where a click turns its reply: on it, or near
