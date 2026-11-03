@@ -15,7 +15,9 @@
 #   writes and which the plugin refuses to apply while it is set. Gradle
 #   reads that file before an init script runs, so the hook drops the line
 #   and loads the build's properties again. The app script already sets
-#   buildFeatures.buildConfig.
+#   buildFeatures.buildConfig. dx also sets android.nonFinalResIds=false,
+#   and AGP 9's optimized resource shrinking, which the release build uses,
+#   requires non-final IDs. The same reload sets that property true.
 #
 # - It always writes Android's stock green robot as the launcher icon (an
 #   adaptive icon under mipmap-anydpi-v26, which is what Android 8+ shows),
@@ -130,10 +132,12 @@ install_android_gradle_hook() {
 // either build script is compiled, so each is read as written here. Only
 // Dust's project (its application id) is touched.
 //
-// Gradle reads gradle.properties before this init script runs, so the line
-// is taken out and the build's properties are loaded again. AGP 9 removed
-// android.defaults.buildfeatures.buildconfig and will not apply while it is
-// set. buildFeatures.buildConfig in the app script turns BuildConfig on.
+// Gradle reads gradle.properties before this init script runs, so these
+// lines are rewritten and the build's properties are loaded again. AGP 9
+// removed android.defaults.buildfeatures.buildconfig and will not apply
+// while it is set. buildFeatures.buildConfig in the app script turns
+// BuildConfig on. Optimized resource shrinking requires non-final resource
+// IDs, and dx sets android.nonFinalResIds=false.
 def dustRoot = gradle.startParameter.projectDir
 if (dustRoot == null) {
     dustRoot = gradle.startParameter.currentDir
@@ -144,11 +148,13 @@ if (dustApp.isFile() && dustProps.isFile()
     && dustApp.getText("UTF-8").contains('applicationId = "dev.dust.morse"')) {
     def kept = dustProps.readLines("UTF-8").findAll { line ->
         !line.trim().startsWith("android.defaults.buildfeatures.buildconfig")
+    }.collect { line ->
+        line.trim() == "android.nonFinalResIds=false" ? "android.nonFinalResIds=true" : line
     }
     def rewritten = kept.join("\n") + "\n"
     if (rewritten != dustProps.getText("UTF-8")) {
         dustProps.write(rewritten, "UTF-8")
-        println "Dust: dropped android.defaults.buildfeatures.buildconfig; AGP 9 removed it"
+        println "Dust: gradle.properties adjusted for AGP 9"
     }
     def controller = gradle.services.get(org.gradle.api.internal.properties.GradlePropertiesController)
     def buildId = gradle.owner.buildIdentifier

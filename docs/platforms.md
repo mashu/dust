@@ -48,7 +48,9 @@ that does all six:
   shipped whether the app reached it or not, and Play flagged it among its
   R8 findings ("Resource shrinking isn't enabled"). The hook sets
   `shrinkResources` on the release build type, and R8 drops what nothing
-  reaches. The app reaches its own resources only from the manifest (the
+  reaches. AGP 9's optimized shrinking requires non-final resource IDs, so
+  the hook sets `android.nonFinalResIds=true` in the generated
+  `gradle.properties` (`dx` writes `false`). The app reaches its own resources only from the manifest (the
   launcher icon, the label, the theme and the network security config),
   which the shrinker always keeps, and nothing in the app, `wry` or `tao`
   looks a resource up by name.
