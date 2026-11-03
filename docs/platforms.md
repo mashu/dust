@@ -15,10 +15,10 @@ as-is, with cpal routing it to AAudio through
 oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just
 the SDK.
 
-The project `dx` generates needs five things put right, and `dx` 0.7 has a
+The project `dx` generates needs six things put right, and `dx` 0.7 has a
 setting for none of them. Every bundle command below, in CI as well, first
 installs a Gradle init hook, [`scripts/android-gradle-hook.sh`](../scripts/android-gradle-hook.sh),
-that does all five:
+that does all six:
 
 - **Android Gradle plugin 9, and no Material Components.** `dx` writes AGP
   8.7 with the separate `kotlin-android` plugin, and Material Components,
@@ -43,6 +43,15 @@ that does all five:
   Material's classes in its dex files (`check_android_build`), and fails if
   the version is older or any class is there.
 
+- **Resource shrinking.** `dx` has R8 shrink the release build's code but
+  not its resources, so every resource of AppCompat and the webview library
+  shipped whether the app reached it or not, and Play flagged it among its
+  R8 findings ("Resource shrinking isn't enabled"). The hook sets
+  `shrinkResources` on the release build type, and R8 drops what nothing
+  reaches. The app reaches its own resources only from the manifest (the
+  launcher icon, the label, the theme and the network security config),
+  which the shrinker always keeps, and nothing in the app, `wry` or `tao`
+  looks a resource up by name.
 - **Launcher icon.** The icon is [`assets/icon.png`](../assets/icon.png).
   Android 8 and later show the adaptive icon packed in the app, and `dx`
   puts the stock robot there. The hook copies

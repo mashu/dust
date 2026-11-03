@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gradle init hook for the Android project dx generates.
 #
-# dx 0.7 leaves five things out for this app, and has a setting for none:
+# dx 0.7 leaves six things out for this app, and has a setting for none:
 #
 # - It writes Android Gradle plugin 8.7 with the separate Kotlin plugin, and
 #   Material Components, which nothing in the app uses. Play asks for AGP
@@ -23,6 +23,10 @@
 # - It always writes versionCode = 1. Play turns away an upload whose
 #   version code is not above every one uploaded before it, so every build
 #   after the first would be refused.
+# - It shrinks the release build's code with R8 but not its resources, so
+#   every resource of AppCompat and the webview library ships whether the
+#   app reaches it or not; Play flags the missing resource shrinking among
+#   its R8 findings. The hook turns it on for the release build.
 # - It asks for no native debug symbols, so Play has nothing to name the
 #   functions in a crash with. Asking the plugin for SYMBOL_TABLE is not
 #   enough: rustc already removed the debug info, the plugin's strip then
@@ -223,6 +227,19 @@ gradle.beforeProject { project ->
         // it: crashes and ANRs in the Rust code then name their functions.
         // The libraries shipped in the app are stripped of it.
         android.defaultConfig.ndk.debugSymbolLevel = "SYMBOL_TABLE"
+
+        // The release build's resources shrunk, as its code already is: R8
+        // drops every resource nothing reaches, AppCompat's and the
+        // webview library's unused layouts and drawables among them. The
+        // app reaches its own only from the manifest (the launcher icon,
+        // the label, the theme, the network security config), which the
+        // shrinker always keeps, and nothing looks one up by name.
+        def release = android.buildTypes.findByName("release")
+        if (release == null) {
+            throw new GradleException("Dust: no release build type to shrink")
+        }
+        release.shrinkResources = true
+        println "Dust: the release build shrinks its resources"
 
         def iconRes = new File("${root}/assets/android")
         if (!iconRes.isDirectory()) {
