@@ -26,7 +26,10 @@ the speaker or headphones its key went in:
   its place keeps the moment it was first keyed, which still says whether
   you were keeping up, so putting a slip right costs the characters around
   it nothing. A character taken out inside the text, with nothing typed in
-  its place, makes the one now after the cut a correction too. Text typed for you (the guided setup's Show me) has no moment.
+  its place, makes the one now after the cut a correction too. A character
+  skipped with Space (kept as `_`, `SKIPPED`) holds its place: it is a miss
+  and no recognition, and the characters after it still line up and keep
+  their times, where one left out ends the timing there. Text typed for you (the guided setup's Show me) has no moment.
 
 Nothing is polled for it and nothing waits on it: each key reads the clock
 once and the box's `KeyLog` takes the moment as the text changes; each

@@ -466,7 +466,7 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "Copy a group",
-        text: "Listen to the group and type each character as you hear it, on the keypad or a keyboard. Once you have started, it waits for you to finish.",
+        text: "Listen to the group and type each character as you hear it, on the keypad or a keyboard; Space skips one you missed. Once you have started, it waits for you to finish.",
         moves: &[Move::Answer],
         shows: None,
         screen: Some(Screen::Training),
@@ -589,7 +589,7 @@ const CONTEST_STEPS: &[Step] = &[
     Step {
         title: "Call and Exchange",
         text: if TOUCH_BUILD {
-            "Type the call you hear, then what the station sends you. ␣\u{a0}Field moves between the two."
+            "Type the call you hear, then what the station sends you. Space moves between the two."
         } else {
             "Type the call you hear, then what the station sends you. Space moves between the two, and on the paddles, so does a word-length pause after a letter."
         },
@@ -613,7 +613,7 @@ const CONTEST_STEPS: &[Step] = &[
             "Message keys"
         },
         text: if TOUCH_BUILD {
-            "The keypad types into the field with the cursor, and ␣\u{a0}Field moves between the fields. Its big key sends what Enter would, and says what. CQ, ?\u{a0}Again and Wipe stay above it."
+            "The keypad types into the field with the cursor, and ␣\u{a0}Space moves between the fields. Its big key sends what Enter would, and says what. CQ, ?\u{a0}Again and Wipe stay above it."
         } else {
             "Every message has a key and a button: F1\u{a0}CQ, F7\u{a0}?\u{a0}Again, Esc\u{a0}stops what you send. The buttons Enter would press now are lit. On a touch screen, a keypad shows; its big key sends what Enter would."
         },
@@ -2086,8 +2086,12 @@ mod tests {
         let first = super::RunPart::Keys.targets(false)[0].clone();
         if TOUCH_BUILD {
             assert_eq!((keys.title, first.as_str()), ("The keypad", "keypad"));
-            assert!(keys.text.contains("␣\u{a0}Field"), "{}", keys.text);
-            assert!(fields.text.contains("␣\u{a0}Field"), "{}", fields.text);
+            assert!(keys.text.contains("Space moves between"), "{}", keys.text);
+            assert!(
+                fields.text.contains("Space moves between"),
+                "{}",
+                fields.text
+            );
             assert!(!fields.text.contains("Space"), "{}", fields.text);
         } else {
             assert_eq!((keys.title, first.as_str()), ("Message keys", "run-keys"));

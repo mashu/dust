@@ -41,7 +41,7 @@ mod streak;
 mod timing;
 mod words;
 
-pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, align_group};
+pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, SKIPPED, align_group};
 pub use auto_level::{
     AutoLevelChange, AutoLevelCounters, AutoLevelProgress, Completion, CountersKey, CountersUpdate,
     apply_auto_level, auto_level_progress, complete_result, complete_session, evaluate_auto_level,
