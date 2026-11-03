@@ -1275,7 +1275,12 @@ mod tests {
                 .expect("your call and exchange, with your name");
             let exchange = sent.transcript.others[0].text.clone();
             let words: Vec<&str> = exchange.split_whitespace().collect();
-            let (rst, name) = (words[3], words[6]);
+            // After `UR` and `NAME`, however its style starts and repeats.
+            let after = |word: &str| {
+                let at = words.iter().position(|said| *said == word).expect(word);
+                words[at + 1]
+            };
+            let (rst, name) = (after("UR"), after("NAME"));
             ui.type_into("field-exchange", rst);
             assert_eq!(enter(&ui).0, "Still to copy: their name. Enter asks again");
             ui.type_into("field-exchange", &format!("{rst} {name}"));

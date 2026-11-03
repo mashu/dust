@@ -124,20 +124,30 @@ impl TrainingSettings {
         // break-in are switches, on or off, and need nothing either.
         let k = &mut self.contest;
         k.contest_minutes = k.contest_minutes.min(CONTEST_MINUTES_MAX);
-        // The dot stays in the shape of POTA's replies, the one shape that
-        // has it.
-        let replies = crate::contest::ContestKind::Pota
-            .rules()
-            .their_replies
-            .len();
-        k.hunter_style = crate::contest::into_shape(replies, k.hunter_style);
-        // Only corners there are, each once, and never every one.
-        k.hunter_styles_off.retain(|at| *at < replies);
-        k.hunter_styles_off.sort_unstable();
-        k.hunter_styles_off.dedup();
-        if k.hunter_styles_off.len() >= replies {
-            k.hunter_styles_off.clear();
-        }
+        // Each contest's knob stays in its shape, and only replies it has
+        // are off, each once, never every one; a contest whose callers do
+        // not vary, or one this build does not know, keeps none, and one as
+        // on the air is not kept.
+        k.caller_styles.retain(|name, choice| {
+            let Some(kind) = crate::contest::ContestKind::from_name(name) else {
+                return false;
+            };
+            let rules = kind.rules();
+            let replies = rules.reply_count();
+            if replies == 0 {
+                return false;
+            }
+            choice.at = crate::contest::into_shape(replies, choice.at);
+            choice.off.retain(|at| *at < replies);
+            choice.off.sort_unstable();
+            choice.off.dedup();
+            if choice.off.len() >= replies {
+                choice.off.clear();
+            }
+            choice.at != rules.styles_on_air() || !choice.off.is_empty()
+        });
+        k.hunter_dx_percent = k.hunter_dx_percent.min(100);
+        k.caller_odds = k.caller_odds.clamped();
         // Zero is no speed of your own: the middle of the callers' range.
         if k.my_wpm != 0 {
             k.my_wpm = k.my_wpm.clamp(MY_WPM_MIN, MY_WPM_MAX);

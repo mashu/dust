@@ -993,7 +993,7 @@ fn pota_shows_an_activators_dialogue_and_your_side() {
         r#"id="contest-pota" class="pill active""#,
         "You send 5NN + state\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}ST",
         "You are W/VE: you send your report and state, and send back the hunter",
-        "about one in four is DX and sends a report alone",
+        "DX hunters send a report alone, so leave their state out",
         ">CQ CQ POTA DE K1ABC K<",
         ">W7XYZ<",
         " UR 5NN 5NN MA MA BK<",
@@ -1049,7 +1049,9 @@ fn pota_settings_at(at: [f64; 2]) -> String {
             let mut settings = crate::testing::contest_settings();
             settings.contest.contest_kind = cw_core::ContestKind::Pota;
             settings.contest.my_call = "SA0KAM".to_string();
-            settings.contest.hunter_style = at;
+            settings
+                .contest
+                .set_style_at(cw_core::ContestKind::Pota, at);
             settings
         });
         rsx! {
@@ -1077,7 +1079,7 @@ fn pota_folds_its_hunter_styles_under_a_line_that_says_how_they_are_set() {
     for (variety, line) in [
         (cw_core::shape_corners(8)[0], "Hunter styles: One reply<"),
         (
-            cw_core::STYLE_ON_AIR,
+            cw_core::ContestKind::Pota.rules().styles_on_air(),
             "Hunter styles: 8 replies, as on the air",
         ),
         (cw_core::STYLE_EVEN, "Hunter styles: 8 replies, all alike"),
@@ -4091,7 +4093,7 @@ mod interactions {
     #[test]
     fn pota_hunter_styles_open_and_follow_the_knob() {
         let shape = "shape-hunter-styles";
-        let view = crate::ui::settings_charset::pota_view("SA0KAM");
+        let view = crate::ui::settings_charset::styles_view(cw_core::ContestKind::Pota, "SA0KAM");
         let corners = cw_core::shape_corners(8);
         let middle = view.px([0.0, 0.0]);
         let heard = |pct: u32, text: &str| {
@@ -4179,7 +4181,11 @@ mod interactions {
         // Pointing at it first says what a click would do.
         let second = view.px(corners[1]);
         ui.pointer_on("pointermove", shape, "mouse", second);
-        assert!(ui.has("Click to turn this BK TU off"), "{}", ui.html());
+        assert!(
+            ui.has("Click to turn off: BK TU UR 579 579 OR OR BK"),
+            "{}",
+            ui.html()
+        );
         assert!(
             !ui.has("style-knob ghost"),
             "a corner is no place for the knob"
@@ -4221,6 +4227,147 @@ mod interactions {
         ui.click("help-hunter-styles");
         ui.click("disclosure-hunter-styles");
         assert!(!ui.has("style-shape"));
+    }
+
+    /// The character set card in a contest, `kind`, as DL1ABC.
+    #[component]
+    fn ContestCharsetHarness(kind: cw_core::ContestKind) -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = kind;
+            settings.contest.my_call = "DL1ABC".to_string();
+            settings
+        });
+        rsx! {
+            crate::ui::settings_charset::CharsetCard { settings }
+        }
+    }
+
+    /// Every contest whose exchange leaves room has caller styles, its shape
+    /// as many-cornered as its replies: WPX's six, `TU`, a dash where the
+    /// reply starts with its exchange, and `R`, sent once down the right
+    /// and twice up the left. A click on a corner turns its reply off, as
+    /// in POTA. The Sprint, whose exchange leaves none, has no styles.
+    #[test]
+    fn contests_with_room_have_caller_styles() {
+        let shape = "shape-caller-styles";
+        let mut ui = Ui::new(
+            ContestCharsetHarness,
+            ContestCharsetHarnessProps {
+                kind: cw_core::ContestKind::Wpx,
+            },
+        );
+        assert!(
+            ui.has("Caller styles: 6 replies, as on the air"),
+            "{}",
+            ui.html()
+        );
+        ui.click("disclosure-caller-styles");
+        assert!(ui.has(r#"id="shape-caller-styles""#), "{}", ui.html());
+        assert!(ui.has(">Once</text>") && ui.has(">Twice</text>"));
+        assert!(ui.has(">5NN 214</text>") && ui.has(">5NN 214 214</text>"));
+        assert_eq!(ui.html().matches(">—</text>").count(), 2);
+        assert_eq!(ui.html().matches(">TU</text>").count(), 2);
+        assert!(ui.has(">55%</text>"), "{}", ui.html());
+        assert!(!ui.has("DX hunters"), "POTA's alone");
+        let view = crate::ui::settings_charset::styles_view(cw_core::ContestKind::Wpx, "DL1ABC");
+        let corners = cw_core::shape_corners(6);
+        ui.pointer_on("pointerdown", shape, "mouse", view.px(corners[2]));
+        assert!(ui.has("Caller styles: 5 replies, 1 off"), "{}", ui.html());
+        ui.press_key("corner-3", Key::Enter, Code::Enter);
+        assert!(ui.has("Caller styles: 6 replies, as on the air"));
+        // The ⓘ speaks of callers, and of no DX hunters.
+        ui.click("help-caller-styles");
+        assert!(
+            ui.has("How callers reply to your exchange"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("How many hunters are outside"));
+        let sprint = Ui::new(
+            ContestCharsetHarness,
+            ContestCharsetHarnessProps {
+                kind: cw_core::ContestKind::Sprint,
+            },
+        );
+        assert!(!sprint.has("styles:"), "{}", sprint.html());
+    }
+
+    /// The contest card folds how often callers do each thing under
+    /// Caller odds: who calls, how pile-up callers call (idle with one
+    /// caller at a time), how they ask and put your call right, each share
+    /// only where the contest has it: dupes where it scores, Field Day's
+    /// DX, `NR?` where the queries differ, your `73 44` in POTA.
+    #[test]
+    fn caller_odds_fold_on_the_contest_card() {
+        let open = |kind: cw_core::ContestKind| {
+            let mut ui = Ui::new(ContestCharsetHarness, ContestCharsetHarnessProps { kind });
+            assert!(ui.has("Caller odds: as on the air"), "{}", ui.html());
+            ui.click("disclosure-caller-odds");
+            ui
+        };
+        let mut wpx = open(cw_core::ContestKind::Wpx);
+        for shown in [
+            "odds-dupe",
+            "odds-portable",
+            "odds-abroad",
+            "odds-asksnr",
+            "odds-fixeswithexchange",
+        ] {
+            assert!(
+                wpx.has(&format!(r#"id="{shown}""#)),
+                "{shown}: {}",
+                wpx.html()
+            );
+        }
+        for gone in ["odds-fielddaydx", "odds-farewell44"] {
+            assert!(!wpx.has(&format!(r#"id="{gone}""#)), "{gone}");
+        }
+        assert!(wpx.input_tag("odds-callstwice").contains("disabled"));
+        assert!(
+            wpx.has(r#"<span class="slider-value">83%</span>"#),
+            "{}",
+            wpx.html()
+        );
+        wpx.type_into("odds-portable", "20");
+        assert!(wpx.has("Caller odds: 1 moved"), "{}", wpx.html());
+        let fd = open(cw_core::ContestKind::FieldDay);
+        assert!(fd.has(r#"id="odds-fielddaydx""#));
+        assert!(
+            fd.has(r#"<span class="slider-value">0.9%</span>"#),
+            "{}",
+            fd.html()
+        );
+        let pota = open(cw_core::ContestKind::Pota);
+        assert!(pota.has(r#"id="odds-farewell44""#));
+        for gone in ["odds-dupe", "odds-asksnr"] {
+            assert!(!pota.has(&format!(r#"id="{gone}""#)), "{gone}");
+        }
+    }
+
+    /// POTA's hunter styles end with how many hunters are DX, on a slider
+    /// that steps by five in a hundred.
+    #[test]
+    fn pota_sets_how_many_hunters_are_dx() {
+        let mut ui = Ui::new(PotaCharsetHarness, ());
+        ui.click("disclosure-hunter-styles");
+        assert!(
+            ui.has(r#"<span class="slider-name">DX hunters</span>"#),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has(r#"<span class="slider-value">25%</span>"#));
+        assert!(ui.has("send their report alone: log them without a state"));
+        ui.click("more-slider-dx-hunters");
+        assert!(
+            ui.has(r#"<span class="slider-value">30%</span>"#),
+            "{}",
+            ui.html()
+        );
+        ui.type_into("slider-dx-hunters", "0");
+        assert!(ui.has(r#"<span class="slider-value">0%</span>"#));
+        ui.click("help-hunter-styles");
+        assert!(ui.has("How many hunters are outside the US and Canada"));
     }
 
     /// The band card on a 400-600 Hz side-tone range, which the 300 Hz

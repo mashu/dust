@@ -111,10 +111,13 @@ impl TrainingSettings {
                 self.contest.contest_kind = from.contest.contest_kind;
                 self.contest.contest_style = from.contest.contest_style;
                 self.contest.contest_tu_call = from.contest.contest_tu_call;
-                self.contest.hunter_style = from.contest.hunter_style;
                 self.contest
-                    .hunter_styles_off
-                    .clone_from(&from.contest.hunter_styles_off);
+                    .caller_styles
+                    .clone_from(&from.contest.caller_styles);
+                self.contest.hunter_dx_percent = from.contest.hunter_dx_percent;
+                self.contest
+                    .caller_odds
+                    .reset_card(crate::contest::OddsCard::Contest, &from.contest.caller_odds);
                 // A single caller again, or no contest: the stations a
                 // pile-up opened go back; a pile-up again opens them.
                 self.fit_stations_to_pileup();
@@ -151,6 +154,9 @@ impl TrainingSettings {
                 self.band.pileup_level_db = b.pileup_level_db;
                 self.contest.contest_habits = from.contest.contest_habits;
                 self.contest.contest_flutter = from.contest.contest_flutter;
+                self.contest
+                    .caller_odds
+                    .reset_card(crate::contest::OddsCard::Band, &from.contest.caller_odds);
             }
             SettingsSection::AutoLevel => {
                 let a = &from.auto_level;

@@ -1,7 +1,7 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill, GROUP_SIZE_MAX,
-    LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS,
-    STYLE_EVEN, STYLE_ON_AIR, Sender, SequenceChoice, SettingsSection, TrainingSettings, TuCall,
+    CALLSIGN_TIER_MAX, CallerOdds, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill,
+    GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL, Odd, PracticeWindow, RunStyle, SEQUENCE_PRESETS,
+    STARTER_WORDS, STYLE_EVEN, Sender, SequenceChoice, SettingsSection, TrainingSettings, TuCall,
     WORD_LIST_MAX, WordList, compute_char_pool, corner_shares, current_practice_window, greeting,
     into_shape, parse_callsign, shape_corners, shares_without, tier_examples, toggle_corner,
     unlocked_practice_count,
@@ -15,10 +15,11 @@ use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
+use crate::ui::odds::{OddsFold, OddsGroup};
 use crate::ui::paddle::use_typed_field;
 use crate::ui::widgets::{
-    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, TextDraft, TextField,
-    control_id, range_label, whole,
+    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, SliderField, TextDraft,
+    TextField, control_id, range_label, whole,
 };
 
 /// The largest file read as a word list. The longest list kept is a few
@@ -132,6 +133,10 @@ struct ContestCard {
     qso: Vec<(Sender, String)>,
     /// How the callers' styles vary, where the contest lets you set it.
     styles: Option<StylesCard>,
+    /// How often callers do each thing they do now and then, and which of
+    /// those shares this contest has: the groups of its Caller odds.
+    odds: CallerOdds,
+    odds_groups: Vec<OddsGroup>,
     /// The preset the settings are on, if any.
     preset: Option<ContestPreset>,
 }
@@ -182,29 +187,86 @@ impl ContestCard {
                     ..Fill::default()
                 },
             ),
-            styles: rules
-                .caller_styles(
-                    side,
-                    call_or_stand_in(&contest.my_call),
-                    contest.hunter_style,
-                    &contest.hunter_styles_off,
-                )
-                .map(|styles| {
-                    StylesCard::of(styles, contest.hunter_style, &contest.hunter_styles_off)
-                }),
+            styles: {
+                let (at, off) = (contest.style_at(kind), contest.styles_off(kind));
+                rules
+                    .caller_styles(side, call_or_stand_in(&contest.my_call), at, off)
+                    .map(|styles| {
+                        let dx = (kind == ContestKind::Pota).then_some(contest.hunter_dx_percent);
+                        StylesCard::of(styles, kind, at, off, dx)
+                    })
+            },
+            odds: contest.caller_odds,
+            odds_groups: odds_groups(rules, style),
             preset,
         }
     }
 }
 
-/// How POTA hunters reply, as the card shows it: where you put the dot in
-/// the shape of their replies, which you turned off, how many of the
-/// hundred send each, and each reply, a corner each, in the corners' order:
-/// whole, and apart as its corner names it.
+/// The groups of shares a contest's Caller odds hold: who calls, how
+/// pile-up callers call (only in a pile-up), how callers ask and put your
+/// call right, and how your TU signs off, each only where the contest has
+/// it: dupes where a contest scores, DX where Field Day's callers send it,
+/// `NR?` where the contest's queries differ, `73 44` where your TU signs
+/// off with a farewell.
+fn odds_groups(rules: &cw_core::ContestRules, style: RunStyle) -> Vec<OddsGroup> {
+    let mut who = Vec::new();
+    if rules.scoring.is_some() {
+        who.push(Odd::Dupe);
+    }
+    who.extend([Odd::Portable, Odd::Abroad]);
+    if rules.kind == ContestKind::FieldDay {
+        who.push(Odd::FieldDayDx);
+    }
+    let mut asking = Vec::new();
+    if rules.their_query[0] != rules.their_query[1] {
+        asking.push(Odd::AsksNr);
+    }
+    asking.push(Odd::FixesWithExchange);
+    let mut groups = vec![
+        OddsGroup {
+            head: "Who calls",
+            odds: who,
+            disabled: false,
+        },
+        OddsGroup {
+            head: "Pile-up callers",
+            odds: vec![Odd::CallsTwice, Odd::MissesExchange],
+            disabled: style != RunStyle::Pileup,
+        },
+        OddsGroup {
+            head: "Asking and putting your call right",
+            odds: asking,
+            disabled: false,
+        },
+    ];
+    if rules.tu.wve.contains("{bye}") || rules.tu.dx.contains("{bye}") {
+        groups.push(OddsGroup {
+            head: "Your TU",
+            odds: vec![Odd::Farewell44],
+            disabled: false,
+        });
+    }
+    groups
+}
+
+/// How a contest's callers reply, as the card shows it: where you put the
+/// knob in the shape of their replies, which you turned off, how many of
+/// the hundred send each, and each reply, a corner each, in the corners'
+/// order: whole, and apart as its corner names it.
 #[derive(Clone, PartialEq)]
 struct StylesCard {
-    /// Where the dot stands, across and down from the middle.
+    /// The contest whose callers these are.
+    kind: ContestKind,
+    /// Where the knob stands, across and down from the middle.
     at: [f64; 2],
+    /// Where it stands until moved: the mix heard on the air.
+    on_air: [f64; 2],
+    /// What the right side of the shape is headed with, and the left.
+    heads: [&'static str; 2],
+    /// How many POTA hunters in a hundred are DX; none in any other
+    /// contest.
+    dx_percent: Option<u32>,
     /// The replies turned off, by their corners from the top right, from
     /// nought.
     off: Vec<usize>,
@@ -221,10 +283,20 @@ struct StylesCard {
 }
 
 impl StylesCard {
-    fn of(styles: cw_core::CallerStyles, at: [f64; 2], off: &[usize]) -> Self {
+    fn of(
+        styles: cw_core::CallerStyles,
+        kind: ContestKind,
+        at: [f64; 2],
+        off: &[usize],
+        dx_percent: Option<u32>,
+    ) -> Self {
         let shares = styles.replies.iter().map(|(_, share)| *share).collect();
         Self {
+            kind,
             at,
+            on_air: styles.on_air,
+            heads: styles.heads,
+            dx_percent,
             off: off.to_vec(),
             shares,
             replies: in_percent(styles.replies),
@@ -268,9 +340,20 @@ impl StylesCard {
         };
         match self.at {
             _ if count <= 1 => format!("One reply{off}"),
-            STYLE_ON_AIR if self.off.is_empty() => format!("{count} replies, as on the air"),
+            at if at == self.on_air && self.off.is_empty() => {
+                format!("{count} replies, as on the air")
+            }
             STYLE_EVEN if self.off.is_empty() => format!("{count} replies, all alike"),
             _ => format!("{count} replies{off}"),
+        }
+    }
+
+    /// Who the callers are, as the card names them: POTA's hunt.
+    fn who(&self) -> &'static str {
+        if self.kind == ContestKind::Pota {
+            "hunter styles"
+        } else {
+            "caller styles"
         }
     }
 }
@@ -327,10 +410,11 @@ const SHAPE_BOTTOM: f64 = 1.08;
 /// How far an arrow key moves the dot, in the shape's units.
 const SHAPE_STEP: f64 = 0.1;
 
-/// How the replies' sides are headed: the right side's report and state go
-/// twice, the left side's each once, POTA's replies going twice down the
-/// right and back up the left once ([`cw_core::ContestRules::their_replies`]).
-const SIDE_HEADS: [&str; 2] = ["Twice", "Each once"];
+/// The words beside a corner whose reply starts with `lead`: an empty lead,
+/// a reply that starts with its exchange, is a dash.
+fn lead_label(lead: &str) -> &str {
+    if lead.is_empty() { "—" } else { lead }
+}
 
 /// The part of the shape's own units the drawing shows: as wide as the
 /// words beside its widest pill reach either way, so a long call still
@@ -345,7 +429,10 @@ impl ShapeView {
     fn of(leads: &[String], exchanges: &[String]) -> Self {
         let corners = shape_corners(leads.len());
         let labels = corners.iter().zip(leads).map(|(corner, lead)| {
-            corner[0].abs() + PILL_W / 2.0 + LABEL_GAP + lead.chars().count() as f64 * LABEL_LETTER
+            corner[0].abs()
+                + PILL_W / 2.0
+                + LABEL_GAP
+                + lead_label(lead).chars().count() as f64 * LABEL_LETTER
         });
         let captions = exchanges
             .iter()
@@ -400,13 +487,13 @@ impl ShapeView {
     }
 }
 
-/// How POTA's card draws the shape for `my_call`: what a test points at.
+/// How `kind`'s card draws the shape for `my_call`: what a test points at.
 #[cfg(test)]
-pub(crate) fn pota_view(my_call: &str) -> ShapeView {
-    let styles = ContestKind::Pota
-        .rules()
-        .caller_styles(cw_core::Side::Dx, my_call, STYLE_ON_AIR, &[])
-        .expect("POTA's hunters vary");
+pub(crate) fn styles_view(kind: ContestKind, my_call: &str) -> ShapeView {
+    let rules = kind.rules();
+    let styles = rules
+        .caller_styles(cw_core::Side::Dx, my_call, rules.styles_on_air(), &[])
+        .expect("its callers vary");
     ShapeView::of(&styles.leads, &styles.exchanges)
 }
 
@@ -436,7 +523,8 @@ fn corner_under(leads: &[String], at: [f64; 2]) -> Option<usize> {
         let on_pill = across.abs() <= PILL_W / 2.0 + 0.04 && down <= PILL_H / 2.0 + 0.04;
         // The words go outward, away from the middle.
         let out = across * corner[0].signum();
-        let reach = PILL_W / 2.0 + LABEL_GAP + lead.chars().count() as f64 * LABEL_LETTER;
+        let reach =
+            PILL_W / 2.0 + LABEL_GAP + lead_label(lead).chars().count() as f64 * LABEL_LETTER;
         let on_label = out > 0.0 && out <= reach && down <= PILL_H / 2.0;
         on_pill || on_label
     })
@@ -469,11 +557,19 @@ fn tint(share: f64, most: f64) -> f64 {
     }
 }
 
-/// The reply at `corner`, of `count`, turned off, or on again if it was
-/// off; never the last one on ([`toggle_corner`]).
-fn turn_corner(mut settings: Signal<TrainingSettings>, corner: usize, count: usize) {
-    let off = settings.peek().contest.hunter_styles_off.clone();
-    settings.write().contest.hunter_styles_off = toggle_corner(&off, corner, count);
+/// The reply at `corner` of `kind`'s `count`, turned off, or on again if it
+/// was off; never the last one on ([`toggle_corner`]).
+fn turn_corner(
+    mut settings: Signal<TrainingSettings>,
+    kind: ContestKind,
+    corner: usize,
+    count: usize,
+) {
+    let off = settings.peek().contest.styles_off(kind).to_vec();
+    settings
+        .write()
+        .contest
+        .set_styles_off(kind, toggle_corner(&off, corner, count));
 }
 
 /// What a mouse over the shape is on: a point a click would put the dot
@@ -510,7 +606,8 @@ fn StyleShape(
     let at = styles.at;
     let off = styles.off.clone();
     let view = ShapeView::of(&styles.leads, &styles.exchanges);
-    let mut place = move |point: [f64; 2]| settings.write().contest.hunter_style = point;
+    let kind = styles.kind;
+    let mut place = move |point: [f64; 2]| settings.write().contest.set_style_at(kind, point);
     let leads = styles.leads.clone();
     let pointed_leads = styles.leads.clone();
     let corners = shape_corners(count);
@@ -542,7 +639,7 @@ fn StyleShape(
     let edge = view.half - 0.02;
     rsx! {
         svg {
-            id: control_id("shape", "hunter styles"),
+            id: control_id("shape", styles.who()),
             class: if hot.is_some() { "style-shape on-corner" } else { "style-shape" },
             view_box: "{view.view_box()}",
             width: "{SHAPE_PX}",
@@ -554,7 +651,7 @@ fn StyleShape(
                 let point = e.element_coordinates();
                 hover.set(None);
                 if let Some(corner) = corner_under(&leads, view.unit(point.x, point.y)) {
-                    turn_corner(settings, corner, count);
+                    turn_corner(settings, kind, corner, count);
                     return;
                 }
                 dragging.set(true);
@@ -629,12 +726,12 @@ fn StyleShape(
                 }
             }
             text { class: "style-head", x: "{edge}", y: "-1.36", "text-anchor": "end",
-                "{SIDE_HEADS[0]}"
+                "{styles.heads[0]}"
             }
             text { class: "style-side", x: "{edge}", y: "-1.22", "text-anchor": "end",
                 "{right}"
             }
-            text { class: "style-head", x: "{-edge}", y: "-1.36", "{SIDE_HEADS[1]}" }
+            text { class: "style-head", x: "{-edge}", y: "-1.36", "{styles.heads[1]}" }
             text { class: "style-side", x: "{-edge}", y: "-1.22", "{left}" }
             polygon { class: "style-face", points: "{outline}" }
             // Each corner's part of the face, from the middle out to the
@@ -672,13 +769,15 @@ fn StyleShape(
                     };
                     let outward = if corner[0] < 0.0 { -1.0 } else { 1.0 };
                     let label_x = corner[0] + outward * (PILL_W / 2.0 + LABEL_GAP);
-                    let lead = styles.leads.get(number).cloned().unwrap_or_default();
+                    let lead = lead_label(styles.leads.get(number).map_or("", String::as_str))
+                        .to_string();
                     let pct = shown_pct.get(number).map_or(0, |(_, pct)| *pct);
                     let shown_number = number + 1;
+                    let whole = styles.replies.get(number).map_or("", |(reply, _)| reply.as_str());
                     let label = if is_off {
-                        format!("Turn reply {shown_number}, {lead}, on again")
+                        format!("Turn {whole} on again")
                     } else {
-                        format!("Turn reply {shown_number}, {lead}, off")
+                        format!("Turn {whole} off")
                     };
                     rsx! {
                         g {
@@ -692,7 +791,7 @@ fn StyleShape(
                                 if matches!(e.key(), Key::Enter) || e.key() == Key::Character(" ".to_string()) {
                                     e.prevent_default();
                                     e.stop_propagation();
-                                    turn_corner(settings, number, count);
+                                    turn_corner(settings, kind, number, count);
                                 }
                             },
                             rect {
@@ -764,19 +863,26 @@ fn StyleShape(
 /// How many of the commonest replies the card writes out in full.
 const HEARD_MOST: usize = 3;
 
-/// How POTA hunters reply, folded away under a line that says how it is
-/// set, as the Band card folds its receiver. Open, the shape with a reply
-/// at each corner and the knob that sets how often each comes, a line
-/// saying what a click would do, and the replies you will hear most, whole,
-/// beside how many in a hundred send each. While a mouse is over the
-/// shape, they are the ones of the mix it would set, marked as not set
-/// yet. What it does is in its ⓘ.
+/// How a contest's callers reply, POTA's hunters among them, folded away
+/// under a line that says how it is set, as the Band card folds its
+/// receiver. Open, the shape with a reply at each corner and the knob that
+/// sets how often each comes, a line saying what a click would do, and the
+/// replies you will hear most, whole, beside how many in a hundred send
+/// each. While a mouse is over the shape, they are the ones of the mix it
+/// would set, marked as not set yet. In POTA, how many hunters are DX, on a
+/// slider. What it does is in its ⓘ.
 #[component]
-fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Element {
+fn ReplyStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Element {
     let mut open = use_signal(|| false);
     let mut help = use_signal(|| false);
     let hover = use_signal(|| None::<Pointing>);
     let reading = styles.reading();
+    let who = styles.who();
+    let title = if styles.dx_percent.is_some() {
+        "Hunter styles"
+    } else {
+        "Caller styles"
+    };
     let count = styles.replies.len();
     // The mix the mouse would set, while it is over the shape somewhere
     // else than the knob and its corners.
@@ -791,15 +897,20 @@ fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Eleme
     let mut most: Vec<(String, u32)> = rows.into_iter().filter(|(_, pct)| *pct > 0).collect();
     most.sort_by_key(|(_, pct)| std::cmp::Reverse(*pct));
     most.truncate(HEARD_MOST);
-    let lead = |corner: usize| styles.leads.get(corner).cloned().unwrap_or_default();
+    let whole = |corner: usize| {
+        styles
+            .replies
+            .get(corner)
+            .map_or_else(String::new, |(reply, _)| reply.clone())
+    };
     let line = match hover() {
         Some(Pointing::Corner(corner)) if styles.off.contains(&corner) => {
-            format!("Click to turn {} back on", lead(corner))
+            format!("Click to turn back on: {}", whole(corner))
         }
         Some(Pointing::Corner(_)) if styles.off.len() + 1 >= count => {
             "This is the last reply on".to_string()
         }
-        Some(Pointing::Corner(corner)) => format!("Click to turn this {} off", lead(corner)),
+        Some(Pointing::Corner(corner)) => format!("Click to turn off: {}", whole(corner)),
         _ if preview.is_some() => "Click to set this mix".to_string(),
         _ => "Drag the knob toward the replies you want more of; tap a corner to turn it off"
             .to_string(),
@@ -807,31 +918,31 @@ fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Eleme
     rsx! {
         div { class: "card-title-row",
             button {
-                id: control_id(DISCLOSURE, "hunter styles"),
+                id: control_id(DISCLOSURE, who),
                 class: if open() { "link-toggle open" } else { "link-toggle" },
                 r#type: "button",
                 aria_expanded: if open() { "true" } else { "false" },
-                aria_controls: "hunter-styles",
+                aria_controls: "reply-styles",
                 onclick: move |_| open.toggle(),
-                "Hunter styles: {reading}"
+                "{title}: {reading}"
                 Icon { name: IconName::Chevron }
             }
             button {
-                id: control_id("help", "hunter styles"),
+                id: control_id("help", who),
                 class: if help() { "icon-btn help-btn on" } else { "icon-btn help-btn" },
                 r#type: "button",
                 title: if help() { "Hide the help" } else { "What does this mean?" },
-                aria_label: if help() { "Hide the help on hunter styles" } else { "Help on hunter styles" },
+                aria_label: if help() { format!("Hide the help on {who}") } else { format!("Help on {who}") },
                 aria_expanded: help(),
                 onclick: move |_| help.toggle(),
                 Icon { name: if help() { IconName::X } else { IconName::Info } }
             }
         }
         if help() {
-            div { class: "help-note", role: "note", {help::hunter_styles()} }
+            div { class: "help-note", role: "note", {help::caller_styles(styles.dx_percent.is_some())} }
         }
         if open() {
-            div { id: "hunter-styles", class: "stack-sm",
+            div { id: "reply-styles", class: "stack-sm",
                 StyleShape { settings, styles: styles.clone(), hover }
                 p { class: "muted hint style-preview-line", "{line}" }
                 div { class: "eyebrow", "You'll hear most" }
@@ -845,6 +956,26 @@ fn HunterStyles(settings: Signal<TrainingSettings>, styles: StylesCard) -> Eleme
                                 span { class: "call", "{reply}" }
                             }
                         }
+                    }
+                }
+                if let Some(dx) = styles.dx_percent {
+                    SliderField {
+                        label: "DX hunters",
+                        long_label: "How many hunters are DX",
+                        value_label: format!("{dx}%"),
+                        value: f64::from(dx),
+                        min: 0.0,
+                        max: 100.0,
+                        step: 5.0,
+                        disabled: false,
+                        onchange: move |percent: f64| {
+                            // Within the slider's ends, so the cast holds.
+                            settings.write().contest.hunter_dx_percent = percent.round().clamp(0.0, 100.0)
+                                as u32;
+                        },
+                    }
+                    p { class: "muted hint style-dx-note",
+                        "Hunters outside the US and Canada send their report alone: log them without a state."
                     }
                 }
             }
@@ -1185,7 +1316,13 @@ fn ContestBody(
             QsoLines { lines: contest.qso.clone() }
         }
         if let Some(styles) = contest.styles.clone() {
-            HunterStyles { settings, styles }
+            ReplyStyles { settings, styles }
+        }
+        OddsFold {
+            settings,
+            title: "Caller odds",
+            odds: contest.odds,
+            groups: contest.odds_groups.clone(),
         }
         PresetPicker { settings, preset: contest.preset }
     }
@@ -1507,7 +1644,12 @@ mod tests {
         LABEL_LETTER, PILL_W, SHAPE_PX, SHAPE_TOP, ShapeView, StylesCard, corner_under, in_percent,
         shade, tint,
     };
-    use cw_core::{STYLE_EVEN, STYLE_ON_AIR, shape_corners};
+    use cw_core::{ContestKind, STYLE_EVEN, shape_corners};
+
+    /// Where POTA's knob stands until moved.
+    fn pota_on_air() -> [f64; 2] {
+        ContestKind::Pota.rules().styles_on_air()
+    }
 
     /// Shares read as whole percents that add up to 100, the rest going to
     /// the largest remainders.
@@ -1538,7 +1680,7 @@ mod tests {
                 .rules()
                 .caller_styles(cw_core::Side::Dx, "SA0KAM", at, &[])
                 .expect("POTA's hunters vary");
-            StylesCard::of(styles, at, &[])
+            StylesCard::of(styles, ContestKind::Pota, at, &[], Some(25))
         };
         let one = card(shape_corners(8)[0]);
         assert_eq!(one.reading(), "One reply");
@@ -1547,7 +1689,7 @@ mod tests {
             one.replies[0],
             ("BK SA0KAM TU UR 579 579 OR OR BK".to_string(), 100)
         );
-        let on_air = card(STYLE_ON_AIR);
+        let on_air = card(pota_on_air());
         assert_eq!(on_air.reading(), "8 replies, as on the air");
         assert_eq!(on_air.replies.iter().map(|(_, pct)| pct).sum::<u32>(), 100);
         assert_eq!(on_air.replies[0].0, "BK SA0KAM TU UR 579 579 OR OR BK");
@@ -1568,9 +1710,9 @@ mod tests {
         let off = [1, 2];
         let styles = cw_core::ContestKind::Pota
             .rules()
-            .caller_styles(cw_core::Side::Dx, "SA0KAM", STYLE_ON_AIR, &off)
+            .caller_styles(cw_core::Side::Dx, "SA0KAM", pota_on_air(), &off)
             .expect("POTA's hunters vary");
-        let card = StylesCard::of(styles, STYLE_ON_AIR, &off);
+        let card = StylesCard::of(styles, ContestKind::Pota, pota_on_air(), &off, Some(25));
         assert_eq!(card.reading(), "6 replies, 2 off");
         assert_eq!((card.replies[1].1, card.replies[2].1), (0, 0));
         let even = card.at_point(STYLE_EVEN);
@@ -1599,9 +1741,9 @@ mod tests {
     fn pota_card(my_call: &str) -> StylesCard {
         let styles = cw_core::ContestKind::Pota
             .rules()
-            .caller_styles(cw_core::Side::Dx, my_call, STYLE_ON_AIR, &[])
+            .caller_styles(cw_core::Side::Dx, my_call, pota_on_air(), &[])
             .expect("POTA's hunters vary");
-        StylesCard::of(styles, STYLE_ON_AIR, &[])
+        StylesCard::of(styles, ContestKind::Pota, pota_on_air(), &[], Some(25))
     }
 
     /// A corner's pill, or the words beside it, is where a click turns its
@@ -1660,5 +1802,37 @@ mod tests {
         assert_eq!(view.point(8, x, y), corner);
         let (x, y) = view.px([0.1, 0.2]);
         assert_eq!(view.point(8, x, y), [0.1, 0.2]);
+    }
+
+    /// A contest's callers have a shape of their own, as many corners as
+    /// replies: WPX's six, each row across starting alike, the reply that
+    /// starts with its exchange beside a dash; its heads say how the
+    /// exchange goes on each side.
+    #[test]
+    fn a_contest_has_a_shape_as_many_cornered_as_its_replies() {
+        let rules = ContestKind::Wpx.rules();
+        let styles = rules
+            .caller_styles(cw_core::Side::Dx, "DL1ABC", rules.styles_on_air(), &[])
+            .expect("WPX's callers vary");
+        let card = StylesCard::of(styles, ContestKind::Wpx, rules.styles_on_air(), &[], None);
+        assert_eq!(card.replies.len(), 6);
+        assert_eq!(card.reading(), "6 replies, as on the air");
+        assert_eq!(card.who(), "caller styles");
+        assert_eq!(card.heads, ["Once", "Twice"]);
+        assert_eq!(card.replies[0], ("TU 5NN 214".to_string(), 55));
+        assert_eq!(card.replies[1].0, "5NN 214");
+        let labels: Vec<&str> = card
+            .leads
+            .iter()
+            .map(|lead| super::lead_label(lead))
+            .collect();
+        assert_eq!(labels, ["TU", "—", "R", "R", "—", "TU"]);
+        // The words beside each corner fit in the drawing.
+        let view = ShapeView::of(&card.leads, &card.exchanges);
+        for (corner, label) in shape_corners(6).iter().zip(&labels) {
+            let reach =
+                corner[0].abs() + PILL_W / 2.0 + label.chars().count() as f64 * LABEL_LETTER;
+            assert!(reach < view.half, "{label}");
+        }
     }
 }

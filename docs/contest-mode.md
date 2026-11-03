@@ -324,14 +324,53 @@ kind replacing an earlier one (11.7).
 | Real contest | NCJ NA Sprint | ARRL International DX | CQ WPX | CQ WW DX | ARRL Field Day | an everyday QSO | a Parks on the Air activation |
 | RST, serial | no, yes | yes, no | yes, yes | yes, no | no, no | yes, no | yes, no |
 | You copy | NR NAME ST | ST or PWR | NR | ZN | CL SEC | RST NAME | RST ST, ST optional |
-| Callers | US, Canada | the other side | world | world | US, Canada, ~1% DX | world | US, Canada, ~25% DX |
+| Callers | US, Canada | the other side | world | world | US, Canada, ~1% DX | world | US, Canada, DX as set (25% until set) |
+| Caller styles | one | 6 | 6 | 6 | 6 | 6 | 8 |
 | Phase | 2 | 3 | 1 | 3 | 3 | 1 | after 5 |
+
+**Caller styles.** Where a contest's exchange leaves room, its callers
+vary their first exchange as you set them (`ContestRules::their_styles`,
+`Styles`): each caller keeps, for its QSO, to one way of starting it (a
+lead such as `TU` or `R`, or none) and one of two forms of the exchange
+(once or twice in a contest, report and state twice or each once in
+POTA). Each lead in each form is a whole reply and a corner of a shape:
+six for three leads, a hexagon, eight for POTA's four, an octagon. The
+corners go clockwise from the top right (`shape_corners`), each lead
+with the first form down the right side and then back up the left with
+the second, so the shape reads as a map: the right side one form, the
+left the other, as heads over the shape say with the exchange each sends
+(`Form::head`), and each row across starts alike. Where you put a knob in
+the shape sets how often each reply comes (its Wachspress coordinates,
+`corner_shares`); a reply can be turned off (`toggle_corner`,
+`shares_without`). Until you move it the knob stands where the contest's
+mix is heard on the air (`Styles::on_air`), the commonest reply at the top
+right. Each contest keeps its own knob and replies turned off
+(`callerStyles`, by the contest's name, §8; one as on the air is not
+saved). The contest card shows it folded under "Caller styles: …"
+("Hunter styles: …" in POTA), as §3's POTA section describes. A caller
+draws its reply once, from its own generator, where it drew its lead
+before, so nothing else a run draws moves. The Sprint's exchange leaves
+no room, both calls, the serial, the name and the state and nothing else,
+so its callers keep to its one exchange (`their_lead`).
+
+| | Leads, top to bottom | Right side | Left side | As on the air |
+|---|---|---|---|---|
+| WPX | `TU`, none, `R` | once, `5NN 214` | twice, `5NN 214 214` | about 55% `TU 5NN 214`, 27% `5NN 214`, 10% `TU 5NN 214 214`, a few each of the rest |
+| CQ WW | `TU`, none, `R` | once, `5NN 25` | twice, `5NN 25 25` | as WPX |
+| ARRL DX | `TU`, none, `R` | once, `5NN OR` / `5NN KW` | twice, `5NN OR OR` / `5NN KW KW` | as WPX |
+| Field Day | `R`, none, `TU` | once, `3A OR` | twice, `3A OR 3A OR` | as WPX, `R` first |
+| Simple QSO | `R TNX`, `R R`, `TNX FER RPT` | twice, `UR 579 579 NAME BOB BOB BK` | each once, `UR 579 NAME BOB BK` | as WPX, `R TNX` and twice first |
+| POTA | `BK <you> TU`, `BK TU`, `R TU`, `TU` | twice | each once | about 34, 25, 9, 4, 3, 3, 6 and 16 in a hundred |
+
+A field sent twice goes the second time as it was meant: a careless
+operator's fumbled serial, `2T4EEEEE 214`, comes again as `214`.
 
 ### WPX (`wpx`), the default
 
 - **On the air.** `CQ DL1ABC TEST` (`Contest.pas:466`) · `K5XYZ` ·
   `K5XYZ 5NN TT7` · `TU 5NN 214` · `TU DL1ABC`. They may also send
-  `R 5NN 214`.
+  `5NN 214`, `R 5NN 214`, or the serial twice, as their styles have them
+  (above).
   Logged: K5XYZ, NR 214. Your serial starts at 1, padded to three digits and
   cut (`TT7`, `1N5`), as MRCE sends the user's (`Station.pas:482, 541-547`).
 - **Rules.** One point per QSO × different WPX prefixes. The real contest
@@ -357,7 +396,8 @@ kind replacing an earlier one (11.7).
   goes out as its habits send it (§11.6): plain digits under easy habits,
   599 as `5NN` or now and then `ENN` and any other with its nines cut
   (`57N`) under real and rough ones (as built, 4a). Asked again,
-  the caller sends its exchange without `R TNX`; a correction is `DE K5XYZ`
+  the caller sends its exchange without its first words (`R TNX` and the
+  like, by its style, above); a correction is `DE K5XYZ`
   or `K5XYZ K5XYZ`, as in WPX. Your TU greets it by the name the Exchange
   field reads (`TU 73 EE` with none). Its `73 EE` comes in the TU's turn and
   brings nobody, and the hint then says "Enter calls CQ for the next
@@ -540,10 +580,11 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   or "You are DX: you send your report alone, and no state back"; Your
   station's call line ends "you are W/VE" or "you are DX", as in ARRL DX.
 - **Hunters.** US and Canadian stations, each sending its report twice and
-  its state or province twice, and about one in four from anywhere else,
-  sending its report twice and no state, as DX stations do
-  (`Countries::Pota`, `POTA_DX`; the share is a choice, so a short run has
-  some). The report is drawn from §11.5's shares and sent as habits send
+  its state or province twice, and as many from anywhere else as you set,
+  each sending its report and no state, as DX stations do
+  (`Countries::Pota`, `hunterDxPercent`, `CallSpec::dx_percent`; 25 in a
+  hundred until set, a choice, so a short run has some). The DX hunters
+  slider ends the hunter styles on the card, in fives from none to all. The report is drawn from §11.5's shares and sent as habits send
   it (§11.6: plain under easy habits, `57N` and now and then `ENN` under
   real and rough ones), the state where its call puts it. A hunter answers
   your CQ with its call alone (twice from a pile-up caller that calls
@@ -552,7 +593,7 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   as it keeps to. One that has its call but not your exchange asks
   `AGN`, and F12 sends `AGN`: there is no serial.
 - **Hunter styles.** Each hunter keeps to one of eight whole replies for
-  its QSO (`their_replies`): it starts `BK`, your call and `TU`, or `BK
+  its QSO (`their_styles`): it starts `BK`, your call and `TU`, or `BK
   TU`, `R TU` or `TU`, and sends its report and state twice or each once.
   Each is a corner of an eight-cornered shape standing on an edge
   (`shape_corners`, the first corner just right of the top), clockwise
@@ -561,14 +602,14 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
   map: the right side sends report and state twice and the left each
   once, and each row across starts alike, your call at the top and `TU`
   alone at the bottom. Where you put the knob in the shape sets how often
-  each comes (`hunterStyle`, two numbers, across and down from the
+  each comes (`callerStyles.pota.at`, two numbers, across and down from the
   middle, the corners one from it): its Wachspress coordinates
   (`corner_shares`), so the middle has all eight alike, a corner that
   reply alone, and along an edge only its two corners', by how near each
   is. Until moved the knob stands up and right of the middle
-  (`STYLE_ON_AIR`): about 34, 25, 9, 4, 3, 3, 6 and 16 in a hundred, half
-  the hunters naming you and about one in four sending each field once. A
-  reply can be turned off (`hunterStylesOff`, by corner): none sends it,
+  (`Styles::on_air`): about 34, 25, 9, 4, 3, 3, 6 and 16 in a hundred, half
+  the hunters naming you and a few sending each field once. A
+  reply can be turned off (`callerStyles.pota.off`, by corner): none sends it,
   and the rest are scaled up alike to make a hundred, so they keep their
   proportions to one another and in the middle are alike
   (`shares_without`), or share alike where the knob sits on its corner;
@@ -631,8 +672,9 @@ with your call, and you now and then sign off `73 44` (§15.2 item 16).
 - **Rules.** No contest score, as in Simple QSO: QSOs, minutes per QSO and
   accuracy per field. A hunter you worked does not call again, as no dupes
   come where nothing scores. The card says "Hunters in the US and Canada
-  send their report and state; about one in four is DX and sends a report
-  alone, so leave its state out. Simplified: no park references."
+  send their report and state; DX hunters send a report alone, so leave
+  their state out. Simplified: no park references." It states no share:
+  how many hunters are DX is yours to set.
 
 **Later contests,** in order of value: K1USN SST (with Farnsworth), CWops
 CWT, NAQP, IARU HF, Sweepstakes, and an HST-style preset with fixed
@@ -2548,12 +2590,36 @@ the preset.
 | `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 (as built, 4a) |
 | `contestShowCopy` | bool | false | — | Session shape | 4 (as built, 4b) |
 | `contestTuCall` | `every` `everyThird` `never` | `every` | forgiving; `third`, an older save's, reads as `every` | Character set | operator feedback; 2026-10-29 |
+| `callerStyles` | map of contest name to `{ at: [x, y], off: [corner…] }` | `{}` (each contest as on the air) | read back, a contest whose `at` is not two numbers is left out and an `off` that is not whole numbers is none; the clamp brings `at` into the contest's shape, keeps only corners it has, each once, never every one, and drops a contest whose callers do not vary, one this build does not know, and one as on the air | Character set | caller styles; 2026-11-03 |
+| `hunterDxPercent` | u32 | 25 | 0..=100; read back, anything but a number is 25 | Character set | POTA's DX hunters; 2026-11-03 |
 | `contestAdaptSpeed` | bool | true | — (read back, anything but true or false is on) | Speed | adaptive callers' speed |
 | `myWpm` | u32 | 0 | 0 (the callers' middle) or 5..=80; read back, anything but a number is 0 | Speed | operator feedback |
 | `mySendingDb` | i32 | -9 | -60..=0 (-60 is off); read back, anything but a number is -9 | Tone and volume | operator feedback |
 | `contestFlutter` | bool | false | — (read back, anything but true or false is off) | Band conditions | 5 (as built, 5a) |
+| `callerOdds` | object of shares, 0..=1, by name (below) | each as heard on the air | read back, a share that is no number or left out is where it starts, one past its ends is kept to them; the clamp does the same | Band conditions (flutter, habits) and Character set (the rest) | no fixed odds; 2026-11-03 |
 | `contestQsk` | bool | false | — (read back, anything but true or false is off) | Tone and volume | 5 (as built, 5a) |
 
+- **Caller odds** (`callerOdds`, `CallerOdds`, `Odd`). Nothing a caller
+  does now and then is fixed in the code: each share is a slider, from
+  none to all, starting where it was heard on the air, so a run left as it
+  is goes exactly as before. On the Band conditions card: how many callers
+  flutter (`flutter`, 30%, idle while Flutter is off, under its switch,
+  whose line no longer says "three in ten"), and, folded under the caller
+  habits as "Habit odds: as on the air" or "N moved", the numbers of real
+  and rough habits (`enn` 5%, `serialZeroAsT` 98%, `nineAsN` 97%,
+  `zeroAsO` 40%, `zeroAsT` 97%, `zoneCut` 70%, `zonePadded` 5%; idle under
+  easy habits) and rough habits' careless operators (`fumbles` 10%,
+  `early` 0.88 − 5/6, `slips` 4%; idle unless rough). On the contest card,
+  folded as "Caller odds: …" after the caller styles: who calls (`dupe`
+  2% where a contest scores, `portable` 4%, `abroad` 3%, and in Field Day
+  `fieldDayDx`, the counted 0.9%), pile-up callers (`callsTwice` 10%,
+  `missesExchange` 10%; idle with one caller at a time), asking and
+  putting your call right (`asksNr` 30% where the contest's queries
+  differ, `fixesWithExchange` 5/6), and in POTA your TU (`farewell44`
+  25%). Each card's Reset puts back its own shares (`OddsCard`). A share
+  below ten that is not whole reads to a tenth (`0.9%`, `4.7%`). The draws
+  are where the constants' were, so nothing else a run draws moves; the
+  call mix rides on `CallSpec` (`with_odds`), the numbers on `Habits`.
 - **Caller habits.** `easy`: plain digits, no LIDs. `real`: numbers as
   MRCE's callers send them (11.6). `rough`: LIDs and on-frequency QRM. As
   built (4a), the Band card shows them in Contest mode only, after the
@@ -2657,9 +2723,11 @@ the preset.
   save nothing; the card's reset turns it off; `clamp()` has nothing to
   bound; no preset touches it.
 - **Flutter** (as built, 5a). On the Band card in Contest mode only, after
-  the fading, beside which it plays: a switch "Flutter", with "Three callers in ten
+  the fading, beside which it plays: a switch "Flutter", with "Some callers
   flutter, their signal rising and falling 3 to 33 times a second, as over
-  a polar path, fading or not. Your own message never does." (§5.5). Off as
+  a polar path, fading or not; how many is yours to set. Your own message
+  never does." (§5.5), and under it the slider "Callers that flutter", 30%
+  until moved, idle while the switch is off (`callerOdds.flutter`). Off as
   it ships, as MorseRunner's `Flutter` is (`Ini.pas:265`); Contester turns
   it on and First QSO and Club off, and the Band card's note in Contest
   mode names it ("fading and flutter"). Read back, anything but true or

@@ -1,7 +1,7 @@
 use cw_core::band::{FilterDesign, NOISE_LEVEL_PER_DB, heard_snr_db};
 use cw_core::{
-    AgcDecay, BandSettings, CallerHabits, CharSetMode, ContestRules, FILTER_WIDTH_MAX,
-    FILTER_WIDTH_MIN, Field, FilterShape, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
+    AgcDecay, BandSettings, CallerHabits, CallerOdds, CharSetMode, ContestRules, FILTER_WIDTH_MAX,
+    FILTER_WIDTH_MIN, Field, FilterShape, Odd, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
     PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_DEPTH_MAX_DB, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
     RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RunStyle, STATIONS_MAX, STATIONS_MIN,
     SettingsSection, Side, TrainingSettings, filter_capacity,
@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 
 use crate::ui::format::counted;
 use crate::ui::help;
+use crate::ui::odds::{OddSlider, OddsFold, OddsGroup};
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch,
     control_id, range_label,
@@ -126,6 +127,9 @@ struct Band {
     /// In Contest mode, whether some callers flutter; none in group
     /// training.
     flutter: Option<bool>,
+    /// In Contest mode, how often callers do each thing they do now and
+    /// then, of which this card sets flutter's and the habits'.
+    odds: CallerOdds,
 }
 
 impl Band {
@@ -146,6 +150,7 @@ impl Band {
                 (settings.contest.contest_habits, line)
             }),
             flutter: contest.then_some(settings.contest.contest_flutter),
+            odds: settings.contest.caller_odds,
         }
     }
 }
@@ -355,6 +360,31 @@ pub fn BandConditionsCard(
                     }
                 }
                 p { id: "habits-line", class: "muted hint", "{line}" }
+                OddsFold {
+                    settings,
+                    title: "Habit odds",
+                    odds: view.odds,
+                    groups: vec![
+                        OddsGroup {
+                            head: "Numbers, under real and rough habits",
+                            odds: vec![
+                                Odd::Enn,
+                                Odd::SerialZeroAsT,
+                                Odd::NineAsN,
+                                Odd::ZeroAsO,
+                                Odd::ZeroAsT,
+                                Odd::ZoneCut,
+                                Odd::ZonePadded,
+                            ],
+                            disabled: *habits == CallerHabits::Easy,
+                        },
+                        OddsGroup {
+                            head: "Careless operators, under rough habits",
+                            odds: vec![Odd::Fumbles, Odd::Early, Odd::Slips],
+                            disabled: *habits != CallerHabits::Rough,
+                        },
+                    ],
+                }
             }
             Switch {
                 title: "QSB fading".to_string(),
@@ -389,9 +419,15 @@ pub fn BandConditionsCard(
             if let Some(flutter) = view.flutter {
                 Switch {
                     title: "Flutter".to_string(),
-                    description: "Three callers in ten flutter, their signal rising and falling 3 to 33 times a second, as over a polar path, fading or not. Your own message never does.".to_string(),
+                    description: "Some callers flutter, their signal rising and falling 3 to 33 times a second, as over a polar path, fading or not; how many is yours to set. Your own message never does.".to_string(),
                     checked: flutter,
                     onchange: move |on| settings.write().contest.contest_flutter = on,
+                }
+                OddSlider {
+                    settings,
+                    odd: Odd::Flutter,
+                    share: view.odds.flutter,
+                    disabled: !flutter,
                 }
             }
             Switch {

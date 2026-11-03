@@ -1117,9 +1117,12 @@ fn flutter_is_a_band_switch_in_contest_mode() {
         ui.click("nav-settings");
         assert!(ui.shows("switch-flutter"));
         assert!(!ui.input_tag("switch-flutter").contains("checked"));
-        assert!(ui.has(
-            "Three callers in ten flutter, their signal rising and falling 3 to 33 times a second"
-        ));
+        assert!(
+            ui.has("Some callers flutter, their signal rising and falling 3 to 33 times a second")
+        );
+        // How many is a slider of its own, idle while flutter is off.
+        assert!(ui.input_tag("odds-flutter").contains("disabled"));
+        assert!(ui.has(r#"<span class="slider-value">30%</span>"#));
         assert!(ui.has("Stations, callers&#39; habits, fading and flutter"));
         // It sits on the Band card, after the fading.
         let html = ui.html();
@@ -1130,6 +1133,9 @@ fn flutter_is_a_band_switch_in_contest_mode() {
 
         ui.commit("switch-flutter", "true");
         assert!(ui.stored_settings().await.contest.contest_flutter);
+        assert!(!ui.input_tag("odds-flutter").contains("disabled"));
+        ui.type_into("odds-flutter", "60");
+        assert_eq!(ui.stored_settings().await.contest.caller_odds.flutter, 0.6);
         ui.click("preset-club");
         ui.click("preset-first-qso");
         assert!(
@@ -1138,6 +1144,36 @@ fn flutter_is_a_band_switch_in_contest_mode() {
         );
         ui.click("reset-band-conditions");
         assert!(!ui.stored_settings().await.contest.contest_flutter);
+        assert_eq!(ui.stored_settings().await.contest.caller_odds.flutter, 0.3);
+    });
+}
+
+/// How often callers do what their habits have them do is on the Band
+/// card, folded under the habits: each share a slider, idle where the
+/// habits chosen have none of it, stored as moved, and put back by the
+/// card's reset.
+#[test]
+fn habit_odds_are_sliders_under_the_habits() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.has("Habit odds: as on the air"), "{}", ui.html());
+        assert!(!ui.shows("odds-enn"));
+        ui.click("disclosure-habit-odds");
+        assert!(ui.shows("odds-enn") && ui.shows("odds-slips"));
+        // Easy habits send plain numbers and nobody is careless.
+        assert!(ui.input_tag("odds-enn").contains("disabled"));
+        assert!(ui.input_tag("odds-fumbles").contains("disabled"));
+        ui.click("habits-real");
+        assert!(!ui.input_tag("odds-enn").contains("disabled"));
+        assert!(ui.input_tag("odds-fumbles").contains("disabled"));
+        ui.click("habits-rough");
+        assert!(!ui.input_tag("odds-fumbles").contains("disabled"));
+        ui.type_into("odds-enn", "50");
+        assert_eq!(ui.stored_settings().await.contest.caller_odds.enn, 0.5);
+        assert!(ui.has("Habit odds: 1 moved"));
+        ui.click("reset-band-conditions");
+        assert_eq!(ui.stored_settings().await.contest.caller_odds.enn, 0.05);
     });
 }
 

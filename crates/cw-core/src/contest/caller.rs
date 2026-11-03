@@ -13,9 +13,10 @@ use super::data::power::draw_power;
 use super::data::reports::draw_report;
 use super::data::zones::draw_zone;
 use super::esm::MessagePart;
-use super::exchange::{Field, send_5nn, send_power, send_report, send_serial, send_zone};
+use super::exchange::{Field, Habits, send_5nn, send_power, send_report, send_serial, send_zone};
+use super::odds::CallerOdds;
 use super::place::Placement;
-use super::rules::{ContestRules, STYLE_ON_AIR, Side};
+use super::rules::{ContestRules, STYLE_EVEN, Side};
 use super::serial::SerialModel;
 use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
@@ -262,37 +263,19 @@ const REPLY_DELAY_SEC: (f64, f64) = (0.1, 0.6);
 const TIMEOUT_BASE_SEC: f64 = 6.0;
 const TIMEOUT_SPREAD: f64 = 0.5;
 
-/// How many pile-up callers send their call twice, as MorseRunner's do
-/// (`DxOper.pas:500-502`). A single caller never does.
-const CALLS_TWICE: f64 = 0.1;
-
-/// How often a pile-up caller misses your exchange and asks for it again,
-/// as MorseRunner's callers take it nine times in ten (`DxOper.pas:762-770`).
-const MISSES_EXCHANGE: f64 = 0.1;
-
-/// Under the Band card's flutter, how many callers' signals flutter, and
-/// how fast, in hertz: three in ten, at 3 to 33, as MorseRunner's flutter
-/// has them (`DxStn.pas:97-99`). Its flutter fades as deep as a fade can;
+/// Under the Band card's flutter, how fast a fluttering caller's signal
+/// flutters, in hertz: 3 to 33, as MorseRunner's flutter has them
+/// (`DxStn.pas:97-99`); how many flutter is yours to set
+/// ([`CallerOdds::flutter`]). Its flutter fades as deep as a fade can;
 /// here each flutters from half to three quarters of the way down, as deep
 /// as the band's fading ever goes, so a fluttering caller is rough but
 /// never lost.
-const FLUTTER_SHARE: f64 = 0.3;
 pub(crate) const FLUTTER_RATE_HZ: (f64, f64) = (3.0, 33.0);
 pub(crate) const FLUTTER_DEPTH: (f64, f64) = (0.5, 0.75);
 
 /// The stream, forked off a caller's own generator, that its flutter is
 /// drawn from, apart from the rest of its draws.
 const FLUTTER_STREAM: u64 = u64::MAX;
-
-/// How many operators, putting your call right once they have your
-/// exchange, send their own with it, as MorseRunner's do five in six
-/// (`DxOper.pas:851-867`).
-const FIXES_WITH_EXCHANGE: f64 = 5.0 / 6.0;
-
-/// How often a caller waiting for your exchange asks with the first of the
-/// contest's queries rather than the second: `NR?` rather than `AGN`
-/// (`DxOper.pas`, `GetReply`).
-const FIRST_QUERY: f64 = 0.3;
 
 /// After this many incomplete tries — a slip or a partial of its call, or a
 /// `?` while it waits for its call put right or for your TU — a caller
@@ -315,21 +298,9 @@ const QRS_MORE: f64 = 0.02;
 #[cfg(test)]
 pub(crate) const QRS_MOST: f64 = QRS_DROP[0] + QRS_MORE;
 
-/// Under rough habits, how many callers fumble a digit of the first serial
-/// they send, then send `EEEEE` and the serial right, as MorseRunner's LIDs
-/// do (`DxStn.pas:73`, `Station.pas:509-521`).
-const LID_FUMBLES: f64 = 0.1;
-
-/// Under rough habits, how many operators send their exchange with their
-/// call put right before they have yours, as MorseRunner's LIDs do in
-/// 0.88 − 5/6 of operators (`DxOper.pas:879-886`).
-const LID_EARLY: f64 = 0.88 - 5.0 / 6.0;
-
-/// Under rough habits, how often a caller takes a slip of its call for its
-/// own, as MorseRunner's LIDs accept a wrong call (`DxOper.pas:651-671`),
-/// and how long the call you sent must be for it to: a call of more than
-/// three characters.
-const LID_TAKES_SLIP: f64 = 0.04;
+/// Under rough habits, how long the call you sent must be for a careless
+/// operator to take a slip of its call for its own: more than three
+/// characters (`DxOper.pas:651-671`).
 const LID_SLIP_LEN_MIN: usize = 4;
 
 /// What a fumbled digit is followed by before the serial is sent right.
@@ -366,17 +337,19 @@ pub(super) struct Caller {
     /// Its exchange as it sends it, fixed the first time it is needed.
     exchange: Option<Vec<(Field, String)>>,
     /// The whole reply it keeps to, where callers vary as you set them
-    /// ([`ContestRules::their_replies`]): decided the first time it sends
+    /// ([`ContestRules::their_styles`]): decided the first time it sends
     /// its exchange, and never drawn in a contest whose callers do not.
     reply: Option<usize>,
-    /// Where you put the dot that sets how often each reply comes, where
-    /// callers vary; where it stands until moved elsewhere.
+    /// Where you put the knob that sets how often each reply comes, where
+    /// callers vary: as on the air until moved.
     style_at: [f64; 2],
     /// The replies you turned off, which it never keeps to.
     styles_off: Vec<usize>,
     /// How it operates: how it sends its numbers, and under rough habits
     /// whether it is careless.
     habits: CallerHabits,
+    /// How often it does each thing callers do now and then, as you set it.
+    odds: CallerOdds,
     /// Its serials go out padded and cut under real habits, as a WPX
     /// serial does, rather than plain, as the Sprint's do.
     cuts_serial: bool,
@@ -416,9 +389,9 @@ pub(super) struct Caller {
     /// Where on the band's fading it is at the start of the run, in
     /// seconds: its own path, faded apart from every other caller's.
     pub(super) fade_from_sec: f64,
-    /// Its signal's flutter, read along the same path: for three callers
-    /// in ten under the Band card's flutter ([`FLUTTER_SHARE`]), none for
-    /// the rest.
+    /// Its signal's flutter, read along the same path: for as many callers
+    /// as you set under the Band card's flutter ([`CallerOdds::flutter`]),
+    /// none for the rest.
     pub(super) flutter: Option<Qsb>,
     /// Its incomplete tries ([`QRS_AFTER`]), counted afresh as its QSO
     /// moves on, as MorseRunner's `FIncompleteCallCount`.
@@ -444,10 +417,11 @@ impl Caller {
     ) -> Self {
         // From a stream of its own, and only with flutter on, so a run
         // without it draws as it always has.
+        let odds = settings.contest.caller_odds;
         let flutter = settings
             .contest
             .contest_flutter
-            .then(|| draw_flutter(&mut rng.fork(FLUTTER_STREAM)))
+            .then(|| draw_flutter(odds.flutter, &mut rng.fork(FLUTTER_STREAM)))
             .flatten();
         let mut voice = resolve_station(settings, &mut rng);
         voice.tone_hz = placed.tone_hz;
@@ -458,16 +432,16 @@ impl Caller {
         let fit = rules.serials.unwrap_or(super::WPX_SERIALS);
         let serial = SerialModel::draw(fit, run_minutes, &mut rng);
         let pileup = style == RunStyle::Pileup;
-        let twice = pileup && rng.f64() < CALLS_TWICE;
+        let twice = pileup && rng.f64() < odds.calls_twice;
         let fade_from_sec = rng.pick_in_range(0.0, FADE_OFFSET_MAX_SEC);
         let de_first = rng.f64() < 0.5;
-        let fixes_with_exchange = rng.f64() < FIXES_WITH_EXCHANGE;
+        let fixes_with_exchange = rng.f64() < odds.fixes_with_exchange;
         // Drawn only under rough habits, so a run under easier ones draws
         // as it always has.
         let habits = settings.contest.contest_habits;
         let rough = habits == CallerHabits::Rough;
-        let fumbles = rough && rng.f64() < LID_FUMBLES;
-        let early = rough && rng.f64() < LID_EARLY;
+        let fumbles = rough && rng.f64() < odds.fumbles;
+        let early = rough && rng.f64() < odds.early;
         Self {
             call,
             voice,
@@ -483,16 +457,17 @@ impl Caller {
             exchange: None,
             reply: None,
             style_at: if rules.varies() {
-                settings.contest.hunter_style
+                settings.contest.style_at(rules.kind)
             } else {
-                STYLE_ON_AIR
+                STYLE_EVEN
             },
             styles_off: if rules.varies() {
-                settings.contest.hunter_styles_off.clone()
+                settings.contest.styles_off(rules.kind).to_vec()
             } else {
                 Vec::new()
             },
             habits,
+            odds,
             cuts_serial: rules.serial_cut,
             fumbles,
             early,
@@ -538,9 +513,10 @@ impl Caller {
             .serial
             .after(before, run_ms.saturating_sub(at), &mut self.rng);
         self.serial_sent = Some((serial, run_ms));
+        let (sending, cuts) = (self.sending(), self.cuts_serial);
         let fields = self.exchange.iter_mut().flatten();
         for (_, token) in fields.filter(|(field, _)| *field == Field::Nr) {
-            *token = send_serial(serial, self.habits, self.cuts_serial, &mut self.rng);
+            *token = send_serial(serial, sending, cuts, &mut self.rng);
         }
     }
 
@@ -691,17 +667,27 @@ impl Caller {
 
     /// Under rough habits, whether it takes `sent`, a slip of its call, for
     /// its own this time, as MorseRunner's careless operators accept a
-    /// wrong call: a call of four characters or more, one time in 25.
+    /// wrong call: a call of four characters or more, as often as its odds
+    /// have it.
     fn takes_slip(&mut self, sent: &str) -> bool {
         self.habits == CallerHabits::Rough
             && sent.chars().count() >= LID_SLIP_LEN_MIN
-            && self.rng.f64() < LID_TAKES_SLIP
+            && self.rng.f64() < self.odds.slips
+    }
+
+    /// How it sends its numbers: its habits, and how often each of their
+    /// ways comes.
+    fn sending(&self) -> Habits {
+        Habits {
+            level: self.habits,
+            odds: self.odds,
+        }
     }
 
     /// In a pile-up, whether it misses the exchange it is waiting for, and
     /// asks for it again.
     fn misses_exchange(&mut self) -> bool {
-        self.pileup && self.rng.f64() < MISSES_EXCHANGE
+        self.pileup && self.rng.f64() < self.odds.misses_exchange
     }
 
     /// Hear one of your messages, whole and in order, and settle what it
@@ -1066,7 +1052,7 @@ impl Caller {
         let said = match self.state {
             CallerState::NeedQso => (rules.answer_text(my_call, &call, self.twice), Says::Call),
             CallerState::NeedNr => {
-                let query = if self.rng.f64() < FIRST_QUERY {
+                let query = if self.rng.f64() < self.odds.asks_nr {
                     rules.their_query[0]
                 } else {
                     rules.their_query[1]
@@ -1106,9 +1092,9 @@ impl Caller {
                 let text = if self.exchanges_sent > 0 {
                     body
                 } else {
-                    match self.reply.and_then(|reply| rules.their_replies.get(reply)) {
-                        // Its own reply's word, kept to.
-                        Some(reply) => rules.their_first_exchange_led(reply.lead, my_call, &body),
+                    match self.reply.and_then(|reply| rules.reply_lead(reply)) {
+                        // Its own style's words, kept to.
+                        Some(lead) => rules.their_first_exchange_led(lead, my_call, &body),
                         None => {
                             let lead = rules.lead_at(self.rng.f64());
                             rules.their_first_exchange(lead, my_call, &body)
@@ -1151,7 +1137,7 @@ impl Caller {
         run_ms: u64,
     ) -> &[(Field, String)] {
         if self.exchange.is_none() {
-            let habits = self.habits;
+            let habits = self.sending();
             // A field with no value to send, as a zone for a station Dust
             // cannot place, is not sent.
             let fields = rules
@@ -1217,7 +1203,10 @@ impl Caller {
         // The report every caller sends and nobody copies: under real
         // habits now and then `ENN`, message by message.
         if rules.prefills_report(side) {
-            fields.push((Field::Rst, send_5nn(self.habits, &mut self.rng).to_string()));
+            fields.push((
+                Field::Rst,
+                send_5nn(self.sending(), &mut self.rng).to_string(),
+            ));
         }
         // A careless operator's first serial: a digit off, `EEEEE`, and
         // the serial right, which is what it sent for your copy.
@@ -1306,10 +1295,10 @@ fn slowed(mut voice: StationVoice, drop: f64) -> StationVoice {
     voice
 }
 
-/// A caller's flutter, from `rng`: none for most ([`FLUTTER_SHARE`]), and
-/// for the rest a flutter of its own rate and depth.
-fn draw_flutter(rng: &mut impl Rng) -> Option<Qsb> {
-    (rng.f64() < FLUTTER_SHARE).then(|| {
+/// A caller's flutter, from `rng`: one of its own rate and depth for a
+/// `share` of callers, none for the rest.
+fn draw_flutter(share: f64, rng: &mut impl Rng) -> Option<Qsb> {
+    (rng.f64() < share).then(|| {
         let rate_hz = rng.pick_in_range(FLUTTER_RATE_HZ.0, FLUTTER_RATE_HZ.1);
         let depth = rng.pick_in_range(FLUTTER_DEPTH.0, FLUTTER_DEPTH.1);
         Qsb::flutter(depth, rate_hz)
@@ -1473,15 +1462,16 @@ mod tests {
             .reply(rules(), Side::Dx, "DL1ABC", 60_000)
             .expect("a reply");
         assert_eq!(says, Says::Exchange);
-        let serial = caller.exchange(rules(), Side::Dx, 0)[0].1.clone();
-        assert!(text == format!("TU 5NN {serial}") || text == format!("R 5NN {serial}"));
+        let sent = caller.exchange(rules(), Side::Dx, 0).to_vec();
+        let any = rules().first_exchanges(Side::Dx, "DL1ABC", "K5XYZ", &sent);
+        assert!(any.contains(&text), "{text} is none of {any:?}");
         // Asked again, it sends the same serial, alone.
         let reaction = caller.hear(&[Again], &[]);
         assert!(reaction.replies && reaction.asked);
         let again = caller
             .reply(rules(), Side::Dx, "DL1ABC", 120_000)
             .expect("a reply");
-        assert_eq!(again.0, format!("5NN {serial}"));
+        assert_eq!(again.0, &text[text.find("5NN").expect("its report")..]);
         assert!(!caller.hear(&[Tu], &[]).replies);
         assert_eq!(caller.state, CallerState::Done);
     }
@@ -1519,17 +1509,13 @@ mod tests {
         let (rst, name) = (&fields[0], &fields[1]);
         assert_eq!((rst.0, name.0), (Field::Rst, Field::Name));
         assert!(Field::Rst.canonical(&rst.1).is_some(), "{}", rst.1);
-        assert_eq!(
-            text,
-            format!("R TNX UR {} {} NAME {} {} BK", rst.1, rst.1, name.1, name.1)
-        );
+        let any = rules.first_exchanges(Side::Dx, "DL1ABC", "K5XYZ", &fields);
+        assert!(any.contains(&text), "{text} is none of {any:?}");
         // Sent again, the exchange goes without its first words.
         caller.hear(&[Again], &[]);
         let again = caller.reply(rules, Side::Dx, "DL1ABC", 0).expect("a reply");
-        assert_eq!(
-            again.0,
-            format!("UR {} {} NAME {} {} BK", rst.1, rst.1, name.1, name.1)
-        );
+        let body = &text[text.find("UR ").expect("UR")..];
+        assert_eq!(again.0, body);
         let reaction = caller.hear(&[Tu], &[]);
         assert!(reaction.replies && !reaction.asked);
         assert_eq!(caller.state, CallerState::Done);
@@ -1853,6 +1839,11 @@ mod tests {
         generated.text = call.to_string();
         let mut settings = TrainingSettings::default();
         settings.contest.contest_habits = habits;
+        // It keeps to `TU` and its exchange once, the commonest style, so
+        // a test reads its numbers where they always stand.
+        settings
+            .contest
+            .set_style_at(ContestKind::Wpx, crate::contest::shape_corners(6)[0]);
         let settings = settings.clamp();
         Caller::arrive(
             generated,
@@ -1886,6 +1877,65 @@ mod tests {
         )
     }
 
+    /// A caller from `seed` in a run of `style` whose odds are `odds`.
+    fn caller_with_odds(seed: u64, style: RunStyle, odds: CallerOdds) -> Caller {
+        let mut rng = SplitMix64::new(seed);
+        let generated = generate_call(3, CallSpec::default(), &mut rng);
+        let mut settings = TrainingSettings::default();
+        settings.contest.contest_flutter = true;
+        settings.contest.caller_odds = odds;
+        Caller::arrive(
+            generated,
+            &settings.clamp(),
+            rules(),
+            10,
+            style,
+            centre(),
+            rng.fork(1),
+        )
+    }
+
+    /// Each share you set reaches the callers: none or all of them flutter,
+    /// call twice in a pile-up, put your call right with their exchange,
+    /// and ask with `NR?` rather than `AGN`, as you set it.
+    #[test]
+    fn callers_do_each_thing_as_often_as_you_set() {
+        for all in [false, true] {
+            let share = if all { 1.0 } else { 0.0 };
+            let odds = CallerOdds {
+                flutter: share,
+                calls_twice: share,
+                fixes_with_exchange: share,
+                asks_nr: share,
+                ..CallerOdds::default()
+            };
+            for seed in 0..200 {
+                let mut caller = caller_with_odds(seed, RunStyle::Pileup, odds);
+                assert_eq!(caller.flutter.is_some(), all, "seed {seed}");
+                assert_eq!(caller.twice, all, "seed {seed}");
+                assert_eq!(caller.fixes_with_exchange, all, "seed {seed}");
+                caller.state = CallerState::NeedNr;
+                let (query, says) = caller
+                    .reply(rules(), Side::Dx, "DL1ABC", 0)
+                    .expect("a query");
+                assert_eq!(says, Says::Query);
+                assert_eq!(query, if all { "NR?" } else { "AGN" }, "seed {seed}");
+            }
+        }
+        // Under real habits, every 599 as `ENN`, or none.
+        for (enn, want) in [(1.0, "ENN"), (0.0, "5NN")] {
+            let habits = Habits {
+                level: CallerHabits::Real,
+                odds: CallerOdds {
+                    enn,
+                    ..CallerOdds::default()
+                },
+            };
+            let mut rng = SplitMix64::new(1);
+            assert!((0..100).all(|_| send_5nn(habits, &mut rng) == want));
+        }
+    }
+
     /// Under the Band card's flutter, three callers in ten flutter, each
     /// at a rate from 3 to 33 Hz and a depth from half to three quarters of
     /// its own, the same caller from the same seed alike; with it off none
@@ -1896,7 +1946,10 @@ mod tests {
         let callers: Vec<Caller> = (0..4_000).map(|seed| fluttering(seed, true)).collect();
         let flutters: Vec<Qsb> = callers.iter().filter_map(|caller| caller.flutter).collect();
         let share = flutters.len() as f64 / callers.len() as f64;
-        assert!((share - FLUTTER_SHARE).abs() < 0.03, "{share:.3}");
+        assert!(
+            (share - CallerOdds::default().flutter).abs() < 0.03,
+            "{share:.3}"
+        );
         for flutter in &flutters {
             assert!(
                 (FLUTTER_RATE_HZ.0..=FLUTTER_RATE_HZ.1).contains(&flutter.rate_hz()),
@@ -2668,8 +2721,11 @@ mod tests {
                 .expect("a reply");
             assert_eq!(says, Says::Correction);
         }
-        let share = f64::from(early) / 4_000.0 / (1.0 - LID_TAKES_SLIP);
-        assert!((share - LID_EARLY).abs() < 0.012, "{share:.3} early");
+        let share = f64::from(early) / 4_000.0 / (1.0 - CallerOdds::default().slips);
+        assert!(
+            (share - CallerOdds::default().early).abs() < 0.012,
+            "{share:.3} early"
+        );
     }
 
     /// A careless operator still calling takes a partial or a piece of its
@@ -2760,7 +2816,10 @@ mod tests {
             }
         }
         let share = f64::from(taken) / 5_000.0;
-        assert!((share - LID_TAKES_SLIP).abs() < 0.01, "{share:.3} taken");
+        assert!(
+            (share - CallerOdds::default().slips).abs() < 0.01,
+            "{share:.3} taken"
+        );
         // A call too short to be taken: a three-character one, its slip.
         let mut short = caller_with(1, CallerHabits::Rough);
         short.call.text = "K5X".to_string();

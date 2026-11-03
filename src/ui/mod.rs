@@ -26,6 +26,7 @@ pub mod home;
 pub mod letters;
 pub mod listen;
 pub mod notice;
+pub mod odds;
 pub mod paddle;
 pub mod privacy;
 pub mod results;

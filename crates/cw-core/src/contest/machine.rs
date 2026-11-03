@@ -39,7 +39,7 @@ use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
-use super::rules::{ContestRules, FAREWELL_44, FAREWELLS, Fill, GREETING_HOUR, Side, greeting};
+use super::rules::{ContestRules, FAREWELLS, Fill, GREETING_HOUR, Side, greeting};
 use super::score::rate_at;
 use super::turn::{
     Fade, Segment, Sender, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
@@ -378,10 +378,10 @@ const RESUME_DELAY_MS: u64 = 1_000;
 /// the design).
 const SHOWN_AFTER_MS: u64 = 1_000;
 
-/// Once this many QSOs are logged, [`DUPE_SHARE`] of the callers who join
-/// are stations worked before (§4.7 of the design).
+/// Once this many QSOs are logged, as many of the callers who join as you
+/// set are stations worked before (§4.7 of the design,
+/// [`crate::contest::CallerOdds::dupe`]).
 const DUPES_AFTER: u32 = 5;
-const DUPE_SHARE: f64 = 0.02;
 
 /// The stream, forked off the run's generator, that the run's own draws
 /// come from: how many call, and who calls again. The callers' streams are
@@ -2197,7 +2197,7 @@ impl<S: CallSource> ContestMachine<S> {
         // A TU that signs off with a farewell, `73` or now and then `73 44`.
         let farewell = if message.contains(&MessagePart::Tu)
             && self.rules.tu.on(self.side).contains("{bye}")
-            && self.farewells.f64() < FAREWELL_44
+            && self.farewells.f64() < self.settings.contest.caller_odds.farewell_44
         {
             FAREWELLS[1]
         } else {
@@ -4164,7 +4164,7 @@ impl<S: CallSource> ContestMachine<S> {
     ) -> Option<usize> {
         let logged = self.serial - 1;
         let dupes = self.rules.scoring.is_some() && logged >= DUPES_AFTER;
-        if dupes && self.draws.f64() < DUPE_SHARE {
+        if dupes && self.draws.f64() < self.settings.contest.caller_odds.dupe {
             // Stations done with you and logged with a QSO, but none that was
             // on the frequency at your key or your TU closed: a station you
             // have just thanked does not call straight back.
@@ -4204,9 +4204,14 @@ impl<S: CallSource> ContestMachine<S> {
             }))
             .collect();
         let avoid = |call: &str| calls.iter().any(|taken| taken == call);
-        let call = self
-            .source
-            .next_call(&self.settings, self.rules.callers(self.side), &avoid);
+        let call = self.source.next_call(
+            &self.settings,
+            self.rules
+                .callers(self.side)
+                .with_dx(self.settings.contest.hunter_dx_percent)
+                .with_odds(&self.settings.contest.caller_odds),
+            &avoid,
+        );
         let mut caller = Caller::arrive(
             call,
             &self.settings,
@@ -5058,6 +5063,17 @@ mod tests {
         Runtime::start(1, run_settings(25.0), ScriptCalls::new(calls))
     }
 
+    /// A Simple QSO caller's report and name in `exchange`, after `UR` and
+    /// `NAME`, however its style starts and repeats them.
+    fn report_and_name(exchange: &str) -> (String, String) {
+        let words: Vec<&str> = exchange.split_whitespace().collect();
+        let after = |word: &str| {
+            let at = words.iter().position(|said| *said == word).expect(word);
+            words[at + 1].to_string()
+        };
+        (after("UR"), after("NAME"))
+    }
+
     /// What callers send in `turn`.
     fn replies(turn: &Turn) -> Vec<&str> {
         turn.segments
@@ -5164,7 +5180,12 @@ mod tests {
         let exchange = replies(runtime.last_turn())[0].to_string();
         assert_eq!(yours(runtime.last_turn()), "K5XYZ 5NN TT1");
         let nr = serial(&exchange);
-        assert!(exchange == format!("TU 5NN {nr}") || exchange == format!("R 5NN {nr}"));
+        let sent = [(Field::Nr, nr.to_string())];
+        let any = runtime
+            .machine
+            .rules
+            .first_exchanges(Side::Dx, "DL1ABC", "K5XYZ", &sent);
+        assert!(any.contains(&exchange), "{exchange} is none of {any:?}");
         assert!(view(&runtime).qso.exchange_sent);
         runtime.finish_turn();
         let effects = runtime.key(OpKey::Esm, "K5XYZ", &nr);
@@ -5247,11 +5268,17 @@ mod tests {
         );
         let exchange = replies(runtime.last_turn())[0].to_string();
         let words: Vec<&str> = exchange.split_whitespace().collect();
-        let (rst, name) = (words[3], words[6]);
-        assert_eq!(
-            exchange,
-            format!("R TNX UR {rst} {rst} NAME {name} {name} BK")
-        );
+        let after = |word: &str| words[words.iter().position(|w| *w == word).expect(word) + 1];
+        let (rst, name) = (after("UR"), after("NAME"));
+        let sent = [
+            (Field::Rst, rst.to_string()),
+            (Field::Name, name.to_string()),
+        ];
+        let any = runtime
+            .machine
+            .rules
+            .first_exchanges(Side::Dx, "DL1ABC", "K5XYZ", &sent);
+        assert!(any.contains(&exchange), "{exchange} is none of {any:?}");
         // Plain digits, as callers with easy habits send them.
         assert!(rst.chars().all(|c| c.is_ascii_digit()), "{rst}");
         assert!(Field::Rst.canonical(rst).is_some() && Field::Name.canonical(name).is_some());
@@ -5362,15 +5389,20 @@ mod tests {
             "BK N4BKY TU UR R S BK",
         ];
         let runs: u32 = 900;
-        for at in [crate::contest::STYLE_EVEN, crate::contest::STYLE_ON_AIR] {
+        let on_air = crate::contest::ContestKind::Pota.rules().styles_on_air();
+        for at in [crate::contest::STYLE_EVEN, on_air] {
             let mut counts = [0u32; 8];
             for seed in 1..=u64::from(runs) {
                 let mut settings = run_settings(25.0);
                 settings.contest.contest_kind = crate::contest::ContestKind::Pota;
                 settings.contest.my_call = "N4BKY".to_string();
                 settings.contest.my_state = "AL".to_string();
-                settings.contest.hunter_style = at;
-                settings.contest.hunter_styles_off = off.to_vec();
+                settings
+                    .contest
+                    .set_style_at(crate::contest::ContestKind::Pota, at);
+                settings
+                    .contest
+                    .set_styles_off(crate::contest::ContestKind::Pota, off.to_vec());
                 let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["W7XYZ"]));
                 runtime.finish_turn();
                 runtime.key(OpKey::Esm, "W7XYZ", "");
@@ -5405,6 +5437,98 @@ mod tests {
                     let alike = if off.contains(&reply) { 0.0 } else { 1.0 / 6.0 };
                     assert!((share - alike).abs() < 1e-9, "{reply}: {share}");
                 }
+            }
+        }
+    }
+
+    /// Your TU signs `73 44` as often as you set: never, or every time.
+    #[test]
+    fn your_tu_signs_73_44_as_often_as_you_set() {
+        for (share, want) in [(0.0, " 73 EE"), (1.0, " 73 44 EE")] {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_kind = crate::contest::ContestKind::Pota;
+            settings.contest.my_call = "N4BKY".to_string();
+            settings.contest.my_state = "AL".to_string();
+            settings.contest.caller_odds.farewell_44 = share;
+            let settings = settings.clamp();
+            let sampler = Sampler::new(&[], &settings, 3);
+            let mut runtime = Runtime::start(3, settings, sampler);
+            work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+            let tus: Vec<String> = runtime
+                .turns
+                .iter()
+                .map(|turn| yours(turn).to_string())
+                .filter(|mine| mine.starts_with("BK TU "))
+                .collect();
+            assert!(!tus.is_empty());
+            assert!(tus.iter().all(|tu| tu.ends_with(want)), "{tus:?}");
+        }
+    }
+
+    /// How many hunters are DX is yours to set: none, and every hunter
+    /// sends its state; all, and none does; a share between, and about that
+    /// many send their report alone.
+    #[test]
+    fn as_many_hunters_are_dx_as_you_set() {
+        let states = |percent: u32| -> usize {
+            (1..=120)
+                .filter(|seed| {
+                    let mut settings = run_settings(25.0);
+                    settings.contest.contest_kind = crate::contest::ContestKind::Pota;
+                    settings.contest.my_call = "N4BKY".to_string();
+                    settings.contest.my_state = "AL".to_string();
+                    settings.contest.hunter_dx_percent = percent;
+                    let settings = settings.clamp();
+                    let sampler = Sampler::new(&[], &settings, *seed);
+                    let mut runtime = Runtime::start(*seed, settings, sampler);
+                    runtime.finish_turn();
+                    let call = replies(runtime.last_turn())[0].to_string();
+                    runtime.key(OpKey::Esm, &call, "");
+                    let first = replies(runtime.last_turn())[0].to_string();
+                    pota_hunter(&first, "N4BKY").1.is_some()
+                })
+                .count()
+        };
+        assert_eq!(states(0), 120);
+        assert_eq!(states(100), 0);
+        let half = states(50);
+        assert!((40..=80).contains(&half), "{half} of 120 sent a state");
+    }
+
+    /// Where you put the knob reaches every contest's callers: at a corner,
+    /// every caller sends that reply.
+    #[test]
+    fn contest_callers_reply_as_you_set_their_styles() {
+        for (kind, corner, want) in [
+            (crate::contest::ContestKind::Wpx, 2, "R 5NN "),
+            (crate::contest::ContestKind::Wpx, 4, "5NN "),
+            (crate::contest::ContestKind::FieldDay, 0, "R "),
+        ] {
+            let count = kind.rules().reply_count();
+            for seed in 1..40 {
+                let mut settings = run_settings(25.0);
+                settings.contest.contest_kind = kind;
+                settings.contest.my_class = "1D".to_string();
+                settings.contest.my_section = "EMA".to_string();
+                settings.contest.my_call = "K1ABC".to_string();
+                settings
+                    .contest
+                    .set_style_at(kind, crate::contest::shape_corners(count)[corner]);
+                let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["W7XYZ"]));
+                runtime.finish_turn();
+                runtime.key(OpKey::Esm, "W7XYZ", "");
+                let first = replies(runtime.last_turn())[0].to_string();
+                assert!(first.starts_with(want), "{kind:?} {corner}: {first}");
+                let words: Vec<&str> = first.split_whitespace().collect();
+                // Twice from the left side: its last field again.
+                let twice = corner >= count / 2;
+                let n = words.len();
+                assert_eq!(
+                    words[n - 1] == words[n - 2]
+                        || (n >= 4 && words[n - 2..] == words[n - 4..n - 2]),
+                    twice,
+                    "{kind:?} {corner}: {first}"
+                );
             }
         }
     }
@@ -5465,7 +5589,9 @@ mod tests {
                     settings.contest.contest_kind = crate::contest::ContestKind::Pota;
                     settings.contest.my_call = "N4BKY".to_string();
                     settings.contest.my_state = "AL".to_string();
-                    settings.contest.hunter_style = at;
+                    settings
+                        .contest
+                        .set_style_at(crate::contest::ContestKind::Pota, at);
                     let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["W7XYZ"]));
                     runtime.finish_turn();
                     runtime.key(OpKey::Esm, "W7XYZ", "");
@@ -5766,15 +5892,15 @@ mod tests {
         for key in [OpKey::Esm, OpKey::TuAndLog] {
             let mut runtime = Runtime::start(1, settings.clone(), ScriptCalls::new(&["K5XYZ"]));
             let exchange = to_its_exchange(&mut runtime);
-            let words: Vec<&str> = exchange.split_whitespace().collect();
-            let copy = format!("{} {}", words[3], words[6]);
+            let (rst, name) = report_and_name(&exchange);
+            let copy = format!("{rst} {name}");
             runtime.key(OpKey::Tu, "K5XYZ", &copy);
             runtime.finish_turn();
             assert_eq!(view(&runtime).qsos, 0, "F3 logs nothing");
             runtime.key(key, "K5XYZ", &copy);
             assert_eq!(
                 yours(runtime.last_turn()),
-                format!("TU {} 73 EE", words[6]),
+                format!("TU {name} 73 EE"),
                 "{key:?}"
             );
             runtime.finish_turn();
@@ -5791,9 +5917,9 @@ mod tests {
         settings.contest.contest_kind = crate::contest::ContestKind::SimpleQso;
         let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
         let exchange = to_its_exchange(&mut runtime);
-        let words: Vec<&str> = exchange.split_whitespace().collect();
+        let (rst, name) = report_and_name(&exchange);
         let at = runtime.now;
-        runtime.key(OpKey::Esm, "K5XYZ", &format!("{} {}", words[3], words[6]));
+        runtime.key(OpKey::Esm, "K5XYZ", &format!("{rst} {name}"));
         let signoff = sent_by(runtime.last_turn(), 0)[0].clone();
         assert_eq!(signoff.text, "73 EE");
         runtime.run_to(at + ms(signoff.start_sec + 0.1));
@@ -6373,10 +6499,7 @@ mod tests {
         runtime.finish_turn();
         runtime.key(OpKey::Esm, "K5XYZ", "");
         let exchange = replies(runtime.last_turn())[0].to_string();
-        assert!(
-            exchange.starts_with("TU 5NN") || exchange.starts_with("R 5NN"),
-            "{exchange}"
-        );
+        assert!(exchange.contains("5NN "), "{exchange}");
         runtime.finish_turn();
         runtime.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
         runtime.finish_turn();
@@ -7153,8 +7276,8 @@ mod tests {
         settings.contest.contest_kind = crate::contest::ContestKind::SimpleQso;
         let mut simple = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
         let exchange = to_its_exchange(&mut simple);
-        let words: Vec<&str> = exchange.split_whitespace().collect();
-        simple.key(OpKey::Esm, "K5XYZ", &format!("{} {}", words[3], words[6]));
+        let (rst, name) = report_and_name(&exchange);
+        simple.key(OpKey::Esm, "K5XYZ", &format!("{rst} {name}"));
         assert_eq!(taught(&simple.machine.source.learned_speed), ["K5XYZ"]);
         assert_eq!(
             simple.machine.source.learned.len(),
@@ -13948,20 +14071,21 @@ mod tests {
 
     /// An exchange counts as sent once it is on its way: one a pause cut
     /// before it began, or one lost with a failed sound, comes again after
-    /// Resume with a word in front, as it would have gone out.
+    /// Resume as it would have gone out, its style's word in front.
     #[test]
     fn an_exchange_that_never_went_out_keeps_its_lead_word() {
-        let led = |runtime: &Runtime<ScriptCalls>, text: &str| {
-            let first = text.split_whitespace().next().unwrap_or_default();
-            runtime
-                .machine
-                .rules
-                .their_lead
-                .iter()
-                .any(|(lead, _)| *lead == first)
+        // Every caller keeps to `TU` first.
+        let tu = || {
+            let mut settings = run_settings(25.0);
+            settings.contest.set_style_at(
+                crate::contest::ContestKind::Wpx,
+                crate::contest::shape_corners(6)[0],
+            );
+            Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]))
         };
+        let led = |_: &Runtime<ScriptCalls>, text: &str| text.starts_with("TU ");
         // Paused before it began.
-        let mut paused = runtime(&["K5XYZ"]);
+        let mut paused = tu();
         paused.finish_turn();
         paused.key(OpKey::Esm, "K5XYZ", "");
         let planned = replies(paused.last_turn())[0].to_string();
@@ -13977,7 +14101,7 @@ mod tests {
         assert!(led(&paused, replies(&again)[0]), "{:?}", replies(&again));
 
         // Heard whole, then the sound failed.
-        let mut failed = runtime(&["K5XYZ"]);
+        let mut failed = tu();
         failed.finish_turn();
         failed.key(OpKey::Esm, "K5XYZ", "");
         let turn = failed.last_turn().clone();
