@@ -11,8 +11,17 @@ pub struct AlignmentPair {
     pub matched: bool,
 }
 
+/// What an answer holds where a character was skipped: Space on the
+/// keypad or a keyboard, to move on past a character not caught. It keeps
+/// the character's place, so the rest of the answer lines up as copied,
+/// and it is read as that character missed, never as another character it
+/// was taken for. No group ever holds it.
+pub const SKIPPED: char = '_';
+
 /// Pair what was sent with what was received, character by character, at
 /// the fewest edits: a match, a wrong character, one dropped, or one added.
+/// A character skipped ([`SKIPPED`]) is one dropped where it stands, and a
+/// skip past the group's end is nothing.
 pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
     let (s, r) = upper(sent, received);
     // A clean copy is the common case, and needs no table.
@@ -20,7 +29,28 @@ pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
         return s.iter().map(|&c| pair(Some(c), Some(c))).collect();
     }
     let table = Edits::new(&s, &r);
-    table.walk_back(&s, &r, s.len())
+    unskipped(table.walk_back(&s, &r, s.len()))
+}
+
+/// `alignment` with each skip read as the character it stands for missed,
+/// and a skip that stands for none left out.
+fn unskipped(alignment: Vec<AlignmentPair>) -> Vec<AlignmentPair> {
+    alignment
+        .into_iter()
+        .filter_map(|aligned| match aligned {
+            AlignmentPair {
+                sent_char: None,
+                received_char: Some(SKIPPED),
+                ..
+            } => None,
+            AlignmentPair {
+                sent_char,
+                received_char: Some(SKIPPED),
+                ..
+            } => Some(pair(sent_char, None)),
+            aligned => Some(aligned),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -47,7 +77,7 @@ pub(crate) fn align_holding(sent: &str, received: &str) -> (Vec<AlignmentPair>, 
         .rev()
         .find(|lost| table.at(s.len() - lost, r.len()) + *lost as u32 == fewest)
         .unwrap_or(0);
-    (table.walk_back(&s, &r, s.len() - lost), lost)
+    (unskipped(table.walk_back(&s, &r, s.len() - lost)), lost)
 }
 
 /// The fewest edits — a wrong character, one dropped, or one added — that
@@ -449,6 +479,63 @@ mod tests {
         assert_eq!(
             pairs.iter().filter(|p| p.received_char.is_some()).count(),
             20_000
+        );
+    }
+
+    /// A character skipped keeps its place: it is that character missed,
+    /// the rest lines up as copied, a skip past the end is nothing, and a
+    /// skip is never a character taken for another.
+    #[test]
+    fn a_skipped_character_is_missed_where_it_stands() {
+        let pairs = align_group("ABCD", "A_CD");
+        assert_eq!(pairs.len(), 4);
+        assert_eq!(
+            (pairs[1].sent_char, pairs[1].received_char),
+            (Some('B'), None)
+        );
+        assert!(!pairs[1].matched);
+        assert!(
+            pairs
+                .iter()
+                .enumerate()
+                .all(|(at, pair)| at == 1 || pair.matched)
+        );
+        // Skipped at the start and the end alike.
+        let pairs = align_group("ABCD", "_BC_");
+        assert_eq!(
+            pairs
+                .iter()
+                .map(|pair| pair.received_char)
+                .collect::<Vec<_>>(),
+            [None, Some('B'), Some('C'), None]
+        );
+        // A skip past the group's end is nothing at all.
+        let pairs = align_group("AB", "AB_");
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(|pair| pair.matched));
+        // Tallied as misses, and never as a character added.
+        let tally = CopyTally::of("ABCD", "A__D_");
+        assert_eq!(
+            tally.sent[&'B'],
+            LetterAccuracy {
+                correct: 0,
+                total: 1
+            }
+        );
+        assert_eq!(
+            tally.sent[&'C'],
+            LetterAccuracy {
+                correct: 0,
+                total: 1
+            }
+        );
+        assert!(tally.inserted.is_empty(), "{:?}", tally.inserted);
+        // Held: what was skipped is missed, what never came is lost.
+        let (held, lost) = align_holding("KMRSU", "K_");
+        assert_eq!(lost, 3);
+        assert_eq!(
+            (held[1].sent_char, held[1].received_char),
+            (Some('M'), None)
         );
     }
 }

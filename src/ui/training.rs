@@ -1,4 +1,4 @@
-use cw_core::{ChosenSpeed, CountdownTo, MonoMs, answer_length_matches};
+use cw_core::{ChosenSpeed, CountdownTo, MonoMs, SKIPPED, answer_length_matches};
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
@@ -351,6 +351,7 @@ fn AnswerBox(
     on_confirm: EventHandler<()>,
 ) -> Element {
     let shown = draft.read_for(idx).unwrap_or_default();
+    let skipped_in = sent.clone();
     rsx! {
         input {
             id: "group-input-{idx}",
@@ -386,6 +387,13 @@ fn AnswerBox(
                 if e.key() == Key::Enter && !e.is_auto_repeating() {
                     on_confirm.call(());
                 }
+                // Space skips a character not caught, as the keypad's does:
+                // the box holds its place, and a group goes on as soon as the
+                // rest is in. The space itself never reaches the box.
+                if e.key() == Key::Character(" ".to_string()) {
+                    e.prevent_default();
+                    draft.push(idx, SKIPPED, &skipped_in, Some(MonoMs(mono_ms())));
+                }
             },
         }
     }
@@ -402,8 +410,9 @@ pub(crate) enum PadKey {
     Back,
     /// The answer is done.
     Next,
-    /// A run's next field: from Call on to Exchange, a space in Exchange.
-    Field,
+    /// Space: a group's character skipped, or a run's next field, from Call
+    /// on to Exchange, a space in Exchange.
+    Space,
     /// A run's Enter, named for what it sends.
     Send(String),
 }
@@ -429,15 +438,15 @@ impl PadRow {
 /// The keypad's character rows, top to bottom: digits, then the letters as a
 /// keyboard has them, with the punctuation a group can hold at the ends.
 const PAD_ROWS: [&str; 4] = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM,.?"];
-/// What the bottom row holds before ⌫ and Next.
+/// What the bottom row holds before Space, ⌫ and Next.
 const PAD_LAST: [char; 2] = ['=', '+'];
 
 /// The keys a group is answered with: every character a group can hold,
-/// then ⌫ and Next.
+/// then Space, which skips a character not caught, ⌫ and Next.
 fn group_rows() -> Vec<PadRow> {
     let mut rows: Vec<PadRow> = PAD_ROWS.into_iter().map(PadRow::chars).collect();
     let mut last: Vec<PadKey> = PAD_LAST.into_iter().map(PadKey::Char).collect();
-    last.extend([PadKey::Back, PadKey::Next]);
+    last.extend([PadKey::Space, PadKey::Back, PadKey::Next]);
     rows.push(PadRow {
         keys: last,
         class: "keypad-row keypad-last",
@@ -479,11 +488,11 @@ fn pad_face(key: &PadKey) -> (String, String, String, &'static str) {
             "Next".into(),
             "key key-next",
         ),
-        PadKey::Field => (
-            control_id("key", "field"),
-            "Next field".into(),
-            "␣ Field".into(),
-            "key key-field",
+        PadKey::Space => (
+            control_id("key", "space"),
+            "Space".into(),
+            "Space".into(),
+            "key key-space",
         ),
         // Named for what it sends, aloud as on screen; the ↵ after it is
         // drawn apart, so a long label is cut short before it.
@@ -706,8 +715,10 @@ pub fn TrainingView(
             PadKey::Char(ch) => draft.push(current, ch, &sent_now, Some(keyed)),
             PadKey::Back => draft.pop(current, &sent_now),
             PadKey::Next => on_confirm.call(()),
-            // A run's keys: the keys a group is answered with have neither.
-            PadKey::Field | PadKey::Send(_) => {}
+            // A character not caught, skipped: its place held, and on.
+            PadKey::Space => draft.push(current, SKIPPED, &sent_now, Some(keyed)),
+            // A run's key: the keys a group is answered with have none.
+            PadKey::Send(_) => {}
         }
     });
     // One short line. How to key with the paddles is the settings screen's to

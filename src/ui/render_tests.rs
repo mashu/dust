@@ -5422,6 +5422,39 @@ mod interactions {
         });
     }
 
+    /// Space skips a character not caught: the keypad's Space key and a
+    /// keyboard's Space alike put the skip in its place, the box shows it,
+    /// and a group with its places all filled goes to the session at once.
+    /// The space itself never reaches the box.
+    #[test]
+    fn space_skips_a_character_and_moves_on() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            let space = ui.input_tag("key-space");
+            assert!(
+                space.contains(">Space<") || ui.has(">Space</button>"),
+                "{space}"
+            );
+            ui.click("key-k");
+            ui.click("key-space");
+            assert!(box_shows(&ui, "K_"), "{}", ui.input_tag("group-input-0"));
+            ui.click("key-r");
+            assert!(ui.has("committed:K_R"), "{}", ui.html());
+            for _ in 0..3 {
+                ui.click("key-delete");
+            }
+            // A keyboard's Space does the same, and adds no space.
+            ui.click("key-k");
+            let kept = ui.press_key(
+                "group-input-0",
+                Key::Character(" ".to_string()),
+                Code::Space,
+            );
+            assert!(!kept, "the space is kept out of the box");
+            assert!(box_shows(&ui, "K_"), "{}", ui.input_tag("group-input-0"));
+        });
+    }
+
     /// A key types as the finger lands: a touch the browser sends no click
     /// for — one that slid as it tapped — types all the same, and the click
     /// it does send after a clean tap is not a second key. A click with no

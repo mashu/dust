@@ -953,14 +953,16 @@ fn recorded_mode(mode: CharSetMode) -> CharSetMode {
 
 /// An answer as it is kept: upper case, with no whitespace — a group never
 /// has any, so a stray space is neither an error nor a reason the length
-/// does not match — and no longer than [`LONGEST_ANSWER`] allows.
+/// does not match — and no longer than [`LONGEST_ANSWER`] allows. A
+/// character skipped is kept as [`crate::SKIPPED`], which holds its place.
 fn normalize_answer(sent: &str, typed: &str) -> String {
     let longest = (2 * sent.chars().count()).max(LONGEST_ANSWER);
     answer_chars(typed).take(longest).collect()
 }
 
 /// Whether `received` is as long as `sent`, not counting whitespace: when an
-/// answer is complete enough to confirm by itself.
+/// answer is complete enough to confirm by itself. A character skipped
+/// counts, so a group with one skipped moves on as soon as the rest is in.
 pub fn answer_length_matches(sent: &str, received: &str) -> bool {
     !sent.is_empty() && answer_chars(received).count() == sent.chars().count()
 }

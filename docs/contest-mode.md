@@ -264,7 +264,7 @@ no settings saves mid-run. Four things change:
   `run-keys`, `keypad`, `run-log`, `run-actions`): the status and clock,
   the hint, TX and RX, Call and Exchange, Reads as, the message keys or,
   where touch is how you type, the keypad (each build saying its own, as it
-  does of what moves between the fields, Space or `␣ Field`), the log, and
+  does of what moves between the fields, Space or the keypad's `Space`), the log, and
   Pause, End run and Discard; then the run left by its Discard, asked
   twice, through `abort_run`, and a last word on where the rest is.
   Next never starts a run, whose callers would be sound nobody asked for,
@@ -1170,7 +1170,7 @@ key that sends nothing reads no other caller's call into it (9.1).
 | CQ | F1 | `CQ` | 1 |
 | Again: `?` (4.6) | F7 | `? Again` | 1 |
 | Stop sending; wipe the fields | Esc or Alt+S; Alt+W | —; `Wipe` | 1 |
-| Call ⇄ Exchange | Space: on to Exchange from Call, back to Call from Exchange (as built after operator feedback, below); Tab as on any page | `␣ Field`, or a tap | 1 |
+| Call ⇄ Exchange | Space: on to Exchange from Call, back to Call from Exchange (as built after operator feedback, below); Tab as on any page | `Space`, or a tap | 1 |
 | Speed ±2 WPM; pause; end run | PgUp/PgDn; Alt+P; Alt+E | − / +; `Pause`; `End run` | 1 |
 | Your exchange; TU without logging (as MRCE) | F2; F3 | — | 1d |
 | His call; his call + exchange | F5; `;` (Insert also works) | — | 1d |
@@ -1251,7 +1251,7 @@ key that sends nothing reads no other caller's call into it (9.1).
   never moves the cursor out of it; one pause presses Space once, however
   long it lasts; and a key pressed in it, Enter or any message key, ends
   the word with no Space after it. So does anything done by hand: Space
-  from the keyboard, the key bar or `␣ Field`, any key of the keypad,
+  from the keyboard, the key bar or `Space`, any key of the keypad,
   typing, or a click, a tap or Tab into the other field
   (`ContestEntry::finish_letter`), which would otherwise have the word
   space move the cursor a second time, back to the call from an empty
@@ -1273,7 +1273,7 @@ key that sends nothing reads no other caller's call into it (9.1).
   lands at the end of the field it goes to with nothing selected, so ⌫
   takes the call's last character at once; every move of the run's cursor
   does so (`focus_end_script`, `src/ui/widgets.rs`), and the app's tests
-  see the script that moved it. The keypad's `␣ Field` follows the same
+  see the script that moved it. The keypad's `Space` follows the same
   rule, from one place (`space_goes_to`, `src/ui/contest.rs`), as the key
   bar's Space and the hint do, and as built (5b) the paddles' word space.
   The key bar shows Space on a keyboard, desk-only, straight after Enter's
@@ -2322,7 +2322,7 @@ past a group of 20. Wider or taller screens draw a session as before.
 │  Q  W  E  R  T  Y  U  I  O  P      │
 │  A  S  D  F  G  H  J  K  L  /      │
 │  Z  X  C  V  B  N  M  ?    ⌫       │
-│ [  ␣ Field  ]  [   TU & log  ↵  ]  │
+│ [   Space   ]  [   TU & log  ↵  ]  │
 ├────────────────────────────────────┤
 │ [ ⏸ Pause ]        [ End run ]     │
 └────────────────────────────────────┘
@@ -2355,7 +2355,7 @@ The desktop log's exchange column holds a Sprint's serial, name and state.
 The keypad takes its rows as props, not the constants `PAD_ROWS` and
 `PAD_LAST` (`training.rs`): the character
 rows stay as in group training, only `,` and `.` leave row four, and the
-last row is `␣ Field` (Space's rule, §4.5: Call to Exchange, and back
+last row is `Space` (Space's rule, §4.5: Call to Exchange, and back
 to Call from Exchange but where it separates an item) and the ESM
 key, whose label and `aria-label` name what it sends, cut short before its
 `↵` when long. Fields keep `inputmode="none"` (`ANSWER_INPUT_MODE`,
@@ -4061,7 +4061,7 @@ plus a mark); `scripts/callsign-prefixes.py` (zones and continents).
   type (WPX, CQ WW, ARRL DX from either side) whatever is typed, and
   where it has more (the Sprint, Field Day, Simple QSO) once what is typed
   reads whole, is nothing or ends in a space, a space typed otherwise; the
-  keypad's `␣ Field` the same; the cursor at the end of the field it goes
+  keypad's `Space` the same; the cursor at the end of the field it goes
   to, which the app's tests see in the focus script that moved it; with a
   correction to put right, the hint on a wider screen and the key bar say
   Space goes back only where it does, not in a Sprint's exchange typed
@@ -4341,7 +4341,7 @@ to Exchange, back to Call from a WPX exchange, a space between a Sprint's
 items, the cursor at the field's end and nothing typed; a hesitation of
 six dits keeps a call whole; a pause presses Space once; and none follows
 Enter. A Space by hand in the word space, from the keyboard, the key bar
-or `␣ Field`, moves the cursor once, and typing or a focus moved to the
+or `Space`, moves the cursor once, and typing or a focus moved to the
 other field leaves it where it is: the word space adds nothing after any
 of them; and a letter still open when Space comes lands first, in Call.
 
@@ -4657,7 +4657,7 @@ the design where it says so:
    once the items typed read whole, or the field is empty or ends in a
    space, and otherwise it types the space before the next item. It never
    types a space only for it to be dropped, and the cursor lands at the end
-   of the call with nothing selected. The keypad's `␣ Field` follows it;
+   of the call with nothing selected. The keypad's `Space` follows it;
    the hint (on a wider screen) and the key bar say how to get back where
    a correction waits and Space does go back, and the key bar names what
    Space does at every keystroke; Tab moves as on any page (§4.5, §7).

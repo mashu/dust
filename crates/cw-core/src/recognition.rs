@@ -753,6 +753,20 @@ mod tests {
         assert_eq!(recognise("KMR", "KMR", &slow)[2], Some(RECOGNITION_MAX_MS));
     }
 
+    /// A character skipped holds its place: it is no recognition, and the
+    /// characters after it line up and keep theirs, where one left out
+    /// would end the timing there.
+    #[test]
+    fn a_character_skipped_keeps_the_rest_timed() {
+        let keys = times(&[Some(550), Some(900), Some(1_250)], true);
+        assert_eq!(
+            recognise("KMR", &format!("K{}R", crate::SKIPPED), &keys),
+            [Some(250), None, Some(250)]
+        );
+        let left_out = times(&[Some(550), Some(1_250)], true);
+        assert_eq!(recognise("KMR", "KR", &left_out), [Some(250), None, None]);
+    }
+
     /// Typed wrong, typed too soon to be heard, or typed behind: untimed.
     #[test]
     fn only_a_character_typed_right_while_keeping_up_is_timed() {

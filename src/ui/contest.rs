@@ -557,7 +557,7 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
 }
 
 /// Where Space in `field` takes the cursor, the keyboard's, the keypad's
-/// ␣ Field, the key bar's and the paddles' word space alike: from Call on to
+/// Space key, the key bar's and the paddles' word space alike: from Call on to
 /// Exchange, as a call has no spaces; from Exchange back to Call, as
 /// MorseRunner's and N1MM's space bar goes, so a call is put right with one
 /// key, but where it separates the exchange's next item
@@ -570,7 +570,7 @@ fn space_goes_to(ctx: AppCtx, field: EntryField) -> Option<EntryField> {
     }
 }
 
-/// A word space keyed on the paddles, or Space from the keypad's ␣ Field:
+/// A word space keyed on the paddles, or Space from the keypad's Space:
 /// where [`space_goes_to`] says, or else the space before the exchange's
 /// next item, typed. A Space pressed by hand ends the paddles' word first
 /// ([`crate::contest_runtime::ContestEntry::finish_letter`]), so their word
@@ -744,7 +744,7 @@ fn EnterChip(qso: QsoState, live: bool) -> Element {
 /// beside F2 Exch, or the space before the exchange's next item. A click
 /// does the same. Lit, as Enter's own keys are, where it takes the cursor
 /// back to a call to put right, as Enter's `Fix call` does. A finger has
-/// the keypad's ␣ Field instead.
+/// the keypad's Space instead.
 #[component]
 fn SpaceKey(qso: QsoState, live: bool) -> Element {
     let ctx = use_context::<AppCtx>();
@@ -800,7 +800,7 @@ fn RunKeypad(qso: QsoState, open: bool) -> Element {
         match pressed {
             PadKey::Char(ch) => entry.push(ch, Some(keyed)),
             PadKey::Back => entry.pop(),
-            PadKey::Field => field_space(ctx),
+            PadKey::Space => field_space(ctx),
             PadKey::Send(_) | PadKey::Next => press_key(ctx, OpKey::Esm),
         }
     });
@@ -817,7 +817,7 @@ fn pad_rows(enter: String) -> Vec<PadRow> {
     tail.class = "keypad-row keypad-tail";
     rows.push(tail);
     rows.push(PadRow {
-        keys: vec![PadKey::Field, PadKey::Send(enter)],
+        keys: vec![PadKey::Space, PadKey::Send(enter)],
         class: "keypad-row keypad-send",
     });
     rows
@@ -2062,7 +2062,7 @@ mod tests {
             );
             assert!(ui.has(&format!(r#"<span class="key-label">{label}</span>"#)));
             assert!(ui.has(r#"<span class="key-return">↵</span>"#));
-            ui.tap("key-field");
+            ui.tap("key-space");
             ui.tap("key-1");
             ui.tap("key-2");
             assert!(ui.input_tag("field-exchange").contains(r#"value="12""#));
@@ -2208,20 +2208,20 @@ mod tests {
         });
     }
 
-    /// The keypad's ␣ Field does as Space does: on to Exchange from Call;
+    /// The keypad's Space does as Space does: on to Exchange from Call;
     /// back to Call from a WPX exchange, typing nothing; in a Sprint, a
     /// space between its exchange's items until it reads whole or already
     /// ends in one, then back to Call, the cursor at the call's end.
     #[test]
-    fn the_keypads_field_key_follows_the_space_rule() {
+    fn the_keypads_space_key_follows_the_space_rule() {
         run(|| async {
             let (mut ui, _recorder, call) = first_caller().await;
             ui.type_into("field-call", &call);
-            ui.tap("key-field");
+            ui.tap("key-space");
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
             ui.tap("key-1");
             ui.take_focused();
-            ui.tap("key-field");
+            ui.tap("key-space");
             // The cursor at the end of the call, nothing selected.
             assert_eq!(
                 ui.take_focus_scripts(),
@@ -2246,7 +2246,7 @@ mod tests {
                 "key-1",
                 "key-4",
                 "key-5",
-                "key-field",
+                "key-space",
                 "key-b",
                 "key-o",
                 "key-b",
@@ -2257,13 +2257,13 @@ mod tests {
                 ui.input_tag("field-exchange")
                     .contains(r#"value="145 BOB""#)
             );
-            ui.tap("key-field");
+            ui.tap("key-space");
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
             assert!(
                 ui.input_tag("field-exchange")
                     .contains(r#"value="145 BOB ""#)
             );
-            ui.tap("key-field");
+            ui.tap("key-space");
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
             assert!(
                 ui.input_tag("field-exchange")
@@ -2274,7 +2274,7 @@ mod tests {
             for key in ["key-o", "key-r"] {
                 ui.tap(key);
             }
-            ui.tap("key-field");
+            ui.tap("key-space");
             assert_eq!(
                 ui.with_app(|ctx| ctx.entry.focus()),
                 EntryField::Call,
@@ -2419,7 +2419,7 @@ mod tests {
     }
 
     /// A Space pressed by hand while the paddles wait out a word space, on
-    /// the keyboard, the key bar or the keypad's ␣ Field, ends their word:
+    /// the keyboard, the key bar or the keypad's Space, ends their word:
     /// the cursor moves once, as pressed, and the word space does not move
     /// it again, back to the call from an empty WPX exchange. So does
     /// anything typed, and a click or Tab into the other field. A letter
@@ -2429,7 +2429,7 @@ mod tests {
     fn a_space_by_hand_ends_the_paddles_word() {
         run(|| async {
             let space = Key::Character(" ".into());
-            for by in ["keyboard", "btn-space", "key-field", "focus", "typed"] {
+            for by in ["keyboard", "btn-space", "key-space", "focus", "typed"] {
                 for open in [false, true] {
                     let (mut ui, _recorder) =
                         Ui::app_with_settings(paddled(cw_core::ContestKind::Wpx));
@@ -2816,7 +2816,7 @@ mod tests {
         assert_eq!(rows[3].keys.last(), Some(&PadKey::Back));
         assert_eq!(
             rows[4].keys,
-            [PadKey::Field, PadKey::Send("TU & log".into())]
+            [PadKey::Space, PadKey::Send("TU & log".into())]
         );
         assert_eq!(exchange_label(&[Field::Nr]), "Exchange · NR");
         assert_eq!(
