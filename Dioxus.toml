@@ -1,5 +1,9 @@
 [application]
 name = "dust"
+# Dust's own Android activity, in place of dx's: it keeps the webview clear
+# of the system bars and the keyboard once Android 15 draws the app edge to
+# edge (docs/platforms.md, Android).
+android_main_activity = "android/MainActivity.kt"
 
 [web.app]
 # `dx bundle` writes this into index.html's <title> in place of

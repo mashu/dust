@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dust's theme from Android 15, edge to edge: both bars are drawn over
+     the window's paper, so the navigation bar's icons are dark on it too. -->
+<resources>
+    <style name="AppTheme" parent="@style/Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimaryDark">@color/dust_paper</item>
+        <item name="android:windowBackground">@color/dust_paper</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

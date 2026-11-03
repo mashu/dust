@@ -130,6 +130,7 @@ cp "$aab" "$out"
 echo "Packing native debug symbols into $out"
 pack_android_native_symbols "$out"
 check_android_page_size "$out"
+check_android_build "$out"
 
 echo "Signing $out"
 jarsigner -sigalg SHA256withRSA -digestalg SHA256 \

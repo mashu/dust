@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dust's theme in dark mode: the window and the status bar the dark
+     theme's background, with light icons on it. -->
+<resources>
+    <style name="AppTheme" parent="@style/Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimaryDark">@color/dust_night</item>
+        <item name="android:windowBackground">@color/dust_night</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
