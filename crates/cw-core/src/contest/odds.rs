@@ -337,9 +337,11 @@ mod tests {
         assert_eq!(odds.slips, CallerOdds::default().slips);
         assert_eq!(odds.calls_twice, CallerOdds::default().calls_twice);
         assert_eq!(read(serde_json::json!("lots")), CallerOdds::default());
-        let mut wild = CallerOdds::default();
-        wild.fumbles = f64::NAN;
-        wild.abroad = 3.0;
+        let wild = CallerOdds {
+            fumbles: f64::NAN,
+            abroad: 3.0,
+            ..CallerOdds::default()
+        };
         let kept = wild.clamped();
         assert_eq!(kept.fumbles, CallerOdds::default().fumbles);
         assert_eq!(kept.abroad, 1.0);
@@ -348,9 +350,11 @@ mod tests {
     /// A card's Reset puts back its own shares and no other card's.
     #[test]
     fn a_cards_reset_puts_back_its_own() {
-        let mut odds = CallerOdds::default();
-        odds.flutter = 0.9;
-        odds.dupe = 0.5;
+        let mut odds = CallerOdds {
+            flutter: 0.9,
+            dupe: 0.5,
+            ..CallerOdds::default()
+        };
         odds.reset_card(OddsCard::Band, &CallerOdds::default());
         assert_eq!(odds.flutter, 0.3);
         assert_eq!(odds.dupe, 0.5);
