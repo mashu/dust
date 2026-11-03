@@ -5,6 +5,8 @@
 //! whether you hear the band while you do, and your station.
 //! Everything else a run uses is shared with group training.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::{CharSetMode, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
@@ -13,9 +15,7 @@ use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_can
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{
-    CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, STYLE_ON_AIR, Side, TuCall,
-};
+use crate::contest::{CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -120,19 +120,18 @@ pub struct ContestSettings {
     /// not sign by its own rules: every QSO, every third, or never. Set on
     /// the contest card, with the run style.
     pub contest_tu_call: TuCall,
-    /// Where the dot stands in the shape that sets how often POTA hunters
-    /// send each of their replies, one at each corner: the middle has them
-    /// all alike, a corner that one alone ([`crate::contest::corner_shares`]).
-    /// [`STYLE_ON_AIR`] until moved, as heard on the air. Set on the contest
-    /// card, where the contest lets you
-    /// ([`crate::contest::ContestRules::varies`]).
-    #[serde(deserialize_with = "forgiving_style")]
-    pub hunter_style: [f64; 2],
-    /// The POTA replies you turned off, by their corners from the top, the
-    /// first nought: hunters never keep to them. Never every one: the last
-    /// on stays on. Set on the contest card, a click on a corner.
-    #[serde(deserialize_with = "forgiving_off_styles")]
-    pub hunter_styles_off: Vec<usize>,
+    /// How callers reply in each contest whose callers vary
+    /// ([`crate::contest::ContestRules::varies`]), by the contest's name:
+    /// where you put the knob in its shape of replies and which you turned
+    /// off. A contest left out is as heard on the air. Set on the contest
+    /// card.
+    #[serde(deserialize_with = "forgiving_styles")]
+    pub caller_styles: BTreeMap<String, StyleChoice>,
+    /// How many POTA hunters are outside the US and Canada, in percent: each
+    /// sends a report and no state, as DX stations do. Set on the contest
+    /// card, under the hunters' styles.
+    #[serde(deserialize_with = "forgiving_dx_percent")]
+    pub hunter_dx_percent: u32,
     /// Each new caller's speed drawn from your copy speed in contests, within
     /// the Speed card's ranges: faster as you copy calls and numbers clean,
     /// slower as you miss them. Off, it is drawn evenly from the ranges. A
@@ -196,8 +195,8 @@ impl Default for ContestSettings {
             contest_minutes: 10,
             contest_show_copy: false,
             contest_tu_call: TuCall::Every,
-            hunter_style: STYLE_ON_AIR,
-            hunter_styles_off: Vec::new(),
+            caller_styles: BTreeMap::new(),
+            hunter_dx_percent: HUNTER_DX_PERCENT,
             contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
@@ -250,38 +249,53 @@ fn forgiving_number<'de, D: serde::Deserializer<'de>, T>(
         .map_or(fallback, |number| whole(number.round())))
 }
 
-/// Where the hunters' dot stands, as saved: two numbers, across and down;
-/// anything else reads as where it stands until moved. A point outside the
-/// shape is brought into it with the rest of the clamp.
-fn forgiving_style<'de, D: serde::Deserializer<'de>>(
+/// The callers' styles as saved, each contest's by its name: where its knob
+/// stands, two numbers across and down, and the replies turned off, whole
+/// numbers. A contest whose knob is anything but two numbers is left out,
+/// as on the air, and anything but whole numbers for the replies turned off
+/// reads as none; anything but such a list of contests reads as none set.
+/// What does not fit a contest's shape goes with the rest of the clamp.
+fn forgiving_styles<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<[f64; 2], D::Error> {
+) -> Result<BTreeMap<String, StyleChoice>, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
-    let read = || -> Option<[f64; 2]> {
+    let read_at = |value: &serde_json::Value| -> Option<[f64; 2]> {
         let [x, y] = value.as_array()?.as_slice() else {
             return None;
         };
         let (x, y) = (x.as_f64()?, y.as_f64()?);
         (x.is_finite() && y.is_finite()).then_some([x, y])
     };
-    Ok(read().unwrap_or(STYLE_ON_AIR))
+    let read_off = |value: Option<&serde_json::Value>| -> Vec<usize> {
+        let read = || -> Option<Vec<usize>> {
+            value?
+                .as_array()?
+                .iter()
+                .map(|entry| entry.as_u64().and_then(|at| usize::try_from(at).ok()))
+                .collect()
+        };
+        read().unwrap_or_default()
+    };
+    let Some(contests) = value.as_object() else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(contests
+        .iter()
+        .filter_map(|(name, choice)| {
+            let at = read_at(choice.get("at")?)?;
+            let off = read_off(choice.get("off"));
+            Some((name.clone(), StyleChoice { at, off }))
+        })
+        .collect())
 }
 
-/// The replies turned off, as saved: whole numbers; anything else, and any
-/// entry that is not one, reads as none turned off. Ones past the corners
-/// there are go with the rest of the clamp.
-fn forgiving_off_styles<'de, D: serde::Deserializer<'de>>(
+/// The share of POTA hunters that are DX, as saved: a number, rounded;
+/// anything else is the share it starts at.
+fn forgiving_dx_percent<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Vec<usize>, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    let read = || -> Option<Vec<usize>> {
-        value
-            .as_array()?
-            .iter()
-            .map(|entry| entry.as_u64().and_then(|at| usize::try_from(at).ok()))
-            .collect()
-    };
-    Ok(read().unwrap_or_default())
+) -> Result<u32, D::Error> {
+    // A float cast to an integer saturates at its ends.
+    forgiving_number(deserializer, |percent| percent as u32, HUNTER_DX_PERCENT)
 }
 
 /// Your speed as saved: a speed of your own, or 0 for the middle of the
@@ -297,7 +311,69 @@ fn forgiving_sending<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
     forgiving_number(deserializer, |db| db as i32, MY_SENDING_DEFAULT_DB)
 }
 
+/// How many POTA hunters are DX until you set it, in percent: a choice,
+/// not a count, so that a run of a few minutes has some to copy.
+pub const HUNTER_DX_PERCENT: u32 = 25;
+
+/// Where you put the knob in a contest's shape of caller styles, across
+/// and down from the middle, and the replies, by their corners from the top
+/// right, that you turned off there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StyleChoice {
+    pub at: [f64; 2],
+    pub off: Vec<usize>,
+}
+
 impl ContestSettings {
+    /// Where the knob stands in `kind`'s shape of caller styles: where you
+    /// put it, or as heard on the air.
+    pub fn style_at(&self, kind: ContestKind) -> [f64; 2] {
+        self.caller_styles
+            .get(kind.name())
+            .map_or_else(|| kind.rules().styles_on_air(), |choice| choice.at)
+    }
+
+    /// The replies you turned off in `kind`'s shape: none until you do.
+    pub fn styles_off(&self, kind: ContestKind) -> &[usize] {
+        self.caller_styles
+            .get(kind.name())
+            .map_or(&[], |choice| choice.off.as_slice())
+    }
+
+    /// The knob in `kind`'s shape put `at`.
+    pub fn set_style_at(&mut self, kind: ContestKind, at: [f64; 2]) {
+        self.style_choice(kind).at = at;
+        self.tidy_style(kind);
+    }
+
+    /// The replies turned off in `kind`'s shape made `off`.
+    pub fn set_styles_off(&mut self, kind: ContestKind, off: Vec<usize>) {
+        self.style_choice(kind).off = off;
+        self.tidy_style(kind);
+    }
+
+    fn style_choice(&mut self, kind: ContestKind) -> &mut StyleChoice {
+        self.caller_styles
+            .entry(kind.name().to_string())
+            .or_insert_with(|| StyleChoice {
+                at: kind.rules().styles_on_air(),
+                off: Vec::new(),
+            })
+    }
+
+    /// `kind`'s choice left out where it is as on the air, so a save holds
+    /// only what was moved.
+    fn tidy_style(&mut self, kind: ContestKind) {
+        let on_air = kind.rules().styles_on_air();
+        if self
+            .caller_styles
+            .get(kind.name())
+            .is_some_and(|choice| choice.at == on_air && choice.off.is_empty())
+        {
+            self.caller_styles.remove(kind.name());
+        }
+    }
+
     /// How loud your own messages play, as a peak of full scale: the
     /// monitor's level, [`MONITOR_LEVEL`], turned down by your sending's
     /// decibels, and nothing at all at [`MY_SENDING_OFF_DB`].
@@ -1339,40 +1415,87 @@ mod tests {
         assert_eq!((wild.my_wpm, wild.my_sending_db), (0, i32::MAX));
         let rounded = read(serde_json::json!({ "myWpm": 29.6, "mySendingDb": -8.6 }));
         assert_eq!((rounded.my_wpm, rounded.my_sending_db), (30, -9));
-        // The hunters' dot: where it stands until moved, and anything but
-        // two numbers read as that; a point kept, brought into the shape
-        // with the rest of the clamp.
-        assert_eq!(missing.hunter_style, STYLE_ON_AIR);
-        let moved = read(serde_json::json!({ "hunterStyle": [-0.2, 0.3] }));
-        assert_eq!(moved.hunter_style, [-0.2, 0.3]);
+        // The callers' styles: as heard on the air until set, each contest
+        // its own; a knob kept as it was saved, fitted to its shape with the
+        // rest of the clamp; a contest whose knob is not two numbers left
+        // out, and replies turned off that are not whole numbers read as
+        // none.
+        assert!(missing.caller_styles.is_empty());
+        let pota = ContestKind::Pota.rules().styles_on_air();
+        assert_eq!(missing.style_at(ContestKind::Pota), pota);
+        assert!(missing.styles_off(ContestKind::Wpx).is_empty());
+        let set = read(serde_json::json!({
+            "callerStyles": {
+                "wpx": { "at": [-0.2, 0.3], "off": [2, 5] },
+                "pota": { "at": [0.1, 0.1] },
+                "cqww": { "at": [1.0, "x"], "off": [1] },
+                "fieldday": { "at": [0.0, 0.0], "off": [1, -2] },
+                "nonsense": { "at": [0.0, 0.0] },
+            }
+        }));
+        assert_eq!(set.style_at(ContestKind::Wpx), [-0.2, 0.3]);
+        assert_eq!(set.styles_off(ContestKind::Wpx), [2, 5]);
+        assert_eq!(set.style_at(ContestKind::Pota), [0.1, 0.1]);
+        assert!(set.styles_off(ContestKind::Pota).is_empty());
+        assert_eq!(
+            set.style_at(ContestKind::Cqww),
+            ContestKind::Cqww.rules().styles_on_air()
+        );
+        assert!(set.styles_off(ContestKind::FieldDay).is_empty());
         for odd in [
             serde_json::json!("lots"),
             serde_json::Value::Null,
-            serde_json::json!([1.0]),
-            serde_json::json!([1.0, "x"]),
+            serde_json::json!([1.0, 2.0]),
         ] {
-            let read = read(serde_json::json!({ "hunterStyle": odd }));
-            assert_eq!(read.hunter_style, STYLE_ON_AIR, "{odd}");
+            let read = read(serde_json::json!({ "callerStyles": odd }));
+            assert!(read.caller_styles.is_empty(), "{odd}");
         }
-        // The replies turned off: none until a corner is clicked, and
-        // anything but whole numbers read as none.
-        assert!(missing.hunter_styles_off.is_empty());
-        let off = read(serde_json::json!({ "hunterStylesOff": [2, 5] }));
-        assert_eq!(off.hunter_styles_off, [2, 5]);
-        for odd in [
-            serde_json::json!("two"),
-            serde_json::json!([1, -2]),
-            serde_json::json!([0.5]),
-        ] {
-            let read = read(serde_json::json!({ "hunterStylesOff": odd }));
-            assert!(read.hunter_styles_off.is_empty(), "{odd}");
-        }
+        // The DX hunters: a share of their own until set, any number kept
+        // to the clamp, anything else that share.
+        assert_eq!(missing.hunter_dx_percent, HUNTER_DX_PERCENT);
+        assert_eq!(
+            read(serde_json::json!({ "hunterDxPercent": 40.4 })).hunter_dx_percent,
+            40
+        );
+        assert_eq!(
+            read(serde_json::json!({ "hunterDxPercent": "x" })).hunter_dx_percent,
+            HUNTER_DX_PERCENT
+        );
         let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
         assert_eq!(json["contestTuCall"], "every");
-        assert_eq!(json["hunterStylesOff"], serde_json::json!([]));
-        assert_eq!(json["hunterStyle"], serde_json::json!([0.3, -0.47]));
+        assert_eq!(json["callerStyles"], serde_json::json!({}));
+        assert_eq!(json["hunterDxPercent"], 25);
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -3);
+    }
+
+    /// Moving a contest's knob or turning a reply off keeps it for that
+    /// contest alone; brought back as on the air, it is no longer saved.
+    #[test]
+    fn each_contest_keeps_its_own_styles() {
+        let mut settings = ContestSettings::default();
+        settings.set_style_at(ContestKind::Wpx, [0.2, 0.1]);
+        settings.set_styles_off(ContestKind::Pota, vec![3]);
+        assert_eq!(settings.style_at(ContestKind::Wpx), [0.2, 0.1]);
+        assert!(settings.styles_off(ContestKind::Wpx).is_empty());
+        assert_eq!(
+            settings.style_at(ContestKind::Pota),
+            ContestKind::Pota.rules().styles_on_air()
+        );
+        assert_eq!(settings.styles_off(ContestKind::Pota), [3]);
+        let json = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(
+            json["callerStyles"]["wpx"]["at"],
+            serde_json::json!([0.2, 0.1])
+        );
+        assert_eq!(json["callerStyles"]["pota"]["off"], serde_json::json!([3]));
+        settings.set_styles_off(ContestKind::Pota, Vec::new());
+        settings.set_style_at(ContestKind::Wpx, ContestKind::Wpx.rules().styles_on_air());
+        assert!(
+            settings.caller_styles.is_empty(),
+            "{:?}",
+            settings.caller_styles
+        );
     }
 
     #[test]

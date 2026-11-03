@@ -793,8 +793,9 @@ pub(crate) mod tests {
         k.contest_minutes = 25;
         k.contest_show_copy = true;
         k.contest_tu_call = cw_core::TuCall::Third;
-        k.hunter_style = [-0.5, 0.3];
-        k.hunter_styles_off = vec![3];
+        k.set_style_at(cw_core::ContestKind::Pota, [-0.5, 0.3]);
+        k.set_styles_off(cw_core::ContestKind::Wpx, vec![3]);
+        k.hunter_dx_percent = 60;
         k.contest_adapt_speed = false;
         k.my_wpm = 34;
         k.my_sending_db = -21;

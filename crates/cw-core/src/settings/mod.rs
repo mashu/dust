@@ -727,9 +727,9 @@ mod reset;
 mod save;
 
 pub use contest::{
-    CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX, MY_NAME_MAX, MY_POWER_MAX,
-    MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN, MY_ZONE_MAX, class_reading,
-    power_reading, section_code, state_code,
+    CONTEST_MINUTES_MAX, ContestSettings, HUNTER_DX_PERCENT, MY_CALL_MAX, MY_NAME_MAX,
+    MY_POWER_MAX, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN, MY_ZONE_MAX,
+    StyleChoice, class_reading, power_reading, section_code, state_code,
 };
 pub use contest_preset::ContestPreset;
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
@@ -1085,8 +1085,21 @@ mod tests {
         s.contest.contest_minutes = 9_000;
         s.contest.contest_show_copy = true;
         s.contest.contest_tu_call = crate::contest::TuCall::Never;
-        s.contest.hunter_style = [9_000.0, 0.0];
-        s.contest.hunter_styles_off = vec![9, 2, 2];
+        s.contest.caller_styles.insert(
+            "pota".to_string(),
+            StyleChoice {
+                at: [9_000.0, 0.0],
+                off: vec![9, 2, 2],
+            },
+        );
+        s.contest.caller_styles.insert(
+            "sprint".to_string(),
+            StyleChoice {
+                at: [0.1, 0.1],
+                off: vec![1],
+            },
+        );
+        s.contest.hunter_dx_percent = 9_000;
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 9_000;
         s.contest.my_sending_db = 9_000;
@@ -1204,13 +1217,17 @@ mod tests {
             crate::callsign::CALLSIGN_TIER_MAX
         );
         assert_eq!(s.contest.contest_minutes, CONTEST_MINUTES_MAX);
-        // Far right: to the shape's right edge.
-        assert!(s.contest.hunter_style[0] <= 1.0 && s.contest.hunter_style[0] > 0.8);
+        // Far right: to the shape's right edge; only corners there are,
+        // each once; the Sprint, whose callers do not vary, keeps none.
+        let pota = s.contest.style_at(crate::contest::ContestKind::Pota);
+        assert!(pota[0] <= 1.0 && pota[0] > 0.8, "{pota:?}");
         assert_eq!(
-            s.contest.hunter_styles_off,
+            s.contest.styles_off(crate::contest::ContestKind::Pota),
             [2],
             "corners there are, each once"
         );
+        assert!(!s.contest.caller_styles.contains_key("sprint"));
+        assert_eq!(s.contest.hunter_dx_percent, 100);
         assert_eq!(s.contest.my_call, "DL1/ABC/QRP");
         assert_eq!(s.contest.my_name, "JEANLUCMAX");
         assert_eq!(s.contest.my_state, "QC");
@@ -1846,8 +1863,8 @@ mod tests {
         assert_eq!(contest.contest.contest_kind, d.contest_kind);
         assert_eq!(contest.contest.contest_style, d.contest_style);
         assert_eq!(contest.contest.contest_tu_call, d.contest_tu_call);
-        assert_eq!(contest.contest.hunter_style, d.hunter_style);
-        assert_eq!(contest.contest.hunter_styles_off, d.hunter_styles_off);
+        assert_eq!(contest.contest.caller_styles, d.caller_styles);
+        assert_eq!(contest.contest.hunter_dx_percent, d.hunter_dx_percent);
     }
 
     /// Undo after a reset puts that card back as it was, and only that one:
@@ -2056,8 +2073,11 @@ mod tests {
         s.contest.contest_minutes = 25;
         s.contest.contest_show_copy = true;
         s.contest.contest_tu_call = crate::contest::TuCall::Third;
-        s.contest.hunter_style = [-0.5, 0.3];
-        s.contest.hunter_styles_off = vec![3];
+        s.contest
+            .set_style_at(crate::contest::ContestKind::Pota, [-0.5, 0.3]);
+        s.contest
+            .set_styles_off(crate::contest::ContestKind::Wpx, vec![3]);
+        s.contest.hunter_dx_percent = 60;
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 34;
         s.contest.my_sending_db = -21;
@@ -2185,7 +2205,7 @@ mod tests {
                 "{section:?}"
             );
             assert_eq!(
-                s.contest.hunter_style == crate::contest::STYLE_ON_AIR,
+                s.contest.caller_styles.is_empty() && s.contest.hunter_dx_percent == 25,
                 section == SettingsSection::CharacterSet,
                 "{section:?}"
             );

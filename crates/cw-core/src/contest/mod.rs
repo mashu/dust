@@ -71,9 +71,9 @@ pub(crate) use record::LAYOUT;
 pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use rules::{
-    CallerStyles, ContestRules, FAREWELLS, Fill, GREETING_HOUR, Multiplier, PerSide, Points, Reply,
-    STYLE_EVEN, STYLE_ON_AIR, Scoring, Side, Sides, corner_shares, greeting, into_shape,
-    shape_corners, shares_without, toggle_corner,
+    CallerStyles, ContestRules, FAREWELLS, Fill, Form, GREETING_HOUR, Multiplier, PerSide, Points,
+    STYLE_EVEN, Scoring, Side, Sides, Styles, corner_shares, greeting, into_shape, shape_corners,
+    shares_without, toggle_corner,
 };
 pub use score::{ContestScore, MyStation, Placed, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};

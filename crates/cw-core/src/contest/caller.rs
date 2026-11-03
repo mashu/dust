@@ -15,7 +15,7 @@ use super::data::zones::draw_zone;
 use super::esm::MessagePart;
 use super::exchange::{Field, send_5nn, send_power, send_report, send_serial, send_zone};
 use super::place::Placement;
-use super::rules::{ContestRules, STYLE_ON_AIR, Side};
+use super::rules::{ContestRules, STYLE_EVEN, Side};
 use super::serial::SerialModel;
 use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
@@ -366,11 +366,11 @@ pub(super) struct Caller {
     /// Its exchange as it sends it, fixed the first time it is needed.
     exchange: Option<Vec<(Field, String)>>,
     /// The whole reply it keeps to, where callers vary as you set them
-    /// ([`ContestRules::their_replies`]): decided the first time it sends
+    /// ([`ContestRules::their_styles`]): decided the first time it sends
     /// its exchange, and never drawn in a contest whose callers do not.
     reply: Option<usize>,
-    /// Where you put the dot that sets how often each reply comes, where
-    /// callers vary; where it stands until moved elsewhere.
+    /// Where you put the knob that sets how often each reply comes, where
+    /// callers vary: as on the air until moved.
     style_at: [f64; 2],
     /// The replies you turned off, which it never keeps to.
     styles_off: Vec<usize>,
@@ -483,12 +483,12 @@ impl Caller {
             exchange: None,
             reply: None,
             style_at: if rules.varies() {
-                settings.contest.hunter_style
+                settings.contest.style_at(rules.kind)
             } else {
-                STYLE_ON_AIR
+                STYLE_EVEN
             },
             styles_off: if rules.varies() {
-                settings.contest.hunter_styles_off.clone()
+                settings.contest.styles_off(rules.kind).to_vec()
             } else {
                 Vec::new()
             },
@@ -1106,9 +1106,9 @@ impl Caller {
                 let text = if self.exchanges_sent > 0 {
                     body
                 } else {
-                    match self.reply.and_then(|reply| rules.their_replies.get(reply)) {
-                        // Its own reply's word, kept to.
-                        Some(reply) => rules.their_first_exchange_led(reply.lead, my_call, &body),
+                    match self.reply.and_then(|reply| rules.reply_lead(reply)) {
+                        // Its own style's words, kept to.
+                        Some(lead) => rules.their_first_exchange_led(lead, my_call, &body),
                         None => {
                             let lead = rules.lead_at(self.rng.f64());
                             rules.their_first_exchange(lead, my_call, &body)
@@ -1473,15 +1473,16 @@ mod tests {
             .reply(rules(), Side::Dx, "DL1ABC", 60_000)
             .expect("a reply");
         assert_eq!(says, Says::Exchange);
-        let serial = caller.exchange(rules(), Side::Dx, 0)[0].1.clone();
-        assert!(text == format!("TU 5NN {serial}") || text == format!("R 5NN {serial}"));
+        let sent = caller.exchange(rules(), Side::Dx, 0).to_vec();
+        let any = rules().first_exchanges(Side::Dx, "DL1ABC", "K5XYZ", &sent);
+        assert!(any.contains(&text), "{text} is none of {any:?}");
         // Asked again, it sends the same serial, alone.
         let reaction = caller.hear(&[Again], &[]);
         assert!(reaction.replies && reaction.asked);
         let again = caller
             .reply(rules(), Side::Dx, "DL1ABC", 120_000)
             .expect("a reply");
-        assert_eq!(again.0, format!("5NN {serial}"));
+        assert_eq!(again.0, &text[text.find("5NN").expect("its report")..]);
         assert!(!caller.hear(&[Tu], &[]).replies);
         assert_eq!(caller.state, CallerState::Done);
     }
@@ -1519,17 +1520,13 @@ mod tests {
         let (rst, name) = (&fields[0], &fields[1]);
         assert_eq!((rst.0, name.0), (Field::Rst, Field::Name));
         assert!(Field::Rst.canonical(&rst.1).is_some(), "{}", rst.1);
-        assert_eq!(
-            text,
-            format!("R TNX UR {} {} NAME {} {} BK", rst.1, rst.1, name.1, name.1)
-        );
+        let any = rules.first_exchanges(Side::Dx, "DL1ABC", "K5XYZ", &fields);
+        assert!(any.contains(&text), "{text} is none of {any:?}");
         // Sent again, the exchange goes without its first words.
         caller.hear(&[Again], &[]);
         let again = caller.reply(rules, Side::Dx, "DL1ABC", 0).expect("a reply");
-        assert_eq!(
-            again.0,
-            format!("UR {} {} NAME {} {} BK", rst.1, rst.1, name.1, name.1)
-        );
+        let body = &text[text.find("UR ").expect("UR")..];
+        assert_eq!(again.0, body);
         let reaction = caller.hear(&[Tu], &[]);
         assert!(reaction.replies && !reaction.asked);
         assert_eq!(caller.state, CallerState::Done);
@@ -1853,6 +1850,11 @@ mod tests {
         generated.text = call.to_string();
         let mut settings = TrainingSettings::default();
         settings.contest.contest_habits = habits;
+        // It keeps to `TU` and its exchange once, the commonest style, so
+        // a test reads its numbers where they always stand.
+        settings
+            .contest
+            .set_style_at(ContestKind::Wpx, crate::contest::shape_corners(6)[0]);
         let settings = settings.clamp();
         Caller::arrive(
             generated,

@@ -84,17 +84,12 @@ pub enum Countries {
     /// Everyone outside [`Self::NorthAmerica`]: Field Day's DX.
     OutsideNorthAmerica,
     /// Who hunts a POTA activation: [`Self::UsAndCanada`], each with a
-    /// state or province to send, and now and then a station anywhere else
-    /// ([`POTA_DX`]), which sends its report alone.
+    /// state or province to send, and as many stations anywhere else as
+    /// you set ([`CallSpec::dx_percent`]), each sending its report alone.
     Pota,
     /// Everyone outside [`Self::UsAndCanada`]: POTA's DX hunters.
     OutsideUsAndCanada,
 }
-
-/// The share of POTA hunters outside the US and Canada, in percent: a
-/// choice, not a count, so that a run of a few minutes has some to copy.
-/// Each sends a report and no state, as DX stations do.
-pub(crate) const POTA_DX: f64 = 25.0;
 
 impl Countries {
     /// Whether a station in `country`, by its DXCC primary prefix as the
@@ -116,13 +111,14 @@ impl Countries {
 
     /// The countries one caller is drawn from: a Field Day caller is in
     /// North America but as often as Field Day's entries send DX, when it is
-    /// anywhere else; a POTA hunter is in the US or Canada but as often as
-    /// [`POTA_DX`] has it; every other choice is itself, and draws nothing.
-    pub(crate) fn for_one_call(self, rng: &mut impl Rng) -> Self {
+    /// anywhere else; a POTA hunter is in the US or Canada but `dx_percent`
+    /// in a hundred, the share of DX hunters; every other choice is itself,
+    /// and draws nothing.
+    pub(crate) fn for_one_call(self, dx_percent: u32, rng: &mut impl Rng) -> Self {
         match self {
             Self::FieldDay if rng.f64() * 100.0 < FIELD_DAY_DX => Self::OutsideNorthAmerica,
             Self::FieldDay => Self::NorthAmerica,
-            Self::Pota if rng.f64() * 100.0 < POTA_DX => Self::OutsideUsAndCanada,
+            Self::Pota if rng.f64() * 100.0 < f64::from(dx_percent) => Self::OutsideUsAndCanada,
             Self::Pota => Self::UsAndCanada,
             countries => countries,
         }
@@ -141,6 +137,10 @@ pub struct CallSpec {
     /// country than the one it is labelled with (Guantanamo Bay's), or in
     /// none: a VP2 call's suffix starts with its country's letter.
     pub contest: bool,
+    /// How many callers in a hundred are DX, where the countries draw some
+    /// apart, as POTA's hunters: [`crate::HUNTER_DX_PERCENT`] until a run
+    /// sets it from the settings.
+    pub dx_percent: u32,
 }
 
 impl CallSpec {
@@ -149,7 +149,14 @@ impl CallSpec {
         Self {
             countries,
             contest: true,
+            dx_percent: crate::settings::HUNTER_DX_PERCENT,
         }
+    }
+
+    /// The same, with `dx_percent` callers in a hundred DX, where the
+    /// countries draw some apart.
+    pub const fn with_dx(self, dx_percent: u32) -> Self {
+        Self { dx_percent, ..self }
     }
 }
 
@@ -565,7 +572,7 @@ const AREA_DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9
 /// country of the table's entry it was drawn from.
 pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> GeneratedCall {
     let tier = tier_at(tier);
-    let countries = spec.countries.for_one_call(rng);
+    let countries = spec.countries.for_one_call(spec.dx_percent, rng);
     let prefix = pick_prefix(tier, countries, rng);
     let digit = separator(prefix, rng);
     let mut call = GeneratedCall {

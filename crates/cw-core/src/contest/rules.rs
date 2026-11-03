@@ -207,17 +207,16 @@ pub struct ContestRules {
     pub answer: &'static str,
     /// A caller's exchange as it sends it, on your side.
     pub their_exchange: PerSide<&'static str>,
-    /// The whole replies callers keep to, one each, where they vary as you
-    /// set them, as POTA's hunters do: each a corner of the shape you place
-    /// the dot in ([`Self::reply_shares`]), in order clockwise from the top
-    /// right ([`shape_corners`]).
-    /// Empty where every caller sends [`Self::their_exchange`] after a lead
-    /// drawn from [`Self::their_lead`].
-    pub their_replies: &'static [Reply],
+    /// The ways callers start their first exchange and send it, where each
+    /// keeps to a way of its own and how often each comes is yours to set
+    /// ([`Styles`]). None where the contest's exchange leaves no room for
+    /// it, as the Sprint's, whose callers send [`Self::their_exchange`]
+    /// after a lead drawn from [`Self::their_lead`].
+    pub their_styles: Option<Styles>,
     /// What a caller sends before its exchange the first time, each with
     /// the share of callers that lead with it, the shares making one,
-    /// `{my}` your call in it, where callers do not keep to replies of
-    /// their own. Sent again, the exchange goes alone.
+    /// `{my}` your call in it, where callers do not keep to styles of their
+    /// own; empty where they do. Sent again, the exchange goes alone.
     pub their_lead: &'static [(&'static str, f64)],
     /// What a caller that has its call but not your exchange asks with:
     /// the first as often as `caller.rs`'s `FIRST_QUERY` has it, the second
@@ -311,8 +310,25 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{his}",
         their_exchange: PerSide::both("{rst} {nr}"),
-        their_replies: &[],
-        their_lead: &[("TU", 0.9), ("R", 0.1)],
+        // Each caller starts with `TU`, with nothing, or with `R`, and sends
+        // its exchange once or twice: most `TU` and once, as MorseRunner's
+        // do, and many with nothing first, as a logger's exchange key sends
+        // it.
+        their_styles: Some(Styles {
+            leads: &["TU", "", "R"],
+            forms: [
+                Form {
+                    head: "Once",
+                    exchange: PerSide::both("{rst} {nr}"),
+                },
+                Form {
+                    head: "Twice",
+                    exchange: PerSide::both("{rst} {nr} {nr}"),
+                },
+            ],
+            on_air: [0.48, -0.52],
+        }),
+        their_lead: &[],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -357,7 +373,9 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::UsAndCanada)),
         answer: "{his}",
         their_exchange: PerSide::both("{my} {nr} {name} {st}"),
-        their_replies: &[],
+        // Its exchange leaves no room: both calls, the serial, the name
+        // and the state, and nothing else.
+        their_styles: None,
         their_lead: &[("", 1.0)],
         their_query: ["NR?", "AGN"],
         signoff: None,
@@ -399,8 +417,25 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{his}",
         their_exchange: PerSide::both("{rst} {zn}"),
-        their_replies: &[],
-        their_lead: &[("TU", 0.9), ("R", 0.1)],
+        // Each caller starts with `TU`, with nothing, or with `R`, and sends
+        // its exchange once or twice: most `TU` and once, as MorseRunner's
+        // do, and many with nothing first, as a logger's exchange key sends
+        // it.
+        their_styles: Some(Styles {
+            leads: &["TU", "", "R"],
+            forms: [
+                Form {
+                    head: "Once",
+                    exchange: PerSide::both("{rst} {zn}"),
+                },
+                Form {
+                    head: "Twice",
+                    exchange: PerSide::both("{rst} {zn} {zn}"),
+                },
+            ],
+            on_air: [0.48, -0.52],
+        }),
+        their_lead: &[],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -452,8 +487,31 @@ pub(super) const RULES: &[ContestRules] = &[
             wve: "{rst} {pwr}",
             dx: "{rst} {st}",
         },
-        their_replies: &[],
-        their_lead: &[("TU", 0.9), ("R", 0.1)],
+        // Each caller starts with `TU`, with nothing, or with `R`, and sends
+        // its exchange once or twice: most `TU` and once, as MorseRunner's
+        // do, and many with nothing first, as a logger's exchange key sends
+        // it.
+        their_styles: Some(Styles {
+            leads: &["TU", "", "R"],
+            forms: [
+                Form {
+                    head: "Once",
+                    exchange: PerSide {
+                        wve: "{rst} {pwr}",
+                        dx: "{rst} {st}",
+                    },
+                },
+                Form {
+                    head: "Twice",
+                    exchange: PerSide {
+                        wve: "{rst} {pwr} {pwr}",
+                        dx: "{rst} {st} {st}",
+                    },
+                },
+            ],
+            on_air: [0.48, -0.52],
+        }),
+        their_lead: &[],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -497,8 +555,23 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::FieldDay)),
         answer: "{his}",
         their_exchange: PerSide::both("{cl} {sec}"),
-        their_replies: &[],
-        their_lead: &[("R", 0.9), ("TU", 0.1)],
+        // Each caller starts with `R`, with nothing, or with `TU`, and sends
+        // its class and section once or twice over: most `R` and once.
+        their_styles: Some(Styles {
+            leads: &["R", "", "TU"],
+            forms: [
+                Form {
+                    head: "Once",
+                    exchange: PerSide::both("{cl} {sec}"),
+                },
+                Form {
+                    head: "Twice",
+                    exchange: PerSide::both("{cl} {sec} {cl} {sec}"),
+                },
+            ],
+            on_air: [0.48, -0.52],
+        }),
+        their_lead: &[],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
@@ -538,8 +611,23 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{my} DE {his} K",
         their_exchange: PerSide::both("UR {rst} {rst} NAME {name} {name} BK"),
-        their_replies: &[],
-        their_lead: &[("R TNX", 1.0)],
+        // Each caller starts `R TNX`, `R R` or `TNX FER RPT`, and sends its
+        // report and name twice, as a first QSO is taught, or each once.
+        their_styles: Some(Styles {
+            leads: &["R TNX", "R R", "TNX FER RPT"],
+            forms: [
+                Form {
+                    head: "Twice",
+                    exchange: PerSide::both("UR {rst} {rst} NAME {name} {name} BK"),
+                },
+                Form {
+                    head: "Each once",
+                    exchange: PerSide::both("UR {rst} NAME {name} BK"),
+                },
+            ],
+            on_air: [0.48, -0.52],
+        }),
+        their_lead: &[],
         their_query: ["AGN", "AGN"],
         signoff: Some("73 EE"),
         tu_calls: false,
@@ -555,8 +643,9 @@ pub(super) const RULES: &[ContestRules] = &[
     // BK` · `BK TU OR OR 73 EE` · `EE`. You greet the hunter by the time of
     // day, and sign off with `73`, now and then `73 44`. Hunters in the US
     // and Canada send their report and their state or province, which you
-    // copy, and your TU sends the state back; about one in four is DX and
-    // sends its report alone, as DX stations do, so its state is optional.
+    // copy, and your TU sends the state back; DX hunters, as many as you
+    // set, send their report alone, as DX stations do, so the state is
+    // optional.
     // Each hunter keeps to one of eight whole replies: it starts `BK`, your
     // call and `TU`, or `BK TU`, `R TU` or `TU`, and sends its report and
     // state twice or each once. How often each comes is where you put the
@@ -590,46 +679,23 @@ pub(super) const RULES: &[ContestRules] = &[
         callers: PerSide::both(CallSpec::contest(Countries::Pota)),
         answer: "{his}",
         their_exchange: PerSide::both("UR {rst} {rst} {st} {st} BK"),
-        // Clockwise from the top right, so the shape reads as a map: each
-        // way of starting with report and state twice down the right, then
-        // back up the left with each once, so that each row across has one
-        // way of starting, naming you at the top and TU alone at the
-        // bottom, the right side twice and the left once.
-        their_replies: &[
-            Reply {
-                lead: "BK {my} TU",
-                exchange: "UR {rst} {rst} {st} {st} BK",
-            },
-            Reply {
-                lead: "BK TU",
-                exchange: "UR {rst} {rst} {st} {st} BK",
-            },
-            Reply {
-                lead: "R TU",
-                exchange: "UR {rst} {rst} {st} {st} BK",
-            },
-            Reply {
-                lead: "TU",
-                exchange: "UR {rst} {rst} {st} {st} BK",
-            },
-            Reply {
-                lead: "TU",
-                exchange: "UR {rst} {st} BK",
-            },
-            Reply {
-                lead: "R TU",
-                exchange: "UR {rst} {st} BK",
-            },
-            Reply {
-                lead: "BK TU",
-                exchange: "UR {rst} {st} BK",
-            },
-            Reply {
-                lead: "BK {my} TU",
-                exchange: "UR {rst} {st} BK",
-            },
-        ],
-        their_lead: &[("BK {my} TU", 1.0)],
+        // Each hunter starts `BK`, your call and `TU`, or `BK TU`, `R TU` or
+        // `TU`, and sends its report and state twice or each once.
+        their_styles: Some(Styles {
+            leads: &["BK {my} TU", "BK TU", "R TU", "TU"],
+            forms: [
+                Form {
+                    head: "Twice",
+                    exchange: PerSide::both("UR {rst} {rst} {st} {st} BK"),
+                },
+                Form {
+                    head: "Each once",
+                    exchange: PerSide::both("UR {rst} {st} BK"),
+                },
+            ],
+            on_air: [0.3, -0.47],
+        }),
+        their_lead: &[],
         their_query: ["AGN", "AGN"],
         signoff: Some("EE"),
         tu_calls: true,
@@ -642,7 +708,7 @@ pub(super) const RULES: &[ContestRules] = &[
             dx: "you send your report alone, and no state back",
         }),
         simplified: Some(
-            "Hunters in the US and Canada send their report and state; about one in four is DX and sends a report alone, so leave its state out. Simplified: no park references.",
+            "Hunters in the US and Canada send their report and state; DX hunters send a report alone, so leave their state out. Simplified: no park references.",
         ),
     },
 ];
@@ -662,22 +728,53 @@ pub fn greeting(hour: u32) -> &'static str {
 /// afternoon, `GA`, as the greeting most often heard in examples.
 pub const GREETING_HOUR: u32 = 12;
 
-/// A whole reply a caller keeps to, where callers vary as you set them: the
-/// word it leads its first exchange with, `{my}` your call in it, and its
-/// exchange, each field its name in braces, as [`ContestRules::their_exchange`]
-/// has them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Reply {
-    pub lead: &'static str,
-    pub exchange: &'static str,
+/// How a contest's callers vary their first exchange: each keeps, for its
+/// QSO, to one of [`Self::leads`] before it and one of two [`Self::forms`]
+/// of the exchange itself, how often each as you set it. Their replies are
+/// the corners of a shape you place a knob in ([`ContestRules::reply_shares`]),
+/// clockwise from the top right ([`shape_corners`]): each lead with the
+/// first form down the right side, then back up the left with the second,
+/// so each row across starts alike, the first lead at the top.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Styles {
+    /// The words a caller starts its first exchange with, `{my}` your call
+    /// in them; one may be none. Sent again, the exchange goes alone.
+    pub leads: &'static [&'static str],
+    /// The two forms of the exchange: the right side's, as most callers send
+    /// it, and the left side's.
+    pub forms: [Form; 2],
+    /// Where the knob stands until you move it, across and down from the
+    /// middle: the mix heard on the air.
+    pub on_air: [f64; 2],
 }
 
-/// Where the dot stands until you move it: up and right of the middle,
-/// toward the first reply and the second, so most hunters send those, as
-/// heard on the air, and every reply comes: of POTA's eight, about 34, 25,
-/// 9, 4, 3, 3, 6 and 16 in a hundred, half of them naming you and about
-/// one in four sending each field once.
-pub const STYLE_ON_AIR: [f64; 2] = [0.3, -0.47];
+/// One form of a caller's exchange: what the card heads its side of the
+/// shape with, and the exchange as [`ContestRules::their_exchange`] has it,
+/// each field its name in braces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Form {
+    pub head: &'static str,
+    pub exchange: PerSide<&'static str>,
+}
+
+impl Styles {
+    /// How many whole replies there are: each lead in each form.
+    pub fn count(&self) -> usize {
+        2 * self.leads.len()
+    }
+
+    /// The `reply`th, round the shape: its lead and its form.
+    pub fn reply(&self, reply: usize) -> Option<(&'static str, &Form)> {
+        let leads = self.leads.len();
+        if reply < leads {
+            Some((self.leads[reply], &self.forms[0]))
+        } else if reply < 2 * leads {
+            Some((self.leads[2 * leads - 1 - reply], &self.forms[1]))
+        } else {
+            None
+        }
+    }
+}
 
 /// The middle of the shape: every reply as often as the others.
 pub const STYLE_EVEN: [f64; 2] = [0.0, 0.0];
@@ -821,6 +918,10 @@ pub struct CallerStyles {
     pub leads: Vec<String>,
     /// Each reply's exchange after its first words.
     pub exchanges: Vec<String>,
+    /// What the right side of the shape is headed with, and the left.
+    pub heads: [&'static str; 2],
+    /// Where the knob stands until moved: the mix heard on the air.
+    pub on_air: [f64; 2],
 }
 
 /// How you sign off in a TU that holds a farewell: `73`, and now and then
@@ -1095,8 +1196,8 @@ impl ContestRules {
         self.their_reply_text(side, None, my_call, his_call, fields)
     }
 
-    /// The same, as the `reply`th of [`Self::their_replies`] sends it where
-    /// a caller keeps to one.
+    /// The same, as the `reply`th of its styles sends it where a caller
+    /// keeps to one ([`Styles::reply`]).
     pub(super) fn their_reply_text(
         &self,
         side: Side,
@@ -1106,8 +1207,13 @@ impl ContestRules {
         fields: &[(Field, String)],
     ) -> String {
         let template = reply
-            .and_then(|reply| self.their_replies.get(reply))
-            .map_or_else(|| self.their_exchange.on(side), |reply| reply.exchange);
+            .and_then(|reply| {
+                self.their_styles?
+                    .reply(reply)
+                    .map(|(_, form)| form.exchange)
+            })
+            .unwrap_or(self.their_exchange)
+            .on(side);
         let report = fields
             .iter()
             .find(|(field, _)| *field == Field::Rst)
@@ -1116,8 +1222,15 @@ impl ContestRules {
             .replace("{my}", my_call)
             .replace("{his}", his_call)
             .replace("{rst}", report);
+        // A field sent twice goes the second time as it was meant: a
+        // careless operator's fumbled serial, `1T4EEEEE 214`, is `214` again.
         for (field, token) in fields {
-            text = text.replace(&format!("{{{}}}", field.name()), token);
+            let held = format!("{{{}}}", field.name());
+            if let Some(at) = text.find(&held) {
+                let again = token.rsplit(' ').next().unwrap_or(token);
+                let rest = text[at + held.len()..].replace(&held, again);
+                text = format!("{}{token}{rest}", &text[..at]);
+            }
         }
         // A field it does not send, as a DX hunter's state, leaves no gap.
         for field in self.copied(side) {
@@ -1130,10 +1243,46 @@ impl ContestRules {
     /// the contest leads it with, the `lead`th of [`Self::their_lead`];
     /// alone in a contest that leads it with none.
     pub(super) fn their_first_exchange(&self, lead: usize, my_call: &str, body: &str) -> String {
-        self.their_first_exchange_led(self.their_lead[lead].0, my_call, body)
+        let lead = self.their_lead.get(lead).map_or("", |(lead, _)| *lead);
+        self.their_first_exchange_led(lead, my_call, body)
     }
 
-    /// The same, led by `lead`, a reply's own ([`Reply::lead`]).
+    /// Every first exchange its callers may send to you, `my_call`, from
+    /// `his_call` with `fields`: each style's, or the plain exchange after
+    /// each lead where callers keep to none. What a test takes a reply to
+    /// be one of.
+    #[cfg(test)]
+    pub(crate) fn first_exchanges(
+        &self,
+        side: Side,
+        my_call: &str,
+        his_call: &str,
+        fields: &[(Field, String)],
+    ) -> Vec<String> {
+        match self.their_styles {
+            Some(styles) => (0..styles.count())
+                .map(|reply| {
+                    let body = self.their_reply_text(side, Some(reply), my_call, his_call, fields);
+                    let lead = styles.reply(reply).map_or("", |(lead, _)| lead);
+                    self.their_first_exchange_led(lead, my_call, &body)
+                })
+                .collect(),
+            None => {
+                let body = self.their_exchange_text(side, my_call, his_call, fields);
+                (0..self.their_lead.len())
+                    .map(|lead| self.their_first_exchange(lead, my_call, &body))
+                    .collect()
+            }
+        }
+    }
+
+    /// The words a caller keeping to the `reply`th of its styles starts
+    /// with ([`Styles::reply`]); none where callers keep to none.
+    pub(super) fn reply_lead(&self, reply: usize) -> Option<&'static str> {
+        self.their_styles?.reply(reply).map(|(lead, _)| lead)
+    }
+
+    /// The same, led by `lead`, a style's own ([`Self::reply_lead`]).
     pub(super) fn their_first_exchange_led(&self, lead: &str, my_call: &str, body: &str) -> String {
         let lead = lead.replace("{my}", my_call);
         squeeze(&format!("{lead} {body}"))
@@ -1150,29 +1299,41 @@ impl ContestRules {
                 return at;
             }
         }
-        self.their_lead.len() - 1
+        self.their_lead.len().saturating_sub(1)
     }
 
-    /// Whether its callers keep to whole replies that vary as you set them
-    /// ([`Self::their_replies`]), as POTA's hunters do.
+    /// Whether its callers keep to styles of their own that you set
+    /// ([`Self::their_styles`]).
     pub fn varies(&self) -> bool {
-        !self.their_replies.is_empty()
+        self.their_styles.is_some()
     }
 
-    /// The share of callers that keep to each of [`Self::their_replies`],
-    /// the dot standing `at` in the shape whose corners they are
+    /// Where the knob stands until you move it, for its styles: the mix
+    /// heard on the air; the middle where callers do not vary.
+    pub fn styles_on_air(&self) -> [f64; 2] {
+        self.their_styles.map_or(STYLE_EVEN, |styles| styles.on_air)
+    }
+
+    /// How many whole replies its callers keep to: none where they do not
+    /// vary.
+    pub fn reply_count(&self) -> usize {
+        self.their_styles.map_or(0, |styles| styles.count())
+    }
+
+    /// The share of callers that keep to each of its replies, the knob
+    /// standing `at` in the shape whose corners they are
     /// ([`corner_shares`]), the replies `off` sent by none
     /// ([`shares_without`]). Empty where callers do not vary.
     pub fn reply_shares(&self, at: [f64; 2], off: &[usize]) -> Vec<f64> {
         if !self.varies() {
             return Vec::new();
         }
-        shares_without(&corner_shares(self.their_replies.len(), at), off)
+        shares_without(&corner_shares(self.reply_count(), at), off)
     }
 
-    /// Which of [`Self::their_replies`] a caller keeps to, the dot standing
-    /// `at` and the replies `off` sent by none, for `draw`, drawn evenly
-    /// from nothing up to one; none where callers do not vary.
+    /// Which of its replies a caller keeps to, the knob standing `at` and
+    /// the replies `off` sent by none, for `draw`, drawn evenly from nothing
+    /// up to one; none where callers do not vary.
     pub(super) fn reply_at(&self, draw: f64, at: [f64; 2], off: &[usize]) -> Option<usize> {
         let shares = self.reply_shares(at, off);
         let mut upto = 0.0;
@@ -1185,11 +1346,11 @@ impl ContestRules {
         shares.len().checked_sub(1)
     }
 
-    /// The replies its callers send, the dot standing `at` and the replies
-    /// `off` sent by none, as the card lists them, to you as `my_call` on
-    /// `side`: each whole, from a caller in Oregon with the report and state
-    /// the card's QSO has, with its share, in the order of the corners. None
-    /// where they do not vary.
+    /// The replies its callers send, the knob standing `at` and the replies
+    /// `off` sent by none, as the card shows them, to you as `my_call` on
+    /// `side`: each whole, as the card's QSO has its fields, with its share,
+    /// in the order of the corners, and each apart. None where they do not
+    /// vary.
     pub fn caller_styles(
         &self,
         side: Side,
@@ -1197,21 +1358,20 @@ impl ContestRules {
         at: [f64; 2],
         off: &[usize],
     ) -> Option<CallerStyles> {
-        if !self.varies() {
-            return None;
-        }
+        let styles = self.their_styles?;
         let fields: Vec<(Field, String)> = self
             .copied(side)
             .iter()
             .map(|field| (*field, field.example().to_string()))
             .collect();
-        let exchanges: Vec<String> = (0..self.their_replies.len())
+        let exchanges: Vec<String> = (0..styles.count())
             .map(|at| self.their_reply_text(side, Some(at), my_call, "W7XYZ", &fields))
             .collect();
-        let leads: Vec<String> = self
-            .their_replies
-            .iter()
-            .map(|reply| self.their_first_exchange_led(reply.lead, my_call, ""))
+        let leads: Vec<String> = (0..styles.count())
+            .map(|at| {
+                let lead = styles.reply(at).map_or("", |(lead, _)| lead);
+                self.their_first_exchange_led(lead, my_call, "")
+            })
             .collect();
         let replies = leads
             .iter()
@@ -1223,6 +1383,8 @@ impl ContestRules {
             replies,
             leads,
             exchanges,
+            heads: styles.forms.map(|form| form.head),
+            on_air: styles.on_air,
         })
     }
 
@@ -1267,14 +1429,13 @@ impl ContestRules {
                 Sender::You,
                 format!("{caller} {}", self.exchange_text(side, &first)),
             ),
-            (
-                them,
-                self.their_first_exchange(
-                    0,
-                    me.my_call,
-                    &self.their_exchange_text(side, me.my_call, caller, &fields),
-                ),
-            ),
+            (them, {
+                let body = self.their_exchange_text(side, me.my_call, caller, &fields);
+                match self.reply_lead(0) {
+                    Some(lead) => self.their_first_exchange_led(lead, me.my_call, &body),
+                    None => self.their_first_exchange(0, me.my_call, &body),
+                }
+            }),
             (
                 Sender::You,
                 self.tu_text(
@@ -1365,6 +1526,11 @@ mod tests {
 
     fn field_day() -> &'static ContestRules {
         ContestKind::FieldDay.rules()
+    }
+
+    /// Where POTA's knob stands until moved.
+    fn pota_on_air() -> [f64; 2] {
+        pota().styles_on_air()
     }
 
     fn pota() -> &'static ContestRules {
@@ -1480,7 +1646,7 @@ mod tests {
             rules.their_exchange_text(Side::Dx, "DL1ABC", "K5XYZ", &theirs),
             "UR 579 579 NAME BOB BOB BK"
         );
-        assert_eq!(rules.their_lead, [("R TNX", 1.0)]);
+        assert_eq!(rules.reply_lead(0), Some("R TNX"));
         assert_eq!(rules.their_query, ["AGN", "AGN"], "no serial to ask for");
         assert_eq!(rules.signoff, Some("73 EE"));
         assert_eq!(rules.sends(Side::Dx), "599 + name");
@@ -1664,8 +1830,27 @@ mod tests {
         ];
         let sent = rules.their_exchange_text(Side::WVe, "K1ABC", "W7XYZ", &theirs);
         assert_eq!(sent, "3A OR");
-        assert_eq!(rules.their_first_exchange(0, "K1ABC", &sent), "R 3A OR");
-        assert_eq!(rules.their_first_exchange(1, "K1ABC", &sent), "TU 3A OR");
+        // Its callers start `R`, with nothing, or `TU`, and send it once or
+        // twice over.
+        let replies: Vec<String> = (0..6)
+            .map(|reply| {
+                let body =
+                    rules.their_reply_text(Side::WVe, Some(reply), "K1ABC", "W7XYZ", &theirs);
+                let lead = rules.reply_lead(reply).expect("a style");
+                rules.their_first_exchange_led(lead, "K1ABC", &body)
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            [
+                "R 3A OR",
+                "3A OR",
+                "TU 3A OR",
+                "TU 3A OR 3A OR",
+                "3A OR 3A OR",
+                "R 3A OR 3A OR"
+            ]
+        );
         assert!(rules.tu_calls && rules.signoff.is_none() && rules.serials.is_none());
         assert!(!rules.sided() && rules.side_note(Side::Dx, true).is_none());
         assert_eq!(
@@ -1781,7 +1966,7 @@ mod tests {
         assert_eq!(body, "UR 57N 57N FL FL BK");
         // The card's QSO names you after its BK.
         assert_eq!(
-            rules.their_first_exchange(0, "K1ABC", &body),
+            rules.their_first_exchange_led(rules.reply_lead(0).expect("a style"), "K1ABC", &body),
             "BK K1ABC TU UR 57N 57N FL FL BK"
         );
         // Each hunter keeps to one of eight whole replies, a corner each.
@@ -1789,7 +1974,8 @@ mod tests {
             .map(|reply| {
                 let body =
                     rules.their_reply_text(Side::WVe, Some(reply), "K1ABC", "W4XYZ", &theirs);
-                rules.their_first_exchange_led(rules.their_replies[reply].lead, "K1ABC", &body)
+                let lead = rules.reply_lead(reply).expect("a style");
+                rules.their_first_exchange_led(lead, "K1ABC", &body)
             })
             .collect();
         assert_eq!(
@@ -1805,7 +1991,7 @@ mod tests {
                 "BK K1ABC TU UR 57N FL BK"
             ]
         );
-        assert!(rules.varies() && !wpx().varies());
+        assert!(rules.varies() && !sprint().varies());
         // A DX hunter's: its report alone, and no gap where a state would be.
         let dx_theirs = [(Field::Rst, "57N".to_string())];
         assert_eq!(
@@ -1910,8 +2096,8 @@ mod tests {
             "{shares:?}"
         );
         // As heard on the air, among POTA's eight: every reply, the first
-        // the commonest, half naming you, about one in four each field once.
-        let on_air = corner_shares(8, STYLE_ON_AIR);
+        // the commonest, half naming you, a few each field once.
+        let on_air = corner_shares(8, pota_on_air());
         assert!(on_air.iter().all(|share| *share > 0.02), "{on_air:?}");
         assert!(on_air[0] > 0.3 && on_air[0] > on_air[1], "{on_air:?}");
         assert!(
@@ -1945,13 +2131,13 @@ mod tests {
         );
         assert_eq!(into_shape(5, [f64::NAN, 0.0]), STYLE_EVEN);
         // Callers that do not vary have none to share.
-        assert!(wpx().reply_shares(STYLE_ON_AIR, &[]).is_empty());
-        assert_eq!(wpx().reply_at(0.5, STYLE_ON_AIR, &[]), None);
-        assert_eq!(pota().reply_at(0.0, STYLE_ON_AIR, &[]), Some(0));
-        assert_eq!(pota().reply_at(0.999_999, STYLE_ON_AIR, &[]), Some(7));
+        assert!(sprint().reply_shares(STYLE_EVEN, &[]).is_empty());
+        assert_eq!(sprint().reply_at(0.5, STYLE_EVEN, &[]), None);
+        assert_eq!(pota().reply_at(0.0, pota_on_air(), &[]), Some(0));
+        assert_eq!(pota().reply_at(0.999_999, pota_on_air(), &[]), Some(7));
         // A reply turned off is drawn by none.
-        assert_eq!(pota().reply_at(0.0, STYLE_ON_AIR, &[0]), Some(1));
-        assert_eq!(pota().reply_at(0.999_999, STYLE_ON_AIR, &[7]), Some(6));
+        assert_eq!(pota().reply_at(0.0, pota_on_air(), &[0]), Some(1));
+        assert_eq!(pota().reply_at(0.999_999, pota_on_air(), &[7]), Some(6));
     }
 
     /// A reply turned off is sent by none: the rest are scaled up alike, so
@@ -1960,7 +2146,7 @@ mod tests {
     /// on.
     #[test]
     fn a_reply_turned_off_is_sent_by_none() {
-        let on_air = corner_shares(8, STYLE_ON_AIR);
+        let on_air = corner_shares(8, pota_on_air());
         let without = shares_without(&on_air, &[0]);
         assert_eq!(without[0], 0.0);
         let sum: f64 = without.iter().sum();
@@ -1984,7 +2170,7 @@ mod tests {
         assert_eq!(toggle_corner(&seven, 0, 8), seven, "the last one on stays");
         assert_eq!(toggle_corner(&[9, 3, 3], 1, 8), [1, 3]);
         let styles = pota()
-            .caller_styles(Side::Dx, "SA0KAM", STYLE_ON_AIR, &[1, 2])
+            .caller_styles(Side::Dx, "SA0KAM", pota_on_air(), &[1, 2])
             .expect("POTA varies");
         assert_eq!(styles.replies[1].1, 0.0);
         assert_eq!(styles.replies[2].1, 0.0);
@@ -2001,7 +2187,7 @@ mod tests {
                 .expect("POTA's hunters vary")
                 .replies
         };
-        let on_air = replies(STYLE_ON_AIR);
+        let on_air = replies(pota_on_air());
         let texts: Vec<&str> = on_air.iter().map(|(text, _)| text.as_str()).collect();
         assert_eq!(
             texts,
@@ -2021,7 +2207,7 @@ mod tests {
         // Each corner names its reply apart: the words it starts with, and
         // the exchange after them.
         let styles = pota()
-            .caller_styles(Side::Dx, "SA0KAM", STYLE_ON_AIR, &[])
+            .caller_styles(Side::Dx, "SA0KAM", pota_on_air(), &[])
             .expect("POTA's hunters vary");
         assert_eq!(
             styles.leads,
@@ -2044,9 +2230,77 @@ mod tests {
             assert!((share - 0.125).abs() < 1e-12);
         }
         assert!(
-            wpx()
-                .caller_styles(Side::Dx, "DL1ABC", STYLE_ON_AIR, &[])
+            sprint()
+                .caller_styles(Side::Dx, "DL1ABC", STYLE_EVEN, &[])
                 .is_none()
+        );
+    }
+
+    /// Every contest whose exchange leaves room has styles: each lead with
+    /// the right side's form, then back up with the left's, the commonest
+    /// at the top right as heard on the air, and every reply coming. The
+    /// Sprint's callers keep to its one exchange.
+    #[test]
+    fn contests_with_room_have_styles() {
+        let first = |kind: ContestKind, side: Side, theirs: &[(Field, String)]| {
+            let rules = kind.rules();
+            let styles = rules.caller_styles(side, "K1ABC", rules.styles_on_air(), &[]);
+            let styles = styles.unwrap_or_else(|| panic!("{kind:?} has styles"));
+            let texts: Vec<String> = (0..styles.replies.len())
+                .map(|reply| {
+                    let body = rules.their_reply_text(side, Some(reply), "K1ABC", "W7XYZ", theirs);
+                    rules.their_first_exchange_led(
+                        rules.reply_lead(reply).expect("a style"),
+                        "K1ABC",
+                        &body,
+                    )
+                })
+                .collect();
+            (texts, styles)
+        };
+        let nr = [(Field::Nr, "214".to_string())];
+        let (wpx_replies, styles) = first(ContestKind::Wpx, Side::Dx, &nr);
+        assert_eq!(
+            wpx_replies,
+            [
+                "TU 5NN 214",
+                "5NN 214",
+                "R 5NN 214",
+                "R 5NN 214 214",
+                "5NN 214 214",
+                "TU 5NN 214 214"
+            ]
+        );
+        assert_eq!(styles.heads, ["Once", "Twice"]);
+        assert_eq!(styles.leads, ["TU", "", "R", "R", "", "TU"]);
+        // As heard on the air: most `TU` and once, many with nothing first.
+        let shares: Vec<f64> = styles.replies.iter().map(|(_, share)| *share).collect();
+        assert!(shares[0] > 0.5 && shares[1] > 0.2, "{shares:?}");
+        assert!(shares.iter().all(|share| *share > 0.01), "{shares:?}");
+        let zn = [(Field::Zn, "25".to_string())];
+        assert_eq!(first(ContestKind::Cqww, Side::Dx, &zn).0[5], "TU 5NN 25 25");
+        let st = [(Field::St, "OR".to_string())];
+        assert_eq!(first(ContestKind::ArrlDx, Side::Dx, &st).0[4], "5NN OR OR");
+        let pwr = [(Field::Pwr, "KW".to_string())];
+        assert_eq!(
+            first(ContestKind::ArrlDx, Side::WVe, &pwr).0[0],
+            "TU 5NN KW"
+        );
+        let named = [
+            (Field::Rst, "579".to_string()),
+            (Field::Name, "BOB".to_string()),
+        ];
+        let (simple, styles) = first(ContestKind::SimpleQso, Side::Dx, &named);
+        assert_eq!(simple[0], "R TNX UR 579 579 NAME BOB BOB BK");
+        assert_eq!(simple[3], "TNX FER RPT UR 579 NAME BOB BK");
+        assert_eq!(styles.heads, ["Twice", "Each once"]);
+        assert!(!sprint().varies());
+        // A careless operator's fumbled serial sent twice goes right the
+        // second time.
+        let fumbled = [(Field::Nr, "2T4EEEEE 214".to_string())];
+        assert_eq!(
+            wpx().their_reply_text(Side::Dx, Some(5), "K1ABC", "W7XYZ", &fumbled),
+            "5NN 2T4EEEEE 214 214"
         );
     }
 
@@ -2283,18 +2537,24 @@ mod tests {
                 for field in rules.optional {
                     assert!(rules.copied(side).contains(field), "{:?}", rules.kind);
                 }
-                // Every reply a caller keeps to sends what the exchange does.
-                for reply in rules.their_replies {
-                    for field in rules.copied(side) {
-                        let held = format!("{{{}}}", field.name());
-                        assert!(reply.exchange.contains(&held), "{:?}", rules.kind);
-                    }
+                // Every form a caller keeps to sends what the exchange does,
+                // and the first is the exchange itself, as the card's QSO
+                // has it.
+                if let Some(styles) = rules.their_styles {
                     assert_eq!(
-                        reply.exchange.contains("{rst}"),
-                        rules.rst,
+                        styles.forms[0].exchange.on(side),
+                        rules.their_exchange.on(side),
                         "{:?}",
                         rules.kind
                     );
+                    for form in styles.forms {
+                        let exchange = form.exchange.on(side);
+                        for field in rules.copied(side) {
+                            let held = format!("{{{}}}", field.name());
+                            assert!(exchange.contains(&held), "{:?}", rules.kind);
+                        }
+                        assert_eq!(exchange.contains("{rst}"), rules.rst, "{:?}", rules.kind);
+                    }
                 }
             }
             assert!(rules.cq.contains("{my}"), "{:?}", rules.kind);
@@ -2308,9 +2568,25 @@ mod tests {
                 rules.kind
             );
             assert!(!rules.long_cq.contains("{my}"), "{:?}", rules.kind);
-            // The leads' shares make one.
-            let shares: f64 = rules.their_lead.iter().map(|(_, share)| share).sum();
-            assert!((shares - 1.0).abs() < 1e-9, "{:?}: {shares}", rules.kind);
+            // The leads' shares make one, where callers keep to no styles;
+            // where they do, the styles have the leads, and the knob as on
+            // the air stands inside the shape.
+            match rules.their_styles {
+                None => {
+                    let shares: f64 = rules.their_lead.iter().map(|(_, share)| share).sum();
+                    assert!((shares - 1.0).abs() < 1e-9, "{:?}: {shares}", rules.kind);
+                }
+                Some(styles) => {
+                    assert!(rules.their_lead.is_empty(), "{:?}", rules.kind);
+                    assert!(styles.leads.len() >= 2, "{:?}", rules.kind);
+                    assert_eq!(
+                        into_shape(styles.count(), styles.on_air),
+                        styles.on_air,
+                        "{:?}",
+                        rules.kind
+                    );
+                }
+            }
             // The card says who you work exactly where sides change it.
             assert_eq!(rules.works.is_some(), rules.sided(), "{:?}", rules.kind);
         }

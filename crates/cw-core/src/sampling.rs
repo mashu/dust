@@ -624,7 +624,7 @@ fn wanted_call(
     // before the candidates: with a chance each, the most wanted of them
     // would be DX far more often than Field Day's callers are.
     let spec = CallSpec {
-        countries: spec.countries.for_one_call(rng),
+        countries: spec.countries.for_one_call(spec.dx_percent, rng),
         ..spec
     };
     most_wanted(settings, state, config, rng, CALLSIGN_CANDIDATES, |rng| {
