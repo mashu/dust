@@ -1100,6 +1100,8 @@ mod tests {
             },
         );
         s.contest.hunter_dx_percent = 9_000;
+        s.contest.caller_odds.flutter = 9.0;
+        s.contest.caller_odds.dupe = f64::NAN;
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 9_000;
         s.contest.my_sending_db = 9_000;
@@ -1228,6 +1230,13 @@ mod tests {
         );
         assert!(!s.contest.caller_styles.contains_key("sprint"));
         assert_eq!(s.contest.hunter_dx_percent, 100);
+        // Every share kept from nothing to all, and one that is no number
+        // where it starts.
+        assert_eq!(s.contest.caller_odds.flutter, 1.0);
+        assert_eq!(
+            s.contest.caller_odds.dupe,
+            crate::contest::CallerOdds::default().dupe
+        );
         assert_eq!(s.contest.my_call, "DL1/ABC/QRP");
         assert_eq!(s.contest.my_name, "JEANLUCMAX");
         assert_eq!(s.contest.my_state, "QC");
@@ -1865,6 +1874,9 @@ mod tests {
         assert_eq!(contest.contest.contest_tu_call, d.contest_tu_call);
         assert_eq!(contest.contest.caller_styles, d.caller_styles);
         assert_eq!(contest.contest.hunter_dx_percent, d.hunter_dx_percent);
+        // The contest card's shares go back, and the Band card's stay.
+        assert_eq!(contest.contest.caller_odds.dupe, d.caller_odds.dupe);
+        assert_eq!(contest.contest.caller_odds.flutter, 0.6);
     }
 
     /// Undo after a reset puts that card back as it was, and only that one:
@@ -2078,6 +2090,9 @@ mod tests {
         s.contest
             .set_styles_off(crate::contest::ContestKind::Wpx, vec![3]);
         s.contest.hunter_dx_percent = 60;
+        for odd in crate::contest::Odd::ALL {
+            *odd.of_mut(&mut s.contest.caller_odds) = 0.6;
+        }
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 34;
         s.contest.my_sending_db = -21;
@@ -2207,6 +2222,18 @@ mod tests {
             assert_eq!(
                 s.contest.caller_styles.is_empty() && s.contest.hunter_dx_percent == 25,
                 section == SettingsSection::CharacterSet,
+                "{section:?}"
+            );
+            // Each card's shares go back with it, and only with it.
+            let start = crate::contest::CallerOdds::default();
+            assert_eq!(
+                s.contest.caller_odds.dupe == start.dupe,
+                section == SettingsSection::CharacterSet,
+                "{section:?}"
+            );
+            assert_eq!(
+                s.contest.caller_odds.flutter == start.flutter,
+                section == SettingsSection::BandConditions,
                 "{section:?}"
             );
         }

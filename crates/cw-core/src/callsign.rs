@@ -57,9 +57,10 @@ const ABROAD_SHARE: f64 = 0.12;
 
 /// The same two shares in a contest. The tiers send portables and stations
 /// abroad often, because they are what is being practised there; a contest's
-/// callers are mostly at home, as on a real band.
-const CONTEST_PORTABLE_SHARE: f64 = 0.04;
-const CONTEST_ABROAD_SHARE: f64 = 0.03;
+/// callers are mostly at home, as on a real band: until a run sets them
+/// ([`crate::contest::CallerOdds`]).
+pub(crate) const CONTEST_PORTABLE_SHARE: f64 = 0.04;
+pub(crate) const CONTEST_ABROAD_SHARE: f64 = 0.03;
 
 /// The countries a contest's callers may be in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -109,14 +110,15 @@ impl Countries {
         }
     }
 
-    /// The countries one caller is drawn from: a Field Day caller is in
-    /// North America but as often as Field Day's entries send DX, when it is
-    /// anywhere else; a POTA hunter is in the US or Canada but `dx_percent`
-    /// in a hundred, the share of DX hunters; every other choice is itself,
-    /// and draws nothing.
-    pub(crate) fn for_one_call(self, dx_percent: u32, rng: &mut impl Rng) -> Self {
+    /// The countries one caller is drawn from, `spec` saying how many are
+    /// DX: a Field Day caller is in North America but as often as you set
+    /// Field Day's DX, when it is anywhere else; a POTA hunter is in the US
+    /// or Canada but as often as you set its DX hunters; every other choice
+    /// is itself, and draws nothing.
+    pub(crate) fn for_one_call(self, spec: &CallSpec, rng: &mut impl Rng) -> Self {
+        let dx_percent = spec.dx_percent;
         match self {
-            Self::FieldDay if rng.f64() * 100.0 < FIELD_DAY_DX => Self::OutsideNorthAmerica,
+            Self::FieldDay if rng.f64() < spec.field_day_dx => Self::OutsideNorthAmerica,
             Self::FieldDay => Self::NorthAmerica,
             Self::Pota if rng.f64() * 100.0 < f64::from(dx_percent) => Self::OutsideUsAndCanada,
             Self::Pota => Self::UsAndCanada,
@@ -128,7 +130,7 @@ impl Countries {
 /// Which calls to draw: from which countries, and whether for a contest or
 /// for practice. The default is the tier's own draw, which Callsigns mode
 /// and the band send, and which never changes under them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CallSpec {
     pub countries: Countries,
     /// A contest's callers: portables and stations abroad come as often as
@@ -141,6 +143,14 @@ pub struct CallSpec {
     /// apart, as POTA's hunters: [`crate::HUNTER_DX_PERCENT`] until a run
     /// sets it from the settings.
     pub dx_percent: u32,
+    /// The share of Field Day's callers that are DX, as Field Day's entries
+    /// send it until a run sets it from the settings.
+    pub field_day_dx: f64,
+    /// The shares of a contest's callers that sign portable and that are
+    /// abroad: as a contest hears them until a run sets them from the
+    /// settings.
+    pub portable: f64,
+    pub abroad: f64,
 }
 
 impl CallSpec {
@@ -150,6 +160,20 @@ impl CallSpec {
             countries,
             contest: true,
             dx_percent: crate::settings::HUNTER_DX_PERCENT,
+            field_day_dx: FIELD_DAY_DX / 100.0,
+            portable: CONTEST_PORTABLE_SHARE,
+            abroad: CONTEST_ABROAD_SHARE,
+        }
+    }
+
+    /// The same, with its shares as `odds` sets them: Field Day's DX, and
+    /// the callers signing portable and abroad.
+    pub const fn with_odds(self, odds: &crate::contest::CallerOdds) -> Self {
+        Self {
+            field_day_dx: odds.field_day_dx,
+            portable: odds.portable,
+            abroad: odds.abroad,
+            ..self
         }
     }
 
@@ -572,7 +596,7 @@ const AREA_DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9
 /// country of the table's entry it was drawn from.
 pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> GeneratedCall {
     let tier = tier_at(tier);
-    let countries = spec.countries.for_one_call(spec.dx_percent, rng);
+    let countries = spec.countries.for_one_call(&spec, rng);
     let prefix = pick_prefix(tier, countries, rng);
     let digit = separator(prefix, rng);
     let mut call = GeneratedCall {
@@ -592,7 +616,7 @@ pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> Generated
         call.text.push(letter.filter(|_| at == 0).unwrap_or(drawn));
     }
     let (portable_share, abroad_share) = if spec.contest {
-        (CONTEST_PORTABLE_SHARE, CONTEST_ABROAD_SHARE)
+        (spec.portable, spec.abroad)
     } else {
         (PORTABLE_SHARE, ABROAD_SHARE)
     };
@@ -1889,5 +1913,62 @@ mod tests {
         for unknown in ["VP2XAB", "VP2/K1ABC"] {
             assert_eq!(country_of(unknown), None, "{unknown:?}");
         }
+    }
+
+    /// A contest's call mix is as you set it: none or all signing portable,
+    /// none or all abroad, and Field Day's DX none or all of its callers.
+    #[test]
+    fn a_contests_call_mix_is_as_you_set_it() {
+        let mix = |countries: Countries, portable: f64, abroad: f64, dx: f64| {
+            let odds = crate::contest::CallerOdds {
+                portable,
+                abroad,
+                field_day_dx: dx,
+                ..crate::contest::CallerOdds::default()
+            };
+            generated(
+                CALLSIGN_TIER_MAX,
+                CallSpec::contest(countries).with_odds(&odds),
+                2_000,
+            )
+        };
+        let home = mix(Countries::Any, 0.0, 0.0, 0.0);
+        assert!(
+            home.iter()
+                .all(|call| call.marker.is_none() && call.host.is_none())
+        );
+        // All of them where the tier and a host country let a call be: far
+        // more than as heard on the air.
+        let start = crate::contest::CallerOdds::default();
+        let usual = mix(Countries::Any, start.portable, start.abroad, 0.0);
+        let abroad =
+            |calls: &[GeneratedCall]| calls.iter().filter(|call| call.host.is_some()).count();
+        let portable =
+            |calls: &[GeneratedCall]| calls.iter().filter(|call| call.marker.is_some()).count();
+        let away = mix(Countries::Any, 0.0, 1.0, 0.0);
+        assert!(
+            abroad(&away) > 5 * abroad(&usual).max(1),
+            "{} abroad, {} as on the air",
+            abroad(&away),
+            abroad(&usual)
+        );
+        let signed = mix(Countries::Any, 1.0, 0.0, 0.0);
+        assert!(
+            portable(&signed) > 5 * portable(&usual).max(1),
+            "{} portable, {} as on the air",
+            portable(&signed),
+            portable(&usual)
+        );
+        let north = mix(Countries::FieldDay, 0.0, 0.0, 0.0);
+        assert!(
+            north
+                .iter()
+                .all(|call| Countries::NorthAmerica.admits(call.country))
+        );
+        let dx = mix(Countries::FieldDay, 0.0, 0.0, 1.0);
+        assert!(
+            dx.iter()
+                .all(|call| !Countries::NorthAmerica.admits(call.country))
+        );
     }
 }

@@ -4293,6 +4293,58 @@ mod interactions {
         assert!(!sprint.has("styles:"), "{}", sprint.html());
     }
 
+    /// The contest card folds how often callers do each thing under
+    /// Caller odds: who calls, how pile-up callers call (idle with one
+    /// caller at a time), how they ask and put your call right, each share
+    /// only where the contest has it: dupes where it scores, Field Day's
+    /// DX, `NR?` where the queries differ, your `73 44` in POTA.
+    #[test]
+    fn caller_odds_fold_on_the_contest_card() {
+        let open = |kind: cw_core::ContestKind| {
+            let mut ui = Ui::new(ContestCharsetHarness, ContestCharsetHarnessProps { kind });
+            assert!(ui.has("Caller odds: as on the air"), "{}", ui.html());
+            ui.click("disclosure-caller-odds");
+            ui
+        };
+        let mut wpx = open(cw_core::ContestKind::Wpx);
+        for shown in [
+            "odds-dupe",
+            "odds-portable",
+            "odds-abroad",
+            "odds-asksnr",
+            "odds-fixeswithexchange",
+        ] {
+            assert!(
+                wpx.has(&format!(r#"id="{shown}""#)),
+                "{shown}: {}",
+                wpx.html()
+            );
+        }
+        for gone in ["odds-fielddaydx", "odds-farewell44"] {
+            assert!(!wpx.has(&format!(r#"id="{gone}""#)), "{gone}");
+        }
+        assert!(wpx.input_tag("odds-callstwice").contains("disabled"));
+        assert!(
+            wpx.has(r#"<span class="slider-value">83%</span>"#),
+            "{}",
+            wpx.html()
+        );
+        wpx.type_into("odds-portable", "20");
+        assert!(wpx.has("Caller odds: 1 moved"), "{}", wpx.html());
+        let fd = open(cw_core::ContestKind::FieldDay);
+        assert!(fd.has(r#"id="odds-fielddaydx""#));
+        assert!(
+            fd.has(r#"<span class="slider-value">0.9%</span>"#),
+            "{}",
+            fd.html()
+        );
+        let pota = open(cw_core::ContestKind::Pota);
+        assert!(pota.has(r#"id="odds-farewell44""#));
+        for gone in ["odds-dupe", "odds-asksnr"] {
+            assert!(!pota.has(&format!(r#"id="{gone}""#)), "{gone}");
+        }
+    }
+
     /// POTA's hunter styles end with how many hunters are DX, on a slider
     /// that steps by five in a hundred.
     #[test]

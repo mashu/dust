@@ -2596,8 +2596,30 @@ the preset.
 | `myWpm` | u32 | 0 | 0 (the callers' middle) or 5..=80; read back, anything but a number is 0 | Speed | operator feedback |
 | `mySendingDb` | i32 | -9 | -60..=0 (-60 is off); read back, anything but a number is -9 | Tone and volume | operator feedback |
 | `contestFlutter` | bool | false | — (read back, anything but true or false is off) | Band conditions | 5 (as built, 5a) |
+| `callerOdds` | object of shares, 0..=1, by name (below) | each as heard on the air | read back, a share that is no number or left out is where it starts, one past its ends is kept to them; the clamp does the same | Band conditions (flutter, habits) and Character set (the rest) | no fixed odds; 2026-11-03 |
 | `contestQsk` | bool | false | — (read back, anything but true or false is off) | Tone and volume | 5 (as built, 5a) |
 
+- **Caller odds** (`callerOdds`, `CallerOdds`, `Odd`). Nothing a caller
+  does now and then is fixed in the code: each share is a slider, from
+  none to all, starting where it was heard on the air, so a run left as it
+  is goes exactly as before. On the Band conditions card: how many callers
+  flutter (`flutter`, 30%, idle while Flutter is off, under its switch,
+  whose line no longer says "three in ten"), and, folded under the caller
+  habits as "Habit odds: as on the air" or "N moved", the numbers of real
+  and rough habits (`enn` 5%, `serialZeroAsT` 98%, `nineAsN` 97%,
+  `zeroAsO` 40%, `zeroAsT` 97%, `zoneCut` 70%, `zonePadded` 5%; idle under
+  easy habits) and rough habits' careless operators (`fumbles` 10%,
+  `early` 0.88 − 5/6, `slips` 4%; idle unless rough). On the contest card,
+  folded as "Caller odds: …" after the caller styles: who calls (`dupe`
+  2% where a contest scores, `portable` 4%, `abroad` 3%, and in Field Day
+  `fieldDayDx`, the counted 0.9%), pile-up callers (`callsTwice` 10%,
+  `missesExchange` 10%; idle with one caller at a time), asking and
+  putting your call right (`asksNr` 30% where the contest's queries
+  differ, `fixesWithExchange` 5/6), and in POTA your TU (`farewell44`
+  25%). Each card's Reset puts back its own shares (`OddsCard`). A share
+  below ten that is not whole reads to a tenth (`0.9%`, `4.7%`). The draws
+  are where the constants' were, so nothing else a run draws moves; the
+  call mix rides on `CallSpec` (`with_odds`), the numbers on `Habits`.
 - **Caller habits.** `easy`: plain digits, no LIDs. `real`: numbers as
   MRCE's callers send them (11.6). `rough`: LIDs and on-frequency QRM. As
   built (4a), the Band card shows them in Contest mode only, after the
@@ -2701,9 +2723,11 @@ the preset.
   save nothing; the card's reset turns it off; `clamp()` has nothing to
   bound; no preset touches it.
 - **Flutter** (as built, 5a). On the Band card in Contest mode only, after
-  the fading, beside which it plays: a switch "Flutter", with "Three callers in ten
+  the fading, beside which it plays: a switch "Flutter", with "Some callers
   flutter, their signal rising and falling 3 to 33 times a second, as over
-  a polar path, fading or not. Your own message never does." (§5.5). Off as
+  a polar path, fading or not; how many is yours to set. Your own message
+  never does." (§5.5), and under it the slider "Callers that flutter", 30%
+  until moved, idle while the switch is off (`callerOdds.flutter`). Off as
   it ships, as MorseRunner's `Flutter` is (`Ini.pas:265`); Contester turns
   it on and First QSO and Club off, and the Band card's note in Contest
   mode names it ("fading and flutter"). Read back, anything but true or

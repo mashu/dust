@@ -1,9 +1,9 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill, GROUP_SIZE_MAX,
-    LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS,
-    STYLE_EVEN, Sender, SequenceChoice, SettingsSection, TrainingSettings, TuCall, WORD_LIST_MAX,
-    WordList, compute_char_pool, corner_shares, current_practice_window, greeting, into_shape,
-    parse_callsign, shape_corners, shares_without, tier_examples, toggle_corner,
+    CALLSIGN_TIER_MAX, CallerOdds, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill,
+    GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL, Odd, PracticeWindow, RunStyle, SEQUENCE_PRESETS,
+    STARTER_WORDS, STYLE_EVEN, Sender, SequenceChoice, SettingsSection, TrainingSettings, TuCall,
+    WORD_LIST_MAX, WordList, compute_char_pool, corner_shares, current_practice_window, greeting,
+    into_shape, parse_callsign, shape_corners, shares_without, tier_examples, toggle_corner,
     unlocked_practice_count,
 };
 use dioxus::prelude::*;
@@ -15,6 +15,7 @@ use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
+use crate::ui::odds::{OddsFold, OddsGroup};
 use crate::ui::paddle::use_typed_field;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, SliderField, TextDraft,
@@ -132,6 +133,10 @@ struct ContestCard {
     qso: Vec<(Sender, String)>,
     /// How the callers' styles vary, where the contest lets you set it.
     styles: Option<StylesCard>,
+    /// How often callers do each thing they do now and then, and which of
+    /// those shares this contest has: the groups of its Caller odds.
+    odds: CallerOdds,
+    odds_groups: Vec<OddsGroup>,
     /// The preset the settings are on, if any.
     preset: Option<ContestPreset>,
 }
@@ -191,9 +196,58 @@ impl ContestCard {
                         StylesCard::of(styles, kind, at, off, dx)
                     })
             },
+            odds: contest.caller_odds,
+            odds_groups: odds_groups(rules, style),
             preset,
         }
     }
+}
+
+/// The groups of shares a contest's Caller odds hold: who calls, how
+/// pile-up callers call (only in a pile-up), how callers ask and put your
+/// call right, and how your TU signs off, each only where the contest has
+/// it: dupes where a contest scores, DX where Field Day's callers send it,
+/// `NR?` where the contest's queries differ, `73 44` where your TU signs
+/// off with a farewell.
+fn odds_groups(rules: &cw_core::ContestRules, style: RunStyle) -> Vec<OddsGroup> {
+    let mut who = Vec::new();
+    if rules.scoring.is_some() {
+        who.push(Odd::Dupe);
+    }
+    who.extend([Odd::Portable, Odd::Abroad]);
+    if rules.kind == ContestKind::FieldDay {
+        who.push(Odd::FieldDayDx);
+    }
+    let mut asking = Vec::new();
+    if rules.their_query[0] != rules.their_query[1] {
+        asking.push(Odd::AsksNr);
+    }
+    asking.push(Odd::FixesWithExchange);
+    let mut groups = vec![
+        OddsGroup {
+            head: "Who calls",
+            odds: who,
+            disabled: false,
+        },
+        OddsGroup {
+            head: "Pile-up callers",
+            odds: vec![Odd::CallsTwice, Odd::MissesExchange],
+            disabled: style != RunStyle::Pileup,
+        },
+        OddsGroup {
+            head: "Asking and putting your call right",
+            odds: asking,
+            disabled: false,
+        },
+    ];
+    if rules.tu.wve.contains("{bye}") || rules.tu.dx.contains("{bye}") {
+        groups.push(OddsGroup {
+            head: "Your TU",
+            odds: vec![Odd::Farewell44],
+            disabled: false,
+        });
+    }
+    groups
 }
 
 /// How a contest's callers reply, as the card shows it: where you put the
@@ -1263,6 +1317,12 @@ fn ContestBody(
         }
         if let Some(styles) = contest.styles.clone() {
             ReplyStyles { settings, styles }
+        }
+        OddsFold {
+            settings,
+            title: "Caller odds",
+            odds: contest.odds,
+            groups: contest.odds_groups.clone(),
         }
         PresetPicker { settings, preset: contest.preset }
     }

@@ -219,7 +219,7 @@ pub struct ContestRules {
     /// own; empty where they do. Sent again, the exchange goes alone.
     pub their_lead: &'static [(&'static str, f64)],
     /// What a caller that has its call but not your exchange asks with:
-    /// the first as often as `caller.rs`'s `FIRST_QUERY` has it, the second
+    /// the first as often as you set ([`super::CallerOdds::asks_nr`]), the second
     /// otherwise.
     pub their_query: [&'static str; 2],
     /// What the station you worked sends after your TU, heard and never
@@ -925,11 +925,8 @@ pub struct CallerStyles {
 }
 
 /// How you sign off in a TU that holds a farewell: `73`, and now and then
-/// `73 44`, as often as [`FAREWELL_44`] has it.
+/// `73 44`, as often as you set ([`super::CallerOdds::farewell_44`]).
 pub const FAREWELLS: [&str; 2] = ["73", "73 44"];
-
-/// How often your farewell is the second of [`FAREWELLS`], `73 44`.
-pub(super) const FAREWELL_44: f64 = 0.25;
 
 impl Scoring {
     /// Whether anything multiplies the points, on either side: all but

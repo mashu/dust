@@ -796,6 +796,9 @@ pub(crate) mod tests {
         k.set_style_at(cw_core::ContestKind::Pota, [-0.5, 0.3]);
         k.set_styles_off(cw_core::ContestKind::Wpx, vec![3]);
         k.hunter_dx_percent = 60;
+        for odd in cw_core::Odd::ALL {
+            *odd.of_mut(&mut k.caller_odds) = 0.6;
+        }
         k.contest_adapt_speed = false;
         k.my_wpm = 34;
         k.my_sending_db = -21;

@@ -30,6 +30,7 @@ pub(crate) mod data;
 mod esm;
 pub(crate) mod exchange;
 mod machine;
+mod odds;
 mod parse;
 mod place;
 mod qrm;
@@ -64,6 +65,7 @@ pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
     PauseWhy, RowStatus, ShownText,
 };
+pub use odds::{CallerOdds, Odd, OddsCard};
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub use place::filter_capacity;
 #[cfg(test)]

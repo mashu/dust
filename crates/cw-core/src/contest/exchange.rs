@@ -10,6 +10,7 @@
 use super::CallerHabits;
 use super::data::places::place_code;
 use super::data::sections::{fold_yukon, listed_section};
+use super::odds::CallerOdds;
 use crate::alignment::align_group;
 use crate::rng::Rng;
 
@@ -289,30 +290,27 @@ pub fn cut_power(power: &str) -> String {
     cut(power, &SERIAL_CUTS)
 }
 
-/// How a caller with real habits sends a zero that is not in a run of them,
-/// in a message, as MorseRunner's callers do (`Station.pas:538-551`): in a
-/// serial, as `T` 98% of the time; otherwise, and in a power, as `O` 40% of
-/// the time and as `T` 97% of the rest, so a serial's is hardly ever a
-/// plain 0, and a power's is `T` or `O`.
-const REAL_CUT_ZERO: f64 = 0.98;
-const REAL_ZERO_AS_O: f64 = 0.4;
-const REAL_CUT_ZERO_AFTER: f64 = 0.97;
-
-/// How often a caller with real habits cuts the nines of a serial or a
-/// report other than 599 (`Station.pas:564-565`).
-const REAL_CUT_NINE: f64 = 0.97;
-
-/// How many callers with real habits cut a zone's or a power's zeros, ones
-/// and nines, each keeping to it for the QSO (`Station.pas:555-562`); and
-/// how often one pads a zone below 9 with a zero, as MorseRunner's do
-/// (`CqWW.pas:305-307`).
-const REAL_CUT_ZONE: f64 = 0.70;
-const REAL_PAD_ZONE: f64 = 0.05;
+/// A zone below this is padded with a zero now and then, as MorseRunner's
+/// are (`CqWW.pas:305-307`), as often as [`CallerOdds::zone_padded`] has it.
 const REAL_PAD_BELOW: u32 = 9;
 
-/// How often a caller with real habits sends its 599 as `ENN` rather than
-/// `5NN`, message by message (`Station.pas:527-528`).
-const REAL_ENN: f64 = 0.05;
+/// How a caller sends its numbers: under which habits, and how often each
+/// of real habits' ways comes ([`CallerOdds`]). Habits alone send each as
+/// heard on the air.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Habits {
+    pub level: CallerHabits,
+    pub odds: CallerOdds,
+}
+
+impl From<CallerHabits> for Habits {
+    fn from(level: CallerHabits) -> Self {
+        Self {
+            level,
+            odds: CallerOdds::default(),
+        }
+    }
+}
 
 /// A report of 599, and the two ways a caller with real habits sends it.
 const REPORT_599: u32 = 599;
@@ -326,15 +324,17 @@ fn cut_zero_runs(digits: &str) -> String {
     digits.replace("000", "TTT").replace("00", "TT")
 }
 
-/// What a caller with real habits sends a zero alone as, in one message:
-/// in a `serial` almost always `T`, and otherwise `O` or `T`, seldom a
-/// plain 0.
-fn lone_zero(serial: bool, rng: &mut impl Rng) -> char {
-    if serial && rng.f64() < REAL_CUT_ZERO {
+/// What a caller with real habits sends a zero alone as, in one message,
+/// as MorseRunner's callers do (`Station.pas:538-551`): in a `serial` as
+/// `T` as often as `odds` has it, almost always; otherwise, and in a
+/// power, as `O` as often as they have it and as `T` most of the rest, so
+/// a serial's is hardly ever a plain 0.
+fn lone_zero(serial: bool, odds: &CallerOdds, rng: &mut impl Rng) -> char {
+    if serial && rng.f64() < odds.serial_zero_as_t {
         'T'
-    } else if rng.f64() < REAL_ZERO_AS_O {
+    } else if rng.f64() < odds.zero_as_o {
         'O'
-    } else if rng.f64() < REAL_CUT_ZERO_AFTER {
+    } else if rng.f64() < odds.zero_as_t {
         'T'
     } else {
         '0'
@@ -348,12 +348,18 @@ fn lone_zero(serial: bool, rng: &mut impl Rng) -> char {
 /// callers do: padded to three digits, as WPX's are, the padding as `TT`;
 /// every run of zeros as `T`s, a zero alone as `T` almost always (now and
 /// then `O`), and nines as `N` nearly as often.
-pub fn send_serial(serial: u32, habits: CallerHabits, cut: bool, rng: &mut impl Rng) -> String {
-    if habits == CallerHabits::Easy || !cut {
+pub fn send_serial(
+    serial: u32,
+    habits: impl Into<Habits>,
+    cut: bool,
+    rng: &mut impl Rng,
+) -> String {
+    let Habits { level, odds } = habits.into();
+    if level == CallerHabits::Easy || !cut {
         return serial.to_string();
     }
-    let zero = lone_zero(true, rng);
-    let cut_nine = rng.f64() < REAL_CUT_NINE;
+    let zero = lone_zero(true, &odds, rng);
+    let cut_nine = rng.f64() < odds.nine_as_n;
     cut_zero_runs(&format!("{serial:03}"))
         .chars()
         .map(|c| match c {
@@ -368,17 +374,18 @@ pub fn send_serial(serial: u32, habits: CallerHabits, cut: bool, rng: &mut impl 
 /// `14`); real ones send as MorseRunner's callers do: a zone below 9 now
 /// and then padded with a zero (`05`), and its zeros, ones and nines cut
 /// by most callers (`T5`, `A4`).
-pub fn send_zone(zone: u32, habits: CallerHabits, rng: &mut impl Rng) -> String {
+pub fn send_zone(zone: u32, habits: impl Into<Habits>, rng: &mut impl Rng) -> String {
+    let Habits { level, odds } = habits.into();
     let plain = zone.to_string();
-    if habits == CallerHabits::Easy {
+    if level == CallerHabits::Easy {
         return plain;
     }
-    let padded = if zone < REAL_PAD_BELOW && rng.f64() < REAL_PAD_ZONE {
+    let padded = if zone < REAL_PAD_BELOW && rng.f64() < odds.zone_padded {
         format!("0{plain}")
     } else {
         plain
     };
-    if rng.f64() < REAL_CUT_ZONE {
+    if rng.f64() < odds.zone_cut {
         cut(&padded, &ZONE_CUTS)
     } else {
         padded
@@ -389,16 +396,17 @@ pub fn send_zone(zone: u32, habits: CallerHabits, rng: &mut impl Rng) -> String 
 /// `KW`); real ones as MorseRunner's callers do: a run of zeros always as
 /// `T`s (`1TT`), a zero alone as `O` or `T` (`5O`, `5T`), and most callers
 /// cut ones and nines too (`ATT`). A kilowatt goes as written.
-pub fn send_power(power: &str, habits: CallerHabits, rng: &mut impl Rng) -> String {
-    if habits == CallerHabits::Easy || !power.chars().all(|c| c.is_ascii_digit()) {
+pub fn send_power(power: &str, habits: impl Into<Habits>, rng: &mut impl Rng) -> String {
+    let Habits { level, odds } = habits.into();
+    if level == CallerHabits::Easy || !power.chars().all(|c| c.is_ascii_digit()) {
         return power.to_string();
     }
-    let zero = lone_zero(false, rng);
+    let zero = lone_zero(false, &odds, rng);
     let sent: String = cut_zero_runs(power)
         .chars()
         .map(|c| if c == '0' { zero } else { c })
         .collect();
-    if rng.f64() < REAL_CUT_ZONE {
+    if rng.f64() < odds.zone_cut {
         cut(&sent, &ZONE_CUTS)
     } else {
         sent
@@ -409,15 +417,16 @@ pub fn send_power(power: &str, habits: CallerHabits, rng: &mut impl Rng) -> Stri
 /// digits under easy habits (`579`), and under real ones as MorseRunner's
 /// callers send one: 599 as `5NN`, or `ENN` now and then, and the nines of
 /// any other cut nearly always (`57N`).
-pub fn send_report(report: u32, habits: CallerHabits, rng: &mut impl Rng) -> String {
+pub fn send_report(report: u32, habits: impl Into<Habits>, rng: &mut impl Rng) -> String {
+    let habits = habits.into();
     let plain = report.to_string();
-    if habits == CallerHabits::Easy {
+    if habits.level == CallerHabits::Easy {
         return plain;
     }
     if report == REPORT_599 {
         return send_5nn(habits, rng).to_string();
     }
-    let cut_nine = rng.f64() < REAL_CUT_NINE;
+    let cut_nine = rng.f64() < habits.odds.nine_as_n;
     plain
         .chars()
         .map(|c| if c == '9' && cut_nine { 'N' } else { c })
@@ -425,9 +434,11 @@ pub fn send_report(report: u32, habits: CallerHabits, rng: &mut impl Rng) -> Str
 }
 
 /// A report of 599 as a caller sends it in one message: `5NN`, as every
-/// caller cuts it, or under real habits `ENN` in one message in twenty.
-pub(super) fn send_5nn(habits: CallerHabits, rng: &mut impl Rng) -> &'static str {
-    if habits != CallerHabits::Easy && rng.f64() < REAL_ENN {
+/// caller cuts it, or under real habits `ENN` as often as its odds have it
+/// (`Station.pas:527-528`).
+pub(super) fn send_5nn(habits: impl Into<Habits>, rng: &mut impl Rng) -> &'static str {
+    let Habits { level, odds } = habits.into();
+    if level != CallerHabits::Easy && rng.f64() < odds.enn {
         ENN
     } else {
         CUT_599

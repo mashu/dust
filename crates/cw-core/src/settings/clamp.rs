@@ -147,6 +147,7 @@ impl TrainingSettings {
             choice.at != rules.styles_on_air() || !choice.off.is_empty()
         });
         k.hunter_dx_percent = k.hunter_dx_percent.min(100);
+        k.caller_odds = k.caller_odds.clamped();
         // Zero is no speed of your own: the middle of the callers' range.
         if k.my_wpm != 0 {
             k.my_wpm = k.my_wpm.clamp(MY_WPM_MIN, MY_WPM_MAX);

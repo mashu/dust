@@ -39,7 +39,7 @@ use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
-use super::rules::{ContestRules, FAREWELL_44, FAREWELLS, Fill, GREETING_HOUR, Side, greeting};
+use super::rules::{ContestRules, FAREWELLS, Fill, GREETING_HOUR, Side, greeting};
 use super::score::rate_at;
 use super::turn::{
     Fade, Segment, Sender, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
@@ -378,10 +378,10 @@ const RESUME_DELAY_MS: u64 = 1_000;
 /// the design).
 const SHOWN_AFTER_MS: u64 = 1_000;
 
-/// Once this many QSOs are logged, [`DUPE_SHARE`] of the callers who join
-/// are stations worked before (§4.7 of the design).
+/// Once this many QSOs are logged, as many of the callers who join as you
+/// set are stations worked before (§4.7 of the design,
+/// [`crate::contest::CallerOdds::dupe`]).
 const DUPES_AFTER: u32 = 5;
-const DUPE_SHARE: f64 = 0.02;
 
 /// The stream, forked off the run's generator, that the run's own draws
 /// come from: how many call, and who calls again. The callers' streams are
@@ -2197,7 +2197,7 @@ impl<S: CallSource> ContestMachine<S> {
         // A TU that signs off with a farewell, `73` or now and then `73 44`.
         let farewell = if message.contains(&MessagePart::Tu)
             && self.rules.tu.on(self.side).contains("{bye}")
-            && self.farewells.f64() < FAREWELL_44
+            && self.farewells.f64() < self.settings.contest.caller_odds.farewell_44
         {
             FAREWELLS[1]
         } else {
@@ -4164,7 +4164,7 @@ impl<S: CallSource> ContestMachine<S> {
     ) -> Option<usize> {
         let logged = self.serial - 1;
         let dupes = self.rules.scoring.is_some() && logged >= DUPES_AFTER;
-        if dupes && self.draws.f64() < DUPE_SHARE {
+        if dupes && self.draws.f64() < self.settings.contest.caller_odds.dupe {
             // Stations done with you and logged with a QSO, but none that was
             // on the frequency at your key or your TU closed: a station you
             // have just thanked does not call straight back.
@@ -4208,7 +4208,8 @@ impl<S: CallSource> ContestMachine<S> {
             &self.settings,
             self.rules
                 .callers(self.side)
-                .with_dx(self.settings.contest.hunter_dx_percent),
+                .with_dx(self.settings.contest.hunter_dx_percent)
+                .with_odds(&self.settings.contest.caller_odds),
             &avoid,
         );
         let mut caller = Caller::arrive(
@@ -5437,6 +5438,30 @@ mod tests {
                     assert!((share - alike).abs() < 1e-9, "{reply}: {share}");
                 }
             }
+        }
+    }
+
+    /// Your TU signs `73 44` as often as you set: never, or every time.
+    #[test]
+    fn your_tu_signs_73_44_as_often_as_you_set() {
+        for (share, want) in [(0.0, " 73 EE"), (1.0, " 73 44 EE")] {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_kind = crate::contest::ContestKind::Pota;
+            settings.contest.my_call = "N4BKY".to_string();
+            settings.contest.my_state = "AL".to_string();
+            settings.contest.caller_odds.farewell_44 = share;
+            let settings = settings.clamp();
+            let sampler = Sampler::new(&[], &settings, 3);
+            let mut runtime = Runtime::start(3, settings, sampler);
+            work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+            let tus: Vec<String> = runtime
+                .turns
+                .iter()
+                .map(|turn| yours(turn).to_string())
+                .filter(|mine| mine.starts_with("BK TU "))
+                .collect();
+            assert!(!tus.is_empty());
+            assert!(tus.iter().all(|tu| tu.ends_with(want)), "{tus:?}");
         }
     }
 

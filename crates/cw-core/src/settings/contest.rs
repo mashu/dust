@@ -15,7 +15,9 @@ use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_can
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall};
+use crate::contest::{
+    CallerHabits, CallerOdds, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall,
+};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -132,6 +134,11 @@ pub struct ContestSettings {
     /// card, under the hunters' styles.
     #[serde(deserialize_with = "forgiving_dx_percent")]
     pub hunter_dx_percent: u32,
+    /// How often callers do each thing they do now and then, and how often
+    /// your TU signs `73 44`: each a share you set, starting as heard on
+    /// the air ([`CallerOdds`]). Set on the Band conditions card (flutter
+    /// and the callers' habits) and the contest card (the rest).
+    pub caller_odds: CallerOdds,
     /// Each new caller's speed drawn from your copy speed in contests, within
     /// the Speed card's ranges: faster as you copy calls and numbers clean,
     /// slower as you miss them. Off, it is drawn evenly from the ranges. A
@@ -197,6 +204,7 @@ impl Default for ContestSettings {
             contest_tu_call: TuCall::Every,
             caller_styles: BTreeMap::new(),
             hunter_dx_percent: HUNTER_DX_PERCENT,
+            caller_odds: CallerOdds::default(),
             contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
