@@ -5430,11 +5430,7 @@ mod interactions {
     fn space_skips_a_character_and_moves_on() {
         crate::testing::run(|| async {
             let mut ui = Ui::new(KeypadHarness, ());
-            let space = ui.input_tag("key-space");
-            assert!(
-                space.contains(">Space<") || ui.has(">Space</button>"),
-                "{space}"
-            );
+            assert!(ui.has(">␣ Space</button>"), "{}", ui.html());
             ui.click("key-k");
             ui.click("key-space");
             assert!(box_shows(&ui, "K_"), "{}", ui.input_tag("group-input-0"));

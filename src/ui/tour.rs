@@ -613,7 +613,7 @@ const CONTEST_STEPS: &[Step] = &[
             "Message keys"
         },
         text: if TOUCH_BUILD {
-            "The keypad types into the field with the cursor, and Space moves between the fields. Its big key sends what Enter would, and says what. CQ, ?\u{a0}Again and Wipe stay above it."
+            "The keypad types into the field with the cursor, and ␣\u{a0}Space moves between the fields. Its big key sends what Enter would, and says what. CQ, ?\u{a0}Again and Wipe stay above it."
         } else {
             "Every message has a key and a button: F1\u{a0}CQ, F7\u{a0}?\u{a0}Again, Esc\u{a0}stops what you send. The buttons Enter would press now are lit. On a touch screen, a keypad shows; its big key sends what Enter would."
         },

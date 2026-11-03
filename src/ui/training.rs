@@ -491,7 +491,7 @@ fn pad_face(key: &PadKey) -> (String, String, String, &'static str) {
         PadKey::Space => (
             control_id("key", "space"),
             "Space".into(),
-            "Space".into(),
+            "␣ Space".into(),
             "key key-space",
         ),
         // Named for what it sends, aloud as on screen; the ↵ after it is

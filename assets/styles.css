@@ -1580,7 +1580,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
   .keypad.touch-only { display: grid; }
 }
 .keypad-row { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 0.35rem; }
-.keypad-last { grid-template-columns: 1fr 1fr 2fr 2fr 4fr; }
+/* ␣ Space wide enough for its word on one line, ⌫ a little narrower, and
+   Next still the widest. */
+.keypad-last { grid-template-columns: 1fr 1fr 3fr 1.5fr 3.5fr; }
 .key {
   min-height: 3rem;
   padding: 0;
@@ -1810,7 +1812,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
    field and Enter, which names what it sends. */
 .keypad-tail { grid-template-columns: repeat(8, minmax(0, 1fr)) 2fr; }
 .keypad-send { grid-template-columns: 3fr 7fr; }
-.key-space { font-size: 1rem; }
+.key-space { font-size: 1rem; white-space: nowrap; padding-inline: 0.15rem; }
 .keypad-send .key {
   min-width: 0;
   padding: 0 0.5rem;
