@@ -12831,11 +12831,20 @@ mod tests {
         let planned = plan_turn(&turn, &runtime.machine.settings);
         assert_eq!(
             planned.others.len(),
-            1 + sent.len(),
-            "the reply and the QRM"
+            replies(&turn).len() + sent.len(),
+            "the replies and the QRM"
         );
-        // The station you work answers as ever, and is the only station.
-        assert_eq!(replies(&turn).len(), 1);
+        // The station you work answers as ever, and is the only station: a
+        // short serial ends its reply early, so its wait for you may run
+        // out while the QRM still sends, and it sends again in the turn.
+        assert!(!replies(&turn).is_empty(), "{turn:?}");
+        assert!(
+            turn.segments
+                .iter()
+                .filter(|segment| segment.who.is_caller())
+                .all(|segment| segment.who == Sender::Caller(0)),
+            "{turn:?}"
+        );
         assert_eq!(runtime.machine.stations.len(), 1);
         // With only the QRM sounding beside your message, nobody calls.
         let air = view(&runtime).air.expect("on the air");

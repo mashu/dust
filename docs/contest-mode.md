@@ -3490,20 +3490,50 @@ digit above.
 
 ### 11.6 Serials, cut numbers, 5NN
 
-- **Callers' serials** are `1 + floor(final × (T0 + t) / L)`, never past
-  `final`: `L` is the contest's length (48 h, 4 h), `T0` uniform in
-  [0, L − the run's limit] (60 minutes for an open run), `t` run time,
-  `final` capped at 9,999 so a serial stays within four digits. `final` is
+- **Callers' serials** come from a counting process, each station's log
+  growing as a Poisson process through the contest: a station's serial at
+  run time `t` is `1 + N(t)`, `N(t) ~ Poisson(final × t / L)`, `L` the
+  run's limit (60 minutes for an open run). A run is far shorter than a
+  contest, so it is the whole contest drawn in to the run's length: time
+  is read as the share of the run gone, `t / L`, a 60-minute run standing
+  for WPX's 48 hours, each of its minutes for 48 minutes of the contest,
+  and in a 10-minute run each minute for 4.8 hours; the Sprint's 4 hours
+  are drawn in alike. Every station starts the run
+  with the contest, so the first serials of a run are short, and they grow in
+  proportion to how far through the run it is, to each station's whole
+  log, `final` on average, by its end, whatever the run's length. Each
+  station reads its count at a quantile of its own, drawn once, so its
+  serial never goes back as the run goes on, and the count at any moment
+  is exactly Poisson. Past the run's limit the count stays at its end.
+- **`final`,** the QSOs a station logs by the contest's end on average, is
   log-normal: WPX median 190, σ 1.45, fitted to F6FVY's histogram of last
   serials in MRCE (`CqWpx.pas:127-196`); Sprint median 80, σ 0.9, Dust's
-  estimate (`SPRINT_SERIALS`, `L` 4 h). Those bins count logs, and a
-  station you hear tends to have a big log, so `final` is drawn with
-  weight ∝ final^0.5, Dust's estimate between logs and QSOs. A dupe sends
-  its previous serial + 1 + Poisson(final × Δt / L). As built (2a), the
-  dupe's serial is fixed as
-  it calls again, Δt the run time since its last exchange was fixed, the
-  count drawn as Knuth draws one, within four digits; the rest of its
-  exchange is what it sent before, its name among it.
+  estimate (`SPRINT_SERIALS`). Those bins count logs, and a station you
+  hear tends to have a big log, so `final` is drawn with weight ∝
+  final^0.5, Dust's estimate between logs and QSOs; a log-normal weighted
+  by a power of itself is log-normal again, its log-mean moved up by that
+  power × σ². It is truncated to [1, 9,999], drawn again where it falls
+  outside, so no log piles up at four digits' end; a serial too is held
+  within four digits. Only the biggest logs reach four digits, late in
+  the run: a station sends one only once its count passes 998.
+- **A dupe** sends its previous serial + 1 + Poisson(final × Δt / L), the
+  QSOs it logged meanwhile, the same process; Δt is the run time since
+  its last exchange was fixed. The serial is fixed as it calls again,
+  within four digits; the rest of its exchange is what it sent before,
+  its name among it.
+- **The counts** are read by exact inversion (`poisson_quantile`): the
+  probabilities summed out from the most likely count in both directions,
+  in logarithms, so a mean of thousands is read as surely as one of three.
+- **Before (2a to 2026-11-03),** each caller stood at a time `T0` of its
+  own, uniform through the real contest's 48 h or 4 h, with its serial
+  `1 + floor(final × (T0 + t) / L)` and `final` clamped at 9,999, so a
+  run's first callers sent serials of any size, four digits among them,
+  hardly growing through a run of minutes, and the biggest logs piled up
+  at 9,999. The user asked for the first serials to be short, to grow in
+  proportion to the time the contest runs, and to come from a distribution
+  that depends on time rather than rules, so the log became the counting
+  process above. Dupes' counts were drawn by Knuth's method, which
+  underflows past a mean of about 745.
 - **Habits `easy`:** plain digits, no padding (`7`). **`real`,** as MRCE:
   padded to three with the leading zeros as `TT` (`Station.pas:493-494,
   536-537`), 98% of other zeros as T, 9 as N 97% of the time (`:538-539,
