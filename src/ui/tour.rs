@@ -589,7 +589,7 @@ const CONTEST_STEPS: &[Step] = &[
     Step {
         title: "Call and Exchange",
         text: if TOUCH_BUILD {
-            "Type the call you hear, then what the station sends you. Space moves between the two."
+            "Type the call you hear, then what the station sends you. ␣\u{a0}Space moves between the two."
         } else {
             "Type the call you hear, then what the station sends you. Space moves between the two, and on the paddles, so does a word-length pause after a letter."
         },
@@ -2085,18 +2085,16 @@ mod tests {
         let fields = shows(super::RunPart::Fields);
         let first = super::RunPart::Keys.targets(false)[0].clone();
         if TOUCH_BUILD {
+            // The keypad's key, as it is labelled.
             assert_eq!((keys.title, first.as_str()), ("The keypad", "keypad"));
-            assert!(keys.text.contains("Space moves between"), "{}", keys.text);
-            assert!(
-                fields.text.contains("Space moves between"),
-                "{}",
-                fields.text
-            );
-            assert!(!fields.text.contains("Space"), "{}", fields.text);
+            assert!(keys.text.contains("␣\u{a0}Space"), "{}", keys.text);
+            assert!(fields.text.contains("␣\u{a0}Space"), "{}", fields.text);
         } else {
+            // The keyboard's space bar, no keypad's key.
             assert_eq!((keys.title, first.as_str()), ("Message keys", "run-keys"));
             assert!(keys.text.contains("F1\u{a0}CQ"), "{}", keys.text);
             assert!(fields.text.contains("Space"), "{}", fields.text);
+            assert!(!fields.text.contains('␣'), "{}", fields.text);
         }
     }
 
