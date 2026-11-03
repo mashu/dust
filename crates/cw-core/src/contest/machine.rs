@@ -5062,6 +5062,17 @@ mod tests {
         Runtime::start(1, run_settings(25.0), ScriptCalls::new(calls))
     }
 
+    /// A Simple QSO caller's report and name in `exchange`, after `UR` and
+    /// `NAME`, however its style starts and repeats them.
+    fn report_and_name(exchange: &str) -> (String, String) {
+        let words: Vec<&str> = exchange.split_whitespace().collect();
+        let after = |word: &str| {
+            let at = words.iter().position(|said| *said == word).expect(word);
+            words[at + 1].to_string()
+        };
+        (after("UR"), after("NAME"))
+    }
+
     /// What callers send in `turn`.
     fn replies(turn: &Turn) -> Vec<&str> {
         turn.segments
@@ -5856,15 +5867,15 @@ mod tests {
         for key in [OpKey::Esm, OpKey::TuAndLog] {
             let mut runtime = Runtime::start(1, settings.clone(), ScriptCalls::new(&["K5XYZ"]));
             let exchange = to_its_exchange(&mut runtime);
-            let words: Vec<&str> = exchange.split_whitespace().collect();
-            let copy = format!("{} {}", words[3], words[6]);
+            let (rst, name) = report_and_name(&exchange);
+            let copy = format!("{rst} {name}");
             runtime.key(OpKey::Tu, "K5XYZ", &copy);
             runtime.finish_turn();
             assert_eq!(view(&runtime).qsos, 0, "F3 logs nothing");
             runtime.key(key, "K5XYZ", &copy);
             assert_eq!(
                 yours(runtime.last_turn()),
-                format!("TU {} 73 EE", words[6]),
+                format!("TU {name} 73 EE"),
                 "{key:?}"
             );
             runtime.finish_turn();
@@ -5881,9 +5892,9 @@ mod tests {
         settings.contest.contest_kind = crate::contest::ContestKind::SimpleQso;
         let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
         let exchange = to_its_exchange(&mut runtime);
-        let words: Vec<&str> = exchange.split_whitespace().collect();
+        let (rst, name) = report_and_name(&exchange);
         let at = runtime.now;
-        runtime.key(OpKey::Esm, "K5XYZ", &format!("{} {}", words[3], words[6]));
+        runtime.key(OpKey::Esm, "K5XYZ", &format!("{rst} {name}"));
         let signoff = sent_by(runtime.last_turn(), 0)[0].clone();
         assert_eq!(signoff.text, "73 EE");
         runtime.run_to(at + ms(signoff.start_sec + 0.1));
@@ -7240,8 +7251,8 @@ mod tests {
         settings.contest.contest_kind = crate::contest::ContestKind::SimpleQso;
         let mut simple = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
         let exchange = to_its_exchange(&mut simple);
-        let words: Vec<&str> = exchange.split_whitespace().collect();
-        simple.key(OpKey::Esm, "K5XYZ", &format!("{} {}", words[3], words[6]));
+        let (rst, name) = report_and_name(&exchange);
+        simple.key(OpKey::Esm, "K5XYZ", &format!("{rst} {name}"));
         assert_eq!(taught(&simple.machine.source.learned_speed), ["K5XYZ"]);
         assert_eq!(
             simple.machine.source.learned.len(),
