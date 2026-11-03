@@ -21,6 +21,9 @@
 // database keeps has every group's character times and no reason it went
 // untimed.
 //
+// The page reaches nothing but the site served here: no font host, nor any
+// other, can hold a session up.
+//
 // It is the regression check for characters left untimed that the Rust
 // tests cannot make: the browser's own audio clock, stream, event loop and
 // database (src/timing_tests.rs runs the same sessions in the app's test
@@ -222,6 +225,13 @@ const KEY_ALONG = `((wpm, reactMs, after, firstMs, gapMs) => {
 /// wrong, if anything.
 async function session(browser, url, after) {
   const context = await browser.newContext();
+  // Only the site itself. index.html asks Google for its type faces, and a
+  // request there that the runner's network holds open keeps the page's
+  // load event, and page.goto with it, from ever coming, though the app is
+  // up and waiting: refused, they leave the system's faces standing in, as
+  // offline. The check is of the timing, never of anyone else's servers.
+  const origin = new URL(url).origin;
+  await context.route(target => target.origin !== origin, route => route.abort());
   const page = await context.newPage();
   const log = [];
   page.on('console', m => log.push(`${m.type()}: ${m.text()}`));
