@@ -33,7 +33,12 @@ that does all five:
   out the `kotlin-android` plugin, the `kotlinOptions` block (Kotlin
   targets the Java version `compileOptions` sets) and the `sourceSets` block
   (built-in Kotlin finds `src/main/kotlin` itself, and refuses Kotlin
-  sources added to the Java set), and drops Material Components. CI reads
+  sources added to the Java set), and drops Material Components. It also
+  drops `android.defaults.buildfeatures.buildconfig` from the generated
+  `gradle.properties` and loads the build's properties again: Gradle has
+  already read the file by the time an init script runs, and AGP 9 removed
+  that option and will not apply while it is set. The generated app script
+  already sets `buildFeatures.buildConfig`. CI reads
   the plugin version back out of the build's metadata and looks for
   Material's classes in its dex files (`check_android_build`), and fails if
   the version is older or any class is there.
@@ -70,7 +75,10 @@ that does all five:
   language, a foldable opened: each closed it, mid-session or not. The hook
   rewrites the activity's `android:configChanges` in the generated manifest
   to every change there is (`ANDROID_CONFIG_CHANGES`), and fails the build if
-  it finds none to rewrite. The webview lays itself out again for a new size
+  it finds none to rewrite. It also removes `android:extractNativeLibs`,
+  which `dx` sets to true: AGP 9 rejects the attribute, and that legacy
+  packaging is what Play refuses of an app targeting Android 15. Without it
+  the plugin stores the native libraries uncompressed and aligned. The webview lays itself out again for a new size
   or density. The Auto theme follows dark mode switched on meanwhile only as
   far as the webview passes the change on to the page; Light and Dark pin
   it either way.

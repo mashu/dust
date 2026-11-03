@@ -10,7 +10,12 @@
 #   Android 15 deprecates. Before any build script is read, the hook moves
 #   the project to AGP 9 (ANDROID_GRADLE_PLUGIN_VERSION), whose Kotlin is
 #   built in (no kotlin-android plugin, no kotlinOptions, Kotlin sources
-#   where AGP looks for them), and drops Material Components.
+#   where AGP looks for them), and drops Material Components. AGP 9 also
+#   removed android.defaults.buildfeatures.buildconfig, which dx still
+#   writes and which the plugin refuses to apply while it is set. Gradle
+#   reads that file before an init script runs, so the hook drops the line
+#   and loads the build's properties again. The app script already sets
+#   buildFeatures.buildConfig.
 #
 # - It always writes Android's stock green robot as the launcher icon (an
 #   adaptive icon under mipmap-anydpi-v26, which is what Android 8+ shows),
@@ -30,7 +35,11 @@
 #   process. Dark mode turned on, a keyboard or a paddle adapter plugged
 #   in, the font or display size changed, the language, a foldable opened:
 #   each closed the app, mid-session or not. The hook has the activity
-#   handle every change itself (ANDROID_CONFIG_CHANGES).
+#   handle every change itself (ANDROID_CONFIG_CHANGES). The same rewrite
+#   takes out android:extractNativeLibs, which dx sets true: AGP 9 rejects
+#   that attribute, and the legacy packaging it asks for is what Play
+#   refuses of an app targeting Android 15. Without it the plugin stores
+#   the native libraries uncompressed and aligned.
 #
 # The app's own activity (android/MainActivity.kt, which Dioxus.toml points
 # dx at) keeps the webview clear of the system bars and the keyboard once
@@ -116,6 +125,33 @@ install_android_gradle_hook() {
 // the build files dx writes: settled once the settings are read, before
 // either build script is compiled, so each is read as written here. Only
 // Dust's project (its application id) is touched.
+//
+// Gradle reads gradle.properties before this init script runs, so the line
+// is taken out and the build's properties are loaded again. AGP 9 removed
+// android.defaults.buildfeatures.buildconfig and will not apply while it is
+// set. buildFeatures.buildConfig in the app script turns BuildConfig on.
+def dustRoot = gradle.startParameter.projectDir
+if (dustRoot == null) {
+    dustRoot = gradle.startParameter.currentDir
+}
+def dustApp = new File(dustRoot, "app/build.gradle.kts")
+def dustProps = new File(dustRoot, "gradle.properties")
+if (dustApp.isFile() && dustProps.isFile()
+    && dustApp.getText("UTF-8").contains('applicationId = "dev.dust.morse"')) {
+    def kept = dustProps.readLines("UTF-8").findAll { line ->
+        !line.trim().startsWith("android.defaults.buildfeatures.buildconfig")
+    }
+    def rewritten = kept.join("\n") + "\n"
+    if (rewritten != dustProps.getText("UTF-8")) {
+        dustProps.write(rewritten, "UTF-8")
+        println "Dust: dropped android.defaults.buildfeatures.buildconfig; AGP 9 removed it"
+    }
+    def controller = gradle.services.get(org.gradle.api.internal.properties.GradlePropertiesController)
+    def buildId = gradle.owner.buildIdentifier
+    controller.unloadGradleProperties(buildId)
+    controller.loadGradleProperties(buildId, dustRoot, true)
+}
+
 gradle.settingsEvaluated { settings ->
     def rootScript = new File(settings.rootDir, "build.gradle.kts")
     def appScript = new File(settings.rootDir, "app/build.gradle.kts")
@@ -216,6 +252,9 @@ gradle.beforeProject { project ->
         if (!patched.contains(handled)) {
             throw new GradleException("Dust: no android:configChanges in " + manifest)
         }
+        // AGP 9 rejects this attribute. Leaving it out stores the native
+        // libraries uncompressed and 16 KB aligned, which Play requires.
+        patched = patched.replaceFirst(/\s*android:extractNativeLibs="[^"]*"/, "")
         if (patched != written) {
             manifest.write(patched, "UTF-8")
         }
