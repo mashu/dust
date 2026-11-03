@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dust's theme, in place of the one dx writes. The window and the status
+     bar are the app's paper, with dark icons on it. Before Android 15 the
+     status bar takes its colour from colorPrimaryDark; from Android 15 the
+     bars are drawn over the window's background (values-v35). No
+     deprecated bar colour is set: Android 15 deprecates statusBarColor and
+     navigationBarColor. -->
+<resources>
+    <style name="AppTheme" parent="@style/Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimaryDark">@color/dust_paper</item>
+        <item name="android:windowBackground">@color/dust_paper</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

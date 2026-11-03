@@ -15,10 +15,28 @@ as-is, with cpal routing it to AAudio through
 oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just
 the SDK.
 
-The project `dx` generates needs four things put right, and `dx` 0.7 has a
+The project `dx` generates needs five things put right, and `dx` 0.7 has a
 setting for none of them. Every bundle command below, in CI as well, first
 installs a Gradle init hook, [`scripts/android-gradle-hook.sh`](../scripts/android-gradle-hook.sh),
-that does all four:
+that does all five:
+
+- **Android Gradle plugin 9, and no Material Components.** `dx` writes AGP
+  8.7 with the separate `kotlin-android` plugin, and Material Components,
+  which nothing in the app uses. Play asks for AGP 9.0 or later, for R8's
+  newer optimizations, and flagged Material's date picker for calling
+  `Window.setStatusBarColor` and `setNavigationBarColor`, which Android 15
+  deprecates. Once Gradle has read the settings, before either build script
+  is compiled, the hook moves the generated project to AGP
+  `ANDROID_GRADLE_PLUGIN_VERSION` (9.0.1: AGP 9.0 runs on the Gradle 9.1
+  wrapper `dx` writes; a later 9.x needs a later Gradle) with its built-in
+  Kotlin and the Kotlin Gradle plugin it is built with (2.2.10): it takes
+  out the `kotlin-android` plugin, the `kotlinOptions` block (Kotlin
+  targets the Java version `compileOptions` sets) and the `sourceSets` block
+  (built-in Kotlin finds `src/main/kotlin` itself, and refuses Kotlin
+  sources added to the Java set), and drops Material Components. CI reads
+  the plugin version back out of the build's metadata and looks for
+  Material's classes in its dex files (`check_android_build`), and fails if
+  the version is older or any class is there.
 
 - **Launcher icon.** The icon is [`assets/icon.png`](../assets/icon.png).
   Android 8 and later show the adaptive icon packed in the app, and `dx`
@@ -56,6 +74,25 @@ that does all four:
   or density. The Auto theme follows dark mode switched on meanwhile only as
   far as the webview passes the change on to the page; Light and Dark pin
   it either way.
+
+**Edge to edge.** The app targets SDK 36, so from Android 15 the system
+draws it edge to edge: the window reaches under the status bar, the
+navigation bar and a display cutout, and the keyboard no longer shrinks it.
+`wry` puts the webview in the activity's content as it is. The app's own
+activity, [`android/MainActivity.kt`](../android/MainActivity.kt), which
+`Dioxus.toml` points `dx` at (`application.android_main_activity`), pads the
+content by those insets from Android 15 and consumes them, so the page is laid
+out between the bars and above the keyboard, whatever version of the webview
+the phone has (the webview reports system bars to the page's
+`env(safe-area-inset-*)` only in its newer versions). Before Android 15 the
+system keeps the content clear itself, as it always has. The bars show the
+window behind them, coloured by the app's theme, which the hook copies in with
+the icon ([`assets/android/values*/styles.xml`](../assets/android/values)): the
+paper of the light theme with dark icons, or the dark theme's background with
+light ones in dark mode, the status bar through `colorPrimaryDark` before
+Android 15. Nothing calls the window's bar colours, which Android 15
+deprecates. The bars follow the system's dark mode, not the app's own Light
+or Dark choice.
 
 The screen stays on through a session — the count down, every send and
 every answer — through the window's own keep-screen-on flag

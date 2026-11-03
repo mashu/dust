@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Gradle init hook for the Android project dx generates.
 #
-# dx 0.7 leaves four things out for this app, and has a setting for none:
+# dx 0.7 leaves five things out for this app, and has a setting for none:
+#
+# - It writes Android Gradle plugin 8.7 with the separate Kotlin plugin, and
+#   Material Components, which nothing in the app uses. Play asks for AGP
+#   9.0 or later for R8's newer optimizations, and flags Material's date
+#   picker for Window.setStatusBarColor and setNavigationBarColor, which
+#   Android 15 deprecates. Before any build script is read, the hook moves
+#   the project to AGP 9 (ANDROID_GRADLE_PLUGIN_VERSION), whose Kotlin is
+#   built in (no kotlin-android plugin, no kotlinOptions, Kotlin sources
+#   where AGP looks for them), and drops Material Components.
 #
 # - It always writes Android's stock green robot as the launcher icon (an
 #   adaptive icon under mipmap-anydpi-v26, which is what Android 8+ shows),
@@ -22,6 +31,11 @@
 #   in, the font or display size changed, the language, a foldable opened:
 #   each closed the app, mid-session or not. The hook has the activity
 #   handle every change itself (ANDROID_CONFIG_CHANGES).
+#
+# The app's own activity (android/MainActivity.kt, which Dioxus.toml points
+# dx at) keeps the webview clear of the system bars and the keyboard once
+# Android 15 draws it edge to edge, and its theme (assets/android/values*)
+# colours the bars without the deprecated calls.
 #
 # Source this and call install_android_gradle_hook before
 # `dx bundle --platform android`. The caller removes $ANDROID_GRADLE_HOOK
@@ -55,6 +69,13 @@ dust_version_code() {
   fi
   echo $((major * 1000000 + minor * 1000 + patch))
 }
+
+# The Android Gradle plugin the project is moved to, and the Kotlin Gradle
+# plugin it is built with: AGP 9.0's own, the least its built-in Kotlin
+# takes. AGP 9.0 runs on the Gradle 9.1 dx's wrapper asks for; a later 9.x
+# would need a later Gradle than dx writes.
+ANDROID_GRADLE_PLUGIN_VERSION="9.0.1"
+KOTLIN_GRADLE_PLUGIN_VERSION="2.2.10"
 
 # Every configuration change the activity handles itself, rather than be
 # recreated for it: every flag `android:configChanges` takes under the
@@ -91,6 +112,52 @@ install_android_gradle_hook() {
   mkdir -p "$gradle_init"
   ANDROID_GRADLE_HOOK="$gradle_init/dust-android.gradle"
   cat > "$ANDROID_GRADLE_HOOK" << EOF
+// AGP ${ANDROID_GRADLE_PLUGIN_VERSION} with its built-in Kotlin, and no Material Components, in
+// the build files dx writes: settled once the settings are read, before
+// either build script is compiled, so each is read as written here. Only
+// Dust's project (its application id) is touched.
+gradle.settingsEvaluated { settings ->
+    def rootScript = new File(settings.rootDir, "build.gradle.kts")
+    def appScript = new File(settings.rootDir, "app/build.gradle.kts")
+    if (!rootScript.isFile() || !appScript.isFile()) return
+    if (!appScript.getText("UTF-8").contains('applicationId = "dev.dust.morse"')) return
+
+    def lines = rootScript.readLines("UTF-8")
+    def agp = lines.findIndexOf { it.trim().startsWith('classpath("com.android.tools.build:gradle:') }
+    if (agp < 0) {
+        throw new GradleException("Dust: no Android Gradle plugin on the classpath in " + rootScript)
+    }
+    lines[agp] = '        classpath("com.android.tools.build:gradle:${ANDROID_GRADLE_PLUGIN_VERSION}")'
+    def kgp = lines.findIndexOf { it.trim().startsWith('classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:') }
+    if (kgp >= 0) {
+        lines[kgp] = '        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${KOTLIN_GRADLE_PLUGIN_VERSION}")'
+    }
+    rootScript.write(lines.join("\n") + "\n", "UTF-8")
+
+    // Built-in Kotlin compiles the sources under src/main/kotlin and
+    // src/main/java itself, to the Java target compileOptions sets; the
+    // kotlin-android plugin, its kotlinOptions and Kotlin sources added to
+    // the Java set are errors under it.
+    def kept = []
+    def skipping = 0
+    appScript.readLines("UTF-8").each { line ->
+        def trimmed = line.trim()
+        if (skipping > 0) {
+            skipping += line.count("{") - line.count("}")
+            return
+        }
+        if (trimmed == 'id("org.jetbrains.kotlin.android")') return
+        if (trimmed.startsWith('implementation("com.google.android.material:material:')) return
+        if (trimmed == "kotlinOptions {" || trimmed == "sourceSets {") {
+            skipping = line.count("{") - line.count("}")
+            return
+        }
+        kept << line
+    }
+    appScript.write(kept.join("\n") + "\n", "UTF-8")
+    println "Dust: Android Gradle plugin ${ANDROID_GRADLE_PLUGIN_VERSION}, built-in Kotlin, no Material Components"
+}
+
 gradle.beforeProject { project ->
     // As the plugin is applied, before variants exist. The NDK the strip
     // tool is taken from is chosen then.
@@ -267,6 +334,45 @@ check_android_apk_version() {
     echo "$apk is not version ${version} with version code ${code}" >&2
     return 1
   fi
+}
+
+# Fail unless the APK or app bundle at `archive` was built with the Android
+# Gradle plugin the hook moves the project to, or a later one, as its build
+# metadata records, and holds none of Material Components' classes: proof
+# the hook's move to AGP 9 and its drop of Material reached the build.
+check_android_build() {
+  python3 - "$1" "$ANDROID_GRADLE_PLUGIN_VERSION" << 'PY'
+import re
+import sys
+import zipfile
+
+archive, wanted = sys.argv[1], sys.argv[2]
+metadata_names = (
+    "META-INF/com/android/build/gradle/app-metadata.properties",
+    "BUNDLE-METADATA/com.android.tools.build.gradle/app-metadata.properties",
+)
+with zipfile.ZipFile(archive) as bundle:
+    names = bundle.namelist()
+    metadata = next((name for name in metadata_names if name in names), None)
+    if metadata is None:
+        sys.exit("No Android Gradle plugin metadata in " + archive)
+    properties = dict(
+        line.split("=", 1)
+        for line in bundle.read(metadata).decode("utf-8").splitlines()
+        if "=" in line
+    )
+    built = properties.get("androidGradlePluginVersion", "")
+    version = lambda text: tuple(int(part) for part in re.findall(r"\d+", text)[:3])
+    if not built or version(built) < version(wanted):
+        sys.exit(f"{archive} was built with Android Gradle plugin {built or 'unknown'}, not {wanted} or later")
+    dexes = [name for name in names if re.fullmatch(r"(base/dex/|)classes\d*\.dex", name)]
+    if not dexes:
+        sys.exit("No dex files in " + archive)
+    material = [name for name in dexes if b"Lcom/google/android/material/" in bundle.read(name)]
+    if material:
+        sys.exit("Material Components' classes in " + ", ".join(material))
+    print(f"Android Gradle plugin {built}; no Material Components in {', '.join(dexes)}")
+PY
 }
 
 # Fail unless every native library in the APK or app bundle at `archive`

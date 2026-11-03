@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The window behind the webview: the paper the app's light theme is
+     drawn on, as the webview's own first frame is (src/main.rs, PAPER),
+     and the dark theme's background. From Android 15 it shows behind the
+     status and navigation bars (android/MainActivity.kt). -->
+<resources>
+    <color name="dust_paper">#F3EAD9</color>
+    <color name="dust_night">#0D1017</color>
+</resources>
