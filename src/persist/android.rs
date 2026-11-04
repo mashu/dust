@@ -60,6 +60,37 @@ pub fn files_dir() -> Option<PathBuf> {
     path.ok().map(PathBuf::from)
 }
 
+/// The app's folder that Android's own backup leaves out, as the user it
+/// runs as: `Context.getNoBackupFilesDir()`. None when Android cannot be
+/// asked. Asked as [`files_dir`] asks.
+pub fn no_backup_dir() -> Option<PathBuf> {
+    let android = ndk_context::android_context();
+    // Safety: as in `files_dir`.
+    let vm = unsafe { jni::JavaVM::from_raw(android.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    // Safety: as in `files_dir`.
+    let activity = unsafe { JObject::from_raw(android.context().cast()) };
+    let path = env.with_local_frame(4, |env| -> jni::errors::Result<String> {
+        let folder = env
+            .call_method(&activity, "getNoBackupFilesDir", "()Ljava/io/File;", &[])?
+            .l()?;
+        if folder.is_null() {
+            return Err(jni::errors::Error::NullPtr(
+                "the app has no no-backup folder",
+            ));
+        }
+        let path: JString = env
+            .call_method(&folder, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+            .l()?
+            .into();
+        Ok(env.get_string(&path)?.into())
+    });
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    path.ok().map(PathBuf::from)
+}
+
 /// Whether a backup file goes to the app's own folder on the shared
 /// storage, which Android deletes with the app: before Android 10, which
 /// adds a file to Downloads only through the media store. As

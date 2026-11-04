@@ -469,6 +469,7 @@ fn stats_count_sessions_from_every_character_set() {
             sessions: vec![digits, koch].into(),
             on_delete: None,
             backups: None,
+            sync: None,
         },
     );
     assert!(
@@ -1838,6 +1839,7 @@ fn the_level_up_line_shows_only_where_it_is_what_levels_you_up() {
                 sessions: vec![session("2026-09-01", 0.85), session("2026-09-02", 0.95)].into(),
                 on_delete: None,
                 backups: None,
+                sync: None,
             },
         )
     };

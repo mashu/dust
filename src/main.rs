@@ -33,6 +33,7 @@ mod routes;
 mod session_runtime;
 mod stall_log;
 mod state;
+mod sync;
 // A phone's Back and a browser's; tests press it on a page of their own.
 #[cfg(any(test, feature = "web", target_os = "android"))]
 mod system_back;

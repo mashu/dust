@@ -26,6 +26,7 @@ use crate::persist::{
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live, keep_cut_off};
+use crate::sync::ctx::SyncCtx;
 use crate::time::{POLL_MS, now_ms, sleep_ms};
 use crate::ui::format::{counted, day_of, short_date};
 
@@ -199,6 +200,9 @@ pub struct AppCtx {
     /// The settings could not be stored, and the user has been told: not
     /// again until they have been stored since.
     settings_unsaved: CopyValue<bool>,
+    /// Sync with the user's own Google Drive, where it is on
+    /// ([`crate::sync::ctx`]).
+    pub sync: SyncCtx,
     app: CopyValue<AppState>,
 }
 
@@ -233,6 +237,7 @@ impl AppCtx {
                 )
                 .collect();
             let stored_settings = CopyValue::new(settings.clone().clamp());
+            let sync = SyncCtx::new(&*app.store);
             let ctx = Self {
                 screen: Signal::new(Screen::Home),
                 settings: Signal::new(settings),
@@ -259,9 +264,11 @@ impl AppCtx {
                 mark: CopyValue::new(None),
                 retrying: CopyValue::new(false),
                 settings_unsaved: CopyValue::new(false),
+                sync,
                 app: CopyValue::new(app),
             };
             ctx.hear_history_news();
+            ctx.sync_at_launch();
             ctx
         })
     }
@@ -473,7 +480,10 @@ impl AppCtx {
         let mut refused = None;
         if held != merged {
             match store.write_settings(&merged) {
-                Ok(()) => held = merged.clone(),
+                Ok(()) => {
+                    held = merged.clone();
+                    self.sync_settings_stored(&merged);
+                }
                 Err(why) => refused = Some(why),
             }
         }
@@ -703,6 +713,12 @@ impl AppCtx {
         }
     }
 
+    /// Take up what the store holds now, whatever it says of having
+    /// changed: as sync has just changed it ([`crate::sync::ctx`]).
+    pub(crate) fn take_up_store(self) {
+        self.sync_with_store(|| {});
+    }
+
     /// Take up whatever another tab, window or copy of the app stored or
     /// deleted since this one last looked, where the store says anything
     /// may have changed: as a screen that shows the history opens, and as
@@ -761,6 +777,9 @@ impl AppCtx {
         settle_or_spawn(pending, move |saved| {
             then(saved.clone());
             self.took(&put, &saved);
+            if saved.kept().is_some() {
+                self.sync_soon();
+            }
             let held = self.mark.peek().clone();
             match held {
                 // Not stored: a mark held for a session over says so now,
@@ -1003,7 +1022,11 @@ impl AppCtx {
                 }
                 trash.set(taken);
                 toasts.show(format!("The sessions could not be put back: {why}."));
-            } else if let Some(problem) = saved.problem() {
+                return;
+            }
+            // Back by hand: a deletion the drive holds no longer stands.
+            self.sync_revived(taken.iter().map(|(id, _)| *id));
+            if let Some(problem) = saved.problem() {
                 toasts.show(problem);
             }
         });
@@ -1228,6 +1251,13 @@ impl AppCtx {
                 history.insert(fill.id, fill.now.clone());
             }
         }
+        // Wanted back, whatever a synced deletion said of them.
+        self.sync_revived(
+            added
+                .iter()
+                .map(|(id, _)| *id)
+                .chain(filled.iter().map(|fill| fill.id)),
+        );
         // Stored by the app's settings effect; this device's own kept.
         let mut settings = self.settings;
         let before = backup_settings.as_ref().map(|_| settings.peek().clone());

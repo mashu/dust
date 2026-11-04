@@ -33,6 +33,9 @@ sudo apt install libasound2-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
 
 Android, iOS and desktop bundles: [docs/platforms.md](docs/platforms.md).
 
+Sync through the user's own Google Drive, end-to-end encrypted, is offered
+by a build made with Google OAuth clients: [docs/sync.md](docs/sync.md#setting-up).
+
 ## Test
 
 ```bash

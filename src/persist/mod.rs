@@ -78,6 +78,11 @@ pub trait Store {
         Vec::new()
     }
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters;
+    /// Every run of counters stored, by its key: what sync carries between
+    /// devices. None where the store keeps none, or cannot list them.
+    fn every_auto_counter(&self) -> Vec<(CountersKey, AutoLevelCounters)> {
+        Vec::new()
+    }
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters);
     fn clear_auto_counters(&self, keys: &[CountersKey]);
     /// When a backup was last saved, in milliseconds since the epoch.
@@ -165,6 +170,25 @@ pub trait Store {
     /// far to be made: as the app closes, where the store makes them on a
     /// thread of its own, which the app's going would cut short.
     fn flush_history(&self) {}
+    /// What sync keeps on this device while it is on
+    /// ([`crate::sync::state::SyncState`]): none while it is off, or where
+    /// the store keeps nothing for it.
+    fn load_sync(&self) -> Option<String> {
+        None
+    }
+    /// Keep `state` for sync, or, given none, forget what sync kept; or say
+    /// why not. It holds the key everything in the drive is sealed with, so
+    /// it is kept where only the app reads it, and out of the device's own
+    /// backup where the device has one of its own (Android's).
+    fn save_sync(&self, _state: Option<&str>) -> Result<(), String> {
+        Err("this device keeps nothing for sync".into())
+    }
+    /// Whether the history here can sync: kept by record, as every store
+    /// keeps it but a browser's small page storage, which keeps it whole
+    /// and lets the oldest go for room.
+    fn syncs_history(&self) -> bool {
+        true
+    }
 }
 
 /// A session of groups or a contest run, as it is marked open while it runs
@@ -600,9 +624,14 @@ fn load_settings_from(raw: &str) -> TrainingSettings {
     recover_settings(raw).clamp()
 }
 
+/// Settings from elsewhere, as the app may use them, read as a store reads
+/// its own: the synced settings ([`crate::sync::settings`]).
+pub fn settings_from(raw: &str) -> Option<TrainingSettings> {
+    read_settings_from(raw)
+}
+
 /// Stored settings, as the app may use them, when what is stored is
 /// settings at all: a JSON object, however much of it still reads.
-#[cfg(any(feature = "web", feature = "native-runtime"))]
 fn read_settings_from(raw: &str) -> Option<TrainingSettings> {
     matches!(
         serde_json::from_str::<serde_json::Value>(raw),

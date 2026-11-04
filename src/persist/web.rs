@@ -43,6 +43,8 @@ const BLOB_KEYS: BlobKeys = BlobKeys {
 };
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
 const LAST_BACKUP_KEY: &str = "dust_last_backup";
+/// What sync keeps ([`Store::load_sync`]).
+const SYNC_KEY: &str = "dust_sync";
 /// The sessions and runs marked open ([`Store::mark_open`]): each page's
 /// under its own key, while the page holds a Web Lock of the same name. A
 /// page that goes, closed, reloaded or crashed, lets go of its lock, so a
@@ -433,6 +435,24 @@ impl Store for WebStore {
             .unwrap_or_default()
     }
 
+    /// Each key of the site's page storage under the counters' own prefix,
+    /// and only those: what other sites keep there is never read.
+    fn every_auto_counter(&self) -> Vec<(CountersKey, AutoLevelCounters)> {
+        let Some(store) = storage() else {
+            return Vec::new();
+        };
+        let count = store.length().unwrap_or(0);
+        (0..count)
+            .filter_map(|at| store.key(at).ok().flatten())
+            .filter_map(|key| {
+                let name = key.strip_prefix(AUTO_PREFIX)?.to_string();
+                let raw = store.get_item(&key).ok().flatten()?;
+                let counters = serde_json::from_str(&raw).ok()?;
+                Some((CountersKey::named(name), counters))
+            })
+            .collect()
+    }
+
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters) {
         let Some(store) = storage() else {
             return;
@@ -627,6 +647,27 @@ impl Store for WebStore {
             History::Database(database) => database.changed(),
             History::Page { whole, .. } => whole.changed(),
         }
+    }
+
+    fn load_sync(&self) -> Option<String> {
+        storage()?.get_item(SYNC_KEY).ok().flatten()
+    }
+
+    fn save_sync(&self, state: Option<&str>) -> Result<(), String> {
+        let store = storage().ok_or("this browser keeps nothing for this site")?;
+        match state {
+            Some(state) => store
+                .set_item(SYNC_KEY, state)
+                .map_err(|_| "this browser's storage would not take it".into()),
+            None => store
+                .remove_item(SYNC_KEY)
+                .map_err(|_| "this browser's storage would not let it go".into()),
+        }
+    }
+
+    /// Only the browser's database keeps the history by record.
+    fn syncs_history(&self) -> bool {
+        matches!(self.history, History::Database(_))
     }
 
     /// Another tab's word of each change, as the database's channel gives

@@ -119,6 +119,10 @@ pub struct MemoryStore {
     /// the app made while this is set.
     pub hears_news: Cell<bool>,
     news: Rc<RefCell<News>>,
+    /// What sync keeps here ([`Store::load_sync`]).
+    pub sync: RefCell<Option<String>>,
+    /// What sync keeps cannot be written, as a full disk refuses it.
+    pub sync_refused: Cell<bool>,
 }
 
 /// How many changes other copies have told of, and what waits on the next.
@@ -301,6 +305,14 @@ impl Store for MemoryStore {
 
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters {
         self.counters.borrow().get(key).copied().unwrap_or_default()
+    }
+
+    fn every_auto_counter(&self) -> Vec<(CountersKey, AutoLevelCounters)> {
+        self.counters
+            .borrow()
+            .iter()
+            .map(|(key, counters)| (key.clone(), *counters))
+            .collect()
     }
 
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters) {
@@ -505,6 +517,24 @@ impl Store for MemoryStore {
     /// Whether the history changed since this store last read or listed
     /// it. Tabs sharing one store share what it last saw, so a test of
     /// tabs syncs each by hand.
+    fn load_sync(&self) -> Option<String> {
+        self.sync.borrow().clone()
+    }
+
+    fn save_sync(&self, state: Option<&str>) -> Result<(), String> {
+        if self.sync_refused.get() {
+            return Err("the disk is full".into());
+        }
+        *self.sync.borrow_mut() = state.map(str::to_string);
+        Ok(())
+    }
+
+    /// Kept whole in a browser's page storage, as [`Self::in_page`] keeps
+    /// it, the history does not sync.
+    fn syncs_history(&self) -> bool {
+        self.page.is_none()
+    }
+
     fn history_changed(&self) -> bool {
         if let Some(page) = &self.page {
             return page.changed();

@@ -16,6 +16,7 @@ use crate::persist::record::RecordId;
 use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen};
+use crate::sync::ctx::SyncStatus;
 use crate::time::{local_date_string, mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
@@ -26,6 +27,7 @@ use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
+use crate::ui::sync::SyncView;
 use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
 
 /// How long the settings have to stay still, while the band is being
@@ -278,8 +280,28 @@ fn StatsRoute() -> Element {
                 on_save: EventHandler::new(move |()| ctx.save_backup()),
                 on_restore: EventHandler::new(move |backup| ctx.restore_backup(backup)),
             },
+            sync: sync_view(ctx),
         }
     }
+}
+
+/// What the History tab's sync card shows and does: no card where this
+/// build cannot sync at all.
+fn sync_view(ctx: AppCtx) -> Option<SyncView> {
+    let status = ctx.sync.status.read().clone();
+    if status == SyncStatus::Unavailable(None) {
+        return None;
+    }
+    Some(SyncView {
+        status,
+        on_sign_in: EventHandler::new(move |()| ctx.sync_sign_in()),
+        on_passphrase: EventHandler::new(move |(passphrase, repeated)| {
+            ctx.sync_passphrase(passphrase, repeated);
+        }),
+        on_cancel: EventHandler::new(move |()| ctx.sync_cancel()),
+        on_sync_now: EventHandler::new(move |()| ctx.sync_now()),
+        on_turn_off: EventHandler::new(move |and_copy| ctx.sync_turn_off(and_copy)),
+    })
 }
 
 #[component]

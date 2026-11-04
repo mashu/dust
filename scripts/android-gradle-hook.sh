@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gradle init hook for the Android project dx generates.
 #
-# dx 0.7 leaves six things out for this app, and has a setting for none:
+# dx 0.7 leaves seven things out for this app, and has a setting for none:
 #
 # - It writes Android Gradle plugin 8.7 with the separate Kotlin plugin, and
 #   Material Components, which nothing in the app uses. Play asks for AGP
@@ -47,10 +47,16 @@
 #   refuses of an app targeting Android 15. Without it the plugin stores
 #   the native libraries uncompressed and aligned.
 #
+# - It has no say in the app's dependencies. Sync's sign-in on Android is
+#   Google Play services' authorization (android/MainActivity.kt, and
+#   docs/sync.md), so the hook adds play-services-auth
+#   (PLAY_SERVICES_AUTH_VERSION).
+#
 # The app's own activity (android/MainActivity.kt, which Dioxus.toml points
 # dx at) keeps the webview clear of the system bars and the keyboard once
 # Android 15 draws it edge to edge, and its theme (assets/android/values*)
-# colours the bars without the deprecated calls.
+# colours the bars without the deprecated calls. It asks Play services for
+# sync's sign-in too.
 #
 # Source this and call install_android_gradle_hook before
 # `dx bundle --platform android`. The caller removes $ANDROID_GRADLE_HOOK
@@ -91,6 +97,10 @@ dust_version_code() {
 # would need a later Gradle than dx writes.
 ANDROID_GRADLE_PLUGIN_VERSION="9.0.1"
 KOTLIN_GRADLE_PLUGIN_VERSION="2.2.10"
+
+# Google Play services' authorization, which sync signs in with on Android
+# (Identity.getAuthorizationClient).
+PLAY_SERVICES_AUTH_VERSION="21.3.0"
 
 # Every configuration change the activity handles itself, rather than be
 # recreated for it: every flag `android:configChanges` takes under the
@@ -233,6 +243,14 @@ gradle.beforeProject { project ->
         // it: crashes and ANRs in the Rust code then name their functions.
         // The libraries shipped in the app are stripped of it.
         android.defaultConfig.ndk.debugSymbolLevel = "SYMBOL_TABLE"
+
+        // Sync's sign-in, which the activity asks Play services for: added
+        // as the plugin's own configurations exist, before any is resolved.
+        project.dependencies.add(
+            "implementation",
+            "com.google.android.gms:play-services-auth:${PLAY_SERVICES_AUTH_VERSION}"
+        )
+        println "Dust: Google Play services authorization ${PLAY_SERVICES_AUTH_VERSION}"
 
         // The release build's resources shrunk, as its code already is: R8
         // drops every resource nothing reaches, AppCompat's and the

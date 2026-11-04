@@ -419,6 +419,8 @@ pub fn StatsView(
     on_delete: Option<EventHandler<Vec<RecordId>>>,
     /// Saving and restoring backups, on the History tab.
     backups: Option<Backups>,
+    /// Sync with the user's own Google Drive, on the History tab.
+    sync: Option<crate::ui::sync::SyncView>,
 ) -> Element {
     let mut tab = use_signal(|| StatsTab::Overview);
     // Accuracy, letters and mistakes are counted over the whole history: a
@@ -437,11 +439,18 @@ pub fn StatsView(
         StatsTab::History => sessions,
         _ => sessions.shown(),
     };
+    // Synced, the history is every device's.
+    let synced = sync.as_ref().is_some_and(|view| view.status.is_on());
+    let whose = if synced {
+        "Every session scored on your synced devices, whatever it practised."
+    } else {
+        "Every session scored on this device, whatever it practised."
+    };
     rsx! {
         div { class: "stack",
             header { class: "page-head",
                 h2 { class: "page-title", "Stats" }
-                p { class: "page-sub", "Every session scored on this device, whatever it practised." }
+                p { class: "page-sub", "{whose}" }
             }
             div { class: "segmented",
                 for (which, label) in TABS {
@@ -456,7 +465,7 @@ pub fn StatsView(
                 StatsTab::Letters => rsx! { LettersTab { settings, sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
-                StatsTab::History => rsx! { HistoryTab { sessions, on_delete, backups } },
+                StatsTab::History => rsx! { HistoryTab { sessions, on_delete, backups, sync } },
             }
         }
     }

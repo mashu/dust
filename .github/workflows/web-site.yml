@@ -27,6 +27,13 @@ env:
   # deliberate move.
   RUST_TOOLCHAIN: "1.99.1"
   DIOXUS_CLI_VERSION: "0.7.10"
+  # Sync's OAuth clients (docs/sync.md, Setting up), from the repository's
+  # Actions variables: a build made without them offers no sync. None of
+  # them is a secret: each is in every copy of the app.
+  DUST_GOOGLE_WEB_CLIENT_ID: ${{ vars.DUST_GOOGLE_WEB_CLIENT_ID }}
+  DUST_GOOGLE_DESKTOP_CLIENT_ID: ${{ vars.DUST_GOOGLE_DESKTOP_CLIENT_ID }}
+  DUST_GOOGLE_DESKTOP_CLIENT_SECRET: ${{ vars.DUST_GOOGLE_DESKTOP_CLIENT_SECRET }}
+  DUST_GOOGLE_ANDROID_SYNC: ${{ vars.DUST_GOOGLE_ANDROID_SYNC }}
   # Belt and braces with .cargo/config.toml: a Pages runner on a new LLVM
   # must not strip the wasm-bindgen metadata section.
   CARGO_PROFILE_RELEASE_STRIP: none
@@ -106,6 +113,9 @@ jobs:
           cp site/index.html site/404.html
           mkdir -p site/privacy
           cp docs/privacy.html site/privacy/index.html
+          # Where Google's sign-in sends a browser back to, as sync is
+          # turned on (src/sync/auth/web.rs): beside the app.
+          cp docs/oauth.html site/oauth.html
           touch site/.nojekyll
           if ! find site -name '*.css' | grep -q .; then
             echo "Bundled site has no stylesheet"
@@ -126,6 +136,7 @@ jobs:
             exit 1
           fi
           test -f site/privacy/index.html
+          test -f site/oauth.html
           ls -lh site site/assets
 
       # The regression check for characters keyed along and left untimed,
@@ -150,6 +161,22 @@ jobs:
             base=""
           fi
           NODE_PATH="$tools/node_modules" node scripts/browser-timing-check.cjs site "$base"
+
+      # Sync in the same browser, on the site as built, against a fake
+      # Google: nothing reaches Google before sync is on, nothing in the
+      # drive is in the clear, and one device's history and settings reach
+      # another. A build made without a web client ID offers no sync, and
+      # the check says so and passes.
+      - name: Sync two browsers through a fake Google Drive
+        run: |
+          set -euo pipefail
+          tools="${RUNNER_TEMP}/playwright"
+          repo="${GITHUB_REPOSITORY##*/}"
+          base="$repo"
+          if [[ "$repo" == *.github.io ]]; then
+            base=""
+          fi
+          NODE_PATH="$tools/node_modules" node scripts/browser-sync-check.cjs site "$base"
 
       - name: Upload Pages artifact
         if: inputs.upload

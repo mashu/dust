@@ -27,6 +27,14 @@ serde = { version = "1", features = ["derive"] }
 # file, rather than from a copy of the whole of it (src/persist/backup.rs).
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Sync (src/sync): everything bound for the user's Google Drive is sealed on
+# the device first, with a key only a passphrase of theirs opens. Pure Rust,
+# so the same code seals it in a browser, on a phone and on a computer.
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+getrandom = "0.4"
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
 
 # Web / WASM
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
@@ -68,6 +76,15 @@ web-sys = { version = "0.3", optional = true, features = [
     "KeyboardEvent",
     "Node",
     "UiEvent",
+    # Sync: Google Drive asked over fetch, and the sign-in window's answer
+    # heard from the page Google sends it back to.
+    "BroadcastChannel",
+    "Headers",
+    "Location",
+    "MessageEvent",
+    "Request",
+    "RequestInit",
+    "Response",
 ] }
 
 # Linux / desktop
@@ -77,6 +94,13 @@ dirs = { version = "6", optional = true }
 # Rust backend, so no C library is built for any target.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"], optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt", "sync"] }
+# Sync, off a browser: Google Drive and Google's sign-in asked over HTTPS
+# (src/sync/http.rs). Its TLS is rustls, with the roots built in, so no
+# system library is asked for one.
+ureq = { version = "3.5", optional = true, default-features = false, features = ["rustls"] }
+# Sync on a computer: Google's sign-in opened in the user's own browser
+# (src/sync/auth.rs). The same crate dioxus-desktop opens links with.
+webbrowser = { version = "1.2", optional = true }
 
 # Linux desktop: the window menu is asked for through GTK, which the webview
 # runs on already.
@@ -146,6 +170,9 @@ default = []
 web = [
     "dioxus/web",
     "chrono/wasmbind",
+    # Sync packs its records before it seals them, in a browser as elsewhere.
+    "dep:flate2",
+    "getrandom/wasm_js",
     "dep:gloo-timers",
     "dep:js-sys",
     "dep:wasm-bindgen",
@@ -154,7 +181,7 @@ web = [
 ]
 # Desktop is the system webview (wry). `dx serve --platform desktop` and the
 # shipped installers use this.
-desktop = ["dioxus/desktop", "native-runtime", "native-audio", "dep:gtk", "dep:webkit2gtk"]
+desktop = ["dioxus/desktop", "native-runtime", "native-audio", "dep:gtk", "dep:webkit2gtk", "dep:webbrowser"]
 # Android/iOS still use a system webview. `dx` enables this feature
 # automatically for `--platform android`.
 mobile = ["dioxus/mobile", "native-runtime", "native-audio"]
@@ -162,7 +189,7 @@ mobile = ["dioxus/mobile", "native-runtime", "native-audio"]
 # toolchain, since cpal on Android pulls the NDK C++ build for oboe.
 mobile-silent = ["dioxus/mobile", "native-runtime", "silent-audio"]
 # Storage and timers shared by every non-wasm build.
-native-runtime = ["dep:dirs", "dep:flate2", "dep:tokio"]
+native-runtime = ["dep:dirs", "dep:flate2", "dep:tokio", "dep:ureq"]
 # cpal output: ALSA/CoreAudio/WASAPI on desktop, AAudio through oboe on Android.
 native-audio = ["dep:cpal"]
 # Plays nothing, but keeps a session's timing so the rest of the app is usable.
@@ -173,6 +200,18 @@ silent-audio = []
 # the core alone keeps them quick without slowing anything else's build.
 [profile.test.package.cw-core]
 opt-level = 1
+
+# A sync passphrase is stretched over some twenty megabytes of memory, on
+# purpose; unoptimised, each test that opens a keyring would wait seconds on
+# it. Optimised, it takes what it takes in the app.
+[profile.test.package.argon2]
+opt-level = 3
+[profile.test.package.blake2]
+opt-level = 3
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 lto = true
