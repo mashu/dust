@@ -188,3 +188,16 @@ app reaches no more than it did before.
 
 For local web testing, `dx serve` does not serve `docs/oauth.html`: copy it
 into the folder `dx` serves the app from, or try sync on the Pages site.
+
+## Checking it
+
+The Rust tests sync devices through an in-memory folder, through a fake of
+Drive's REST API (`src/sync/drive/fake.rs`), and through the app itself
+(`src/sync/ctx/tests.rs`); the computer's sign-in is tested through a real
+loopback socket. `scripts/browser-sync-check.cjs` syncs two browsers in
+Chromium, on the site as `web-site.yml` builds it, against a fake Google:
+the sign-in window, `oauth.html`, the passphrase, a history and settings
+crossing over, a sign-in run out, and the copy deleted. It checks too that
+nothing reaches Google before sync is on, and that nothing in the drive is
+in the clear. A build made without a web client ID offers no sync, and the
+check passes saying so.
