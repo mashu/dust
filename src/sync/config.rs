@@ -10,11 +10,11 @@
 
 /// The scope sync asks for: Drive's app data folder, a folder of Dust's own
 /// that neither the user's files nor any other app's can be reached from,
-/// and that no other app can reach. Google counts it non-sensitive.
-#[cfg_attr(
-    not(any(feature = "web", feature = "desktop", target_os = "android", test)),
-    allow(dead_code)
-)]
+/// and that no other app can reach. Google counts it non-sensitive. The
+/// browser's and the computer's sign-ins ask for it from here; Android's
+/// asks in the activity (android/MainActivity.kt, `DRIVE_APPDATA`), and iOS
+/// has no sign-in yet, so neither reads it.
+#[cfg_attr(not(any(feature = "web", feature = "desktop", test)), allow(dead_code))]
 pub const SCOPE: &str = "https://www.googleapis.com/auth/drive.appdata";
 
 /// `value`, unless it is empty, as a variable set but left blank is.
