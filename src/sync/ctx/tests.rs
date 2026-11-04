@@ -215,6 +215,54 @@ fn sync_is_joined_with_the_passphrase_chosen_elsewhere() {
     });
 }
 
+/// Joined, the app takes up the theme, the level counters and the marks
+/// of the device that synced first: the shell shows its theme at once.
+#[test]
+fn joining_takes_up_the_theme_counters_and_marks() {
+    run(|| async {
+        use cw_core::{AutoLevelCounters, CountersKey};
+        let remote = Rc::new(MemoryRemote::default());
+        let other = Rc::new(MemoryStore::default());
+        let koch = CountersKey::named("koch_3_abc");
+        other.save_auto_counters(&koch, AutoLevelCounters { above: 2, below: 0 });
+        other.save_theme("dark");
+        other.mark_tutorial_done();
+        let found = now(look(&*remote)).expect("looked");
+        let (key, keyring) =
+            now(join(&*remote, "chosen elsewhere", &found, Stretch::QUICK)).expect("joined");
+        let mut state = SyncState::new("other".into(), key.to_hex(), keyring, None);
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut state,
+            &cw_core::TrainingSettings::default(),
+            1,
+        ))
+        .expect("synced");
+
+        let mut harness = Harness::new();
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = linked(&mut harness, &remote, &auth);
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("chosen elsewhere".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on());
+        assert_eq!(
+            harness
+                .in_app(|| harness.ctx.sync.theme.peek().clone())
+                .as_deref(),
+            Some("dark")
+        );
+        assert_eq!(harness.store.load_theme(), "dark");
+        assert!(harness.store.tutorial_done());
+        assert_eq!(
+            harness.store.load_auto_counters(&koch),
+            AutoLevelCounters { above: 2, below: 0 }
+        );
+    });
+}
+
 /// Turned down at Google, or cancelled, sync stays off.
 #[test]
 fn a_sign_in_turned_down_leaves_sync_off() {

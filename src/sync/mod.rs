@@ -12,9 +12,11 @@
 //! of records, deletions and sessions put back ([`pack`]); every device
 //! takes up all of them, in whatever order they come, and comes to the same
 //! history as every other ([`plan`]). There is nothing to merge, and no
-//! copy any device writes over. The settings are each device's own file,
-//! each setting stamped with when it was last changed, the newest of each
-//! taken ([`settings`]).
+//! copy any device writes over. Everything else a device uses goes too, so
+//! that every synced device is set up as every other: the settings, every
+//! one, the level counters, the theme, and the marks of what has been shown
+//! once. They are each device's own file, each key stamped with when it was
+//! last changed, the newest of each taken ([`settings`]).
 //!
 //! [`run`] is a sync, start to end, against any store and any folder; the
 //! folder is Google Drive's ([`drive`]), reached over HTTPS ([`http`])

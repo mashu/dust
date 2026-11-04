@@ -128,19 +128,29 @@ fn wait_for_browser(
     listener
         .set_nonblocking(true)
         .map_err(|err| AuthError::Failed(err.to_string()))?;
+    // Each connection answered on a thread of its own: a browser opens
+    // some it sends nothing on, ahead of need, and none of them may keep
+    // the one bringing the answer waiting.
+    let (heard, hearing) = std::sync::mpsc::channel();
     let until = Instant::now() + WAIT;
     while Instant::now() < until {
         if stop.load(Ordering::Relaxed) {
             return Err(AuthError::Cancelled);
         }
+        if let Ok(brought) = hearing.try_recv() {
+            return Ok(brought);
+        }
         match listener.accept() {
             Ok((stream, _)) => {
-                if let Some(brought) = answer_browser(stream, state) {
-                    return Ok(brought);
-                }
+                let (heard, state) = (heard.clone(), state.to_string());
+                std::thread::spawn(move || {
+                    if let Some(brought) = answer_browser(stream, &state) {
+                        let _ = heard.send(brought);
+                    }
+                });
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(50));
             }
             Err(err) => return Err(AuthError::Failed(err.to_string())),
         }
@@ -153,7 +163,7 @@ fn wait_for_browser(
 /// sign-in, as a browser asking for an icon is not.
 fn answer_browser(mut stream: TcpStream, state: &str) -> Option<Brought> {
     let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let mut line = String::new();
     // No more than a request line ever holds.
     BufReader::new(Read::take(&stream, 16 * 1024))

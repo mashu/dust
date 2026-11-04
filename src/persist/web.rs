@@ -435,6 +435,24 @@ impl Store for WebStore {
             .unwrap_or_default()
     }
 
+    /// Each key of the site's page storage under the counters' own prefix,
+    /// and only those: what other sites keep there is never read.
+    fn every_auto_counter(&self) -> Vec<(CountersKey, AutoLevelCounters)> {
+        let Some(store) = storage() else {
+            return Vec::new();
+        };
+        let count = store.length().unwrap_or(0);
+        (0..count)
+            .filter_map(|at| store.key(at).ok().flatten())
+            .filter_map(|key| {
+                let name = key.strip_prefix(AUTO_PREFIX)?.to_string();
+                let raw = store.get_item(&key).ok().flatten()?;
+                let counters = serde_json::from_str(&raw).ok()?;
+                Some((CountersKey::named(name), counters))
+            })
+            .collect()
+    }
+
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters) {
         let Some(store) = storage() else {
             return;

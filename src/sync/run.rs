@@ -15,7 +15,7 @@ use super::plan::{DriveState, Here, Plan, plan};
 use super::remote::{Remote, RemoteError, RemoteFile};
 use super::seal::{DataKey, KEYRING, Keys, Stretch, Unlock, new_keyring, open_keyring};
 use super::settings::{
-    SETTINGS_PREFIX, SettingsFile, StampedSettings, as_keys, merge, settings_of, stamp, stamps_of,
+    SETTINGS_PREFIX, SettingsFile, StampedSettings, Using, merge, stamp, stamps_of, taken,
 };
 use super::state::SyncState;
 use crate::persist::record::{HistoryChange, Record, RecordId, read_record};
@@ -122,8 +122,11 @@ pub async fn join(
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Synced {
     /// The settings the drive's and this device's come to, where they
-    /// differ from this device's.
+    /// differ from this device's, for the app to take up.
     pub settings: Option<TrainingSettings>,
+    /// The theme the drive's and this device's come to, where it differs
+    /// from this device's: stored already, for the app to show.
+    pub theme: Option<String>,
     /// The records taken from the drive, put back among them.
     pub took: usize,
     /// The records deleted here as the drive deleted them.
@@ -388,7 +391,7 @@ pub async fn sync_once(
         }
     }
 
-    synced.settings = sync_settings(remote, &keys, &files, state, here, now, &mut synced).await?;
+    sync_settings(store, remote, &keys, &files, state, here, now, &mut synced).await?;
     state.last = Some(now);
     Ok(synced)
 }
@@ -462,10 +465,14 @@ async fn send_pack(
     Ok(())
 }
 
-/// Sync the settings: every device's file read, the newest of each setting
-/// taken, and this device's own file written where that changed what it
-/// holds. The settings that come to, where they differ from `here`.
+/// Sync everything a device uses beside its history, the settings `here`
+/// and what `store` holds of the rest ([`Using`]): every device's file
+/// read, the newest of each key taken, and this device's own file written
+/// where that changed what it holds. What it comes to is stored here, but
+/// for the settings, which `synced` hands the app, as the app holds them.
+#[allow(clippy::too_many_arguments)]
 async fn sync_settings(
+    store: &dyn Store,
     remote: &dyn Remote,
     keys: &Keys,
     files: &[RemoteFile],
@@ -473,7 +480,7 @@ async fn sync_settings(
     here: &TrainingSettings,
     now: u64,
     synced: &mut Synced,
-) -> Result<Option<TrainingSettings>, SyncFailed> {
+) -> Result<(), SyncFailed> {
     let own_name = keys.name(SETTINGS_PREFIX, "settings", &state.device);
     let mut own: Vec<&RemoteFile> = Vec::new();
     let mut others: Vec<StampedSettings> = Vec::new();
@@ -504,19 +511,38 @@ async fn sync_settings(
             others.push(read.keys);
         }
     }
-    let here_keys = as_keys(here);
+    let using = Using::of(store, here);
     let first = state.settings.is_none();
     let mine = if first && !others.is_empty() {
-        // Joining: the drive's settings are the ones wanted here.
+        // Joining: what the drive holds is what is wanted here.
         StampedSettings::new()
     } else {
         let base = state.settings.clone().unwrap_or_default();
-        stamp(&here_keys, &base, &state.stamps, now)
+        stamp(&using.keys(), &base, &state.stamps, now)
     };
     let merged = merge(others.iter().chain(held.iter()).chain([&mine]));
-    let settings = settings_of(&merged, here).unwrap_or_else(|| here.clone());
-    state.settings = Some(as_keys(&settings));
+    let took = taken(&merged, &using);
+    // Stored as the app stores each, the settings excepted: the app holds
+    // those, and stores them itself as it takes them up.
+    for (key, counters) in &took.counters {
+        store.save_auto_counters(key, *counters);
+    }
+    if !took.cleared.is_empty() {
+        store.clear_auto_counters(&took.cleared);
+    }
+    if let Some(theme) = &took.theme {
+        store.save_theme(theme);
+    }
+    if took.tour_done {
+        store.mark_tutorial_done();
+    }
+    if took.told_of_paddle_keys {
+        store.mark_told_of_paddle_keys();
+    }
+    state.settings = Some(using.with(&took).keys());
     state.stamps = stamps_of(&merged);
+    synced.settings = took.settings;
+    synced.theme = took.theme;
 
     if held.as_ref() != Some(&merged) || own.len() > 1 {
         let file = SettingsFile::new(&state.device, now, merged);
@@ -542,7 +568,7 @@ async fn sync_settings(
             }
         }
     }
-    Ok((settings != *here).then_some(settings))
+    Ok(())
 }
 
 /// Delete the synced copy from the drive: every file of Dust's, the

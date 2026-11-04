@@ -55,6 +55,10 @@ fn browser(say: &'static str) -> Opener {
         assert!(back.starts_with("127.0.0.1:"), "{back}");
         let state = asked["state"].clone();
         assert_eq!(asked["code_challenge"].len(), 43);
+        // One that never comes back, as a user who closes the tab.
+        if say == "nothing" {
+            return Ok(());
+        }
         std::thread::spawn(move || {
             let get = |target: &str| {
                 let mut stream = TcpStream::connect(&back).expect("listening");
@@ -69,8 +73,7 @@ fn browser(say: &'static str) -> Opener {
                     "/?state={state}&code=the-code&scope={}",
                     crate::sync::text::percent(SCOPE)
                 )),
-                "no" => get(&format!("/?error=access_denied&state={state}")),
-                _ => return,
+                _ => get(&format!("/?error=access_denied&state={state}")),
             };
             assert!(page.contains("close this tab"), "{page}");
         });

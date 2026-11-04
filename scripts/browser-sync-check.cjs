@@ -10,7 +10,7 @@
 // It checks what the privacy policy says of sync, in the browser:
 // nothing reaches Google until sync is turned on; what the drive holds
 // says nothing in the clear; the passphrase is never kept; and the
-// history and the settings of one device reach the other. A build made
+// history, the settings and the theme of one device reach the other. A build made
 // without a web client ID offers no sync, and the check says so and passes.
 //
 // Playwright is found the way Node finds any package, NODE_PATH included.
@@ -185,6 +185,10 @@ async function turnOn(page, repeat) {
       buffer: Buffer.from(BACKUP),
     });
     await a.page.getByText(/Restored 2 sessions/).waitFor({ timeout: 20000 });
+    // A theme chosen, to come across with the rest.
+    await a.page.click('#btn-theme');
+    const theme = await a.page.evaluate(() => localStorage.getItem('dust_theme'));
+    assert(theme, 'a theme chosen');
     assert.strictEqual(drive.asked.length, 0, 'nothing reaches Google before sync is on');
     assert.strictEqual(signIns, 0);
     await turnOn(a.page, true);
@@ -215,7 +219,13 @@ async function turnOn(page, repeat) {
     await b.page.fill('#sync-passphrase', PASSPHRASE);
     await b.page.click('#btn-open-sync');
     await b.page.getByText(/Synced today at/).waitFor({ timeout: 60000 });
-    await b.page.getByText('2 sessions on this device').waitFor({ timeout: 20000 });
+    await b.page.getByText('2 sessions on your synced devices').waitFor({ timeout: 20000 });
+    assert.strictEqual(await b.page.evaluate(() => localStorage.getItem('dust_theme')), theme, "the phone's theme");
+    assert.strictEqual(
+      await b.page.evaluate(() => document.documentElement.getAttribute('data-theme')),
+      theme,
+      'shown at once',
+    );
     const settings = JSON.parse(await b.page.evaluate(() => localStorage.getItem('dust_settings')));
     assert.strictEqual(settings.numGroups, 7, "the phone's settings came across");
 

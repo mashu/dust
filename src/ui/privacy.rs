@@ -31,9 +31,10 @@ pub const HISTORY_KEPT: &str = "Every session is kept until you delete it; a bro
 /// user turns it on, and then an encrypted copy in their own Google Drive
 /// (src/sync).
 pub const SYNC_PRIVACY: &str = "Sync is off unless you turn it on, on the History tab of Stats. \
-     Then Dust keeps a copy of your settings and history in a folder of its own in your Google \
-     Drive, encrypted on the device with a key made from a passphrase only you know: Google keeps \
-     the copy but cannot read it, and the developer never receives any of it.";
+     Then Dust keeps a copy of your settings, your history and your level progress in a folder \
+     of its own in your Google Drive, encrypted on the device with a key made from a passphrase \
+     only you know: Google keeps the copy but cannot read it, and the developer never receives \
+     any of it.";
 
 /// Whom sync reaches, said on the card and in the policy alike.
 pub const SYNC_CONTACTS: &str = "Sync, if you turn it on, reaches Google alone: its sign-in, and \

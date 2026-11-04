@@ -15,7 +15,7 @@ use super::auth::{Auth, AuthError};
 use super::remote::{Remote, RemoteError};
 use super::run::{Found, SyncFailed, delete_copy, join, look, sync_once};
 use super::seal::{MIN_PASSPHRASE, Stretch};
-use super::settings::as_keys;
+use super::settings::{as_keys, settings_keys};
 use super::state::SyncState;
 use super::text::random_hex;
 use crate::persist::Store;
@@ -66,7 +66,6 @@ pub enum SyncStatus {
 }
 
 impl SyncStatus {
-    #[cfg(test)]
     pub fn is_on(&self) -> bool {
         matches!(self, Self::On { .. })
     }
@@ -99,6 +98,9 @@ impl Link {
 #[derive(Clone, Copy)]
 pub struct SyncCtx {
     pub status: Signal<SyncStatus>,
+    /// The theme a sync took from another device, for the app's shell to
+    /// show: stored already.
+    pub theme: Signal<Option<String>>,
     link: CopyValue<Option<Link>>,
     /// What sync keeps, while it is on.
     state: CopyValue<Option<SyncState>>,
@@ -145,6 +147,7 @@ impl SyncCtx {
         };
         Self {
             status: Signal::new(status),
+            theme: Signal::new(None),
             link: CopyValue::new(link),
             state: CopyValue::new(state),
             found: CopyValue::new(None),
@@ -399,6 +402,10 @@ impl AppCtx {
                         shown.set(settings);
                         self.store_settings();
                     }
+                    if let Some(theme) = synced.theme {
+                        let mut shown = self.sync.theme;
+                        shown.set(Some(theme));
+                    }
                     let unreadable = (synced.unreadable > 0).then(|| {
                         format!(
                             "{} in your Google Drive could not be read, damaged perhaps, and {} passed over.",
@@ -458,12 +465,12 @@ impl AppCtx {
     /// The settings were just stored as `stored`: synced soon, unless they
     /// are what the last sync left them as.
     pub fn sync_settings_stored(self, stored: &cw_core::TrainingSettings) {
-        let synced = self
-            .sync
-            .state
-            .peek()
-            .as_ref()
-            .is_some_and(|state| state.settings.as_ref() == Some(&as_keys(stored)));
+        let synced = self.sync.state.peek().as_ref().is_some_and(|state| {
+            state
+                .settings
+                .as_ref()
+                .is_some_and(|keys| settings_keys(keys) == as_keys(stored))
+        });
         if !synced {
             self.sync_soon();
         }

@@ -11,10 +11,11 @@ use crate::ui::format::{ago, clock, day_of, short_date};
 use crate::ui::widgets::{CardHead, IconName, control_id, html_bool};
 
 /// What sync is, said on the card and in the policy alike.
-pub const SYNC_ABOUT: &str = "Sync keeps your history and settings the same on each device you \
-     turn it on, through a folder of Dust's own in your Google Drive. Everything is encrypted on \
-     the device, with a passphrase only you know, before it goes: Google keeps it but cannot read \
-     it, and the developer never receives any of it.";
+pub const SYNC_ABOUT: &str = "Sync keeps your history, your settings and your progress towards \
+     the next level the same on each device you turn it on, through a folder of Dust's own in \
+     your Google Drive. Everything is encrypted on the device, with a passphrase only you know, \
+     before it goes: Google keeps it but cannot read it, and the developer never receives any of \
+     it.";
 
 /// What signing in asks Google for, said on the card and in the policy.
 pub const SYNC_SCOPE: &str = "Signing in asks Google to let Dust see its own folder only: none \
@@ -27,8 +28,9 @@ const NEW_PASSPHRASE: &str = "Choose a passphrase for sync. It encrypts everythi
 
 /// What joining a sync does.
 const JOIN: &str = "Your Google Drive holds a synced copy of Dust already. Enter the passphrase \
-     you chose for it. This device then takes the sessions and settings there, as a restore \
-     does, but for its own volume and paddle keys, and adds its own sessions to them.";
+     you chose for it. This device then takes the history there, the settings, the level \
+     progress and the theme, and adds its own sessions to them: from then on, every device you \
+     sync holds the same.";
 
 /// What turning sync off does here, and with the copy.
 const TURN_OFF: &str = "Turning sync off here forgets the key and the sign-in on this device. \
@@ -191,7 +193,7 @@ pub fn SyncCard(view: SyncView) -> Element {
                 },
                 SyncStatus::On { syncing, needs_sign_in, .. } => rsx! {
                     p { class: "backup-note",
-                        "Your history and settings sync through a folder of Dust's own in your Google Drive, encrypted with your passphrase."
+                        "Your history, settings and level progress sync through a folder of Dust's own in your Google Drive, encrypted with your passphrase: every device you sync holds the same."
                     }
                     if needs_sign_in {
                         p { class: "backup-note", "Sign in to Google again to sync." }

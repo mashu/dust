@@ -307,6 +307,14 @@ impl Store for MemoryStore {
         self.counters.borrow().get(key).copied().unwrap_or_default()
     }
 
+    fn every_auto_counter(&self) -> Vec<(CountersKey, AutoLevelCounters)> {
+        self.counters
+            .borrow()
+            .iter()
+            .map(|(key, counters)| (key.clone(), *counters))
+            .collect()
+    }
+
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters) {
         self.counters.borrow_mut().insert(key.clone(), counters);
     }

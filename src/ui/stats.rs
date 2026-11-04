@@ -439,11 +439,18 @@ pub fn StatsView(
         StatsTab::History => sessions,
         _ => sessions.shown(),
     };
+    // Synced, the history is every device's.
+    let synced = sync.as_ref().is_some_and(|view| view.status.is_on());
+    let whose = if synced {
+        "Every session scored on your synced devices, whatever it practised."
+    } else {
+        "Every session scored on this device, whatever it practised."
+    };
     rsx! {
         div { class: "stack",
             header { class: "page-head",
                 h2 { class: "page-title", "Stats" }
-                p { class: "page-sub", "Every session scored on this device, whatever it practised." }
+                p { class: "page-sub", "{whose}" }
             }
             div { class: "segmented",
                 for (which, label) in TABS {

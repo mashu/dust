@@ -197,7 +197,8 @@ fn HistoryRow(
     }
 }
 
-/// Every session kept on this device, newest first.
+/// Every session kept on this device, newest first: every synced device's,
+/// where sync is on.
 ///
 /// Given `on_delete`, sessions can be deleted, each by its record: one from
 /// its own row, or several chosen together in select mode, all of them
@@ -257,6 +258,12 @@ pub fn HistoryTab(
         confirming.set(false);
     };
     let more = total.saturating_sub(shown()).min(HISTORY_PAGE);
+    // Synced, the history is every device's.
+    let kept = if sync.as_ref().is_some_and(|view| view.status.is_on()) {
+        "on your synced devices"
+    } else {
+        "on this device"
+    };
 
     // One stamped ahead of the clock was not made after every backup since.
     let since = backups
@@ -281,7 +288,7 @@ pub fn HistoryTab(
             CardHead {
                 icon: IconName::Repeat,
                 title: "Session history",
-                note: format!("{} on this device", counted(total, "session")),
+                note: format!("{} {kept}", counted(total, "session")),
                 if on_delete.is_some() && total > 0 {
                     if selecting_now {
                         button {

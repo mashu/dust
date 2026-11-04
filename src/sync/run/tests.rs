@@ -178,8 +178,8 @@ fn the_first_device_sends_its_history_sealed() {
 }
 
 /// Another device joins with the passphrase, and only with it: it takes
-/// the drive's sessions among its own, and the drive's settings, but for
-/// its own volume and paddles; and the first takes its sessions next.
+/// the drive's sessions among its own, and the drive's settings, every one;
+/// and the first takes its sessions next.
 #[test]
 fn another_device_joins_with_the_passphrase() {
     let remote = MemoryRemote::default();
@@ -200,7 +200,10 @@ fn another_device_joins_with_the_passphrase() {
     assert_eq!((synced.took, synced.sent), (2, 1));
     assert_eq!(computer.stamps(), [1, 2, 3]);
     assert_eq!(computer.settings.curriculum.num_groups, 9, "the drive's");
-    assert_eq!(computer.settings.band.master_volume, 0.8, "its own");
+    assert_eq!(
+        computer.settings.band.master_volume, 0.2,
+        "every setting, volume too"
+    );
 
     let synced = phone.sync(&remote, 300).expect("synced");
     assert_eq!(synced.took, 1);
@@ -326,6 +329,76 @@ fn a_setting_changed_anywhere_reaches_every_device() {
     phone.sync(&remote, 170).expect("synced");
     computer.sync(&remote, 180).expect("synced");
     assert_eq!(remote.writes.get(), writes);
+}
+
+/// What a device uses beside its history reaches every other: the runs of
+/// auto-level counters, the theme, and that the guided setup and the word
+/// on the paddle keys were shown; and a run cleared on one is cleared on
+/// the other.
+#[test]
+fn counters_theme_and_marks_reach_every_device() {
+    use cw_core::{AutoLevelCounters, CountersKey};
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&[]);
+    let koch = CountersKey::named("koch_3_abc");
+    let words = CountersKey::named("words_2");
+    phone
+        .store
+        .save_auto_counters(&koch, AutoLevelCounters { above: 2, below: 0 });
+    phone
+        .store
+        .save_auto_counters(&words, AutoLevelCounters { above: 0, below: 1 });
+    phone.store.save_theme("dark");
+    phone.store.mark_tutorial_done();
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+
+    let mut computer = Device::keeping(&[]);
+    computer.store.mark_told_of_paddle_keys();
+    computer.turn_on(&remote, "passphrase").expect("on");
+    let synced = computer.sync(&remote, 110).expect("synced");
+    assert_eq!(synced.theme.as_deref(), Some("dark"), "for the app to show");
+    assert_eq!(computer.store.load_theme(), "dark");
+    assert!(computer.store.tutorial_done());
+    assert_eq!(
+        computer.store.load_auto_counters(&koch),
+        AutoLevelCounters { above: 2, below: 0 }
+    );
+    assert_eq!(
+        computer.store.load_auto_counters(&words),
+        AutoLevelCounters { above: 0, below: 1 }
+    );
+
+    // A session on the computer moves a run; a level reset clears another.
+    computer
+        .store
+        .save_auto_counters(&koch, AutoLevelCounters { above: 3, below: 0 });
+    computer
+        .store
+        .clear_auto_counters(std::slice::from_ref(&words));
+    computer.store.save_theme("light");
+    computer.sync(&remote, 120).expect("synced");
+    let synced = phone.sync(&remote, 130).expect("synced");
+    assert_eq!(
+        phone.store.load_auto_counters(&koch),
+        AutoLevelCounters { above: 3, below: 0 }
+    );
+    assert_eq!(
+        phone.store.every_auto_counter().len(),
+        1,
+        "the cleared run cleared"
+    );
+    assert_eq!(synced.theme.as_deref(), Some("light"));
+    assert!(
+        phone.store.told_of_paddle_keys(),
+        "the computer's word on the keys"
+    );
+    // Nothing left to take up, either way.
+    assert_eq!(phone.sync(&remote, 140).expect("synced"), Synced::default());
+    assert_eq!(
+        computer.sync(&remote, 150).expect("synced"),
+        Synced::default()
+    );
 }
 
 /// Deleted from the drive, the copy is gone for every device; begun anew

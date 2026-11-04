@@ -547,6 +547,13 @@ impl Store for DesktopStore {
             .unwrap_or_default()
     }
 
+    fn every_auto_counter(&self) -> Vec<(CountersKey, AutoLevelCounters)> {
+        self.load_all_counters()
+            .into_iter()
+            .map(|(key, counters)| (CountersKey::named(key), counters))
+            .collect()
+    }
+
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters) {
         self.update_counters(|all| {
             all.insert(key.as_str().to_string(), counters);

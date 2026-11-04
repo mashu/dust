@@ -80,6 +80,13 @@ impl CountersKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The key a store holds counters under, read back as it was stored
+    /// ([`Self::as_str`]): as a store lists every run it keeps, and sync
+    /// carries them between devices.
+    pub fn named(key: impl Into<String>) -> Self {
+        Self(key.into())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

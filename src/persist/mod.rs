@@ -78,6 +78,11 @@ pub trait Store {
         Vec::new()
     }
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters;
+    /// Every run of counters stored, by its key: what sync carries between
+    /// devices. None where the store keeps none, or cannot list them.
+    fn every_auto_counter(&self) -> Vec<(CountersKey, AutoLevelCounters)> {
+        Vec::new()
+    }
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters);
     fn clear_auto_counters(&self, keys: &[CountersKey]);
     /// When a backup was last saved, in milliseconds since the epoch.

@@ -98,6 +98,13 @@ pub fn App() -> Element {
     // as this one opens.
     use_hook(move || ctx.tell_of_cut_off());
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
+    // A theme chosen on another device, as sync takes it up.
+    let synced_theme = ctx.sync.theme;
+    use_effect(move || {
+        if let Some(key) = synced_theme.read().as_deref() {
+            theme.set(Theme::from_key(key));
+        }
+    });
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
     use_keep_awake(screen, ctx.runtime, ctx.contest, ctx.preview);
@@ -203,6 +210,7 @@ pub fn App() -> Element {
                                 let next = theme().next();
                                 theme.set(next);
                                 ctx.app().store.save_theme(next.key());
+                                ctx.sync_soon();
                                 // A run's fields take the cursor back, as
                                 // after any of the run's own buttons.
                                 refocus_run(ctx);

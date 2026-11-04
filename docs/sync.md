@@ -27,7 +27,7 @@ The folder holds three kinds of file, each sealed (below):
 | --- | --- | --- |
 | `dust-keyring` | the data key, wrapped under the passphrase | once, by the first device |
 | `dust-p-<random>` | a pack: records sent, deletions, sessions put back | once, never changed |
-| `dust-s-<keyed hash>` | one device's settings, each stamped with when it changed | by that device alone |
+| `dust-s-<keyed hash>` | one device's settings, level counters, theme and marks, each stamped with when it changed | by that device alone |
 
 ## The history
 
@@ -51,7 +51,7 @@ Each sync (`src/sync/run.rs`):
 4. makes the local change in one `HistoryChange`, before anything is sent;
 5. sends one or more packs (a few megabytes apiece, so a long history is a
    few files, not one per session);
-6. merges the settings.
+6. merges the settings, the level counters, the theme and the marks.
 
 A record the drive says is deleted (its latest deletion later than its
 latest putting back) is deleted here. A session put back here by Undo, or
@@ -65,16 +65,30 @@ every pack again and comes to the same. A sync cut short leaves the store
 as it was, or with all it took, and the next one sends what this one did
 not.
 
-## The settings
+## Everything else a device uses
 
-Each device writes only its own settings file: every setting, with when it
-was last changed (`src/sync/settings.rs`). A device merging takes the
-newest of each setting from every file and its own, so a setting changed on
-one device and another changed on another both come through, and no device
-writes over another's file. A device joining a sync takes the drive's
-settings, as a restore takes a backup's, and adds nothing of its own until
-it changes something. Its volume and paddle keys stay its own
-(`TrainingSettings::keep_device_settings`), as with a restore.
+A synced device is set up as every other: the history is one, and so is
+everything else a device uses (`src/sync/settings.rs`, `Using`):
+
+- every setting, the volume and the paddle keys among them;
+- every run of auto-level counters, the counts towards the next level,
+  by its run's key (`level:<key>`): a run moved by a session on one device
+  goes on from there on the next, and one a level reset clears is cleared
+  everywhere;
+- the theme (`mark:theme`), and whether the guided setup (`mark:tour`) and
+  the word on the paddle keys (`mark:paddleKeys`) have been shown. A mark is
+  only ever set.
+
+Each device writes only its own file of them, every key with when it was
+last changed. A device merging takes the newest of each key from every file
+and its own, so a change made on one device and another made on another
+both come through, and no device writes over another's file. A device
+joining a sync takes what the drive holds, as a restore takes a backup's
+settings, and adds nothing of its own until it changes something.
+
+All that stays each device's own: when it last saved a backup file, which
+is a file on that device, and a session or run it has under way, which is
+stored, and synced, once it ends.
 
 ## Encryption
 

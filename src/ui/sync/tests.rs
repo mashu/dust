@@ -161,6 +161,60 @@ fn the_card_says_what_is_under_way() {
     assert!(card(SyncStatus::Unavailable(Some("Not this visit."))).has("Not this visit."));
 }
 
+/// The History tab, or the Stats page, given sync, holding one session.
+#[component]
+fn Stats(status: SyncStatus, history: bool) -> Element {
+    let view = SyncView {
+        status,
+        on_sign_in: EventHandler::new(|()| {}),
+        on_passphrase: EventHandler::new(|_: (String, Option<String>)| {}),
+        on_cancel: EventHandler::new(|()| {}),
+        on_sync_now: EventHandler::new(|()| {}),
+        on_turn_off: EventHandler::new(|_: bool| {}),
+    };
+    let sessions = vec![crate::testing::stored_session(
+        "2026-11-01",
+        &[("KM", "KM")],
+    )];
+    if history {
+        rsx! { crate::ui::stats_detail::HistoryTab { sessions, sync: view } }
+    } else {
+        rsx! {
+            crate::ui::stats::StatsView {
+                settings: cw_core::TrainingSettings::default(),
+                sessions,
+                sync: view,
+            }
+        }
+    }
+}
+
+/// Synced, the history and the Stats page are every synced device's, and
+/// say so; otherwise this device's.
+#[test]
+fn synced_the_history_is_every_devices() {
+    for history in [true, false] {
+        let synced = Ui::new(
+            Stats,
+            StatsProps {
+                status: on(None),
+                history,
+            },
+        );
+        assert!(synced.has("on your synced devices"), "{}", synced.html());
+        assert!(!synced.has("on this device"), "{}", synced.html());
+        let off = Ui::new(
+            Stats,
+            StatsProps {
+                status: SyncStatus::Off { problem: None },
+                history,
+            },
+        );
+        assert!(off.has("on this device"), "{}", off.html());
+        assert!(!off.has("synced devices"));
+    }
+}
+
 #[test]
 fn when_it_synced_is_said_plainly() {
     let now = crate::time::now_ms();
