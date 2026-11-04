@@ -1,0 +1,190 @@
+# Sync
+
+Sync keeps the history and the settings the same on every device a user
+turns it on, through a folder of Dust's own in the user's own Google Drive.
+It is off until the user turns it on, on the History tab of Stats, and it
+is end-to-end encrypted: everything is sealed on the device, with a key
+only the user's passphrase opens, before it leaves. Google keeps the files
+and cannot read them. The developer has no server and receives nothing.
+
+The code is `src/sync/`; the privacy policy (`docs/privacy.html`) says all
+of this to the user, in the words a test holds it to.
+
+## What goes where
+
+Google Drive's **app data folder** (`drive.appdata`) is a folder each app
+has in each user's Drive: hidden among their files, reachable by that app
+alone (every OAuth client of the one Google Cloud project), and counted
+against the user's storage. Drive's settings show it under *Manage apps*,
+where the user can delete it. It is the only thing sync asks Google for:
+none of the user's own files, nor anything of any other app's. Google counts
+the scope non-sensitive, so the app needs only Google's brand verification,
+with no security assessment.
+
+The folder holds three kinds of file, each sealed (below):
+
+| File | What it holds | Written |
+| --- | --- | --- |
+| `dust-keyring` | the data key, wrapped under the passphrase | once, by the first device |
+| `dust-p-<random>` | a pack: records sent, deletions, sessions put back | once, never changed |
+| `dust-s-<keyed hash>` | one device's settings, each stamped with when it changed | by that device alone |
+
+## The history
+
+The history is already kept by record (`src/persist/record.rs`): each
+session is written once and never over, named by when it finished and a
+hash of what it holds, and a deletion is a tombstone kept for good. That is
+a set that only grows, beside a set of deletions that only grows: two
+devices that each take up everything the other wrote come to the same
+history, in whatever order, with nothing to merge. Sync carries exactly
+that.
+
+Each sync (`src/sync/run.rs`):
+
+1. lists the folder, and reads the packs it has not read before
+   (`DriveState` puts every pack together: of each record, whether some pack
+   holds it, and the latest time it was deleted and put back);
+2. asks the store what it lists, and which of the drive's records it does
+   not list it deleted by hand (`Store::forgotten`);
+3. works out the plan (`src/sync/plan.rs`): records to take, deletions to
+   make here, records and deletions to send;
+4. makes the local change in one `HistoryChange`, before anything is sent;
+5. sends one or more packs (a few megabytes apiece, so a long history is a
+   few files, not one per session);
+6. merges the settings.
+
+A record the drive says is deleted (its latest deletion later than its
+latest putting back) is deleted here. A session put back here by Undo, or
+by a restore, after a deletion the drive holds is sent as *put back*, so
+that the deletion does not take it again; a device that let it go takes it
+back. Missing is never deleted: a record is let go only for a deletion.
+
+What a device keeps of the drive (`SyncState`: the packs read and what they
+said) is only so as not to read it all again. Lost, the next sync reads
+every pack again and comes to the same. A sync cut short leaves the store
+as it was, or with all it took, and the next one sends what this one did
+not.
+
+## The settings
+
+Each device writes only its own settings file: every setting, with when it
+was last changed (`src/sync/settings.rs`). A device merging takes the
+newest of each setting from every file and its own, so a setting changed on
+one device and another changed on another both come through, and no device
+writes over another's file. A device joining a sync takes the drive's
+settings, as a restore takes a backup's, and adds nothing of its own until
+it changes something. Its volume and paddle keys stay its own
+(`TrainingSettings::keep_device_settings`), as with a restore.
+
+## Encryption
+
+`src/sync/seal.rs`:
+
+- **Data key**: 256 random bits, made as the first device turns sync on.
+- **Keyring**: the data key sealed under a key stretched from the
+  passphrase with **Argon2id** (19 MiB, 2 passes, 1 lane: OWASP's first
+  choice), with a random salt. The stretch is written in the keyring, so a
+  later build can stretch harder.
+- **Sealing**: **XChaCha20-Poly1305**, a fresh random 192-bit nonce for
+  every file, the file's name bound in as associated data, so no file can
+  stand in for another. Packs are deflated first.
+- **Names**: a pack's name is random; a device's settings file is named by
+  an HMAC of the device's random id; neither says anything of what it
+  holds.
+
+The passphrase never leaves the device it is typed on, and is not kept.
+Each device keeps the data key, in what sync keeps
+(`Store::save_sync`): `sync.json` in the store's folder on a computer;
+`dust/sync.json` in the app's no-backup folder on Android, which Android's
+Auto Backup leaves out; `dust_sync` in a browser's `localStorage`.
+
+What Google can see: how many files there are, how large, and when each
+device reads or writes them, with the account and the IP address of each
+request. What it cannot: anything of what they hold. A lost passphrase is
+unrecoverable by design: the synced copy can then not be read, though each
+device keeps what it holds.
+
+On the web, the site's storage is shared with every other Pages site of the
+account (`docs/platforms.md`), and so is the data key kept there, as the
+history itself is. The access token is kept in memory only.
+
+## Signing in
+
+`src/sync/auth.rs`, one way for each platform, as Google asks each to:
+
+- **Web**: Google's sign-in in a window of its own (OAuth's token flow, for
+  a page with no server), sent back to `oauth.html` beside the app
+  (`docs/oauth.html`, copied into the site by `web-site.yml`), which hands
+  the token to the app over a `BroadcastChannel` and closes. The token
+  lasts an hour, in memory only; the next visit asks for a click to sign in
+  as it syncs. No Google script is loaded.
+- **Computer**: Google's sign-in in the user's own browser, sent back to
+  `http://127.0.0.1:<port>` (RFC 8252), with PKCE. The code is traded for a
+  token and a refresh token, which is kept to sign in again with no one
+  asked.
+- **Android**: Google Play services' authorization
+  (`Identity.getAuthorizationClient`), asked for by the activity
+  (`android/MainActivity.kt`) over JNI. The Gradle hook adds
+  `play-services-auth` (`scripts/android-gradle-hook.sh`).
+- **iOS**: not yet; the card is not shown.
+
+Requests go straight from the device to `accounts.google.com`,
+`oauth2.googleapis.com` and `www.googleapis.com`: the browser's own fetch on
+the web, and `ureq` (rustls, with its roots built in) on a thread of its own
+elsewhere (`src/sync/http.rs`).
+
+## When it syncs
+
+`src/sync/ctx.rs`: as the app opens; three seconds after a session is kept,
+a deletion or a restore made, or the settings stored; as the app comes back
+into sight, if it has not synced for two minutes; and on *Sync now*. Never
+while a session or a run is under way: once it is over. A browser whose
+sign-in has run out asks for a click instead.
+
+Turning sync off on one device forgets the key and the sign-in there; the
+copy stays for the other devices. Turning it off with the copy deletes every
+file of Dust's from the folder, the keyring first, and every other device
+then finds it gone, says so, and turns sync off too.
+
+## Setting up
+
+A build offers sync only where it is built with an OAuth client for where
+it runs (`src/sync/config.rs`). Without one, the card is not shown, and the
+app reaches no more than it did before.
+
+1. **Google Cloud project.** Create one at
+   <https://console.cloud.google.com>, and enable the **Google Drive API**.
+2. **Branding and audience** (Google Auth Platform). App name *Dust*, a
+   support email, the home page `https://mashu.github.io/dust/`, the privacy
+   policy `https://mashu.github.io/dust/privacy/`, and the authorized
+   domain `mashu.github.io`. Google asks for the domain to be verified in
+   Search Console, which for `mashu.github.io` is done from the user site
+   (`mashu/mashu.github.io`). Audience: external.
+3. **Data access.** Add the one scope,
+   `https://www.googleapis.com/auth/drive.appdata`. It is non-sensitive:
+   publishing to production then needs brand verification only.
+4. **Clients.** In the one project, so that they share the one app folder:
+   - *Web application*: authorized JavaScript origin
+     `https://mashu.github.io`; authorized redirect URI
+     `https://mashu.github.io/dust/oauth.html` (and, to try it locally,
+     `http://localhost:8080` with `http://localhost:8080/oauth.html`).
+   - *Desktop app*: nothing to fill in; it gives an ID and a secret, which
+     Google says is no secret in an installed app.
+   - *Android*: the package `dev.dust.morse`, and the SHA-1 of each key the
+     app is signed with: the release key CI signs the APK with, and Play's
+     app signing key (Play Console, *App integrity*) for the store's build.
+5. **Repository variables** (Settings, Secrets and variables, Actions,
+   *Variables*; none is a secret):
+   - `DUST_GOOGLE_WEB_CLIENT_ID`
+   - `DUST_GOOGLE_DESKTOP_CLIENT_ID`, `DUST_GOOGLE_DESKTOP_CLIENT_SECRET`
+   - `DUST_GOOGLE_ANDROID_SYNC`: `1`, once the Android client exists.
+
+   The workflows hand them to every build. Locally, set the same variables
+   in the environment before `dx serve` or `cargo build`.
+6. **Play's Data safety form.** Sync sends the user's practice to their own
+   Google Drive end-to-end encrypted, unreadable to anyone but the user,
+   and to no one else: Google's guidance does not count such data as
+   collected. Check the form's current wording before answering.
+
+For local web testing, `dx serve` does not serve `docs/oauth.html`: copy it
+into the folder `dx` serves the app from, or try sync on the Pages site.

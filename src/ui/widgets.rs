@@ -208,6 +208,8 @@ pub enum IconName {
     Upload,
     Download,
     Medal,
+    /// A cloud with arrows going both ways: sync.
+    Cloud,
     /// What a card's terms mean: the ⓘ of its help. The ? is the guided
     /// setup's.
     Info,
@@ -216,7 +218,7 @@ pub enum IconName {
 impl IconName {
     /// Every icon, for the test that draws them all.
     #[cfg(test)]
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::Signal,
         Self::Chart,
         Self::Sliders,
@@ -248,6 +250,7 @@ impl IconName {
         Self::Upload,
         Self::Download,
         Self::Medal,
+        Self::Cloud,
         Self::Info,
     ];
 
@@ -338,6 +341,14 @@ impl IconName {
             Self::Chevron => &["M6 9.5l6 6 6-6"],
             Self::Upload => &["M12 15.5V4.5", "M7.5 9L12 4.5 16.5 9", "M4.5 15v4.5h15V15"],
             Self::Download => &["M12 4.5v11", "M7.5 11L12 15.5 16.5 11", "M4.5 15v4.5h15V15"],
+            // A cloud, an arrow up into it and one down out of it.
+            Self::Cloud => &[
+                "M7 18.5H6a4 4 0 01-.6-7.95A6 6 0 0117 8.5a4.5 4.5 0 011 8.9",
+                "M10 21v-7",
+                "M7.5 16.5L10 14l2.5 2.5",
+                "M14.5 13v7",
+                "M12 17.5l2.5 2.5 2.5-2.5",
+            ],
             // A medal on its ribbon.
             Self::Medal => &[
                 "M8 2.5h3.5l2 6",

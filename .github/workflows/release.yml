@@ -43,6 +43,13 @@ env:
   # deliberate move.
   RUST_TOOLCHAIN: "1.99.1"
   DIOXUS_CLI_VERSION: "0.7.10"
+  # Sync's OAuth clients (docs/sync.md, Setting up), from the repository's
+  # Actions variables: a build made without them offers no sync. None of
+  # them is a secret: each is in every copy of the app.
+  DUST_GOOGLE_WEB_CLIENT_ID: ${{ vars.DUST_GOOGLE_WEB_CLIENT_ID }}
+  DUST_GOOGLE_DESKTOP_CLIENT_ID: ${{ vars.DUST_GOOGLE_DESKTOP_CLIENT_ID }}
+  DUST_GOOGLE_DESKTOP_CLIENT_SECRET: ${{ vars.DUST_GOOGLE_DESKTOP_CLIENT_SECRET }}
+  DUST_GOOGLE_ANDROID_SYNC: ${{ vars.DUST_GOOGLE_ANDROID_SYNC }}
 
 jobs:
   version:

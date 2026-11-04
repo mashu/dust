@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Signing in — Dust</title>
+  <!--
+    Where Google's sign-in sends the browser back to, as the web app turns
+    sync on (src/sync/auth/web.rs): served at oauth.html beside the app.
+    The token Google sends is in the address's fragment, which no request
+    carries: this page hands it to the app over a BroadcastChannel, which
+    only pages of this site hear, takes it out of the address and the
+    browser's history, and closes. It loads nothing, and sends nothing
+    anywhere.
+  -->
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font: 1.05rem/1.6 system-ui, "Segoe UI", sans-serif; background: #f2e9d9; color: #1b2436; }
+    @media (prefers-color-scheme: dark) { body { background: #141a24; color: #f4efe6; } }
+    main { max-width: 32rem; margin: 3rem auto; padding: 0 1.25rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <p id="said">Handing Google's answer to Dust…</p>
+  </main>
+  <script>
+    (function () {
+      var heard = window.location.hash || window.location.search || "";
+      try {
+        window.history.replaceState(null, "", window.location.pathname);
+      } catch (e) {}
+      var said = document.getElementById("said");
+      try {
+        var channel = new BroadcastChannel("dust_oauth");
+        channel.postMessage(heard);
+        channel.close();
+        said.textContent = "Done. You can close this window and go back to Dust.";
+      } catch (e) {
+        said.textContent = "This browser could not hand Google's answer to Dust. Close this window and try again.";
+      }
+      setTimeout(function () { window.close(); }, 300);
+    })();
+  </script>
+</body>
+</html>

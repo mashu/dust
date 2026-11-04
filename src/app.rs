@@ -110,6 +110,7 @@ pub fn App() -> Element {
     use_page_shown(APP_SHOWN, move || {
         ctx.store_unsaved();
         ctx.take_up_changes();
+        ctx.sync_if_stale();
     });
     // Back on a phone, or in a browser, goes back through the app's screens
     // rather than out of it (src/system_back.rs).

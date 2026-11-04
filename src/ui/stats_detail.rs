@@ -18,6 +18,7 @@ use crate::ui::forecast::{group_length_card, speed_card};
 use crate::ui::format::counted;
 use crate::ui::sampling::NextUpCard;
 use crate::ui::settings_charset::mode_label;
+use crate::ui::sync::{SyncCard, SyncView};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
@@ -204,12 +205,14 @@ fn HistoryRow(
 /// around it, so what is chosen stays chosen. Deleting everything asks once
 /// more; anything else is put right with the Undo the app offers after.
 /// Given `backups`, the history can be saved to a file and restored from
-/// one, above the list.
+/// one, above the list; given `sync`, synced through the user's own Google
+/// Drive, beside it.
 #[component]
 pub fn HistoryTab(
     #[props(into)] sessions: History,
     on_delete: Option<EventHandler<Vec<RecordId>>>,
     backups: Option<Backups>,
+    sync: Option<SyncView>,
 ) -> Element {
     let mut selecting = use_signal(|| false);
     let mut chosen = use_signal(BTreeSet::<RecordId>::new);
@@ -270,6 +273,9 @@ pub fn HistoryTab(
     rsx! {
         if let Some(backups) = backups {
             BackupCard { backups, since }
+        }
+        if let Some(view) = sync {
+            SyncCard { view }
         }
         div { class: if selecting_now { "card stack-sm history-card selecting" } else { "card stack-sm history-card" },
             CardHead {

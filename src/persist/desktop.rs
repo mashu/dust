@@ -30,6 +30,8 @@ pub(super) const SESSIONS: &str = "sessions.json";
 pub(super) const DELETED: &str = "deleted.json";
 const COUNTERS: &str = "auto_adjust.json";
 const LAST_BACKUP: &str = "last_backup.txt";
+/// What sync keeps ([`Store::load_sync`]).
+const SYNC: &str = "sync.json";
 /// The sessions and runs marked open ([`Store::mark_open`]): each copy of
 /// the app's as `<id>.json`, beside `<id>.lock`, which that copy holds
 /// locked for as long as its session runs. A copy that stops, however it
@@ -53,6 +55,10 @@ fn outgrows_device_backup(bytes: u64, android: bool) -> bool {
 /// so a test can point one at a scratch folder.
 pub struct DesktopStore {
     root: PathBuf,
+    /// Where sync keeps what it keeps: the store's folder, but on Android,
+    /// the app's folder that Android's own backup leaves out, as it holds
+    /// the key to the copy in the user's Drive.
+    sync_dir: PathBuf,
     /// Where backup files go, when there is anywhere the user can reach.
     backup_folder: Option<PathBuf>,
     /// How the user moves a backup file out of the app, where it is saved
@@ -125,6 +131,7 @@ impl DesktopStore {
             backup_folder: backup_folder(),
             backups_inside: backups_inside_app(),
             loading: RefCell::new(loading),
+            sync_dir: sync_dir_for(&root),
             ..Self::with_history(root, history)
         }
     }
@@ -151,6 +158,7 @@ impl DesktopStore {
         Self {
             history,
             loading: RefCell::new(None),
+            sync_dir: root.clone(),
             root,
             backup_folder: None,
             backups_inside: None,
@@ -232,6 +240,22 @@ impl DesktopStore {
     fn shown(&self, name: &str) -> Option<String> {
         shown(&self.root, name)
     }
+}
+
+/// Where sync keeps what it keeps, for a store under `root`: the store's
+/// own folder, but on Android, `dust/` in the app's folder that Android's
+/// Auto Backup leaves out (`Context.getNoBackupFilesDir()`), where it can
+/// be asked for. A data folder set by hand (`DUST_DATA_DIR`) keeps it too.
+fn sync_dir_for(root: &Path) -> PathBuf {
+    #[cfg(all(target_os = "android", not(test)))]
+    {
+        if std::env::var_os("DUST_DATA_DIR").is_none()
+            && let Some(no_backup) = super::android::no_backup_dir()
+        {
+            return no_backup.join("dust");
+        }
+    }
+    root.to_path_buf()
 }
 
 /// Move a file in `root` that cannot be read, `stem`.json at `path`, out of
@@ -656,6 +680,24 @@ impl Store for DesktopStore {
 
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
         self.history.forgotten(ids)
+    }
+
+    fn load_sync(&self) -> Option<String> {
+        fs::read_to_string(self.sync_dir.join(SYNC)).ok()
+    }
+
+    fn save_sync(&self, state: Option<&str>) -> Result<(), String> {
+        let path = self.sync_dir.join(SYNC);
+        match state {
+            Some(state) => {
+                fs::create_dir_all(&self.sync_dir).map_err(|err| err.to_string())?;
+                write_whole(&self.sync_dir, SYNC, state.as_bytes()).map_err(|err| err.to_string())
+            }
+            None => match fs::remove_file(&path) {
+                Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.to_string()),
+                _ => Ok(()),
+            },
+        }
     }
 
     fn history_changed(&self) -> bool {

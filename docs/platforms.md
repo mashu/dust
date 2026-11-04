@@ -568,8 +568,10 @@ would make translucent to change.
 
 ## Where your progress lives
 
-Dust syncs nothing. Each install keeps its own history, in the place that
-platform gives it:
+Each install keeps its own history, in the place that platform gives it.
+Sync, if the user turns it on, keeps installs in step through an encrypted
+copy in their own Google Drive ([sync.md](sync.md)); without it, each
+install's history is its own:
 
 | Build | Location |
 | --- | --- |

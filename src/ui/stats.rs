@@ -419,6 +419,8 @@ pub fn StatsView(
     on_delete: Option<EventHandler<Vec<RecordId>>>,
     /// Saving and restoring backups, on the History tab.
     backups: Option<Backups>,
+    /// Sync with the user's own Google Drive, on the History tab.
+    sync: Option<crate::ui::sync::SyncView>,
 ) -> Element {
     let mut tab = use_signal(|| StatsTab::Overview);
     // Accuracy, letters and mistakes are counted over the whole history: a
@@ -456,7 +458,7 @@ pub fn StatsView(
                 StatsTab::Letters => rsx! { LettersTab { settings, sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
-                StatsTab::History => rsx! { HistoryTab { sessions, on_delete, backups } },
+                StatsTab::History => rsx! { HistoryTab { sessions, on_delete, backups, sync } },
             }
         }
     }
