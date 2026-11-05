@@ -40,6 +40,13 @@ pub const SYNC_PRIVACY: &str = "Sync is off unless you turn it on, on the Histor
 pub const SYNC_CONTACTS: &str = "Sync, if you turn it on, reaches Google alone: its sign-in, and \
      Google Drive.";
 
+/// What the card says of sync in a build made without Google's clients
+/// (src/sync/config.rs), in place of what sync does: such a build has no
+/// Sync card on the History tab to point to (src/routes.rs, `sync_view`).
+/// The policy is every build's, so it says what sync does wherever it is.
+pub const NO_SYNC_PRIVACY: &str = "This copy of Dust was built without sync, so the History tab \
+     of Stats has none to turn on.";
+
 /// Where Dust runs, which decides where it keeps what it stores, what else
 /// keeps a copy, and whom it contacts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,22 +150,35 @@ impl Platform {
     }
 }
 
+/// The Privacy card. `syncs` is whether this build can sync at all, which
+/// decides whether the card points to the Sync card on the History tab or
+/// says there is none; tests give it either way.
 #[component]
-pub fn PrivacyCard() -> Element {
+pub fn PrivacyCard(#[props(default = crate::sync::config::available())] syncs: bool) -> Element {
     let open = use_signal(|| false);
     let kept = Platform::THIS.kept();
     let contacts = Platform::THIS.contacts();
+    let sends = if syncs {
+        "Dust sends that history nowhere unless you turn on sync"
+    } else {
+        "Dust sends that history nowhere"
+    };
     rsx! {
         div { class: "card stack-sm legal",
             FoldHead { title: "Privacy", note: "No account, no ads, no analytics", open }
             FoldPanel { title: "Privacy", open,
                 p { class: "muted",
-                    "Dust stores your settings and practice history on this device: speed and alphabet, the groups that were sent, what you typed and how soon after each character's sound you keyed it, with the delay your audio device reports, and the scores. There is no account, and Dust sends that history nowhere unless you turn on sync. {HISTORY_KEPT} Any of them can be deleted under Stats → History. While a session runs, when it started is kept too, so that one the app closes under is told of when it next opens."
+                    "Dust stores your settings and practice history on this device: speed and alphabet, the groups that were sent, what you typed and how soon after each character's sound you keyed it, with the delay your audio device reports, and the scores. There is no account, and {sends}. {HISTORY_KEPT} Any of them can be deleted under Stats → History. While a session runs, when it started is kept too, so that one the app closes under is told of when it next opens."
                 }
                 p { class: "muted", "{CONTEST_PRIVACY}" }
                 p { class: "muted", "{kept}" }
-                p { class: "muted", "{SYNC_PRIVACY}" }
-                p { class: "muted", "{contacts} {SYNC_CONTACTS}" }
+                if syncs {
+                    p { class: "muted", "{SYNC_PRIVACY}" }
+                    p { class: "muted", "{contacts} {SYNC_CONTACTS}" }
+                } else {
+                    p { class: "muted", "{NO_SYNC_PRIVACY}" }
+                    p { class: "muted", "{contacts}" }
+                }
                 p { class: "muted",
                     "Dust does not use the microphone, location, or contacts, and it has no ads or analytics."
                 }
@@ -186,7 +206,7 @@ mod tests {
     /// the app contacts, and the policy.
     #[test]
     fn the_card_starts_folded_and_opens_onto_what_dust_keeps() {
-        let mut ui = Ui::new(PrivacyCard, ());
+        let mut ui = Ui::new(PrivacyCard, PrivacyCardProps { syncs: true });
         assert!(
             ui.has("No account, no ads, no analytics"),
             "the head always shows"
@@ -215,8 +235,47 @@ mod tests {
             !ui.has("Uninstalling the app deletes what it stored"),
             "no platform deletes everything it stored on an uninstall"
         );
+        assert!(
+            ui.has("unless you turn on sync. "),
+            "a build that syncs says the history goes nowhere until sync is on"
+        );
+        assert!(!ui.has(NO_SYNC_PRIVACY));
         ui.click("disclosure-privacy");
         assert!(!ui.has(PRIVACY_POLICY_URL), "the head folds the card again");
+    }
+
+    /// A build made without Google's clients has no Sync card on the
+    /// History tab, so its Privacy card points to none: it says it has no
+    /// sync, and names no one sync would reach.
+    #[test]
+    fn a_build_without_sync_says_so_and_points_to_no_sync_card() {
+        let mut ui = Ui::new(PrivacyCard, PrivacyCardProps { syncs: false });
+        ui.click("disclosure-privacy");
+        for shown in [
+            "There is no account, and Dust sends that history nowhere. ",
+            NO_SYNC_PRIVACY,
+            HISTORY_KEPT,
+            CONTEST_PRIVACY,
+            Platform::THIS.kept(),
+            Platform::THIS.contacts(),
+            PRIVACY_POLICY_URL,
+        ] {
+            assert!(ui.has(shown), "{shown} is missing from the open card");
+        }
+        for gone in [SYNC_PRIVACY, SYNC_CONTACTS, "unless you turn on sync. "] {
+            assert!(!ui.has(gone), "a build without sync still says {gone:?}");
+        }
+    }
+
+    /// The card left to itself says what this build does: it points to the
+    /// Sync card only where the History tab has one.
+    #[test]
+    fn the_card_says_what_this_build_does_of_sync() {
+        let mut ui = Ui::new(PrivacyCard, PrivacyCardProps::builder().build());
+        ui.click("disclosure-privacy");
+        let syncs = crate::sync::config::available();
+        assert_eq!(ui.has(SYNC_PRIVACY), syncs, "{}", ui.html());
+        assert_eq!(ui.has(NO_SYNC_PRIVACY), !syncs, "{}", ui.html());
     }
 
     /// Each platform says where it keeps what Dust stores, and what else
