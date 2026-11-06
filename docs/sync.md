@@ -155,6 +155,14 @@ into sight, if it has not synced for two minutes; and on *Sync now*. Never
 while a session or a run is under way: once it is over. A browser whose
 sign-in has run out asks for a click instead.
 
+Each sync shows in the corner of the screen, above the nav
+(`src/ui/sync_pip.rs`): a small cloud breathing while it runs, a check for
+a moment once it is done, then gone; a mark for a few seconds where it went
+wrong, the Sync card saying what. Where a browser's sign-in ran out, the
+cloud stays, and a tap on it signs in again from any screen, as a browser
+opens Google's window only for a tap. The corner is never shown over a
+session or a run, and takes no tap but that one.
+
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Turning it off with the copy deletes every
 file of Dust's from the folder, the keyring first, and every other device

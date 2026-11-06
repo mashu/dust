@@ -18,6 +18,7 @@ use crate::time::sleep_ms;
 use crate::ui::contest::RunAnnouncer;
 use crate::ui::notice::NoticeBanner;
 use crate::ui::paddle::use_paddle_keys;
+use crate::ui::sync_pip::SyncCorner;
 use crate::ui::tour::{TourButton, TourDock};
 use crate::ui::widgets::{Icon, IconName, control_id, keep_focus};
 
@@ -269,6 +270,10 @@ pub fn App() -> Element {
             }
             TourDock {}
             RunAnnouncer {}
+            // Sync, in the corner while it works: never over a session.
+            if show_nav {
+                SyncCorner {}
+            }
             if let Some(toast) = toasts.current() {
                 div { class: if show_nav { "toast-dock has-nav" } else { "toast-dock" },
                     div { class: "toast", role: "status",
