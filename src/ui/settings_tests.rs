@@ -617,8 +617,9 @@ fn callsigns_set_their_country_balance() {
 /// Beside the tier, Callsigns draws the row of tiers filled up to it and
 /// where its calls come from, split between the United States, the next
 /// nine countries and the rest; both follow the tier and the balance, a
-/// part tapped says who is in it, and Contest, whose countries are the
-/// contest's, draws neither.
+/// part tapped says who is in it. Contest, which shares the tier, draws the
+/// row too, and its callers' countries, which are the contest's and come
+/// as on the air, whatever the balance.
 #[test]
 fn callsigns_draw_their_tiers_and_where_their_calls_come_from() {
     run(|| async {
@@ -653,9 +654,16 @@ fn callsigns_draw_their_tiers_and_where_their_calls_come_from() {
             "nine countries are the US and eight more"
         );
 
+        ui.commit("number-country-balance", "100");
+        ui.advance(50).await;
         ui.click("seg-contest");
-        assert!(!ui.shows("tier-steps"));
-        assert!(!ui.shows("country-split"));
+        assert!(ui.shows("tier-steps"));
+        assert!(ui.has("Where callers come from"));
+        assert!(
+            ui.has("Calls from 9 countries: United States 86%, 8 other countries 14%"),
+            "a contest's callers come as on the air"
+        );
+        assert!(!ui.shows("number-country-balance"));
         assert!(!ui.has("of 6 · "), "the note names the contest");
     });
 }

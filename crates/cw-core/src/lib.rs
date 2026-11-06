@@ -59,9 +59,9 @@ pub use buckets::{
 };
 pub use callsign::{
     CALLSIGN_TIER_DEFAULT, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CallSpec, CallsignParts,
-    Countries, GeneratedCall, call_fault, continent_name, country_name, country_of, country_shares,
-    generate_call, generate_callsign, parse_callsign, tier_adds, tier_countries, tier_examples,
-    tier_shape, wpx_prefix,
+    Countries, GeneratedCall, call_fault, callers_by_country, continent_name, country_name,
+    country_of, country_shares, generate_call, generate_callsign, parse_callsign, tier_adds,
+    tier_countries, tier_examples, tier_shape, wpx_prefix,
 };
 pub use contest::{
     AirView, CallSource, CallerHabits, CallerOdds, CallerStyles, ContestEffect, ContestEvent,

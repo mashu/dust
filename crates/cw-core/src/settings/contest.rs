@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::{CharSetMode, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
-use crate::callsign::parse_callsign;
+use crate::callsign::{CallSpec, parse_callsign};
 use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
@@ -457,6 +457,17 @@ impl ContestSettings {
     /// W/VE and DX, or POTA's US and Canada and everywhere else.
     pub fn side(&self) -> Side {
         self.contest_kind.rules().side_of(&self.my_call)
+    }
+
+    /// Who calls you in a run of these settings, as the run draws them:
+    /// the contest's callers on your side, with POTA's DX hunters, and the
+    /// callers signing portable and abroad, as often as you set them.
+    pub fn callers(&self) -> CallSpec {
+        self.contest_kind
+            .rules()
+            .callers(self.side())
+            .with_dx(self.hunter_dx_percent)
+            .with_odds(&self.caller_odds)
     }
 
     /// The CQ zone your call reads as: by your state or province where you
