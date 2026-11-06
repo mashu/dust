@@ -39,6 +39,7 @@ pub mod settings_station;
 pub mod stats;
 pub mod stats_detail;
 pub mod sync;
+pub mod sync_pip;
 pub mod tips;
 pub mod tour;
 pub mod training;

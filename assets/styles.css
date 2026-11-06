@@ -2832,6 +2832,53 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
 }
 .toast-action:hover { background: rgba(255, 255, 255, 0.1); }
 
+/* Sync, in the corner while it has something to say: a cloud breathing as
+   it syncs, a check for a moment once it is done, a mark where it went
+   wrong, and a cloud to tap where a browser's sign-in ran out. Above the
+   nav, clear of the toast's middle, and taking no tap but that one. */
+.sync-pip {
+  position: fixed;
+  right: calc(0.9rem + env(safe-area-inset-right));
+  bottom: calc(6rem + env(safe-area-inset-bottom));
+  z-index: 38;
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--ink-dim);
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.4s var(--ease);
+}
+.sync-pip > .icon { width: 1rem; height: 1rem; }
+.sync-pip.syncing > .icon { animation: sync-breathe 1.1s ease-in-out infinite alternate; }
+.sync-pip.synced { color: var(--good); }
+.sync-pip.trouble { color: var(--warn); }
+.sync-pip.sign-in { pointer-events: auto; color: var(--copper); border-color: var(--copper); cursor: pointer; }
+.sync-pip.leaving { opacity: 0; }
+.sync-pip-mark {
+  position: absolute;
+  right: -0.2rem;
+  bottom: -0.2rem;
+  width: 0.95rem;
+  height: 0.95rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 0.65rem;
+  font-weight: 800;
+  line-height: 1;
+}
+.sync-pip-mark, .sync-pip-mark .icon { color: var(--surface); }
+.sync-pip.synced .sync-pip-mark { background: var(--good); }
+.sync-pip.trouble .sync-pip-mark { background: var(--warn); }
+.sync-pip-mark .icon { width: 0.65rem; height: 0.65rem; stroke-width: 3; }
+@keyframes sync-breathe { from { opacity: 0.3; } to { opacity: 1; } }
+
 /* ==========================================================================
    Guided setup
    ========================================================================== */

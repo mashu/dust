@@ -127,6 +127,28 @@ impl Countries {
         }
     }
 
+    /// The countries callers are drawn from, each with the share of them
+    /// drawn from it, as [`Self::for_one_call`] chooses them a caller at a
+    /// time: Field Day's North America and DX, POTA's US and Canada and its
+    /// DX hunters, and every other choice wholly itself.
+    fn mix(self, spec: &CallSpec) -> [(Self, f64); 2] {
+        let (dx, home, share) = match self {
+            Self::FieldDay => (
+                Self::OutsideNorthAmerica,
+                Self::NorthAmerica,
+                spec.field_day_dx,
+            ),
+            Self::Pota => (
+                Self::OutsideUsAndCanada,
+                Self::UsAndCanada,
+                f64::from(spec.dx_percent) / 100.0,
+            ),
+            countries => (countries, countries, 0.0),
+        };
+        let share = share.clamp(0.0, 1.0);
+        [(dx, share), (home, 1.0 - share)]
+    }
+
     /// The countries one caller is drawn from, `spec` saying how many are
     /// DX: a Field Day caller is in North America but as often as you set
     /// Field Day's DX, when it is anywhere else; a POTA hunter is in the US
@@ -818,61 +840,87 @@ pub fn tier_countries(tier: u32) -> usize {
 }
 
 /// How often Callsigns mode's calls at `tier` come from each country, the
-/// countries evened out by `country_balance` ([`CallSpec::country_balance`]):
-/// each country by its DXCC primary prefix, as [`country_of`] reads a call,
-/// with its share from 0 to 1, the shares summing to 1, the commonest first
-/// and those alike by their prefix. Worked out from the table rather than
-/// drawn, so it is exact and the same every time: each prefix as often as
-/// [`even_out`] weighs it, each digit after it as often as its calls have
-/// it, a VP2 call in the country the letter after its digit names, if any,
-/// and a station abroad in the country it is in, as often as the tier sends
-/// one. Its length is how many countries the tier sends calls from.
+/// countries evened out by `country_balance` ([`CallSpec::country_balance`]),
+/// as [`callers_by_country`] works it out for practice's spec.
 pub fn country_shares(tier: u32, country_balance: f64) -> Vec<(&'static str, f64)> {
+    callers_by_country(tier, CallSpec::default().with_balance(country_balance))
+}
+
+/// How often calls drawn at `tier` to `spec` come from each country: each
+/// country by its DXCC primary prefix, as [`country_of`] reads a call, with
+/// its share from 0 to 1, the shares summing to 1, the commonest first and
+/// those alike by their prefix. Its length is how many countries they come
+/// from. Worked out from the table rather than drawn, so it is exact and the
+/// same every time, as [`generate_call`] draws: the countries `spec` admits,
+/// Field Day's and POTA's DX as often as it has them; each prefix as often
+/// as [`even_out`] weighs it, each digit after it as often as its calls have
+/// it; a VP2 call in the country the letter after its digit names, if any;
+/// and a station abroad in the country it is in, as often as the tier and
+/// the spec send one where a host is admitted.
+pub fn callers_by_country(tier: u32, spec: CallSpec) -> Vec<(&'static str, f64)> {
     let tier = tier_at(tier);
-    let usable = even_out(usable_prefixes(tier, Countries::Any), country_balance);
-    let total: f64 = usable.iter().map(|(_, weight)| weight).sum();
-    let abroad = if tier.abroad { ABROAD_SHARE } else { 0.0 };
+    let abroad_share = if spec.contest {
+        spec.abroad
+    } else {
+        ABROAD_SHARE
+    };
     let mut shares: std::collections::BTreeMap<&'static str, f64> =
         std::collections::BTreeMap::new();
-    for (prefix, weight) in &usable {
-        let share = weight / total;
-        let digits: f64 = prefix.digits.iter().map(|&calls| f64::from(calls)).sum();
-        let homes = PREFIXES
-            .iter()
-            .position(|entry| std::ptr::eq(entry, *prefix))
-            .map(|at| &home_countries()[at]);
-        for (digit, calls) in prefix.digits.into_iter().enumerate() {
-            if calls == 0 {
-                continue;
-            }
-            let home = share * (1.0 - abroad) * f64::from(calls) / digits;
-            let by_letter: Vec<&'static str> = BY_LETTER
-                .iter()
-                .filter(|(shared, _, _)| {
-                    shared.strip_prefix(prefix.prefix) == Some(AREA_DIGITS[digit])
-                })
-                .map(|(_, _, country)| *country)
-                .collect();
-            if by_letter.is_empty() {
-                let country = homes
-                    .and_then(|homes| homes[digit])
-                    .unwrap_or(prefix.country);
-                *shares.entry(country).or_default() += home;
-            } else {
-                // Practice draws the letter after the digit at random; one
-                // no country there has keeps the entry's own.
-                let one = home / LETTERS.len() as f64;
-                for country in &by_letter {
-                    *shares.entry(country).or_default() += one;
-                }
-                *shares.entry(prefix.country).or_default() += home - one * by_letter.len() as f64;
-            }
+    for (countries, part) in spec.countries.mix(&spec) {
+        let usable = even_out(usable_prefixes(tier, countries), spec.country_balance);
+        let total: f64 = usable.iter().map(|(_, weight)| weight).sum();
+        if part <= 0.0 || total <= 0.0 {
+            continue;
         }
-        if abroad > 0.0 {
+        for (prefix, weight) in &usable {
+            let share = part * weight / total;
             let hosts: Vec<&(&str, &'static str, f64)> = HOSTS
                 .iter()
-                .filter(|(_, country, _)| !at_home(prefix.country, country))
+                .filter(|(_, country, _)| {
+                    tier.abroad && !at_home(prefix.country, country) && countries.admits(country)
+                })
                 .collect();
+            let abroad = if hosts.is_empty() {
+                0.0
+            } else {
+                abroad_share.clamp(0.0, 1.0)
+            };
+            let digits: f64 = prefix.digits.iter().map(|&calls| f64::from(calls)).sum();
+            let homes = PREFIXES
+                .iter()
+                .position(|entry| std::ptr::eq(entry, *prefix))
+                .map(|at| &home_countries()[at]);
+            for (digit, calls) in prefix.digits.into_iter().enumerate() {
+                if calls == 0 {
+                    continue;
+                }
+                let home = share * (1.0 - abroad) * f64::from(calls) / digits;
+                let by_letter: Vec<&'static str> = BY_LETTER
+                    .iter()
+                    .filter(|(shared, _, _)| {
+                        shared.strip_prefix(prefix.prefix) == Some(AREA_DIGITS[digit])
+                    })
+                    .map(|(_, _, country)| *country)
+                    .collect();
+                if by_letter.is_empty() {
+                    let country = homes
+                        .and_then(|homes| homes[digit])
+                        .unwrap_or(prefix.country);
+                    *shares.entry(country).or_default() += home;
+                } else if spec.contest && by_letter.contains(&prefix.country) {
+                    // A contest starts the suffix with the country's letter.
+                    *shares.entry(prefix.country).or_default() += home;
+                } else {
+                    // Otherwise the letter after the digit is drawn at
+                    // random; one no country there has keeps the entry's.
+                    let one = home / LETTERS.len() as f64;
+                    for country in &by_letter {
+                        *shares.entry(country).or_default() += one;
+                    }
+                    *shares.entry(prefix.country).or_default() +=
+                        home - one * by_letter.len() as f64;
+                }
+            }
             let weights: f64 = hosts.iter().map(|(_, _, weight)| weight).sum();
             for (_, country, weight) in hosts {
                 *shares.entry(country).or_default() += share * abroad * weight / weights;
@@ -2436,6 +2484,54 @@ mod tests {
         assert!(
             us(6, 0.0) < us(4, 0.0),
             "stations abroad are in other countries"
+        );
+    }
+
+    /// The shares worked out for a contest's callers are what its callers
+    /// are drawn as, on either side of every contest, at the bottom tier,
+    /// the default one and the top one: only the countries it hears, Field
+    /// Day's and POTA's DX as often as set, and a contest's few portables
+    /// and stations abroad.
+    #[test]
+    fn a_contests_callers_come_from_where_its_shares_say() {
+        use crate::contest::{ContestKind, Side};
+        const DRAWS: usize = 8_000;
+        for kind in ContestKind::ALL {
+            for side in [Side::WVe, Side::Dx] {
+                let spec = kind.rules().callers(side).with_dx(30);
+                for tier in [CALLSIGN_TIER_MIN, CALLSIGN_TIER_DEFAULT, CALLSIGN_TIER_MAX] {
+                    let shares = callers_by_country(tier, spec);
+                    let sum: f64 = shares.iter().map(|(_, share)| share).sum();
+                    assert!((sum - 1.0).abs() < 1e-9, "{kind:?} {side:?} {tier}: {sum}");
+                    let mut drawn: std::collections::BTreeMap<&str, usize> =
+                        std::collections::BTreeMap::new();
+                    for call in generated(tier, spec, DRAWS) {
+                        *drawn.entry(call.country).or_default() += 1;
+                    }
+                    for country in drawn.keys() {
+                        assert!(
+                            shares.iter().any(|(listed, _)| listed == country),
+                            "{kind:?} {side:?} {tier}: {country} drawn but not listed"
+                        );
+                    }
+                    for (country, share) in &shares {
+                        let seen = drawn.get(country).copied().unwrap_or(0) as f64 / DRAWS as f64;
+                        let spread = (share * (1.0 - share) / DRAWS as f64).sqrt();
+                        assert!(
+                            (seen - share).abs() < 5.0 * spread + 2e-4,
+                            "{kind:?} {side:?} {tier}: {country} {seen:.4} drawn, {share:.4}"
+                        );
+                    }
+                }
+            }
+        }
+        let w_ve = callers_by_country(CALLSIGN_TIER_DEFAULT, CallSpec::contest(Countries::WVe));
+        let countries: Vec<&str> = w_ve.iter().map(|(country, _)| *country).collect();
+        assert_eq!(countries, ["K", "VE"], "W/VE is the US and Canada");
+        assert!(
+            callers_by_country(CALLSIGN_TIER_DEFAULT, CallSpec::contest(Countries::NotWVe))
+                .iter()
+                .all(|(country, _)| *country != "K" && *country != "VE")
         );
     }
 }

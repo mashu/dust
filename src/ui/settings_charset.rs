@@ -1,10 +1,10 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CallerOdds, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill,
-    GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL, Odd, PracticeWindow, RunStyle, SEQUENCE_PRESETS,
-    STARTER_WORDS, STYLE_EVEN, Sender, SequenceChoice, SettingsSection, TrainingSettings, TuCall,
-    WORD_LIST_MAX, WordList, compute_char_pool, corner_shares, current_practice_window, greeting,
-    into_shape, parse_callsign, shape_corners, shares_without, tier_examples, toggle_corner,
-    unlocked_practice_count,
+    CALLSIGN_TIER_MAX, CallSpec, CallerOdds, CharSetMode, ContestKind, ContestPreset, FAREWELLS,
+    Fill, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL, Odd, PracticeWindow, RunStyle,
+    SEQUENCE_PRESETS, STARTER_WORDS, STYLE_EVEN, Sender, SequenceChoice, SettingsSection,
+    TrainingSettings, TuCall, WORD_LIST_MAX, WordList, compute_char_pool, corner_shares,
+    current_practice_window, greeting, into_shape, parse_callsign, shape_corners, shares_without,
+    tier_examples, toggle_corner, unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
@@ -1007,8 +1007,8 @@ struct Charset {
     /// A few calls of the tier, as Callsigns shows them; none in Contest,
     /// whose QSO shows a call.
     tier_examples: Vec<String>,
-    /// Where Callsigns' calls come from, under its examples; none in
-    /// Contest, whose callers' countries are the contest's.
+    /// Where the calls come from: Callsigns' as evenly as its balance has
+    /// them, under its examples, or a contest's callers, under its tier.
     tier_reach: Option<Split>,
     /// The words Words sends, and whether they are the learner's own.
     words: Vec<String>,
@@ -1026,8 +1026,14 @@ impl Charset {
         } else {
             Vec::new()
         };
-        let tier_reach =
-            callsigns_mode.then(|| Split::of(settings.active_level(), settings.country_balance()));
+        let tier_reach = callsigns.then(|| {
+            let spec = if callsigns_mode {
+                CallSpec::default().with_balance(settings.country_balance())
+            } else {
+                settings.contest.callers()
+            };
+            Split::of(settings.active_level(), spec)
+        });
         Self {
             mode: c.char_set_mode,
             contest,
@@ -1212,6 +1218,17 @@ pub fn CharsetCard(
                 }
             }
             }
+            // What each tier adds, in Callsigns and Contest alike, which
+            // share the tier: the words for it are the help's.
+            if callsigns {
+                TierSteps { tier: c.level }
+            }
+            // A contest's callers, from the countries it hears, under the
+            // tier that shapes their calls.
+            if let (Some(_), Some(split)) = (c.contest.as_ref(), c.tier_reach.clone()) {
+                div { class: "eyebrow", "Where callers come from" }
+                CountrySplit { split }
+            }
             if let Some(contest) = c.contest.clone() {
                 RunStylePicker { settings, style: contest.style, callers: contest.callers }
                 if let Some(tu_call) = contest.tu_call {
@@ -1236,9 +1253,6 @@ pub fn CharsetCard(
                     own: c.own_words,
                 }
             } else if !c.tier_examples.is_empty() {
-                // What each tier adds, and what this one sends: the words
-                // for both are the help's.
-                TierSteps { tier: c.level }
                 div { class: "eyebrow", "What this tier sends" }
                 div { class: "calls",
                     for call in c.tier_examples.iter() {

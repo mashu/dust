@@ -877,6 +877,9 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
         ">TU 5NN 214<",
         ">TU DL1ABC<",
         "Callsign tier (1–6)",
+        r#"id="tier-steps""#,
+        "Where callers come from",
+        "Calls from 125 countries: United States 35%",
         ">Your station<",
         "Signing DL1ABC",
         &reads_as(&[

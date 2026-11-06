@@ -1,12 +1,15 @@
-//! What Callsigns' tier sends, drawn on the Character set card rather than
-//! told: the row of tiers, each labelled with the shape of call it adds and
-//! filled up to the tier chosen, and where the tier's calls come from, as a
-//! bar split between the United States, the next commonest countries and
-//! all the others. The words for both are in the card's help
-//! ([`crate::ui::help::character_set`]).
+//! What the callsign tier sends, drawn on the Character set card rather
+//! than told, in Callsigns and in Contest, which share the tier: the row of
+//! tiers, each labelled with the shape of call it adds and filled up to the
+//! tier chosen, and where the calls come from, as a bar split between the
+//! United States, the next commonest countries and all the others. Callsigns
+//! draws its calls as evenly as its country balance has them; a contest
+//! draws its callers from the countries it hears, as on the air. The words
+//! for both are in the card's help ([`crate::ui::help::character_set`]).
 
 use cw_core::{
-    CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, country_name, country_shares, tier_adds, tier_shape,
+    CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CallSpec, callers_by_country, country_name, tier_adds,
+    tier_shape,
 };
 use dioxus::prelude::*;
 
@@ -59,10 +62,10 @@ pub struct Part {
 }
 
 impl Split {
-    /// Callsigns' calls at `tier`, the countries evened out by
-    /// `country_balance`, from 0 to 1.
-    pub fn of(tier: u32, country_balance: f64) -> Self {
-        let shares = country_shares(tier, country_balance);
+    /// The calls drawn at `tier` to `spec`: Callsigns' practice, evened
+    /// out as its balance has them, or a contest's callers.
+    pub fn of(tier: u32, spec: CallSpec) -> Self {
+        let shares = callers_by_country(tier, spec);
         let countries = shares.len();
         let (us, others): (Vec<_>, Vec<_>) =
             shares.into_iter().partition(|(country, _)| *country == "K");
@@ -86,16 +89,24 @@ impl Split {
                 .iter()
                 .map(|(country, share)| format!("{} {}", named(country), percent(*share)))
                 .collect();
+            // After the United States the next; with none, the commonest.
+            let name = if us.is_empty() {
+                format!("{} commonest countries", next.len())
+            } else {
+                format!("Next {} countries", next.len())
+            };
             parts.push(Part {
                 kind: "next",
-                name: format!("Next {} countries", next.len()),
+                name,
                 share: total(next),
                 who: who.join(", "),
             });
         }
         if let Some((commonest, most)) = rest.first() {
+            // One country alone is named: W/VE's callers are the US and
+            // Canada.
             let name = if rest.len() == 1 {
-                "1 other country".to_string()
+                named(commonest).to_string()
             } else {
                 format!("{} other countries", rest.len())
             };
@@ -215,11 +226,16 @@ pub fn CountrySplit(split: Split) -> Element {
 mod tests {
     use super::*;
 
+    /// Callsigns' calls at `tier`, evened out by `balance`.
+    fn practice(tier: u32, balance: f64) -> Split {
+        Split::of(tier, CallSpec::default().with_balance(balance))
+    }
+
     /// The parts are the whole, the United States first; past ten
     /// countries the next nine are a part of their own.
     #[test]
     fn the_bar_is_the_whole_split_three_ways_or_two() {
-        let many = Split::of(4, 0.5);
+        let many = practice(4, 0.5);
         assert_eq!(many.countries, 126);
         let kinds: Vec<&str> = many.parts.iter().map(|part| part.kind).collect();
         assert_eq!(kinds, ["lead", "next", "rest"]);
@@ -230,7 +246,7 @@ mod tests {
         assert!(many.parts[1].who.starts_with("Fed. Rep. of Germany"));
         assert_eq!(many.parts[1].who.matches(", ").count(), 8, "all nine named");
 
-        let few = Split::of(1, 0.0);
+        let few = practice(1, 0.0);
         let kinds: Vec<&str> = few.parts.iter().map(|part| part.kind).collect();
         assert_eq!(kinds, ["lead", "rest"]);
         assert_eq!(few.parts[1].name, "8 other countries");
@@ -245,10 +261,28 @@ mod tests {
     /// the bar; and a share too small for a whole percent says so.
     #[test]
     fn evened_out_the_others_are_most_of_the_bar() {
-        let even = Split::of(4, 1.0);
+        let even = practice(4, 1.0);
         assert_eq!(percent(even.parts[0].share), "1%");
         assert!(even.parts[2].share > 0.9, "{:?}", even.parts[2]);
         assert_eq!(percent(0.004), "under 1%");
         assert_eq!(percent(0.351), "35%");
+    }
+
+    /// A contest's bar is its callers': W/VE's the US and Canada, the DX
+    /// side's everyone but them, with no United States to lead it.
+    #[test]
+    fn a_contests_bar_is_its_callers() {
+        use cw_core::Countries;
+        let w_ve = Split::of(4, CallSpec::contest(Countries::WVe));
+        assert_eq!(w_ve.countries, 2);
+        let kinds: Vec<&str> = w_ve.parts.iter().map(|part| part.kind).collect();
+        assert_eq!(kinds, ["lead", "rest"]);
+        assert_eq!(w_ve.parts[1].name, "Canada");
+        assert!(w_ve.parts[1].who.starts_with("Canada "));
+
+        let dx = Split::of(4, CallSpec::contest(Countries::NotWVe));
+        let kinds: Vec<&str> = dx.parts.iter().map(|part| part.kind).collect();
+        assert_eq!(kinds, ["next", "rest"]);
+        assert_eq!(dx.parts[0].name, "9 commonest countries");
     }
 }

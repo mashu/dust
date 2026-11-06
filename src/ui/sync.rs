@@ -193,7 +193,7 @@ pub fn SyncCard(view: SyncView) -> Element {
                 },
                 SyncStatus::On { syncing, needs_sign_in, .. } => rsx! {
                     p { class: "backup-note",
-                        "Your history, settings and level progress sync through a folder of Dust's own in your Google Drive, encrypted with your passphrase: every device you sync holds the same."
+                        "Your history, settings and level progress sync through a folder of Dust's own in your Google Drive, encrypted with your passphrase: every device you sync holds the same. Dust syncs by itself as it opens, a moment after each session, and as you come back to it, and the cloud in the corner shows each time."
                     }
                     if needs_sign_in {
                         p { class: "backup-note", "Sign in to Google again to sync." }

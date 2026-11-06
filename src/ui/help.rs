@@ -431,13 +431,13 @@ pub fn character_set() -> Element {
             dt { "Why so few countries at first" }
             dd { "Few countries have one-letter prefixes: the US's K, W and N, Russia's R, England's G and M, France's F, Italy's I and China's B, with a few whose prefix is a letter and its digit, as Bosnia's E7. So on the air's mix tiers 1 and 2 are mostly American; two-letter prefixes, from tier 3, bring in the rest of the world." }
             dt { "Where they come from" }
-            dd { "The bar under the calls splits them by country, each part as wide as its share: the United States, the next nine commonest countries, and all the others. Tap or click a part to see who is in it, and again for the legend." }
+            dd { "The bar splits the calls by country, each part as wide as its share: the United States, the next nine commonest countries, and all the others. In Callsigns it follows Country balance; in Contest it shows the contest's callers, from the countries it hears, as often as on the air. Tap or click a part to see who is in it, and again for the legend." }
             dt { "Country balance" }
             dd { "How evenly Callsigns sends the countries. At 0% they come as often as on the air, where most calls are American, and the first tiers, whose prefixes are one letter, are nearly all K, W, N and R. At 100% every country the tier can send comes up alike. Each country's calls stay its own: its prefixes, digits and suffixes as its real calls have them. A contest's callers keep the air's mix." }
             dt { "Words" }
             dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =. Where your keyboard has + or = on the keys right of P, those keys are the paddles in the answer box: turn off Paddles on the keys right of P (Session shape) to type them there." }
             dt { "Contest" }
-            dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange. A caller that is sending cannot hear you, one caller or a pile-up, as on the air: wait for it to finish before you send, and ask with ? (F7) if you missed it." }
+            dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange. The callsign tier shapes the callers' calls, as it shapes Callsigns'. A caller that is sending cannot hear you, one caller or a pile-up, as on the air: wait for it to finish before you send, and ask with ? (F7) if you missed it." }
             dt { "Unlock order" }
             dd { "The order new characters come in: LCWO, MorseMania, CW Academy, alphabetical, or your own, typed in the box. An order of your own is kept while you try a preset: Your own brings it back." }
             dt { "Level" }
