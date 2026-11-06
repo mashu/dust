@@ -158,6 +158,13 @@ impl TrainingSettings {
         self.max_level(self.curriculum.char_set_mode.axis())
     }
 
+    /// How evenly Callsigns mode sends the countries, from 0, as often as
+    /// real calls carry them, to 1, every country alike
+    /// ([`crate::CallSpec::country_balance`]).
+    pub fn country_balance(&self) -> f64 {
+        f64::from(self.curriculum.callsign_country_balance.min(100)) / 100.0
+    }
+
     /// Whether Mixed is practising this axis at all: a share of 100% letters
     /// leaves the digits out, and 0% the letters.
     pub fn mixed_axis_practised(&self, axis: MixedAutoLevelAxis) -> bool {

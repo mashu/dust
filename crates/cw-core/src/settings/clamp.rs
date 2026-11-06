@@ -35,6 +35,7 @@ impl TrainingSettings {
         c.digits_level = c.digits_level.clamp(LEVEL_MIN, MAX_DIGITS_LEVEL);
         c.callsign_level = c.callsign_level.clamp(CALLSIGN_TIER_MIN, CALLSIGN_TIER_MAX);
         c.mixed_letters_percent = c.mixed_letters_percent.min(100);
+        c.callsign_country_balance = c.callsign_country_balance.min(100);
         c.num_groups = c.num_groups.clamp(NUM_GROUPS_MIN, NUM_GROUPS_MAX);
         c.min_group_size = c.min_group_size.clamp(GROUP_SIZE_MIN, GROUP_SIZE_MAX);
         c.max_group_size = c.max_group_size.clamp(c.min_group_size, GROUP_SIZE_MAX);

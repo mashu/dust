@@ -579,6 +579,41 @@ fn callsigns_have_no_adaptive_group_size() {
     });
 }
 
+/// Callsigns mode sets how evenly its countries come, halfway until you
+/// set it, and keeps what you set; no other mode shows it.
+#[test]
+fn callsigns_set_their_country_balance() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert_eq!(value_of(&ui, "number-country-balance"), "50");
+        ui.commit("number-country-balance", "100");
+        ui.advance(50).await;
+        assert_eq!(value_of(&ui, "number-country-balance"), "100");
+        assert_eq!(
+            ui.stored_settings()
+                .await
+                .curriculum
+                .callsign_country_balance,
+            100
+        );
+        ui.commit("number-country-balance", "250");
+        ui.advance(50).await;
+        assert_eq!(
+            ui.stored_settings()
+                .await
+                .curriculum
+                .callsign_country_balance,
+            100,
+            "no more than every country alike"
+        );
+        ui.click("seg-mixed");
+        assert!(!ui.shows("number-country-balance"));
+    });
+}
+
 /// The experience dropdown's markup.
 fn experience_picker(ui: &Ui) -> String {
     ui.html()

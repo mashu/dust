@@ -746,6 +746,7 @@ pub(crate) mod tests {
         c.kept_sequence = vec!['K', 'M'];
         c.practice_window = cw_core::PracticeWindow::Last3;
         c.callsign_level = 5;
+        c.callsign_country_balance = 80;
         c.word_list = vec!["CQ".into(), "TEST".into()];
         c.num_groups = 7;
         c.min_group_size = 4;

@@ -19,6 +19,15 @@
 //! sounds like a real one. Only the counts are kept, never a call, so the
 //! crate stays pure and the output endless.
 //!
+//! A real band is mostly American, though: the US has about as many calls
+//! in the lists as the next ten countries together, and of the one-letter
+//! prefixes the first tiers send, nearly all are K, W, N and R. So practice
+//! can even the countries out ([`CallSpec::country_balance`]): each
+//! country's share goes from its calls `n` to `n^(1 − balance)`, its own
+//! prefixes, digits and suffixes kept as its real calls have them. At 0 the
+//! band is as it is on the air; at 1 every country the tier can send comes
+//! up alike. A contest's callers and the band's stations keep 0.
+//!
 //! Difficulty is the *shape* of the call, not the characters in it: even `W1AW`
 //! needs four different characters, so there is no Koch-style ladder to climb
 //! here. [`CALLSIGN_TIER_MAX`] tiers add suffixes of every length, then
@@ -151,6 +160,13 @@ pub struct CallSpec {
     /// settings.
     pub portable: f64,
     pub abroad: f64,
+    /// How evenly the countries come up, from 0 to 1: 0 as often as real
+    /// calls carry them, as on the air, where most are American; 1 every
+    /// country the tier and [`Self::countries`] allow alike; in between,
+    /// each country as often as its calls to the power of one less this.
+    /// Callsigns mode sets it from the settings; a contest's callers and
+    /// the band's stations keep 0, so they sound as a real band does.
+    pub country_balance: f64,
 }
 
 impl CallSpec {
@@ -163,6 +179,7 @@ impl CallSpec {
             field_day_dx: FIELD_DAY_DX / 100.0,
             portable: CONTEST_PORTABLE_SHARE,
             abroad: CONTEST_ABROAD_SHARE,
+            country_balance: 0.0,
         }
     }
 
@@ -181,6 +198,15 @@ impl CallSpec {
     /// countries draw some apart.
     pub const fn with_dx(self, dx_percent: u32) -> Self {
         Self { dx_percent, ..self }
+    }
+
+    /// The same, with the countries evened out by `country_balance`, from
+    /// 0 to 1 ([`Self::country_balance`]).
+    pub const fn with_balance(self, country_balance: f64) -> Self {
+        Self {
+            country_balance,
+            ..self
+        }
     }
 }
 
@@ -524,9 +550,24 @@ pub(crate) fn pick_weighted<'t, T>(table: &'t [(T, f64)], rng: &mut impl Rng) ->
 }
 
 /// A prefix of a shape the tier allows, of a country `countries` admits, as
-/// often as real calls carry it with a suffix of a length the tier allows.
-fn pick_prefix(tier: &Tier, countries: Countries, rng: &mut impl Rng) -> &'static Prefix {
-    let usable: Vec<(&'static Prefix, f64)> = PREFIXES
+/// often as real calls carry it with a suffix of a length the tier allows,
+/// the countries evened out by `balance` ([`even_out`]).
+fn pick_prefix(
+    tier: &Tier,
+    countries: Countries,
+    balance: f64,
+    rng: &mut impl Rng,
+) -> &'static Prefix {
+    let usable = even_out(usable_prefixes(tier, countries), balance);
+    // Every tier has US calls to draw, so this is only ever a fallback.
+    pick_weighted(&usable, rng).copied().unwrap_or(&PREFIXES[0])
+}
+
+/// The prefixes of a shape the tier allows, of a country `countries`
+/// admits, each with how many real calls carry it with a suffix of a length
+/// the tier allows; none that no such call carries.
+fn usable_prefixes(tier: &Tier, countries: Countries) -> Vec<(&'static Prefix, f64)> {
+    PREFIXES
         .iter()
         .filter(|prefix| tier.shapes.contains(&prefix.shape()) && countries.admits(prefix.country))
         .map(|prefix| {
@@ -534,9 +575,31 @@ fn pick_prefix(tier: &Tier, countries: Countries, rng: &mut impl Rng) -> &'stati
             (prefix, calls)
         })
         .filter(|(_, calls)| *calls > 0.0)
-        .collect();
-    // Every tier has US calls to draw, so this is only ever a fallback.
-    pick_weighted(&usable, rng).copied().unwrap_or(&PREFIXES[0])
+        .collect()
+}
+
+/// `usable`'s weights with the countries evened out by `balance`, from 0 to
+/// 1: a country whose prefixes carry `n` calls between them comes up as
+/// often as `n^(1 − balance)`, each of its prefixes keeping its share of
+/// the country. 0, or anything that is not above it, leaves every weight
+/// exactly as it is, so a draw goes draw for draw as it always went; 1
+/// gives every country alike. A country is the one the table's entry names,
+/// which [`country_of`] may read otherwise off the digit drawn after it
+/// (`R9` is Asiatic Russia's), so at 1 they are alike to within that.
+fn even_out(mut usable: Vec<(&'static Prefix, f64)>, balance: f64) -> Vec<(&'static Prefix, f64)> {
+    if balance.is_nan() || balance <= 0.0 {
+        return usable;
+    }
+    let balance = balance.min(1.0);
+    let mut calls_of: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    for (prefix, calls) in &usable {
+        *calls_of.entry(prefix.country).or_default() += calls;
+    }
+    for (prefix, calls) in &mut usable {
+        let country = calls_of.get(prefix.country).copied().unwrap_or(*calls);
+        *calls *= country.powf(-balance);
+    }
+    usable
 }
 
 /// One of the digits real calls have after `prefix`, as often as they have it.
@@ -597,7 +660,7 @@ const AREA_DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9
 pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> GeneratedCall {
     let tier = tier_at(tier);
     let countries = spec.countries.for_one_call(&spec, rng);
-    let prefix = pick_prefix(tier, countries, rng);
+    let prefix = pick_prefix(tier, countries, spec.country_balance, rng);
     let digit = separator(prefix, rng);
     let mut call = GeneratedCall {
         text: format!("{}{digit}", prefix.prefix),
@@ -689,11 +752,16 @@ pub fn callsign_pool(tier: u32) -> Vec<char> {
     pool
 }
 
-/// A few calls to show beside the tier setting. Deterministic, so the preview
-/// does not churn every time the screen redraws.
-pub fn tier_examples(tier: u32) -> Vec<String> {
+/// A few calls to show beside the tier setting, the countries evened out by
+/// `country_balance` as Callsigns mode sends them
+/// ([`CallSpec::country_balance`]). Deterministic, so the preview does not
+/// churn every time the screen redraws.
+pub fn tier_examples(tier: u32, country_balance: f64) -> Vec<String> {
     let mut rng = SplitMix64::new(0x51A7_C0DE_u64 ^ u64::from(tier).wrapping_mul(0x9E37_79B9));
-    (0..4).map(|_| generate_callsign(tier, &mut rng)).collect()
+    let spec = CallSpec::default().with_balance(country_balance);
+    (0..4)
+        .map(|_| generate_call(tier, spec, &mut rng).text)
+        .collect()
 }
 
 /// A callsign taken apart.
@@ -1119,11 +1187,17 @@ mod tests {
     #[test]
     fn examples_are_stable_and_belong_to_their_tier() {
         for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
-            let first = tier_examples(tier);
-            assert_eq!(first, tier_examples(tier), "the preview must not churn");
-            assert_eq!(first.len(), 4);
-            for call in first {
-                assert!(parse_callsign(&call).is_some(), "{call:?}");
+            for balance in [0.0, 0.5, 1.0] {
+                let first = tier_examples(tier, balance);
+                assert_eq!(
+                    first,
+                    tier_examples(tier, balance),
+                    "the preview must not churn"
+                );
+                assert_eq!(first.len(), 4);
+                for call in first {
+                    assert!(parse_callsign(&call).is_some(), "{call:?}");
+                }
             }
         }
     }
@@ -1970,5 +2044,144 @@ mod tests {
             dx.iter()
                 .all(|call| !Countries::NorthAmerica.admits(call.country))
         );
+    }
+
+    /// The share of the draw that `country`'s prefixes have at `tier`, the
+    /// countries evened out by `balance`.
+    fn weighed_share(tier: u32, balance: f64, country: &str) -> f64 {
+        let weights = even_out(usable_prefixes(tier_at(tier), Countries::Any), balance);
+        let total: f64 = weights.iter().map(|(_, weight)| weight).sum();
+        let ours: f64 = weights
+            .iter()
+            .filter(|(prefix, _)| prefix.country == country)
+            .map(|(_, weight)| weight)
+            .sum();
+        ours / total
+    }
+
+    /// No balance, or one that is not above 0, draws exactly what the
+    /// default draws, draw for draw, and so does the tier's preview.
+    #[test]
+    fn no_balance_draws_what_was_always_drawn() {
+        for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+            let always = generated(tier, CallSpec::default(), 2_000);
+            for balance in [0.0, -0.5, f64::NAN, f64::NEG_INFINITY] {
+                let spec = CallSpec::default().with_balance(balance);
+                assert_eq!(
+                    generated(tier, spec, 2_000),
+                    always,
+                    "tier {tier}, {balance}"
+                );
+            }
+            let mut rng =
+                SplitMix64::new(0x51A7_C0DE_u64 ^ u64::from(tier).wrapping_mul(0x9E37_79B9));
+            let preview: Vec<String> = (0..4).map(|_| generate_callsign(tier, &mut rng)).collect();
+            assert_eq!(tier_examples(tier, 0.0), preview, "tier {tier}");
+        }
+        assert_eq!(CallSpec::default().country_balance, 0.0);
+        assert_eq!(
+            CallSpec::contest(Countries::Any).country_balance,
+            0.0,
+            "a contest sounds as a real band does"
+        );
+    }
+
+    /// A full balance gives every country the tier can send the same share,
+    /// its prefixes in their own proportions; and the share of the most
+    /// common country only falls as the balance rises.
+    #[test]
+    fn a_balance_evens_the_countries_out() {
+        for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+            let usable = usable_prefixes(tier_at(tier), Countries::Any);
+            let mut countries: Vec<&str> =
+                usable.iter().map(|(prefix, _)| prefix.country).collect();
+            countries.sort_unstable();
+            countries.dedup();
+            let alike = 1.0 / countries.len() as f64;
+            for country in &countries {
+                let share = weighed_share(tier, 1.0, country);
+                assert!(
+                    (share - alike).abs() < 1e-9,
+                    "tier {tier}: {country} {share}"
+                );
+            }
+            // Past 1 is 1.
+            assert_eq!(
+                even_out(usable.clone(), 7.0)
+                    .iter()
+                    .map(|(_, weight)| weight)
+                    .collect::<Vec<_>>(),
+                even_out(usable.clone(), 1.0)
+                    .iter()
+                    .map(|(_, weight)| weight)
+                    .collect::<Vec<_>>(),
+            );
+            // W and K keep their proportion within the US.
+            let ratio = |balance: f64| {
+                let weights = even_out(usable.clone(), balance);
+                let of = |name: &str| {
+                    weights
+                        .iter()
+                        .find(|(prefix, _)| prefix.prefix == name && prefix.country == "K")
+                        .map(|(_, weight)| *weight)
+                        .expect("a US prefix")
+                };
+                of("W") / of("K")
+            };
+            for balance in [0.25, 0.5, 1.0] {
+                assert!((ratio(balance) - ratio(0.0)).abs() < 1e-9, "tier {tier}");
+            }
+            let us: Vec<f64> = [0.0, 0.25, 0.5, 0.75, 1.0]
+                .into_iter()
+                .map(|balance| weighed_share(tier, balance, "K"))
+                .collect();
+            assert!(
+                us.windows(2).all(|pair| pair[1] < pair[0]),
+                "tier {tier}: {us:?}"
+            );
+        }
+        // Tier 1 on the air is nearly all American; halfway, about half.
+        assert!(weighed_share(1, 0.0, "K") > 0.8);
+        assert!((0.4..0.65).contains(&weighed_share(1, 0.5, "K")));
+    }
+
+    /// Drawn evened out, every call is still one its country could have
+    /// issued, every country of the tier comes up, and none much more often
+    /// than the rest.
+    #[test]
+    fn calls_drawn_evened_out_are_real_and_from_everywhere() {
+        let spec = CallSpec::default().with_balance(1.0);
+        for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+            let drawn = generated(tier, spec, 20_000);
+            let mut tally: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for call in &drawn {
+                let parts = parse_callsign(&call.text).expect("a callsign");
+                let len = parts.suffix.chars().count();
+                assert!(
+                    !issuing(parts.prefix, parts.separator, len).is_empty(),
+                    "{call:?}: no country issues it"
+                );
+                if call.host.is_none() {
+                    *tally.entry(call.country).or_default() += 1;
+                }
+            }
+            let at_home: usize = tally.values().sum();
+            let us = tally.get("K").copied().unwrap_or(0) as f64 / at_home as f64;
+            let countries = usable_prefixes(tier_at(tier), Countries::Any)
+                .iter()
+                .map(|(prefix, _)| prefix.country)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            assert!(
+                us < 2.0 / countries as f64,
+                "tier {tier}: {us:.3} of the calls are American"
+            );
+            assert!(
+                tally.len() + 2 >= countries,
+                "tier {tier}: {} of {countries} countries came up",
+                tally.len()
+            );
+        }
     }
 }

@@ -869,6 +869,7 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
         "Unlock order",
         "Practice window",
         "What this tier sends",
+        "Country balance",
         "Digits level",
         "select-experience",
         "Groups per session",

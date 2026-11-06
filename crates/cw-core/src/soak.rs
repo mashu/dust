@@ -123,6 +123,7 @@ fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
     s.band.side_tone_max = rng.pick_in_range(-100.0, 4_000.0);
     s.band.volume_min = rng.pick_in_range(-1.0, 4.0);
     s.band.volume_max = rng.pick_in_range(-1.0, 4.0);
+    s.curriculum.callsign_country_balance = rng.usize_in(0, 200) as u32;
     s
 }
 
@@ -140,6 +141,7 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
         (CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX).contains(&c.callsign_level),
         "seed {seed}"
     );
+    assert!(c.callsign_country_balance <= 100, "seed {seed}");
     assert!(c.min_group_size >= 1, "seed {seed}");
     assert!(c.max_group_size >= c.min_group_size, "seed {seed}");
     let p = &once.playback;

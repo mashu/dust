@@ -423,6 +423,8 @@ pub fn character_set() -> Element {
             dd { "Digits only, or letters and digits together, each with a level of its own; Share of letters sets the mix." }
             dt { "Callsigns" }
             dd { "Real callsigns, as they are heard on the air. The tier sets how hard they come; each keeps what the ones below send." }
+            dt { "Country balance" }
+            dd { "How evenly Callsigns sends the countries. At 0% they come as often as on the air, where most calls are American, and the first tiers, whose prefixes are one letter, are nearly all K, W, N and R. At 100% every country the tier can send comes up alike. Each country's calls stay its own: its prefixes, digits and suffixes as its real calls have them. A contest's callers keep the air's mix." }
             dt { "Words" }
             dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =. Where your keyboard has + or = on the keys right of P, those keys are the paddles in the answer box: turn off Paddles on the keys right of P (Session shape) to type them there." }
             dt { "Contest" }

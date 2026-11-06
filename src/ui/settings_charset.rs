@@ -998,6 +998,8 @@ struct Charset {
     level_max: u32,
     digits_level: u32,
     letters_percent: u32,
+    /// How evenly Callsigns mode sends the countries, in percent.
+    country_balance: u32,
     unlocked: usize,
     window: PracticeWindow,
     pool: Vec<char>,
@@ -1015,7 +1017,7 @@ impl Charset {
         let callsigns = c.char_set_mode.sends_callsigns();
         let contest = (c.char_set_mode == CharSetMode::Contest).then(|| ContestCard::of(settings));
         let tier_examples = if callsigns && contest.is_none() {
-            tier_examples(settings.active_level())
+            tier_examples(settings.active_level(), settings.country_balance())
         } else {
             Vec::new()
         };
@@ -1029,6 +1031,7 @@ impl Charset {
             level_max: settings.max_active_level(),
             digits_level: settings.level(LevelAxis::Digits),
             letters_percent: c.mixed_letters_percent,
+            country_balance: c.callsign_country_balance,
             unlocked: unlocked_practice_count(settings),
             window: current_practice_window(settings),
             pool: compute_char_pool(settings),
@@ -1179,6 +1182,20 @@ pub fn CharsetCard(
                         onchange: move |v| settings.write().curriculum.digits_level = whole(v),
                     }
                 }
+                // A contest's callers keep the air's mix of countries.
+                if c.mode == CharSetMode::Callsign {
+                    NumberField {
+                        label: "Country balance",
+                        value: f64::from(c.country_balance),
+                        min: 0.0,
+                        max: 100.0,
+                        step: 10.0,
+                        unit: "%",
+                        onchange: move |v| {
+                            settings.write().curriculum.callsign_country_balance = whole(v);
+                        },
+                    }
+                }
             }
             }
             if let Some(contest) = c.contest.clone() {
@@ -1214,7 +1231,7 @@ pub fn CharsetCard(
                     span { class: "muted", aria_label: "and more", "…" }
                 }
                 p { class: "muted hint",
-                    "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations, weighted the way you hear them."
+                    "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations. Country balance sets how evenly the countries come: at 0% as you hear them on the air, mostly American; at 100% every country the tier can send alike."
                 }
             } else if !callsigns {
                 div { class: "eyebrow", "Practice window" }
