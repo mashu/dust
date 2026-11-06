@@ -98,7 +98,8 @@ shows:
 - "You send" and "You copy", and the QSO as a dialogue with You and They
   labels, rendered with your call (or `<your call>`);
 - "Callsign tier (1–6)", the stored `callsignLevel` shared with Callsigns,
-  which shapes the callers' calls;
+  which shapes the callers' calls, and starts on tier 4
+  (`CALLSIGN_TIER_DEFAULT`) until a learner sets it;
 - from phase 2, the run style (Single caller or Pile-up, "1–3 callers · set
   on the Band card"; as built, Single caller says "One station calls at a
   time") and presets (§8);

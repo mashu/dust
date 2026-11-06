@@ -53,6 +53,14 @@ use prefixes::{CONTINENT_PREFIXES, COUNTRIES, PREFIXES, ZONE_PREFIXES};
 pub const CALLSIGN_TIER_MIN: u32 = 1;
 pub const CALLSIGN_TIER_MAX: u32 = 6;
 
+/// The tier Callsigns and Contest start on until you set one: prefixes with
+/// a digit in them, so calls come from all of the table's countries but a
+/// few, as a band sends them, without the portables and stations abroad
+/// the top two tiers add. Whatever its tier, a call needs most of the
+/// alphabet and the digits, so a learner who chooses Callsigns has them
+/// already; and Auto level takes the tier down from here if it is too much.
+pub const CALLSIGN_TIER_DEFAULT: u32 = 4;
+
 const LETTERS: &[char] = &[
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
     'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
@@ -251,6 +259,8 @@ enum PrefixShape {
 }
 
 struct Tier {
+    /// What the tier sends that the one below it does not, in a sentence.
+    adds: &'static str,
     shapes: &'static [PrefixShape],
     suffix_min: usize,
     suffix_max: usize,
@@ -265,6 +275,7 @@ use PrefixShape::{Letter, LetterLetter, WithDigit};
 const TIERS: &[Tier] = &[
     // 1 — the shape everyone knows: one letter, a digit, two letters.
     Tier {
+        adds: "The shape everyone knows: a one-letter prefix, a digit and two letters, as W1AW.",
         shapes: &[Letter],
         suffix_min: 2,
         suffix_max: 2,
@@ -273,6 +284,7 @@ const TIERS: &[Tier] = &[
     },
     // 2 — the suffix stops being a fixed length.
     Tier {
+        adds: "Adds suffixes of one to three letters, as G3X and N2ABC.",
         shapes: &[Letter],
         suffix_min: 1,
         suffix_max: 3,
@@ -281,6 +293,7 @@ const TIERS: &[Tier] = &[
     },
     // 3 — two-letter prefixes, so the call can come from anywhere.
     Tier {
+        adds: "Adds two-letter prefixes, as DL1ABC, so calls come from anywhere.",
         shapes: &[Letter, LetterLetter],
         suffix_min: 1,
         suffix_max: 3,
@@ -289,6 +302,7 @@ const TIERS: &[Tier] = &[
     },
     // 4 — prefixes with a digit in them, which break the rhythm.
     Tier {
+        adds: "Adds prefixes with a digit in them, as 9A1AA and S51AB.",
         shapes: &[Letter, LetterLetter, WithDigit],
         suffix_min: 1,
         suffix_max: 3,
@@ -297,6 +311,7 @@ const TIERS: &[Tier] = &[
     },
     // 5 — portable and mobile operation.
     Tier {
+        adds: "Adds portable and mobile operation, as G3XYZ/P and W1AW/4.",
         shapes: &[Letter, LetterLetter, WithDigit],
         suffix_min: 1,
         suffix_max: 3,
@@ -305,6 +320,7 @@ const TIERS: &[Tier] = &[
     },
     // 6 — stations operating abroad, under the host country's prefix.
     Tier {
+        adds: "Adds stations operating abroad, as DL/W1AW.",
         shapes: &[Letter, LetterLetter, WithDigit],
         suffix_min: 1,
         suffix_max: 3,
@@ -762,6 +778,100 @@ pub fn tier_examples(tier: u32, country_balance: f64) -> Vec<String> {
     (0..4)
         .map(|_| generate_call(tier, spec, &mut rng).text)
         .collect()
+}
+
+/// What `tier` sends that the one below it does not, in a sentence:
+/// "Adds prefixes with a digit in them, as 9A1AA and S51AB." The first
+/// tier's says what it sends.
+pub fn tier_adds(tier: u32) -> &'static str {
+    tier_at(tier).adds
+}
+
+/// How often Callsigns mode's calls at `tier` come from each country, the
+/// countries evened out by `country_balance` ([`CallSpec::country_balance`]):
+/// each country by its DXCC primary prefix, as [`country_of`] reads a call,
+/// with its share from 0 to 1, the shares summing to 1, the commonest first
+/// and those alike by their prefix. Worked out from the table rather than
+/// drawn, so it is exact and the same every time: each prefix as often as
+/// [`even_out`] weighs it, each digit after it as often as its calls have
+/// it, a VP2 call in the country the letter after its digit names, if any,
+/// and a station abroad in the country it is in, as often as the tier sends
+/// one. Its length is how many countries the tier sends calls from.
+pub fn country_shares(tier: u32, country_balance: f64) -> Vec<(&'static str, f64)> {
+    let tier = tier_at(tier);
+    let usable = even_out(usable_prefixes(tier, Countries::Any), country_balance);
+    let total: f64 = usable.iter().map(|(_, weight)| weight).sum();
+    let abroad = if tier.abroad { ABROAD_SHARE } else { 0.0 };
+    let mut shares: std::collections::BTreeMap<&'static str, f64> =
+        std::collections::BTreeMap::new();
+    for (prefix, weight) in &usable {
+        let share = weight / total;
+        let digits: f64 = prefix.digits.iter().map(|&calls| f64::from(calls)).sum();
+        let homes = PREFIXES
+            .iter()
+            .position(|entry| std::ptr::eq(entry, *prefix))
+            .map(|at| &home_countries()[at]);
+        for (digit, calls) in prefix.digits.into_iter().enumerate() {
+            if calls == 0 {
+                continue;
+            }
+            let home = share * (1.0 - abroad) * f64::from(calls) / digits;
+            let by_letter: Vec<&'static str> = BY_LETTER
+                .iter()
+                .filter(|(shared, _, _)| {
+                    shared.strip_prefix(prefix.prefix) == Some(AREA_DIGITS[digit])
+                })
+                .map(|(_, _, country)| *country)
+                .collect();
+            if by_letter.is_empty() {
+                let country = homes
+                    .and_then(|homes| homes[digit])
+                    .unwrap_or(prefix.country);
+                *shares.entry(country).or_default() += home;
+            } else {
+                // Practice draws the letter after the digit at random; one
+                // no country there has keeps the entry's own.
+                let one = home / LETTERS.len() as f64;
+                for country in &by_letter {
+                    *shares.entry(country).or_default() += one;
+                }
+                *shares.entry(prefix.country).or_default() += home - one * by_letter.len() as f64;
+            }
+        }
+        if abroad > 0.0 {
+            let hosts: Vec<&(&str, &'static str, f64)> = HOSTS
+                .iter()
+                .filter(|(_, country, _)| !at_home(prefix.country, country))
+                .collect();
+            let weights: f64 = hosts.iter().map(|(_, _, weight)| weight).sum();
+            for (_, country, weight) in hosts {
+                *shares.entry(country).or_default() += share * abroad * weight / weights;
+            }
+        }
+    }
+    let mut shares: Vec<(&'static str, f64)> = shares
+        .into_iter()
+        .filter(|(_, share)| *share > 0.0)
+        .collect();
+    shares.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
+    shares
+}
+
+/// The country [`country_by_prefix`] reads a call at home in, for each
+/// entry of the table and each digit after it, `0` to `9`. Worked out
+/// once: [`country_shares`] asks for every one of them each time the
+/// settings screen redraws, and reading them afresh walks the table for
+/// each.
+fn home_countries() -> &'static [[Option<&'static str>; 10]] {
+    static HOMES: std::sync::OnceLock<Vec<[Option<&'static str>; 10]>> = std::sync::OnceLock::new();
+    HOMES.get_or_init(|| {
+        PREFIXES
+            .iter()
+            .map(|entry| {
+                std::array::from_fn(|digit| country_by_prefix(&format!("{}{digit}", entry.prefix)))
+            })
+            .collect()
+    })
 }
 
 /// A callsign taken apart.
@@ -2183,5 +2293,83 @@ mod tests {
                 tally.len()
             );
         }
+    }
+
+    /// Every tier says what it adds, and each says something of its own.
+    #[test]
+    fn every_tier_says_what_it_adds() {
+        let said: Vec<&str> = (CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX)
+            .map(tier_adds)
+            .collect();
+        for (tier, adds) in (CALLSIGN_TIER_MIN..).zip(&said) {
+            assert!(adds.ends_with('.'), "tier {tier}: {adds:?}");
+            let later = tier > CALLSIGN_TIER_MIN;
+            assert_eq!(adds.starts_with("Adds "), later, "tier {tier}: {adds:?}");
+        }
+        let mut unique = said.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), said.len());
+        assert_eq!(tier_adds(0), tier_adds(CALLSIGN_TIER_MIN));
+        assert_eq!(tier_adds(99), tier_adds(CALLSIGN_TIER_MAX));
+        assert!((CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX).contains(&CALLSIGN_TIER_DEFAULT));
+    }
+
+    /// The shares worked out from the table are what Callsigns mode draws:
+    /// every country drawn is one of them, they sum to 1, and each comes up
+    /// as often as its share says, at every tier and balance.
+    #[test]
+    fn country_shares_are_what_is_drawn() {
+        const DRAWS: usize = 15_000;
+        for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+            for balance in [0.0, 0.5, 1.0] {
+                let shares = country_shares(tier, balance);
+                let sum: f64 = shares.iter().map(|(_, share)| share).sum();
+                assert!((sum - 1.0).abs() < 1e-9, "tier {tier} {balance}: {sum}");
+                assert!(
+                    shares.windows(2).all(|pair| pair[0].1 >= pair[1].1),
+                    "the commonest first"
+                );
+                let spec = CallSpec::default().with_balance(balance);
+                let mut drawn: std::collections::BTreeMap<&str, usize> =
+                    std::collections::BTreeMap::new();
+                for call in generated(tier, spec, DRAWS) {
+                    *drawn.entry(call.country).or_default() += 1;
+                }
+                for country in drawn.keys() {
+                    assert!(
+                        shares.iter().any(|(listed, _)| listed == country),
+                        "tier {tier} {balance}: {country} drawn but not listed"
+                    );
+                }
+                for (country, share) in &shares {
+                    let seen = drawn.get(country).copied().unwrap_or(0) as f64 / DRAWS as f64;
+                    let spread = (share * (1.0 - share) / DRAWS as f64).sqrt();
+                    assert!(
+                        (seen - share).abs() < 5.0 * spread + 1e-4,
+                        "tier {tier} {balance}: {country} {seen:.4} drawn, {share:.4} worked out"
+                    );
+                }
+            }
+        }
+        // As many countries at any balance: the balance moves how often,
+        // never whether.
+        for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+            let count = country_shares(tier, 0.0).len();
+            assert_eq!(country_shares(tier, 1.0).len(), count, "tier {tier}");
+        }
+        assert_eq!(country_shares(1, 0.0).len(), 9, "the one-letter prefixes");
+        let us = |tier, balance| {
+            country_shares(tier, balance)
+                .iter()
+                .find(|(country, _)| *country == "K")
+                .map(|(_, share)| *share)
+                .expect("the US sends at every tier")
+        };
+        assert!(us(1, 0.0) > 0.8 && us(1, 1.0) < 0.12);
+        assert!(
+            us(6, 0.0) < us(4, 0.0),
+            "stations abroad are in other countries"
+        );
     }
 }

@@ -344,7 +344,7 @@ impl Default for CurriculumSettings {
             sequence_is_custom: false,
             kept_sequence: Vec::new(),
             practice_window: PracticeWindow::All,
-            callsign_level: LEVEL_MIN,
+            callsign_level: crate::callsign::CALLSIGN_TIER_DEFAULT,
             callsign_country_balance: COUNTRY_BALANCE_DEFAULT,
             word_list: Vec::new(),
             num_groups: 20,
@@ -1018,6 +1018,7 @@ mod tests {
         let s: TrainingSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.curriculum.mixed_letters_percent, 70);
         assert_eq!(s.curriculum.callsign_country_balance, 50);
+        assert_eq!(s.curriculum.callsign_level, 4);
         assert!(!s.playback.lock_input_during_group_playback);
         assert!(s.playback.link_char_to_effective);
         assert_eq!(s.playback.group_timeout, 10.0);

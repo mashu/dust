@@ -25,7 +25,9 @@ pub enum LevelAxis {
 }
 
 impl LevelAxis {
-    /// The bottom of the axis: where every alphabet and every tier starts.
+    /// The bottom of the axis: where every alphabet starts, and the
+    /// lowest callsign tier, though Callsigns starts higher
+    /// ([`crate::CALLSIGN_TIER_DEFAULT`]).
     pub fn min_level(self) -> u32 {
         match self {
             Self::Letters | Self::Digits | Self::Words => LEVEL_MIN,

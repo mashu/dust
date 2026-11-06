@@ -274,7 +274,10 @@ fn home_in_callsign_mode_points_at_no_character_and_counts_calls() {
     assert!(!html.contains("pool-chip fresh"), "{html}");
     assert!(!html.contains("Newest character"));
     assert!(html.contains(">12<") && html.contains("Calls"), "{html}");
-    assert!(html.contains("Callsign tier 1"));
+    assert!(
+        html.contains("Callsign tier 4"),
+        "the tier a new one starts on"
+    );
 }
 
 /// Home in Contest mode with `my_call` as your call, and no history.

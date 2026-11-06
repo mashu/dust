@@ -422,7 +422,7 @@ pub fn character_set() -> Element {
             dt { "Digits · Mixed" }
             dd { "Digits only, or letters and digits together, each with a level of its own; Share of letters sets the mix." }
             dt { "Callsigns" }
-            dd { "Real callsigns, as they are heard on the air. The tier sets how hard they come; each keeps what the ones below send." }
+            dd { "Real callsigns, as they are heard on the air. The tier sets how hard they come; each keeps what the ones below send. Under the calls it sends, the card says what the tier adds, how many countries its calls come from, and how many in a hundred are American. A new learner starts on tier 4, whose calls come from every country but a few; Auto level moves the tier from there." }
             dt { "Country balance" }
             dd { "How evenly Callsigns sends the countries. At 0% they come as often as on the air, where most calls are American, and the first tiers, whose prefixes are one letter, are nearly all K, W, N and R. At 100% every country the tier can send comes up alike. Each country's calls stay its own: its prefixes, digits and suffixes as its real calls have them. A contest's callers keep the air's mix." }
             dt { "Words" }

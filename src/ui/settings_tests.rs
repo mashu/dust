@@ -614,6 +614,38 @@ fn callsigns_set_their_country_balance() {
     });
 }
 
+/// Beside the tier, Callsigns says what the tier adds and how many
+/// countries its calls come from, and how many of them are American at the
+/// balance set; it follows the tier and the balance, and Contest, whose
+/// countries are the contest's, says none of it.
+#[test]
+fn callsigns_say_how_many_countries_their_tier_reaches() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert_eq!(value_of(&ui, "field-level"), "4", "a new learner's tier");
+        assert!(ui.has("tier 4 of 6 · 126\u{a0}countries"));
+        assert!(ui.has("Adds prefixes with a digit in them, as 9A1AA and S51AB."));
+        assert!(ui.has("Calls from 126 countries, 8% of them from the United States."));
+
+        ui.commit("number-country-balance", "0");
+        ui.advance(50).await;
+        assert!(ui.has("Calls from 126 countries, 35% of them from the United States."));
+
+        ui.commit("field-level", "1");
+        ui.advance(50).await;
+        assert!(ui.has("tier 1 of 6 · 9\u{a0}countries"));
+        assert!(ui.has("The shape everyone knows"));
+        assert!(ui.has("Calls from 9 countries, 86% of them from the United States."));
+
+        ui.click("seg-contest");
+        assert!(!ui.shows("tier-reach"));
+        assert!(!ui.has("of 6 · "), "the note names the contest");
+    });
+}
+
 /// The experience dropdown's markup.
 fn experience_picker(ui: &Ui) -> String {
     ui.html()
