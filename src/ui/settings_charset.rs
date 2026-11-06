@@ -2,15 +2,16 @@ use cw_core::{
     CALLSIGN_TIER_MAX, CallerOdds, CharSetMode, ContestKind, ContestPreset, FAREWELLS, Fill,
     GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL, Odd, PracticeWindow, RunStyle, SEQUENCE_PRESETS,
     STARTER_WORDS, STYLE_EVEN, Sender, SequenceChoice, SettingsSection, TrainingSettings, TuCall,
-    WORD_LIST_MAX, WordList, compute_char_pool, corner_shares, country_shares,
-    current_practice_window, greeting, into_shape, parse_callsign, shape_corners, shares_without,
-    tier_adds, tier_examples, toggle_corner, unlocked_practice_count,
+    WORD_LIST_MAX, WordList, compute_char_pool, corner_shares, current_practice_window, greeting,
+    into_shape, parse_callsign, shape_corners, shares_without, tier_examples, toggle_corner,
+    unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
 use crate::playback::Dialogue;
 use crate::state::AppCtx;
 use crate::time::local_hour;
+use crate::ui::callsign_reach::{CountrySplit, Split, TierSteps};
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
@@ -1006,9 +1007,9 @@ struct Charset {
     /// A few calls of the tier, as Callsigns shows them; none in Contest,
     /// whose QSO shows a call.
     tier_examples: Vec<String>,
-    /// What Callsigns' tier is and sends, beside its examples; none in
+    /// Where Callsigns' calls come from, under its examples; none in
     /// Contest, whose callers' countries are the contest's.
-    tier_reach: Option<TierReach>,
+    tier_reach: Option<Split>,
     /// The words Words sends, and whether they are the learner's own.
     words: Vec<String>,
     own_words: bool,
@@ -1025,8 +1026,8 @@ impl Charset {
         } else {
             Vec::new()
         };
-        let tier_reach = callsigns_mode
-            .then(|| TierReach::of(settings.active_level(), settings.country_balance()));
+        let tier_reach =
+            callsigns_mode.then(|| Split::of(settings.active_level(), settings.country_balance()));
         Self {
             mode: c.char_set_mode,
             contest,
@@ -1083,45 +1084,6 @@ impl Charset {
         } else {
             format!("{what} · {} in play", self.unlocked)
         }
-    }
-}
-
-/// What a callsign tier sends, as Callsigns sends it: what the tier adds to
-/// the one below, how many countries its calls come from, and how many in
-/// a hundred are American at the country balance set.
-#[derive(Clone, Debug, PartialEq)]
-struct TierReach {
-    adds: &'static str,
-    countries: usize,
-    /// The share of the calls from the United States, from 0 to 1.
-    american: f64,
-}
-
-impl TierReach {
-    fn of(tier: u32, country_balance: f64) -> Self {
-        let shares = country_shares(tier, country_balance);
-        Self {
-            adds: tier_adds(tier),
-            countries: shares.len(),
-            american: shares
-                .iter()
-                .find(|(country, _)| *country == "K")
-                .map_or(0.0, |(_, share)| *share),
-        }
-    }
-
-    /// "Calls from 126 countries, 8% of them from the United States."
-    fn line(&self) -> String {
-        let percent = (self.american * 100.0).round();
-        let american = if percent < 1.0 {
-            "under 1%".to_string()
-        } else {
-            format!("{percent}%")
-        };
-        format!(
-            "Calls from {} countries, {american} of them from the United States.",
-            self.countries
-        )
     }
 }
 
@@ -1274,6 +1236,9 @@ pub fn CharsetCard(
                     own: c.own_words,
                 }
             } else if !c.tier_examples.is_empty() {
+                // What each tier adds, and what this one sends: the words
+                // for both are the help's.
+                TierSteps { tier: c.level }
                 div { class: "eyebrow", "What this tier sends" }
                 div { class: "calls",
                     for call in c.tier_examples.iter() {
@@ -1282,11 +1247,9 @@ pub fn CharsetCard(
                     // A few of endless calls, not the lot.
                     span { class: "muted", aria_label: "and more", "…" }
                 }
-                if let Some(reach) = c.tier_reach.as_ref() {
-                    p { id: "tier-reach", class: "muted", "{reach.adds} {reach.line()}" }
-                }
-                p { class: "muted hint",
-                    "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations. Country balance sets how evenly the countries come: at 0% as you hear them on the air, mostly American; at 100% every country the tier can send alike."
+                if let Some(split) = c.tier_reach.clone() {
+                    div { class: "eyebrow", "Where they come from" }
+                    CountrySplit { split }
                 }
             } else if !callsigns {
                 div { class: "eyebrow", "Practice window" }

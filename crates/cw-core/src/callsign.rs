@@ -259,6 +259,9 @@ enum PrefixShape {
 }
 
 struct Tier {
+    /// A call of the shape the tier adds, short enough to label it in a
+    /// row of all six: `9A1AA`.
+    shape: &'static str,
     /// What the tier sends that the one below it does not, in a sentence.
     adds: &'static str,
     shapes: &'static [PrefixShape],
@@ -275,6 +278,7 @@ use PrefixShape::{Letter, LetterLetter, WithDigit};
 const TIERS: &[Tier] = &[
     // 1 — the shape everyone knows: one letter, a digit, two letters.
     Tier {
+        shape: "W1AW",
         adds: "The shape everyone knows: a one-letter prefix, a digit and two letters, as W1AW.",
         shapes: &[Letter],
         suffix_min: 2,
@@ -284,6 +288,7 @@ const TIERS: &[Tier] = &[
     },
     // 2 — the suffix stops being a fixed length.
     Tier {
+        shape: "N2ABC",
         adds: "Adds suffixes of one to three letters, as G3X and N2ABC.",
         shapes: &[Letter],
         suffix_min: 1,
@@ -293,6 +298,7 @@ const TIERS: &[Tier] = &[
     },
     // 3 — two-letter prefixes, so the call can come from anywhere.
     Tier {
+        shape: "DL1ABC",
         adds: "Adds two-letter prefixes, as DL1ABC, so calls come from anywhere.",
         shapes: &[Letter, LetterLetter],
         suffix_min: 1,
@@ -302,6 +308,7 @@ const TIERS: &[Tier] = &[
     },
     // 4 — prefixes with a digit in them, which break the rhythm.
     Tier {
+        shape: "9A1AA",
         adds: "Adds prefixes with a digit in them, as 9A1AA and S51AB.",
         shapes: &[Letter, LetterLetter, WithDigit],
         suffix_min: 1,
@@ -311,6 +318,7 @@ const TIERS: &[Tier] = &[
     },
     // 5 — portable and mobile operation.
     Tier {
+        shape: "G3XYZ/P",
         adds: "Adds portable and mobile operation, as G3XYZ/P and W1AW/4.",
         shapes: &[Letter, LetterLetter, WithDigit],
         suffix_min: 1,
@@ -320,6 +328,7 @@ const TIERS: &[Tier] = &[
     },
     // 6 — stations operating abroad, under the host country's prefix.
     Tier {
+        shape: "DL/W1AW",
         adds: "Adds stations operating abroad, as DL/W1AW.",
         shapes: &[Letter, LetterLetter, WithDigit],
         suffix_min: 1,
@@ -785,6 +794,27 @@ pub fn tier_examples(tier: u32, country_balance: f64) -> Vec<String> {
 /// tier's says what it sends.
 pub fn tier_adds(tier: u32) -> &'static str {
     tier_at(tier).adds
+}
+
+/// A call of the shape `tier` adds, short enough to label the tier in a
+/// row of all six: `W1AW`, `N2ABC`, `DL1ABC`, `9A1AA`, `G3XYZ/P`,
+/// `DL/W1AW`.
+pub fn tier_shape(tier: u32) -> &'static str {
+    tier_at(tier).shape
+}
+
+/// How many countries `tier` sends calls from: as many as
+/// [`country_shares`] lists, whatever the balance. Worked out once a tier,
+/// as a screen that names every tier's asks each time it redraws.
+pub fn tier_countries(tier: u32) -> usize {
+    static COUNTS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    let counts = COUNTS.get_or_init(|| {
+        (CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX)
+            .map(|tier| country_shares(tier, 0.0).len())
+            .collect()
+    });
+    let at = tier.clamp(CALLSIGN_TIER_MIN, CALLSIGN_TIER_MAX) - CALLSIGN_TIER_MIN;
+    counts[at as usize]
 }
 
 /// How often Callsigns mode's calls at `tier` come from each country, the
@@ -2293,6 +2323,42 @@ mod tests {
                 tally.len()
             );
         }
+    }
+
+    /// Every tier's shape is a call of that tier, and of none below it:
+    /// what the tier adds, as the row of tiers labels it.
+    #[test]
+    fn every_tiers_shape_is_one_it_adds() {
+        let first_tier_sending = |call: &str| {
+            let parts = parse_callsign(call).expect("a callsign");
+            (CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX).find(|&tier| {
+                let spec = tier_at(tier);
+                let len = parts.suffix.chars().count();
+                let shape_ok = issuing(parts.prefix, parts.separator, len)
+                    .iter()
+                    .any(|entry| spec.shapes.contains(&entry.shape()));
+                (spec.suffix_min..=spec.suffix_max).contains(&len)
+                    && shape_ok
+                    && (parts.portable.is_none() || spec.portable)
+                    && (parts.host.is_none() || spec.abroad)
+            })
+        };
+        for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+            let shape = tier_shape(tier);
+            assert!(
+                shape.chars().count() <= 7,
+                "{shape} is too long to label a tier"
+            );
+            assert_eq!(first_tier_sending(shape), Some(tier), "{shape}");
+            assert!(tier_adds(tier).contains(shape), "tier {tier} names {shape}");
+        }
+        assert_eq!(
+            (CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX)
+                .map(tier_countries)
+                .collect::<Vec<_>>(),
+            [9, 10, 100, 126, 126, 126]
+        );
+        assert_eq!(tier_countries(0), tier_countries(CALLSIGN_TIER_MIN));
     }
 
     /// Every tier says what it adds, and each says something of its own.

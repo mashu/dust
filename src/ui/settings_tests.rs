@@ -614,12 +614,13 @@ fn callsigns_set_their_country_balance() {
     });
 }
 
-/// Beside the tier, Callsigns says what the tier adds and how many
-/// countries its calls come from, and how many of them are American at the
-/// balance set; it follows the tier and the balance, and Contest, whose
-/// countries are the contest's, says none of it.
+/// Beside the tier, Callsigns draws the row of tiers filled up to it and
+/// where its calls come from, split between the United States, the next
+/// nine countries and the rest; both follow the tier and the balance, a
+/// part tapped says who is in it, and Contest, whose countries are the
+/// contest's, draws neither.
 #[test]
-fn callsigns_say_how_many_countries_their_tier_reaches() {
+fn callsigns_draw_their_tiers_and_where_their_calls_come_from() {
     run(|| async {
         let mut settings = test_settings();
         settings.curriculum.char_set_mode = CharSetMode::Callsign;
@@ -627,21 +628,34 @@ fn callsigns_say_how_many_countries_their_tier_reaches() {
         ui.click("nav-settings");
         assert_eq!(value_of(&ui, "field-level"), "4", "a new learner's tier");
         assert!(ui.has("tier 4 of 6 · 126\u{a0}countries"));
-        assert!(ui.has("Adds prefixes with a digit in them, as 9A1AA and S51AB."));
-        assert!(ui.has("Calls from 126 countries, 8% of them from the United States."));
+        assert!(ui.has("Tier 4 of 6, sending calls shaped as W1AW, N2ABC, DL1ABC, 9A1AA"));
+        assert_eq!(ui.html().matches("tier-step in").count(), 4);
+        assert!(ui.has("Calls from 126 countries: United States 8%, Next 9 countries"));
+        assert!(ui.has("116 other countries"));
+
+        ui.click("split-next");
+        assert!(ui.shows("split-who"));
+        assert!(ui.has("Fed. Rep. of Germany"));
+        ui.click("split-next");
+        assert!(!ui.shows("split-who"), "the legend is back");
 
         ui.commit("number-country-balance", "0");
         ui.advance(50).await;
-        assert!(ui.has("Calls from 126 countries, 35% of them from the United States."));
+        assert!(ui.has("Calls from 126 countries: United States 35%"));
 
         ui.commit("field-level", "1");
         ui.advance(50).await;
         assert!(ui.has("tier 1 of 6 · 9\u{a0}countries"));
-        assert!(ui.has("The shape everyone knows"));
-        assert!(ui.has("Calls from 9 countries, 86% of them from the United States."));
+        assert_eq!(ui.html().matches("tier-step in").count(), 1);
+        assert!(ui.has("Calls from 9 countries: United States 86%, 8 other countries 14%"));
+        assert!(
+            !ui.shows("split-next"),
+            "nine countries are the US and eight more"
+        );
 
         ui.click("seg-contest");
-        assert!(!ui.shows("tier-reach"));
+        assert!(!ui.shows("tier-steps"));
+        assert!(!ui.shows("country-split"));
         assert!(!ui.has("of 6 · "), "the note names the contest");
     });
 }
