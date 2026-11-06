@@ -274,7 +274,33 @@ fn home_in_callsign_mode_points_at_no_character_and_counts_calls() {
     assert!(!html.contains("pool-chip fresh"), "{html}");
     assert!(!html.contains("Newest character"));
     assert!(html.contains(">12<") && html.contains("Calls"), "{html}");
-    assert!(html.contains("Callsign tier 1"));
+    assert!(
+        html.contains("Callsign tier 4"),
+        "the tier a new one starts on"
+    );
+}
+
+/// The Character set's help says what every callsign tier adds, with the
+/// shape the card's row labels it by and how many countries it sends
+/// calls from, and why the first tiers have so few.
+#[test]
+fn the_character_sets_help_names_every_callsign_tier() {
+    let html = render(super::help::character_set);
+    for shown in [
+        "Tier 1 · W1AW",
+        "Tier 2 · N2ABC",
+        "Tier 3 · DL1ABC",
+        "Tier 4 · 9A1AA",
+        "Tier 5 · G3XYZ/P",
+        "Tier 6 · DL/W1AW",
+        "a one-letter prefix, a digit and two letters, as W1AW. Calls from 9 countries.",
+        "Adds prefixes with a digit in them, as 9A1AA and S51AB. Calls from 126 countries.",
+        "Why so few countries at first",
+        "Where they come from",
+        "Country balance",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
 }
 
 /// Home in Contest mode with `my_call` as your call, and no history.
@@ -869,6 +895,7 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
         "Unlock order",
         "Practice window",
         "What this tier sends",
+        "Country balance",
         "Digits level",
         "select-experience",
         "Groups per session",

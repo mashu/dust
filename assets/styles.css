@@ -83,6 +83,15 @@
 
   /* The third accent: the score tile and the sampling bars */
   --purple-700: #5c3d70;
+  /* Where Callsigns' calls come from: the United States in the accent,
+     the next commonest countries and the rest in two neutral steps, each
+     with the ink its share is printed in. */
+  --split-lead: var(--copper-deep);
+  --split-lead-ink: #ffffff;
+  --split-next: #b5a387;
+  --split-next-ink: var(--ink);
+  --split-rest: var(--line);
+  --split-rest-ink: var(--ink);
 
   font-family: Figtree, "Segoe UI", system-ui, sans-serif;
 }
@@ -148,6 +157,12 @@
     --sheen: rgba(255, 255, 255, 0.07);
 
     --purple-700: #b79bd0;
+    --split-lead: var(--copper);
+    --split-lead-ink: var(--navy);
+    --split-next: #4d586e;
+    --split-next-ink: var(--ink);
+    --split-rest: var(--line);
+    --split-rest-ink: var(--ink);
   }
 }
 
@@ -211,6 +226,12 @@
   --sheen: rgba(255, 255, 255, 0.07);
 
   --purple-700: #b79bd0;
+  --split-lead: var(--copper);
+  --split-lead-ink: var(--navy);
+  --split-next: #4d586e;
+  --split-next-ink: var(--ink);
+  --split-rest: var(--line);
+  --split-rest-ink: var(--ink);
 }
 
 /* The page behind the app — its scrollbar, and whatever shows past an
@@ -1484,6 +1505,56 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
+
+/* The row of callsign tiers: each its number, a pip filled up to the tier
+   chosen, and the shape of call it adds. A picture, not a control. */
+.tier-steps { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 2px; }
+.tier-step {
+  display: grid;
+  justify-items: center;
+  gap: 0.2rem;
+  min-width: 0;
+  color: var(--ink-dim);
+  font-size: 0.68rem;
+  line-height: 1.2;
+}
+.tier-num { font-weight: 700; }
+.tier-pip { width: 100%; height: 6px; border-radius: var(--pill); background: var(--surface-sunken); }
+.tier-step.in .tier-pip { background: var(--copper-lift); }
+.tier-step.at .tier-pip { background: var(--copper-deep); }
+.tier-step.in { color: var(--ink-soft); }
+.tier-step.at { color: var(--ink); }
+.tier-shape {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.66rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Where the tier's calls come from: one bar, each part its share wide,
+   2px of the card between them, printing its share where it fits. A part
+   is a button: a tap puts who is in it where the legend was. */
+.country-split { display: flex; gap: 2px; height: 28px; }
+.split-part {
+  flex: 0 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  box-shadow: none;
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.split-share { padding: 0 0.45rem; }
+.split-part.lead, .split-swatch.lead { background: var(--split-lead); color: var(--split-lead-ink); }
+.split-part.next, .split-swatch.next { background: var(--split-next); color: var(--split-next-ink); }
+.split-part.rest, .split-swatch.rest { background: var(--split-rest); color: var(--split-rest-ink); }
+.split-part[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 1px; }
+.split-legend { display: flex; flex-wrap: wrap; gap: 0.25rem 0.9rem; font-size: 0.78rem; color: var(--ink-soft); }
+.split-key { display: inline-flex; align-items: center; gap: 0.35rem; }
+.split-swatch { flex: none; width: 0.7rem; height: 0.7rem; border-radius: 3px; }
+.split-who { margin: 0; font-size: 0.78rem; color: var(--ink-soft); }
 
 /* A contest in place of an alphabet: a QSO of it line by line, who sends
    each named before it. */

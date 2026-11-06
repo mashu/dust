@@ -578,6 +578,9 @@ const CALLSIGN_CANDIDATES: usize = 6;
 ///
 /// The structure is never bent to fit the sampler — every candidate is already
 /// a well-formed call — so this can only decide *which* real callsign to send.
+/// The candidates come from the countries as evenly as the settings have them
+/// ([`TrainingSettings::country_balance`]); a contest's callers do not, and
+/// sound as a real band does.
 /// It scores them with [`compute_raw_sampling_weights`], the same weighting the
 /// group sampler uses, so the error-weight and coverage settings mean exactly
 /// what they mean everywhere else. With both turned off every weight is equal,
@@ -588,7 +591,8 @@ pub(crate) fn generate_callsign_group(
     config: &CharSamplingConfig,
     rng: &mut impl Rng,
 ) -> String {
-    let best = wanted_call(settings, state, config, rng, CallSpec::default()).text;
+    let spec = CallSpec::default().with_balance(settings.country_balance());
+    let best = wanted_call(settings, state, config, rng, spec).text;
     state.count_sent(&best);
     best
 }
@@ -771,9 +775,10 @@ mod tests {
         settings.curriculum.callsign_level = 4;
         let mut groups = Sampler::new(&[], &settings, 21);
         let mut callers = Sampler::new(&[], &settings, 21);
+        let practice = CallSpec::default().with_balance(settings.country_balance());
         for _ in 0..20 {
             let (group, _) = groups.next_group(&settings);
-            let call = callers.next_call(&settings, CallSpec::default(), &|_| false);
+            let call = callers.next_call(&settings, practice, &|_| false);
             assert_eq!(call.text, group);
         }
         settings.curriculum.char_set_mode = CharSetMode::Contest;
@@ -785,6 +790,40 @@ mod tests {
                 "{call:?}"
             );
         }
+    }
+
+    /// Callsigns mode sends the countries as evenly as the settings have
+    /// them: on the air's mix most of its calls are American, evened out
+    /// few are, and a contest's callers keep the air's mix whatever it is.
+    #[test]
+    fn callsigns_mode_evens_the_countries_out_as_set() {
+        use crate::callsign::{Countries, country_of};
+        let american = |balance: u32, contest: bool| {
+            let mut settings = TrainingSettings::default();
+            settings.curriculum.char_set_mode = CharSetMode::Callsign;
+            settings.curriculum.callsign_level = 4;
+            settings.curriculum.callsign_country_balance = balance;
+            let mut sampler = Sampler::new(&[], &settings, 5);
+            let calls: Vec<String> = (0..1_000)
+                .map(|_| {
+                    if contest {
+                        let spec = CallSpec::contest(Countries::Any);
+                        sampler.next_call(&settings, spec, &|_| false).text
+                    } else {
+                        sampler.next_group(&settings).0
+                    }
+                })
+                .collect();
+            let us = calls
+                .iter()
+                .filter(|call| country_of(call) == Some("K"))
+                .count();
+            us as f64 / calls.len() as f64
+        };
+        assert!(american(0, false) > 0.25, "{}", american(0, false));
+        assert!(american(100, false) < 0.05, "{}", american(100, false));
+        assert!(american(50, false) < american(0, false));
+        assert!(american(100, true) > 0.25, "a contest keeps the air's mix");
     }
 
     /// Field Day's callers are DX as often as its entries are, however the

@@ -70,6 +70,10 @@ pub const ADJUST_THRESHOLD_MAX_PCT: f64 = 100.0;
 /// characters it has not sent yet this session.
 pub const ERROR_WEIGHT_MAX: f64 = 10.0;
 pub const COVERAGE_STRENGTH_MAX: f64 = 8.0;
+/// How evenly Callsigns mode sends the countries until you set it, in
+/// percent ([`CurriculumSettings::callsign_country_balance`]): halfway, so
+/// the US still comes up most, as on the air, but every country is heard.
+pub const COUNTRY_BALANCE_DEFAULT: u32 = 50;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -306,6 +310,12 @@ pub struct CurriculumSettings {
     /// field, the way digits have one, so switching modes never reinterprets a
     /// number that meant something else.
     pub callsign_level: u32,
+    /// How evenly Callsigns mode sends the countries, 0–100 percent: 0 as
+    /// often as real calls carry them, as on the air, where most are
+    /// American; 100 every country the tier can send alike
+    /// ([`crate::CallSpec::country_balance`]). A contest's callers keep the
+    /// air's mix. Older saves have no field and load halfway.
+    pub callsign_country_balance: u32,
     /// The learner's own words, for Words: upper-cased, sendable, each once.
     /// Empty sends the starter list.
     pub word_list: Vec<String>,
@@ -334,7 +344,8 @@ impl Default for CurriculumSettings {
             sequence_is_custom: false,
             kept_sequence: Vec::new(),
             practice_window: PracticeWindow::All,
-            callsign_level: LEVEL_MIN,
+            callsign_level: crate::callsign::CALLSIGN_TIER_DEFAULT,
+            callsign_country_balance: COUNTRY_BALANCE_DEFAULT,
             word_list: Vec::new(),
             num_groups: 20,
             min_group_size: 2,
@@ -1006,6 +1017,8 @@ mod tests {
     fn missing_json_fields_use_training_defaults() {
         let s: TrainingSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.curriculum.mixed_letters_percent, 70);
+        assert_eq!(s.curriculum.callsign_country_balance, 50);
+        assert_eq!(s.curriculum.callsign_level, 4);
         assert!(!s.playback.lock_input_during_group_playback);
         assert!(s.playback.link_char_to_effective);
         assert_eq!(s.playback.group_timeout, 10.0);
@@ -1049,6 +1062,7 @@ mod tests {
         s.curriculum.max_group_size = 0;
         s.curriculum.custom_sequence = vec!['k', 'k', ' ', 'm'];
         s.curriculum.callsign_level = 999;
+        s.curriculum.callsign_country_balance = 900;
         s.playback.char_wpm_min = 900.0;
         s.playback.char_wpm_max = -5.0;
         s.playback.keyer_wpm = 900.0;
@@ -1195,6 +1209,7 @@ mod tests {
         assert!(s.curriculum.min_group_size <= s.curriculum.max_group_size);
         assert!(s.playback.group_repeat_min <= s.playback.group_repeat_max);
         assert_eq!(s.curriculum.mixed_letters_percent, 100);
+        assert_eq!(s.curriculum.callsign_country_balance, 100);
         assert_eq!(s.curriculum.num_groups, 200);
         assert_eq!(s.playback.group_timeout, 120.0);
         assert_eq!(s.playback.group_pause_sec, 15.0);
@@ -2013,6 +2028,7 @@ mod tests {
         s.curriculum.aim = Aim::Stretch;
         s.curriculum.char_set_mode = CharSetMode::Koch;
         s.curriculum.mixed_letters_percent = 33;
+        s.curriculum.callsign_country_balance = 85;
         s.curriculum.custom_sequence = vec!['Z', 'Q'];
         s.curriculum.sequence_is_custom = true;
         // Never kept beside an order of their own chosen in the app, but

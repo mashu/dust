@@ -98,7 +98,8 @@ shows:
 - "You send" and "You copy", and the QSO as a dialogue with You and They
   labels, rendered with your call (or `<your call>`);
 - "Callsign tier (1–6)", the stored `callsignLevel` shared with Callsigns,
-  which shapes the callers' calls;
+  which shapes the callers' calls, and starts on tier 4
+  (`CALLSIGN_TIER_DEFAULT`) until a learner sets it;
 - from phase 2, the run style (Single caller or Pile-up, "1–3 callers · set
   on the Band card"; as built, Single caller says "One station calls at a
   time") and presets (§8);
@@ -2452,11 +2453,14 @@ from the rules row (`ContestRules::example_qso`): your CQ, exchange and TU
 as sent, a placeholder caller from the countries that call you, and its
 exchange as callers send it, each copied field's example
 (`Field::example`). The callsign tier's examples ("What this tier sends")
-are not shown: the dialogue shows a call. Session shape's countdown reads
-"Countdown before the first CQ", and the Speed card says the callers come
-at speeds drawn from its ranges; as built with adaptive callers' speed,
-"Adapt callers' speed to me" stands in place of Adapt speed to me, with
-"Aim for" under it while it adapts (§8).
+are not shown: the dialogue shows a call. Nor is Callsigns' "Country
+balance" (`callsignCountryBalance`): a contest's callers come from the
+countries as often as real calls carry them, whatever it is set to, so a
+run sounds, and scores its multipliers, as a real band does. Session
+shape's countdown reads "Countdown before the first CQ", and the Speed
+card says the callers come at speeds drawn from its ranges; as built with
+adaptive callers' speed, "Adapt callers' speed to me" stands in place of
+Adapt speed to me, with "Aim for" under it while it adapts (§8).
 
 ## 8. Settings
 

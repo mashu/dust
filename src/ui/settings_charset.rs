@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 use crate::playback::Dialogue;
 use crate::state::AppCtx;
 use crate::time::local_hour;
+use crate::ui::callsign_reach::{CountrySplit, Split, TierSteps};
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
@@ -998,12 +999,17 @@ struct Charset {
     level_max: u32,
     digits_level: u32,
     letters_percent: u32,
+    /// How evenly Callsigns mode sends the countries, in percent.
+    country_balance: u32,
     unlocked: usize,
     window: PracticeWindow,
     pool: Vec<char>,
     /// A few calls of the tier, as Callsigns shows them; none in Contest,
     /// whose QSO shows a call.
     tier_examples: Vec<String>,
+    /// Where Callsigns' calls come from, under its examples; none in
+    /// Contest, whose callers' countries are the contest's.
+    tier_reach: Option<Split>,
     /// The words Words sends, and whether they are the learner's own.
     words: Vec<String>,
     own_words: bool,
@@ -1014,11 +1020,14 @@ impl Charset {
         let c = &settings.curriculum;
         let callsigns = c.char_set_mode.sends_callsigns();
         let contest = (c.char_set_mode == CharSetMode::Contest).then(|| ContestCard::of(settings));
-        let tier_examples = if callsigns && contest.is_none() {
-            tier_examples(settings.active_level())
+        let callsigns_mode = callsigns && contest.is_none();
+        let tier_examples = if callsigns_mode {
+            tier_examples(settings.active_level(), settings.country_balance())
         } else {
             Vec::new()
         };
+        let tier_reach =
+            callsigns_mode.then(|| Split::of(settings.active_level(), settings.country_balance()));
         Self {
             mode: c.char_set_mode,
             contest,
@@ -1029,10 +1038,12 @@ impl Charset {
             level_max: settings.max_active_level(),
             digits_level: settings.level(LevelAxis::Digits),
             letters_percent: c.mixed_letters_percent,
+            country_balance: c.callsign_country_balance,
             unlocked: unlocked_practice_count(settings),
             window: current_practice_window(settings),
             pool: compute_char_pool(settings),
             tier_examples,
+            tier_reach,
             // Only Words shows them, and every settings write comes here.
             words: if c.char_set_mode == CharSetMode::Words {
                 settings.words().into_iter().map(str::to_string).collect()
@@ -1060,7 +1071,13 @@ impl Charset {
             CharSetMode::Words if self.own_words => "Your own words, sent whole".to_string(),
             CharSetMode::Words => "Starter words, sent whole".to_string(),
         };
-        if self.callsigns {
+        if let Some(reach) = &self.tier_reach {
+            // The count and its noun kept together where a narrow line breaks.
+            format!(
+                "{what} · tier {} of {CALLSIGN_TIER_MAX} · {}\u{a0}countries",
+                self.level, reach.countries
+            )
+        } else if self.callsigns {
             format!("{what} · tier {} of {CALLSIGN_TIER_MAX}", self.level)
         } else if self.mode == CharSetMode::Words {
             format!("{what} · {}", count_words(self.words.len()))
@@ -1179,6 +1196,20 @@ pub fn CharsetCard(
                         onchange: move |v| settings.write().curriculum.digits_level = whole(v),
                     }
                 }
+                // A contest's callers keep the air's mix of countries.
+                if c.mode == CharSetMode::Callsign {
+                    NumberField {
+                        label: "Country balance",
+                        value: f64::from(c.country_balance),
+                        min: 0.0,
+                        max: 100.0,
+                        step: 10.0,
+                        unit: "%",
+                        onchange: move |v| {
+                            settings.write().curriculum.callsign_country_balance = whole(v);
+                        },
+                    }
+                }
             }
             }
             if let Some(contest) = c.contest.clone() {
@@ -1205,6 +1236,9 @@ pub fn CharsetCard(
                     own: c.own_words,
                 }
             } else if !c.tier_examples.is_empty() {
+                // What each tier adds, and what this one sends: the words
+                // for both are the help's.
+                TierSteps { tier: c.level }
                 div { class: "eyebrow", "What this tier sends" }
                 div { class: "calls",
                     for call in c.tier_examples.iter() {
@@ -1213,8 +1247,9 @@ pub fn CharsetCard(
                     // A few of endless calls, not the lot.
                     span { class: "muted", aria_label: "and more", "…" }
                 }
-                p { class: "muted hint",
-                    "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations, weighted the way you hear them."
+                if let Some(split) = c.tier_reach.clone() {
+                    div { class: "eyebrow", "Where they come from" }
+                    CountrySplit { split }
                 }
             } else if !callsigns {
                 div { class: "eyebrow", "Practice window" }

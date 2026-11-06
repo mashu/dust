@@ -2,6 +2,7 @@ pub mod auto_level;
 pub mod backup;
 pub mod band;
 pub mod bigram;
+pub mod callsign_reach;
 pub mod chart;
 pub mod confusion;
 pub mod contest;

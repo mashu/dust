@@ -746,6 +746,7 @@ pub(crate) mod tests {
         c.kept_sequence = vec!['K', 'M'];
         c.practice_window = cw_core::PracticeWindow::Last3;
         c.callsign_level = 5;
+        c.callsign_country_balance = 80;
         c.word_list = vec!["CQ".into(), "TEST".into()];
         c.num_groups = 7;
         c.min_group_size = 4;
@@ -1162,9 +1163,12 @@ pub(crate) mod tests {
         assert_eq!(settings.playback.group_repeat_min, 1);
         assert_eq!(settings.playback.keyer_wpm, 20.0);
         assert_eq!(settings.playback.group_pause_sec, 0.0);
-        // Callsign mode did not exist then either, so its tier starts at one
-        // rather than resetting everything around it.
-        assert_eq!(settings.curriculum.callsign_level, 1);
+        // Callsign mode did not exist then either, so its tier starts where
+        // a new one does rather than resetting everything around it.
+        assert_eq!(
+            settings.curriculum.callsign_level,
+            cw_core::CALLSIGN_TIER_DEFAULT
+        );
     }
 
     /// The background switch has been called `qrm*`, then `receiver*`, and is

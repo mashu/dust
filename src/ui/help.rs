@@ -3,11 +3,12 @@
 //! and its help reads as one text.
 
 use cw_core::{
-    ALONG_FLOOR_MS, BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS,
-    EARLIER_TRIES, ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES,
-    KEEPING_UP_MS, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH,
-    PER_SESSION_UP_TO, RATED_GROUP_CHARS, REACTION_MIN_MS, RECENT_SESSIONS, RECENT_TRIES,
-    RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
+    ALONG_FLOOR_MS, BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, CALLSIGN_TIER_MAX,
+    CALLSIGN_TIER_MIN, DROP_POINTS, EARLIER_TRIES, ENDURANCE_MIN_SESSIONS, FORM_SESSIONS,
+    GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS, MASTERED_MIN_ACCURACY,
+    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, PER_SESSION_UP_TO, RATED_GROUP_CHARS,
+    REACTION_MIN_MS, RECENT_SESSIONS, RECENT_TRIES, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES,
+    RECOGNITION_WINDOW, Ranking, RecognitionBands, tier_adds, tier_countries, tier_shape,
 };
 use dioxus::prelude::*;
 
@@ -422,7 +423,17 @@ pub fn character_set() -> Element {
             dt { "Digits · Mixed" }
             dd { "Digits only, or letters and digits together, each with a level of its own; Share of letters sets the mix." }
             dt { "Callsigns" }
-            dd { "Real callsigns, as they are heard on the air. The tier sets how hard they come; each keeps what the ones below send." }
+            dd { "Real callsigns, as they are heard on the air. Whatever its shape, a call needs most of the letters and digits, so the tiers do not add characters as Koch's levels do: they add shapes of call, each harder to catch than the last, and each tier keeps what the ones below send. The row of tiers on the card shows the shape each adds, filled up to yours. A new learner starts on tier 4; Auto level moves the tier from there." }
+            for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+                dt { "Tier {tier} · {tier_shape(tier)}" }
+                dd { "{tier_adds(tier)} Calls from {tier_countries(tier)} countries." }
+            }
+            dt { "Why so few countries at first" }
+            dd { "Few countries have one-letter prefixes: the US's K, W and N, Russia's R, England's G and M, France's F, Italy's I and China's B, with a few whose prefix is a letter and its digit, as Bosnia's E7. So on the air's mix tiers 1 and 2 are mostly American; two-letter prefixes, from tier 3, bring in the rest of the world." }
+            dt { "Where they come from" }
+            dd { "The bar under the calls splits them by country, each part as wide as its share: the United States, the next nine commonest countries, and all the others. Tap or click a part to see who is in it, and again for the legend." }
+            dt { "Country balance" }
+            dd { "How evenly Callsigns sends the countries. At 0% they come as often as on the air, where most calls are American, and the first tiers, whose prefixes are one letter, are nearly all K, W, N and R. At 100% every country the tier can send comes up alike. Each country's calls stay its own: its prefixes, digits and suffixes as its real calls have them. A contest's callers keep the air's mix." }
             dt { "Words" }
             dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =. Where your keyboard has + or = on the keys right of P, those keys are the paddles in the answer box: turn off Paddles on the keys right of P (Session shape) to type them there." }
             dt { "Contest" }

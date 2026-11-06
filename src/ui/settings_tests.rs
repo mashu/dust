@@ -579,6 +579,87 @@ fn callsigns_have_no_adaptive_group_size() {
     });
 }
 
+/// Callsigns mode sets how evenly its countries come, halfway until you
+/// set it, and keeps what you set; no other mode shows it.
+#[test]
+fn callsigns_set_their_country_balance() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert_eq!(value_of(&ui, "number-country-balance"), "50");
+        ui.commit("number-country-balance", "100");
+        ui.advance(50).await;
+        assert_eq!(value_of(&ui, "number-country-balance"), "100");
+        assert_eq!(
+            ui.stored_settings()
+                .await
+                .curriculum
+                .callsign_country_balance,
+            100
+        );
+        ui.commit("number-country-balance", "250");
+        ui.advance(50).await;
+        assert_eq!(
+            ui.stored_settings()
+                .await
+                .curriculum
+                .callsign_country_balance,
+            100,
+            "no more than every country alike"
+        );
+        ui.click("seg-mixed");
+        assert!(!ui.shows("number-country-balance"));
+    });
+}
+
+/// Beside the tier, Callsigns draws the row of tiers filled up to it and
+/// where its calls come from, split between the United States, the next
+/// nine countries and the rest; both follow the tier and the balance, a
+/// part tapped says who is in it, and Contest, whose countries are the
+/// contest's, draws neither.
+#[test]
+fn callsigns_draw_their_tiers_and_where_their_calls_come_from() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert_eq!(value_of(&ui, "field-level"), "4", "a new learner's tier");
+        assert!(ui.has("tier 4 of 6 · 126\u{a0}countries"));
+        assert!(ui.has("Tier 4 of 6, sending calls shaped as W1AW, N2ABC, DL1ABC, 9A1AA"));
+        assert_eq!(ui.html().matches("tier-step in").count(), 4);
+        assert!(ui.has("Calls from 126 countries: United States 8%, Next 9 countries"));
+        assert!(ui.has("116 other countries"));
+
+        ui.click("split-next");
+        assert!(ui.shows("split-who"));
+        assert!(ui.has("Fed. Rep. of Germany"));
+        ui.click("split-next");
+        assert!(!ui.shows("split-who"), "the legend is back");
+
+        ui.commit("number-country-balance", "0");
+        ui.advance(50).await;
+        assert!(ui.has("Calls from 126 countries: United States 35%"));
+
+        ui.commit("field-level", "1");
+        ui.advance(50).await;
+        assert!(ui.has("tier 1 of 6 · 9\u{a0}countries"));
+        assert_eq!(ui.html().matches("tier-step in").count(), 1);
+        assert!(ui.has("Calls from 9 countries: United States 86%, 8 other countries 14%"));
+        assert!(
+            !ui.shows("split-next"),
+            "nine countries are the US and eight more"
+        );
+
+        ui.click("seg-contest");
+        assert!(!ui.shows("tier-steps"));
+        assert!(!ui.shows("country-split"));
+        assert!(!ui.has("of 6 · "), "the note names the contest");
+    });
+}
+
 /// The experience dropdown's markup.
 fn experience_picker(ui: &Ui) -> String {
     ui.html()

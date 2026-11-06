@@ -103,6 +103,7 @@ impl TrainingSettings {
                 let c = &from.curriculum;
                 self.curriculum.char_set_mode = c.char_set_mode;
                 self.curriculum.mixed_letters_percent = c.mixed_letters_percent;
+                self.curriculum.callsign_country_balance = c.callsign_country_balance;
                 self.curriculum
                     .custom_sequence
                     .clone_from(&c.custom_sequence);
