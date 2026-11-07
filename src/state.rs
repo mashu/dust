@@ -1427,15 +1427,27 @@ impl AppCtx {
     }
 
     /// The restore under way, or the Undo of one, is over, what became of
-    /// it told: the next restore asked for meanwhile is made now.
+    /// it told: the next restore asked for meanwhile is made next, in a
+    /// task of its own, and is under way until then, so that one asked for
+    /// in between waits behind it. What became of a change is told of as
+    /// soon as the store answers, before it is taken up here
+    /// ([`Self::change_history`]): what rode along with it marked stored,
+    /// and what the store let go for room gone. Made then and there, the
+    /// next would be merged with a history that still holds what the store
+    /// let go, and take it for a session lost in passing, to be stored
+    /// again.
     fn restore_over(self) {
         let mut under_way = self.restore_under_way;
-        under_way.set(false);
         let mut waiting = self.restores_waiting;
         let next = waiting.write().pop_front();
-        if let Some(next) = next {
+        let Some(next) = next else {
+            under_way.set(false);
+            return;
+        };
+        spawn_forever(async move {
+            under_way.set(false);
             self.restore_backup(next);
-        }
+        });
     }
 
     /// Restore `backup` ([`Self::restore_backup`]), as `beside` says: each
@@ -2693,6 +2705,33 @@ mod tests {
             a.toast().expect("told").text,
             "Restored your settings. Every session in it was already here."
         );
+    }
+
+    /// A restore waiting for another is made once what became of the
+    /// other's change has been taken up whole: a session the store let go
+    /// for room, as a browser's page storage lets the oldest go, is gone
+    /// from the history it is merged with, not taken for one lost in
+    /// passing and stored again. It was made as soon as the other was told
+    /// of, before the session let go had gone from here, and the store was
+    /// asked to keep it twice more.
+    #[test]
+    fn a_restore_waiting_for_another_is_made_once_that_ones_change_is_taken_up() {
+        let store = holding([3, 4, 5]);
+        store.page_room.set(Some(3));
+        let mut a = Tab::on(&store);
+        store.deferred.set(true);
+        restore(&a, [6]);
+        restore(&a, [7]);
+        store.settle();
+        a.pump();
+        assert_eq!(a.shown(), [4, 5, 6], "3 let go for room");
+        assert_eq!(store.waiting(), 1, "the second restore, and nothing else");
+        let writes = store.record_writes.get();
+        store.settle();
+        a.pump();
+        assert_eq!(store.record_writes.get(), writes + 1, "7 alone");
+        assert_eq!(days(&store.load_sessions()), [5, 6, 7]);
+        assert_eq!(a.shown(), [5, 6, 7]);
     }
 
     /// A restore takes the backup's settings whole, over what another tab
