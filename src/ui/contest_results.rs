@@ -13,7 +13,7 @@
 
 use cw_core::{
     ContestKind, ContestRules, ContestScore, Field, QsoCheck, QsoError, Ranking, RunErrors, RunQso,
-    RunSummary, SessionResult, board_place,
+    RunSummary, SessionResult, board_place_at,
 };
 use dioxus::prelude::*;
 
@@ -265,8 +265,8 @@ pub fn opened_results(
             .filter(|session| session.timestamp == pick.timestamp)
             .cloned()
     })?;
-    let place = *sessions.figure("board place", pick.timestamp, |all| {
-        board_place(all, pick.timestamp)
+    let place = *sessions.figure("board place", pick.index, |all| {
+        board_place_at(all, pick.index)
     });
     Some(rsx! {
         ContestResults {

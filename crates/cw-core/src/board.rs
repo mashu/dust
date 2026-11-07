@@ -327,18 +327,26 @@ pub fn assisted_runs(sessions: &[SessionResult], of: BoardOf, ranking: Ranking) 
     assisted
 }
 
-/// Where the session finished at `timestamp` stands among the sessions of
-/// its own mode on the board, and a contest run among runs of its own
-/// contest, as its own board ranks it ([`Ranking::of`]): its place, and
-/// how many there are. Nothing for a session that is not on it.
+/// Where the session finished at `timestamp` stands on the board
+/// ([`board_place_at`]): the first of the history finished then, where
+/// two were.
 pub fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize, usize)> {
-    let session = sessions
+    let index = sessions
         .iter()
-        .find(|session| session.timestamp == timestamp)?;
+        .position(|session| session.timestamp == timestamp)?;
+    board_place_at(sessions, index)
+}
+
+/// Where session `index` of `sessions` stands among the sessions of its
+/// own mode on the board, and a contest run among runs of its own contest,
+/// as its own board ranks it ([`Ranking::of`]): its place, and how many
+/// there are. Nothing for a session that is not on it. Found by its place
+/// in the history, two sessions finished at one moment are each placed as
+/// they stand.
+pub fn board_place_at(sessions: &[SessionResult], index: usize) -> Option<(usize, usize)> {
+    let session = sessions.get(index)?;
     let board = score_board(sessions, BoardOf::of(session), Ranking::of(session));
-    let place = board
-        .iter()
-        .position(|entry| entry.timestamp == timestamp)?;
+    let place = board.iter().position(|entry| entry.index == index)?;
     Some((place + 1, board.len()))
 }
 
@@ -843,6 +851,25 @@ mod tests {
         assert_eq!(board_place(&sessions, 2), Some((1, 1)));
         assert_eq!(board_place(&sessions, 5), None, "too short to place");
         assert_eq!(board_place(&sessions, 99), None, "no such session");
+    }
+
+    /// Two sessions finished at one moment, as two devices' histories may
+    /// hold them, are each placed as they stand, found by their place in
+    /// the history: by the moment alone, each read the place of whichever
+    /// the board ranked first, and a session on another board, set at that
+    /// moment, read the first session's board.
+    #[test]
+    fn two_sessions_finished_at_one_moment_are_each_placed_as_they_stand() {
+        let sessions = [
+            koch(3, 30.0),
+            koch(3, 50.0),
+            session(3, 1_800.0, 20, CharSetMode::Callsign),
+        ];
+        assert_eq!(board_place_at(&sessions, 0), Some((2, 2)));
+        assert_eq!(board_place_at(&sessions, 1), Some((1, 2)));
+        assert_eq!(board_place_at(&sessions, 2), Some((1, 1)));
+        assert_eq!(board_place_at(&sessions, 3), None, "no such session");
+        assert_eq!(board_place(&sessions, 3), Some((2, 2)), "the first");
     }
 
     #[test]

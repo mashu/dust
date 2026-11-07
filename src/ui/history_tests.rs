@@ -442,6 +442,32 @@ fn a_runs_results_work_out_their_place_once() {
     });
 }
 
+/// Two runs set at one moment, as copies of the history on two devices
+/// may hold them, each show where they stand on the board. A run's place
+/// was found by its stamp alone, and both showed the place of whichever
+/// the board ranked first.
+#[test]
+fn two_runs_set_at_one_moment_each_show_their_own_place() {
+    run(|| async {
+        let qso = ("K5XYZ", "214", "K5XYZ", "214");
+        let clean = stored_run("2026-10-20", &[qso; 5]);
+        let mut slipped = [qso; 5];
+        slipped[4].3 = "241";
+        let slipped = stored_run("2026-10-20", &slipped);
+        assert_eq!(clean.timestamp, slipped.timestamp);
+        let (mut ui, _recorder) = open_history(&[clean, slipped]);
+        let mut said = Vec::new();
+        for index in 0..2 {
+            ui.click(&format!("history-open-{index}"));
+            assert!(ui.has("Run complete"));
+            said.push((ui.has("New personal best"), ui.has("2nd best of your 2")));
+            ui.click("btn-back");
+        }
+        said.sort();
+        assert_eq!(said, [(false, true), (true, false)], "one each");
+    });
+}
+
 /// A long history makes the rows of the sessions it shows, and no others:
 /// a row reads its run's log, and a page more makes the rows of that page.
 #[test]
