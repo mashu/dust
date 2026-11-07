@@ -34,19 +34,34 @@ const EDGES: usize = 16;
 
 /// Each edge is one word: which edge it is in the order they were keyed,
 /// so one written over as it was read is told from the one wanted; its
-/// instant, in microseconds on [`clock_sec`]'s clock, enough for three
-/// months; and on or off.
+/// instant, in microseconds on [`clock_sec`]'s clock, kept modulo the
+/// hundred days or so that fit, and read back against the callback's own
+/// reading of that clock ([`unpack`]); and on or off.
 const SEQ_SHIFT: u32 = 44;
 const SEQ_MASK: u64 = (1 << (64 - SEQ_SHIFT)) - 1;
 const AT_MASK: u64 = (1 << (SEQ_SHIFT - 1)) - 1;
 
+/// How long after the callback's reading of the clock an edge it reads can
+/// be keyed for: a key keyed in the moment between the reading and the
+/// read, and a test's edges keyed a little ahead of the stream it plays.
+const AHEAD_US: u64 = 1_000_000;
+
 fn pack(seq: usize, on: bool, at_sec: f64) -> u64 {
-    let at_us = ((at_sec.max(0.0) * 1e6) as u64).min(AT_MASK);
+    let at_us = ((at_sec.max(0.0) * 1e6) as u64) & AT_MASK;
     ((seq as u64 & SEQ_MASK) << SEQ_SHIFT) | (at_us << 1) | u64::from(on)
 }
 
-fn unpack(word: u64) -> (u64, bool, f64) {
-    let at_us = (word >> 1) & AT_MASK;
+/// An edge's word, read by a callback that came at `now_sec`: its instant
+/// the latest that is kept as it is kept and no more than [`AHEAD_US`]
+/// after `now_sec`. Every edge is keyed for a moment before the callback
+/// reads it, or a moment after, so that is when it was keyed, however long
+/// the process has been up; and none, whenever it was keyed, is read as
+/// further ahead than that, to hold back the edges after it.
+fn unpack(word: u64, now_sec: f64) -> (u64, bool, f64) {
+    let kept = (word >> 1) & AT_MASK;
+    let end = ((now_sec.max(0.0) * 1e6) as u64).saturating_add(AHEAD_US);
+    let back = end.wrapping_sub(kept) & AT_MASK;
+    let at_us = end as i64 - back as i64;
     (word >> SEQ_SHIFT, word & 1 == 1, at_us as f64 / 1e6)
 }
 
@@ -214,7 +229,7 @@ impl Sidetone {
         };
         let mut from = 0;
         while from < frames {
-            match self.next_edge(control, from, frames) {
+            match self.next_edge(control, from, frames, now) {
                 Some((at, on)) => {
                     self.render(&mut out[from..at], &edge);
                     self.keyed = on;
@@ -262,18 +277,19 @@ impl Sidetone {
         }
     }
 
-    /// The next edge to fall in this buffer, on or after frame `from` and
-    /// before `frames`: where, and which way. One already overdue falls at
-    /// `from`, as soon as it can.
+    /// The next edge to fall in this buffer, for a callback that came at
+    /// `now`, on or after frame `from` and before `frames`: where, and which
+    /// way. One already overdue falls at `from`, as soon as it can.
     fn next_edge(
         &mut self,
         control: &SidetoneControl,
         from: usize,
         frames: usize,
+        now: f64,
     ) -> Option<(usize, bool)> {
         let (on, at) = match self.pending.take() {
             Some(edge) => edge,
-            None => self.read(control)?,
+            None => self.read(control, now)?,
         };
         let starts_burst = self.quiet_at(at);
         let sample_rate = self.sample_rate;
@@ -295,10 +311,11 @@ impl Sidetone {
         Some(((frame.max(0.0) as usize).max(from), on))
     }
 
-    /// The next edge keyed and not yet read. Should the UI have keyed so
-    /// many while the stream was not playing that the one wanted has been
-    /// written over, the newest is taken: what came before it is long past.
-    fn read(&mut self, control: &SidetoneControl) -> Option<(bool, f64)> {
+    /// The next edge keyed and not yet read, by a callback that came at
+    /// `now`. Should the UI have keyed so many while the stream was not
+    /// playing that the one wanted has been written over, the newest is
+    /// taken: what came before it is long past.
+    fn read(&mut self, control: &SidetoneControl, now: f64) -> Option<(bool, f64)> {
         let written = control.written.load(Ordering::Acquire);
         let taken = self.taken.get_or_insert(written.saturating_sub(EDGES));
         if *taken >= written {
@@ -310,7 +327,7 @@ impl Sidetone {
             *taken = written - 1;
         }
         let word = control.edges[*taken % EDGES].load(Ordering::Acquire);
-        let (seq, on, at) = unpack(word);
+        let (seq, on, at) = unpack(word, now);
         if seq != *taken as u64 & SEQ_MASK {
             // Written over as it was read: the newest, next buffer.
             *taken = written - 1;
@@ -529,6 +546,43 @@ mod tests {
                     "{frames} frames: {marks:?}"
                 );
             }
+        }
+    }
+
+    /// A process up for months keeps its sidetone in time: keyed across
+    /// the instant an edge's microseconds no longer fit its word, some
+    /// hundred days on, each element and space is as long as it was keyed.
+    /// Every edge past that instant used to read as keyed at it, all at
+    /// once, and the gate opened and shut in one frame.
+    #[test]
+    fn elements_keyed_after_a_hundred_days_up_are_as_long_as_they_were_keyed() {
+        let wrap = (AT_MASK + 1) as f64 / 1e6;
+        let dit = 0.06;
+        let control = SidetoneControl::new();
+        let mut sidetone = Sidetone::new(SR);
+        let tone = ToneRequest::new(true, 600.0, 0.4).shaped(0.004, 0.75);
+        let start = wrap - 0.2;
+        for k in 0..8 {
+            let at = start + 0.003 + k as f64 * dit;
+            control.set_at(
+                ToneRequest {
+                    on: k % 2 == 0,
+                    ..tone
+                },
+                at,
+            );
+        }
+        let out = play(&mut sidetone, &control, start, 256, 1.0);
+        let marks = marks(&out, 0.4);
+        assert_eq!(marks.len(), 4, "{marks:?}");
+        let dit_frames = (dit * f64::from(SR)) as usize;
+        assert!(marks[0].1.abs_diff(dit_frames) < 96, "{marks:?}");
+        for pair in marks.windows(2) {
+            assert!(pair[1].1.abs_diff(pair[0].1) <= 1, "{marks:?}");
+            assert!(
+                (pair[1].0 - pair[0].0).abs_diff(2 * dit_frames) <= 1,
+                "{marks:?}"
+            );
         }
     }
 
