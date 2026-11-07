@@ -331,6 +331,32 @@ fn a_setting_changed_anywhere_reaches_every_device() {
     assert_eq!(remote.writes.get(), writes);
 }
 
+/// A setting changed on a device whose clock is behind another's, after the
+/// other changed it, is the one every device keeps: it is stamped after the
+/// change it follows. It used to lose to that change, stamped by the clock
+/// ahead, and be put back on the device it was made on as it synced.
+#[test]
+fn a_setting_changed_on_a_clock_behind_is_kept_everywhere() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&[]);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    // The computer's clock is an hour ahead of the phone's.
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 3_600_110).expect("synced");
+
+    computer.settings.curriculum.num_groups = 7;
+    computer.sync(&remote, 3_600_120).expect("synced");
+    phone.sync(&remote, 130).expect("synced");
+    assert_eq!(phone.settings.curriculum.num_groups, 7);
+    phone.settings.curriculum.num_groups = 5;
+    phone.sync(&remote, 140).expect("synced");
+    assert_eq!(phone.settings.curriculum.num_groups, 5, "not put back");
+    computer.sync(&remote, 3_600_150).expect("synced");
+    assert_eq!(computer.settings.curriculum.num_groups, 5);
+}
+
 /// What a device uses beside its history reaches every other: the runs of
 /// auto-level counters, the theme, and that the guided setup and the word
 /// on the paddle keys were shown; and a run cleared on one is cleared on

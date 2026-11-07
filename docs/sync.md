@@ -90,9 +90,12 @@ everything else a device uses (`src/sync/settings.rs`, `Using`):
 Each device writes only its own file of them, every key with when it was
 last changed. A device merging takes the newest of each key from every file
 and its own, so a change made on one device and another made on another
-both come through, and no device writes over another's file. A device
-joining a sync takes what the drive holds, as a restore takes a backup's
-settings, and adds nothing of its own until it changes something.
+both come through, and no device writes over another's file. A change is
+stamped after the newest stamp of its key the device has taken up, so one
+made after another is the newer, however far apart the devices' clocks
+are. A device joining a sync takes what the drive holds, as a restore takes
+a backup's settings, and adds nothing of its own until it changes
+something.
 
 All that stays each device's own: when it last saved a backup file, which
 is a file on that device, and a session or run it has under way, which is
