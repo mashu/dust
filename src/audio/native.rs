@@ -34,10 +34,11 @@ const MAX_LATENCY_SEC: f64 = 0.5;
 /// tries.
 const REOPEN_AFTER: Duration = Duration::from_secs(1);
 
-/// How long a stream that keeps reporting errors after it broke is made to
-/// wait before reporting the next. Some hosts' workers retry a dead device
-/// in a tight loop, calling back with an error each time round; this keeps
-/// that loop from taking a core and the log with it.
+/// How long a stream that reports one error after another, with no buffer
+/// asked for between them, is made to wait before reporting the next. Some
+/// hosts' workers retry a dead device in a tight loop, calling back with an
+/// error each time round; this keeps that loop from taking a core and the
+/// log with it.
 const ERROR_BACKOFF: Duration = Duration::from_millis(20);
 
 /// Whether letting go of a stream waits for its worker thread, which may
@@ -107,13 +108,15 @@ pub struct MorsePlayer {
     probed: Option<(cpal::Device, cpal::SupportedStreamConfig)>,
 }
 
-/// An output stream, and its own word that it broke: unplugged headphones, a
-/// sound server restart. A send in flight on it reports the failure, so the
-/// session can recover rather than stall.
+/// An output stream, and the word that it broke: its host's, that its
+/// device is gone, as unplugged headphones are. A send in flight on it
+/// reports the failure, so the session can recover rather than stall.
 ///
 /// Some breaks say nothing: an iOS interruption, a call or Siri, stops the
-/// stream without a word. So the callback notes when it ran, and a stream
-/// found not to have been called for a while is taken for broken too.
+/// stream without a word. And some say only what may pass: ALSA tells of a
+/// dead device as it tells of a poll a signal cut short. So the callback
+/// notes when it ran, and a stream found not to have been called for a
+/// while is taken for broken.
 struct OpenStream {
     /// Taken as the stream is let go of.
     stream: Option<cpal::Stream>,
@@ -121,30 +124,34 @@ struct OpenStream {
     device: Option<String>,
     failed: Arc<AtomicBool>,
     heartbeat: Arc<Heartbeat>,
+    /// It reported an error, and has not been asked for a buffer since
+    /// ([`StreamWords`]).
+    erring: Arc<AtomicBool>,
     /// Let go of without its worker being waited for: its callback plays
     /// silence from then on, and leaves the mixer to the stream after it.
     retired: Arc<AtomicBool>,
 }
 
 impl Drop for OpenStream {
-    /// A stream that broke, or has gone uncalled, is let go of without its
-    /// worker being waited for where that wait may never end
-    /// ([`DROP_WAITS_ON_WORKER`]): retired, so that its callback, should the
-    /// worker live on after all, plays silence and never takes the mixer
-    /// from the stream opened after it, and left to the process with the
-    /// device it holds. One that is not known to have broken closes as cpal
-    /// closes it, but whatever that close throws stays here: cpal's ALSA
-    /// worker can die by a panic of its own without a word to the error
-    /// callback (a timestamp it does not expect), and the close then panics
-    /// too, telling a worker that is gone to stop, or rejoining its panic.
-    /// On the UI thread that took the app with it.
+    /// A stream that broke, or has gone uncalled, or whose worker is erring
+    /// still, is let go of without its worker being waited for where that
+    /// wait may never end ([`DROP_WAITS_ON_WORKER`]): retired, so that its
+    /// callback, should the worker live on after all, plays silence and
+    /// never takes the mixer from the stream opened after it, and left to
+    /// the process with the device it holds. One that is not known to have
+    /// broken closes as cpal closes it, but whatever that close throws stays
+    /// here: cpal's ALSA worker can die by a panic of its own without a word
+    /// to the error callback (a timestamp it does not expect), and the close
+    /// then panics too, telling a worker that is gone to stop, or rejoining
+    /// its panic. On the UI thread that took the app with it.
     fn drop(&mut self) {
         let Some(stream) = self.stream.take() else {
             return;
         };
-        if DROP_WAITS_ON_WORKER
-            && (self.failed.load(Ordering::Acquire) || self.heartbeat.went_silent(clock_sec()))
-        {
+        let broke = self.failed.load(Ordering::Acquire)
+            || self.erring.load(Ordering::Acquire)
+            || self.heartbeat.went_silent(clock_sec());
+        if DROP_WAITS_ON_WORKER && broke {
             self.retired.store(true, Ordering::Release);
             std::mem::forget(stream);
             return;
@@ -584,11 +591,42 @@ fn latency_frames(info: &cpal::OutputCallbackInfo, sample_rate: u32) -> usize {
 }
 
 /// What a stream's callbacks and its player tell each other: that it broke,
-/// that it is still being called, and that it was let go of.
+/// that it is still being called, that it is erring, and that it was let
+/// go of.
+#[derive(Clone)]
 struct StreamWords {
     failed: Arc<AtomicBool>,
     heartbeat: Arc<Heartbeat>,
+    /// It reported an error, and has not been asked for a buffer since: a
+    /// worker retrying in a loop of errors, as cpal's ALSA host retries a
+    /// write to a dead device, which never looks for the word to stop.
+    erring: Arc<AtomicBool>,
     retired: Arc<AtomicBool>,
+}
+
+impl StreamWords {
+    /// The stream asks for a buffer at `now`: whether to play it, rather
+    /// than silence, retired. A worker that asks is in no loop of errors.
+    fn called(&self, now: f64) -> bool {
+        if self.retired.load(Ordering::Acquire) {
+            return false;
+        }
+        self.heartbeat.beat(now);
+        self.erring.store(false, Ordering::Release);
+        true
+    }
+
+    /// The stream reports `err`. A device gone is gone for good, and a send
+    /// on it is told so at once; anything else may pass, as a poll a signal
+    /// cut short does, and the stream is taken for broken only once it is
+    /// no longer called ([`Heartbeat`]). Whether another came before it
+    /// with no buffer asked for since: a worker in a loop of them.
+    fn erred(&self, err: &cpal::StreamError) -> bool {
+        if matches!(err, cpal::StreamError::DeviceNotAvailable) {
+            self.failed.store(true, Ordering::Release);
+        }
+        self.erring.swap(true, Ordering::AcqRel)
+    }
 }
 
 /// Build an output stream that plays `output` into `T` samples, until it is
@@ -602,11 +640,8 @@ fn build_stream<T>(
 where
     T: SizedSample + FromSample<f32>,
 {
-    let StreamWords {
-        failed,
-        heartbeat,
-        retired,
-    } = words;
+    let playing = words.clone();
+    let mut told = false;
     let channels = usize::from(config.channels).max(1);
     let sample_rate = config.sample_rate.0;
     // One scratch buffer of mono frames, made once: an audio callback must
@@ -621,11 +656,10 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
-                if retired.load(Ordering::Acquire) {
+                if !playing.called(clock_sec()) {
                     data.fill(T::EQUILIBRIUM);
                     return;
                 }
-                heartbeat.beat(clock_sec());
                 let frames = data.len().div_ceil(channels);
                 if scratch.len() < frames {
                     // Only a host handing over more than it ever has before.
@@ -636,11 +670,11 @@ where
                 interleave(data, channels, mono);
             },
             move |err| {
-                // The first error is the one worth reading; the stream is
-                // reopened on the next use whatever the rest say.
-                if failed.swap(true, Ordering::AcqRel) {
+                if words.erred(&err) {
                     std::thread::sleep(ERROR_BACKOFF);
-                } else {
+                } else if !told {
+                    // The first error is the one worth reading.
+                    told = true;
                     eprintln!("audio stream error: {err}");
                 }
             },
@@ -703,10 +737,12 @@ fn open_stream(
             config.sample_rate.0,
         );
         let heartbeat = Arc::new(Heartbeat::new(clock_sec()));
+        let erring = Arc::new(AtomicBool::new(false));
         let retired = Arc::new(AtomicBool::new(false));
         let words = StreamWords {
             failed: Arc::clone(&failed),
             heartbeat: Arc::clone(&heartbeat),
+            erring: Arc::clone(&erring),
             retired: Arc::clone(&retired),
         };
         let built = match supported.sample_format() {
@@ -730,6 +766,7 @@ fn open_stream(
                     device: device.name().ok(),
                     failed,
                     heartbeat,
+                    erring,
                     retired,
                 });
             }
@@ -737,6 +774,53 @@ fn open_stream(
         }
     }
     Err(last_err.unwrap_or_else(|| "Audio mixer: no stream config worked".to_string()))
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::*;
+
+    fn words() -> StreamWords {
+        StreamWords {
+            failed: Arc::new(AtomicBool::new(false)),
+            heartbeat: Arc::new(Heartbeat::new(0.0)),
+            erring: Arc::new(AtomicBool::new(false)),
+            retired: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// An error that may pass, as an ALSA poll a signal cut short does,
+    /// fails no stream: a send on it plays on, and the stream is taken for
+    /// broken only once it is no longer called. It is erring until it next
+    /// asks for a buffer, and an error that follows another with none
+    /// asked for between them is a loop's. A device gone fails the stream
+    /// at once. Any error used to fail it for good: the send on it failed,
+    /// and was sent again over a band built anew.
+    #[test]
+    fn only_a_device_gone_fails_a_stream_at_once() {
+        let words = words();
+        let passing = cpal::StreamError::BackendSpecific {
+            err: cpal::BackendSpecificError {
+                description: "Interrupted system call".into(),
+            },
+        };
+        let erring = || words.erring.load(Ordering::Acquire);
+        assert!(!words.erred(&passing), "the first");
+        assert!(!words.failed.load(Ordering::Acquire), "it may pass");
+        assert!(erring(), "erring");
+        assert!(words.erred(&passing), "another, no buffer between");
+        assert!(words.called(1.0));
+        assert!(!erring(), "asked for a buffer since");
+        assert_eq!(words.heartbeat.last(), 1.0);
+        assert!(!words.erred(&passing));
+        assert!(!words.failed.load(Ordering::Acquire));
+        assert!(words.called(2.0));
+        words.erred(&cpal::StreamError::DeviceNotAvailable);
+        assert!(words.failed.load(Ordering::Acquire), "a device gone");
+        words.retired.store(true, Ordering::Release);
+        assert!(!words.called(3.0), "retired, it plays silence");
+        assert_eq!(words.heartbeat.last(), 2.0);
+    }
 }
 
 #[cfg(test)]
@@ -969,11 +1053,41 @@ mod device_tests {
             device: None,
             failed: Arc::new(AtomicBool::new(false)),
             heartbeat: Arc::new(Heartbeat::new(clock_sec())),
+            erring: Arc::new(AtomicBool::new(false)),
             retired: Arc::new(AtomicBool::new(false)),
         });
         let slept = catch_unwind(AssertUnwindSafe(|| player.sleep()));
         assert!(slept.is_ok(), "the close kept its panic to itself");
         assert!(player.stream.is_none(), "asleep, it is closed");
+    }
+
+    /// A stream erring still, its worker in a loop of errors with no buffer
+    /// asked for since, is let go of without its worker being waited for,
+    /// though nothing said it broke: cpal's ALSA worker retrying a write to
+    /// a dead device never comes back to be told. The worker holds the
+    /// stream's words for as long as it lives.
+    #[test]
+    fn an_erring_stream_is_let_go_of_without_waiting_on_its_worker() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        player.ensure_output().expect("open");
+        let open = player.stream.as_ref().expect("open");
+        // It asks for no buffer from here, as a worker in a loop of errors
+        // asks for none, and errs.
+        open.retired.store(true, Ordering::Release);
+        // A callback already past its look at `retired` would clear
+        // `erring` as it ends: it is let end first.
+        std::thread::sleep(Duration::from_millis(100));
+        open.erring.store(true, Ordering::Release);
+        let words = Arc::clone(&open.heartbeat);
+        player.sleep();
+        assert!(player.stream.is_none(), "let go of");
+        assert_eq!(
+            Arc::strong_count(&words) > 1,
+            DROP_WAITS_ON_WORKER,
+            "left to its worker where it is not waited for"
+        );
     }
 
     /// Where what it opened on is kept, as on Android, the output wakes
