@@ -434,7 +434,10 @@ impl AppCtx {
             if cut.is_empty() {
                 return;
             }
-            self.sync_with_store(move || {
+            // Kept whether or not the store could be listed: its marks are
+            // taken from it already, so what they carry is kept here or
+            // nowhere. Stored twice at worst, never lost.
+            self.sync_with_store(move |_listed| {
                 let told = {
                     let history = self.sessions.peek();
                     CutOff::newest(
