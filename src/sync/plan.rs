@@ -148,8 +148,9 @@ pub fn plan(drive: &DriveState, here: Here) -> Plan {
         if drive.deleted(id) {
             let tomb = drive.tombs[&id];
             match here.revived.get(&id) {
-                // Put back here after the drive's latest deletion of it.
-                Some(&at) if at > tomb => plan.send_back.push((id, at)),
+                // Put back here no earlier than the drive's latest deletion
+                // of it: as late, it stands, as the drive reads the two.
+                Some(&at) if at >= tomb => plan.send_back.push((id, at)),
                 _ => plan.let_go.push((id, tomb)),
             }
         } else if !drive.puts.contains(&id) && !drive.revives.contains_key(&id) {
@@ -165,11 +166,12 @@ pub fn plan(drive: &DriveState, here: Here) -> Plan {
             continue;
         }
         // Deleted here: as the drive deleted it, and the drive has put it
-        // back since; or by hand, which the drive is to hear of.
+        // back since, as late as that deletion or later; or by hand, which
+        // the drive is to hear of.
         let put_back_since = here
             .applied
             .get(&id)
-            .is_some_and(|&took| drive.revives.get(&id).is_some_and(|&back| back > took));
+            .is_some_and(|&took| drive.revives.get(&id).is_some_and(|&back| back >= took));
         if put_back_since {
             plan.take_back.push(id);
         } else if !here.applied.contains_key(&id) {
@@ -344,6 +346,27 @@ mod tests {
         here.revived = times(&[(1, 40)]);
         assert_eq!(here.plan(&there).let_go, [(id(1), 50)], "deleted since");
         assert!(here.plan(&there).send_back.is_empty());
+    }
+
+    /// A putting back as late as the drive's latest deletion stands, as the
+    /// drive itself reads the two: one made here is sent as back, and one
+    /// the drive holds as late as the deletion this device took brings the
+    /// session back. Each used to let the session go here, though the drive
+    /// says it is there.
+    #[test]
+    fn a_putting_back_as_late_as_a_deletion_stands() {
+        let there = drive(&[pack(&[1], &[(1, 50)], &[])]);
+        let mut here = Side::listing(&[1]);
+        here.revived = times(&[(1, 50)]);
+        assert_eq!(here.plan(&there).send_back, [(id(1), 50)]);
+        assert!(here.plan(&there).let_go.is_empty());
+
+        let there = drive(&[pack(&[1], &[(1, 50)], &[(1, 50)])]);
+        assert!(there.alive(id(1)), "the drive's word");
+        let mut here = Side::listing(&[]);
+        here.forgotten = ids(&[1]);
+        here.applied = times(&[(1, 50)]);
+        assert_eq!(here.plan(&there).take_back, [id(1)]);
     }
 
     /// A session the drive put back after the deletion this device took

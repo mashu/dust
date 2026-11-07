@@ -223,8 +223,9 @@ fn another_device(
     (store, state)
 }
 
-/// Delete the record `id` by hand in `store`, another device's, at `at`.
-fn delete_in(store: &MemoryStore, id: RecordId, at: u64) {
+/// Delete the record `id` by hand in `store`, another device's, at `at`:
+/// the session it held.
+fn delete_in(store: &MemoryStore, id: RecordId, at: u64) -> cw_core::SessionResult {
     let session = store
         .load_history()
         .sessions
@@ -240,6 +241,31 @@ fn delete_in(store: &MemoryStore, id: RecordId, at: u64) {
         .kept()
         .is_some()
     );
+    session
+}
+
+/// Put `session` back by hand as the record `id` in `store`, another
+/// device's, at `at`, and note it in what that device's sync keeps,
+/// `state`, as the app notes an Undo.
+fn put_back_in(
+    store: &MemoryStore,
+    state: &mut SyncState,
+    id: RecordId,
+    session: &cw_core::SessionResult,
+    at: u64,
+) {
+    let json = serde_json::to_string(session).expect("JSON");
+    assert!(
+        now(store.change_history(HistoryChange {
+            put: vec![Record { id, json }],
+            unforget: vec![id],
+            ..HistoryChange::default()
+        }))
+        .kept()
+        .is_some()
+    );
+    let at = state.stamp_change(id, at);
+    state.revived.insert(id, at);
 }
 
 fn now<T>(pending: impl Future<Output = T>) -> T {
@@ -1234,6 +1260,74 @@ fn undo_after_a_deletion_stamped_ahead_keeps_the_session() {
             .map(|(_, s)| s.timestamp)
             .collect();
         assert_eq!(theirs, [1, 2], "the drive's word");
+    });
+}
+
+/// A session deleted here by hand, then put back by Undo while the sync
+/// sending that deletion is under way, stays, though another device with
+/// its clock an hour ahead deleted it and put it back before: the putting
+/// back is stamped after the deletion that sync sent, and the drive says so
+/// to every device. It used to be stamped by what sync knew as that sync
+/// began, no later than the deletion the sync went on to send, and taken
+/// away again by it at the next sync, here and everywhere.
+#[test]
+fn undo_while_its_deletion_is_sent_keeps_the_session_after_changes_ahead() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        // Deleted and put back on another device, its clock ahead.
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        let ahead = now_ms() + 3_600_000;
+        let session = delete_in(&other, two, ahead);
+        let settings = cw_core::TrainingSettings::default();
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &settings,
+            ahead,
+        ))
+        .expect("synced");
+        put_back_in(&other, &mut other_state, two, &session, ahead + 10);
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &settings,
+            ahead + 10,
+        ))
+        .expect("synced");
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert_eq!(stamps(&harness), [1, 2]);
+
+        // Deleted here, and put back while the deletion is being sent.
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        held.hold_writes(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| ctx.undo_delete());
+        held.hold_writes(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(stamps(&harness), [1, 2], "not deleted again");
+        let (joined, joined_state) = another_device(&remote, "a long passphrase", &[]);
+        let theirs: Vec<u64> = joined
+            .load_history()
+            .sessions
+            .iter()
+            .map(|(_, s)| s.timestamp)
+            .collect();
+        assert_eq!(theirs, [1, 2], "the drive's word");
+        assert!(
+            joined_state.drive.revives[&two] > joined_state.drive.tombs[&two],
+            "put back after the deletion sent"
+        );
     });
 }
 

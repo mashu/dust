@@ -474,8 +474,13 @@ impl AppCtx {
             if synced.is_err() {
                 self.take_up_store();
             }
-            // Put back by hand meanwhile: noted with the rest.
-            state.revived.extend(take(self.sync.revived));
+            // Put back by hand meanwhile: noted with the rest, each stamped
+            // again after what this sync read of it and sent, the deletion
+            // by hand it put back among them.
+            for (id, at) in take(self.sync.revived) {
+                let at = state.stamp_change(id, at);
+                state.revived.insert(id, at);
+            }
             // The sign-in is no sync's to keep: one made meanwhile stays.
             state.sign_in = self
                 .sync
@@ -614,7 +619,9 @@ impl AppCtx {
     /// The sessions `ids` were put back by hand, after a deletion, by Undo
     /// or a restore: the drive is told, so that a deletion it already holds
     /// does not take them away again. Each is put back after the deletion
-    /// of it this device knows of ([`SyncState::stamp_change`]).
+    /// of it this device knows of ([`SyncState::stamp_change`]); while a
+    /// sync is under way, after what that sync read and sent as well, as
+    /// it ends.
     pub fn sync_revived(self, ids: impl IntoIterator<Item = RecordId>) {
         let now = now_ms();
         let revived: Vec<(RecordId, u64)> = match self.sync.state.peek().as_ref() {
