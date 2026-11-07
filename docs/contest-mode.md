@@ -2958,7 +2958,11 @@ exactly as it was while the run went on.
   reads no field that holds another station's call, its own or one it
   took from you, as a copy of the station you work: it was typed for that
   station, so the station you work keeps what it had, and is named by it
-  when it gives up. So no lost copy is a call another station took from
+  when it gives up. One it read while no station had taken it, as the next
+  caller's call or a slip of it is before it goes out, was typed for
+  whichever station takes it from you later, before the copy is made: the
+  station you worked keeps the call you last sent it, as Show copy's copy
+  is settled too. So no lost copy is a call another station took from
   you, which the soak checks as each copy is lost, against the stations
   there then. It is timed as the call was when you last sent it.
 - **A NIL** (`k: "nil"`): a call group, and a group for each field as a
@@ -3986,8 +3990,9 @@ plus a mark); `scripts/callsign-prefixes.py` (zones and continents).
   else; a station you leave for another calls again; B4 and NIL send away
   only the station they are for, and the rest calls again; callers that
   only answered a partial lose no copy; a NIL like nobody's charges nobody;
-  a station left for another, even with a slip of the next call, keeps
-  the call you sent it, and Enter sends the next one your exchange; a call
+  a station left for another, even with a slip of the next call, read at
+  a key before it went out or not, keeps the call you sent it, and Enter
+  sends the next one your exchange; a call
   typed for another station at a key that sends no call is no copy of the
   one you work, nor a call kept for it once it has gone; a copy is crossed only by a
   station there when it is lost; a fix sent over a correction leaves Enter
