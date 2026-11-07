@@ -40,10 +40,21 @@ pub const BACKUP_MAX_BYTES: u64 = 1_000_000_000;
 /// while: fifty megabytes, some seven thousand sessions.
 pub const BACKUP_LARGE_BYTES: u64 = 50_000_000;
 
-/// The longest a session in a backup may be and still be read: sixteen
-/// megabytes, far more than any session comes to, at some seven kilobytes
-/// a session, or a run of an hour. One longer is left out unread.
-const SESSION_MAX_BYTES: usize = 16_000_000;
+/// The longest a session in a backup may be and still be read: four
+/// megabytes. A session is some seven kilobytes, and the longest session
+/// of groups there can be, two hundred of twenty characters each timed,
+/// some a hundred; a contest run of an hour, worked at twenty QSOs a
+/// minute, far faster than anyone works, comes to a megabyte and a half
+/// with its log. One longer is left out unread.
+const SESSION_MAX_BYTES: usize = 4_000_000;
+
+/// How much of what the sessions in a backup hold that this build does
+/// not read is kept, in all, as JSON: sixteen megabytes, a kilobyte a
+/// session that a later build added over a history of sixteen thousand.
+/// Kept as it was read, to be written back with them, it takes many times
+/// as much memory as it does in the file, so a session that would take it
+/// past this is left out, as one that does not read is ([`each_session`]).
+const UNREAD_MAX_BYTES: usize = 16_000_000;
 
 /// The longest the settings in a backup may be and still be read: a
 /// megabyte, far more than settings come to, a word list of two thousand
@@ -404,8 +415,12 @@ where
 ///
 /// Only the sessions are held as they are read: each is read from where it
 /// lies in the file, and one that does not read is left out alone. No part
-/// is read whole that is far larger than any backup's: a file of a
-/// gigabyte is read in about as much memory again.
+/// is read whole that is far longer than its kind ever is: settings longer
+/// than [`SETTINGS_MAX_BYTES`], or a session longer than
+/// [`SESSION_MAX_BYTES`]. And what the sessions hold that this build does
+/// not read is kept only up to [`UNREAD_MAX_BYTES`] in all. So what a file
+/// takes in memory is what the sessions this build reads in it take, and
+/// a bounded part beside them, whatever else it holds.
 pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
     // A mark of the encoding, as an editor saving a file may put first, is
     // no part of what it holds.
@@ -470,10 +485,17 @@ fn settings_in(raw: &str) -> TrainingSettings {
 /// Every session of `raw`, a JSON list, that reads, each read from where
 /// it lies as the list is read, and scored as sessions score today: one
 /// that does not read is left out alone, and nothing is held of it, and so
-/// is one far longer than any session ([`SESSION_MAX_BYTES`]), unread: what
-/// a session holds that this build does not read is kept as it was read,
-/// and one of a gigabyte was built up many times over. None where `raw` is
-/// no list. Beside them, how many of its elements were left out.
+/// is one far longer than any session ([`SESSION_MAX_BYTES`]), unread.
+///
+/// What a session holds that this build does not read is kept as it was
+/// read, to be written back with it, and takes many times as much memory
+/// as it does in the file: a session that would take what is kept of it
+/// past [`UNREAD_MAX_BYTES`], in all, is left out too, rather than kept
+/// without it. Bounded a session at a time, a file of sixty sessions each
+/// of sixteen megabytes of keys no build reads kept a gigabyte of them.
+///
+/// None where `raw` is no list. Beside them, how many of its elements were
+/// left out.
 fn each_session(raw: &str) -> Option<(Vec<SessionResult>, usize)> {
     use serde::Deserializer as _;
     let mut list = serde_json::Deserializer::from_str(raw);
@@ -498,17 +520,53 @@ impl<'de> serde::de::Visitor<'de> for EachSession {
 
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut list: A) -> Result<Self::Value, A::Error> {
         let (mut sessions, mut left_out) = (Vec::new(), 0);
+        // What is kept so far of what they hold that this build does not
+        // read, as JSON.
+        let mut unread = 0;
         while let Some(session) = list.next_element::<&RawValue>()? {
             let session = session.get();
             let read = (session.len() <= SESSION_MAX_BYTES)
-                .then(|| serde_json::from_str(session).ok())
+                .then(|| serde_json::from_str::<SessionResult>(session).ok())
                 .flatten();
-            match read {
-                Some(session) => sessions.push(scored(session)),
-                None => left_out += 1,
+            match read.map(|session| (unread_bytes(&session), session)) {
+                Some((more, session)) if unread + more <= UNREAD_MAX_BYTES => {
+                    unread += more;
+                    sessions.push(scored(session));
+                }
+                _ => left_out += 1,
             }
         }
         Ok((sessions, left_out))
+    }
+}
+
+/// How long what `session` holds that this build does not read is, as
+/// JSON: none where it holds nothing of the kind.
+fn unread_bytes(session: &SessionResult) -> usize {
+    let unread = &session.unread;
+    let mut counted = Counted(0);
+    for part in std::iter::once(&unread.session)
+        .chain(&unread.groups)
+        .chain(&unread.timings)
+        .filter(|part| !part.is_empty())
+    {
+        // Counting fails nowhere.
+        let _ = serde_json::to_writer(&mut counted, part);
+    }
+    counted.0
+}
+
+/// A writer that keeps nothing, and counts the bytes written to it.
+struct Counted(usize);
+
+impl Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1171,6 +1229,38 @@ mod tests {
         let dates: Vec<&str> = backup.sessions.iter().map(|s| s.date.as_str()).collect();
         assert_eq!(dates, ["2026-10-05"]);
         assert_eq!(backup.left_out, 1);
+    }
+
+    /// What the sessions of a backup hold that this build does not read is
+    /// kept, to be written back with them, only up to a bound in all: past
+    /// it, a session that holds any is left out, as one too long to read
+    /// is, and one that holds none is read all the same. And a session of
+    /// five megabytes, far longer than any session or run comes to, is too
+    /// long to read. Each was bounded on its own, at sixteen megabytes, and
+    /// all of it kept: a file of sixty such kept a gigabyte of keys no
+    /// build reads, many times over in memory.
+    #[test]
+    fn what_sessions_hold_that_this_build_does_not_read_is_kept_to_a_bound() {
+        let holding = |day: u64, bytes: usize| {
+            let mut session = serde_json::to_value(at(day, &format!("2026-10-{day:02}"))).unwrap();
+            session["later"] = "x".repeat(bytes).into();
+            session.to_string()
+        };
+        // Five that fit the bound together, and a sixth that does not.
+        let share = UNREAD_MAX_BYTES / 5 - 100;
+        let mut list: Vec<String> = (1..=6).map(|day| holding(day, share)).collect();
+        list.push(serde_json::to_string(&at(7, "2026-10-07")).unwrap());
+        let backup = read_backup(&format!("[{}]", list.join(","))).expect("a history");
+        let days: Vec<u64> = backup.sessions.iter().map(|s| s.timestamp).collect();
+        assert_eq!(days, [1, 2, 3, 4, 5, 7]);
+        assert_eq!(backup.left_out, 1);
+        let kept = backup.sessions[0].unread.session["later"].as_str();
+        assert_eq!(kept.map(str::len), Some(share), "kept as it was");
+
+        let raw = format!("[{},{}]", holding(8, 5_000_000), holding(9, 1_000));
+        let backup = read_backup(&raw).expect("a history");
+        let days: Vec<u64> = backup.sessions.iter().map(|s| s.timestamp).collect();
+        assert_eq!((days, backup.left_out), (vec![9], 1));
     }
 
     /// `backup` with none of its sessions counted as left out, as Dust
