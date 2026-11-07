@@ -1412,6 +1412,82 @@ fn sync_turned_on_anew_in_another_copy_of_the_app_is_the_sync_kept() {
     });
 }
 
+/// Sync turned off here once another copy of the app on the same store has
+/// turned it off and on anew there is off here, saying why, and the store
+/// keeps what that copy kept: that copy syncs on. Turning sync off here
+/// used to clear the store, and that copy's sync went off at its next sync.
+#[test]
+fn sync_turned_off_here_leaves_the_sync_another_copy_turned_on_anew() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_turn_off(false));
+        harness.in_app(|| window.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| window.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        let theirs = kept_device(&harness);
+        assert!(theirs.is_some(), "kept there");
+
+        harness.in_app(|| ctx.sync_turn_off(false));
+        assert_eq!(kept_device(&harness), theirs, "the other copy's");
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned on anew in another tab or window of Dust. Open Dust again here to sync."),
+            "{:?}",
+            status(&harness)
+        );
+        harness.in_app(|| window.sync_now());
+        harness.advance(100).await;
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert!(
+            matches!(there, SyncStatus::On { problem: None, .. }),
+            "{there:?}"
+        );
+    });
+}
+
+/// A sync ending the whole sync here, the copy gone from the drive, clears
+/// nothing from the store that another copy of the app on it kept there,
+/// where this copy's own was never kept there, the store refusing it: that
+/// copy's sync stays as it kept it. It used to be cleared from the store.
+#[test]
+fn a_sync_ended_here_clears_nothing_another_copy_kept() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        harness.store.sync_refused.set(true);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        harness.store.sync_refused.set(false);
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| window.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        let theirs = kept_device(&harness);
+        assert!(theirs.is_some(), "kept there");
+
+        now(delete_copy(&*remote)).expect("deleted");
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert_eq!(kept_device(&harness), theirs, "the other copy's");
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p.contains("gone")),
+            "{:?}",
+            status(&harness)
+        );
+    });
+}
+
+/// The device of the sync the store keeps, if it keeps one.
+fn kept_device(harness: &Harness) -> Option<String> {
+    let kept = harness.store.sync.borrow().clone()?;
+    Some(SyncState::read(&kept).expect("reads").device)
+}
+
 /// What a sync took from the drive and stored before a later request
 /// failed, the drive full as it sent what this device kept, is shown: the
 /// store has it, and the history here takes it up. It used to stay hidden

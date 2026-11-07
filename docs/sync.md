@@ -191,9 +191,11 @@ next syncs, or keeps what it keeps, and turns sync off too, saying so. One
 that finds there instead what another tab or window kept as it turned sync
 on anew turns off as well, saying so, rather than write its own over it:
 opened again, it syncs as that one does. Neither clears anything from the
-store. Turning it off with the copy deletes every file of Dust's from the
-folder, the keyring first, and every other device then finds it gone, says
-so, and turns sync off too.
+store, nor does a tab or window that finds the store so as sync is turned
+off in it, by hand or as the copy is gone from the drive. Turning it off
+with the copy deletes every file of Dust's from the folder, the keyring
+first, and every other device then finds it gone, says so, and turns sync
+off too.
 
 ## Setting up
 

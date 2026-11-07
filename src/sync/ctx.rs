@@ -698,8 +698,12 @@ impl AppCtx {
             return;
         };
         if !and_copy {
-            self.sync_forget();
-            self.set_sync_status(SyncStatus::Off { problem: None });
+            // Turned off, or on anew, in another copy of the app since: off
+            // here as well, saying so, the store left as that copy left it.
+            if !self.take_up_sync_off() {
+                self.sync_forget();
+                self.set_sync_status(SyncStatus::Off { problem: None });
+            }
             return;
         }
         self.set_sync_status(SyncStatus::TurningOff);
@@ -736,9 +740,23 @@ impl AppCtx {
         });
     }
 
-    /// Forget everything sync keeps here, and in the store.
+    /// Forget everything sync keeps here, and what it keeps in the store,
+    /// where the store may hold it still: not where another copy of the app
+    /// on the same store has turned sync off since, or on anew and kept its
+    /// own there, which stays ([`Self::sync_changed_elsewhere`]). A copy
+    /// looks for that as it keeps what sync keeps and as each sync ends, but
+    /// only once the store has taken its own ([`Self::take_up_sync_off`]).
     fn sync_forget(self) {
+        let ours = self
+            .sync
+            .state
+            .peek()
+            .as_ref()
+            .is_some_and(|here| self.sync_changed_elsewhere(here).is_none());
         self.forget_sync_here();
+        if !ours {
+            return;
+        }
         if let Err(why) = self.app().store.save_sync(None) {
             self.toasts.show(format!(
                 "What sync kept could not be cleared: {}.",
