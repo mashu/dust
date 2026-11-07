@@ -606,6 +606,51 @@ fn a_copy_not_deleted_is_told_of_and_no_sync_is_left_showing() {
     });
 }
 
+/// The copy not deleted, a sync follows by itself a moment later: a session
+/// kept while the deletion was under way, whose sync could not start then,
+/// goes with it. Nothing used to sync it until the next change.
+#[test]
+fn a_copy_not_deleted_syncs_what_was_kept_meanwhile() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let packs = || {
+            remote
+                .names()
+                .iter()
+                .filter(|name| name.starts_with("dust-p-"))
+                .count()
+        };
+        let before = packs();
+        held.hold(true);
+        harness.in_app(|| ctx.sync_turn_off(true));
+        harness.in_app(|| ctx.keep_finished(at(5), |_| {}));
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(status(&harness), SyncStatus::TurningOff);
+        *remote.failing.borrow_mut() = Some(RemoteError::Failed("offline".into()));
+        held.hold(false);
+        harness.advance(100).await;
+        assert!(
+            matches!(&status(&harness), SyncStatus::On { problem: Some(p), .. } if p.contains("not deleted")),
+            "{:?}",
+            status(&harness)
+        );
+        *remote.failing.borrow_mut() = None;
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(packs(), before + 1, "the session kept meanwhile");
+        assert!(matches!(
+            status(&harness),
+            SyncStatus::On {
+                syncing: false,
+                problem: None,
+                ..
+            }
+        ));
+    });
+}
+
 /// A sync asked for just as sync is turned off never starts, and sync
 /// turned on again syncs as ever.
 #[test]

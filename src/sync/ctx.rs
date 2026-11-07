@@ -583,7 +583,8 @@ impl AppCtx {
                     );
                 }
                 // Said of sync as it stands now: a sync under way as the
-                // deletion was asked for has ended since.
+                // deletion was asked for has ended since. None asked for
+                // meanwhile started, so one starts soon, where sync is on.
                 Err(err) => {
                     let problem = Some(format!("The synced copy was not deleted: {}.", err.why()));
                     let last = self.sync.state.peek().as_ref().map(|state| state.last);
@@ -596,6 +597,7 @@ impl AppCtx {
                         },
                         None => SyncStatus::Off { problem },
                     });
+                    self.sync_soon();
                 }
             }
         });
