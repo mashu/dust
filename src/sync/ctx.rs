@@ -12,13 +12,13 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use super::auth::{Auth, AuthError};
-use super::remote::{Remote, RemoteError};
+use super::remote::{Remote, RemoteError, RemoteFile};
 use super::run::{Found, SyncFailed, Synced, delete_copy, join, look, sync_once};
 use super::seal::{MIN_PASSPHRASE, Stretch};
 use super::settings::{as_keys, settings_keys};
 use super::state::SyncState;
 use super::text::random_hex;
-use crate::persist::record::RecordId;
+use crate::persist::record::{Pending, RecordId, done};
 use crate::persist::{Store, merge_settings};
 use crate::state::AppCtx;
 use crate::time::{POLL_MS, now_ms, sleep_ms};
@@ -421,14 +421,21 @@ impl AppCtx {
             state.revived.extend(take(self.sync.revived));
             let here = self.settings.peek().clone().clamp();
             let store = self.app().store;
-            let synced = sync_once(&*store, &*link.remote, &mut state, &here, now_ms()).await;
+            let remote = WhileCurrent {
+                remote: &*link.remote,
+                current: move || *self.sync.epoch.peek() == epoch,
+            };
+            let synced = sync_once(&*store, &remote, &mut state, &here, now_ms()).await;
             if *self.sync.epoch.peek() != epoch {
                 // Sync was turned off meanwhile, or turned on anew: what
                 // this sync stored is taken up, and none of what it would
                 // keep is kept. What was put back by hand since is sync's
-                // as it is now, and waits for its next sync.
-                if let Ok(synced) = &synced {
-                    self.take_up_synced(synced);
+                // as it is now, and waits for its next sync. One stopped
+                // as it asked the drive for more may have stored what it
+                // took before then.
+                match &synced {
+                    Ok(synced) => self.take_up_synced(synced),
+                    Err(_) => self.take_up_store(),
                 }
                 self.sync_over();
                 return;
@@ -685,6 +692,52 @@ impl AppCtx {
         let store = self.app().store;
         self.sync = crate::state::in_root(|| SyncCtx::linked(&*store, Some(link)));
         self
+    }
+}
+
+/// The folder as a sync sees it, `remote`, while `current` says sync is
+/// still as it was as the sync began: once it is turned off, or on anew,
+/// nothing more is asked of the folder. The sign-in may by then be another
+/// account's, whose drive a sync begun before must not write into, sealed
+/// with a key that account's sync does not go by.
+struct WhileCurrent<'a, F> {
+    remote: &'a dyn Remote,
+    current: F,
+}
+
+impl<F: Fn() -> bool> WhileCurrent<'_, F> {
+    /// What `asked` of the folder comes to, while sync is as it was.
+    fn ask<T: 'static>(
+        &self,
+        asked: impl FnOnce(&dyn Remote) -> Pending<Result<T, RemoteError>>,
+    ) -> Pending<Result<T, RemoteError>> {
+        if (self.current)() {
+            asked(self.remote)
+        } else {
+            done(Err(RemoteError::Failed("sync was turned off".into())))
+        }
+    }
+}
+
+impl<F: Fn() -> bool> Remote for WhileCurrent<'_, F> {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        self.ask(|remote| remote.list())
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        self.ask(|remote| remote.get(id))
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        self.ask(|remote| remote.create(name, bytes))
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        self.ask(|remote| remote.update(id, bytes))
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        self.ask(|remote| remote.delete(id))
     }
 }
 

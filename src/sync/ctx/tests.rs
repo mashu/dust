@@ -664,6 +664,56 @@ fn sync_turned_off_while_it_syncs_stays_off() {
     });
 }
 
+/// A sync under way as sync is turned off asks nothing more of the drive
+/// than the request it waits on: by its next, the sign-in may be another
+/// account's, whose drive it would write into, sealed with a key that
+/// account's sync does not go by. It used to go on to its end.
+#[test]
+fn a_sync_under_way_as_sync_is_turned_off_asks_nothing_more_of_the_drive() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        keep(&harness, &[5]);
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| ctx.sync_turn_off(false));
+        let asked = || (remote.lists.get(), remote.gets.get(), remote.writes.get());
+        let (lists, gets, writes) = asked();
+        held.hold(false);
+        harness.advance(100).await;
+        assert_eq!(
+            asked(),
+            (lists + 1, gets, writes),
+            "the one waited on alone"
+        );
+    });
+}
+
+/// What a sync stored before sync was turned off is shown, though the sync
+/// stops as it asks the drive for more: the sessions it took from the drive
+/// are here.
+#[test]
+fn what_a_sync_stopped_by_turning_sync_off_took_is_shown() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        another_device(&remote, "a long passphrase", &[1, 2]);
+        keep(&harness, &[5]);
+        held.hold_writes(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| ctx.sync_turn_off(false));
+        held.hold_writes(false);
+        harness.advance(100).await;
+        assert_eq!(stamps(&harness), [1, 2, 5]);
+    });
+}
+
 /// A sync due a moment after a change does not start while the copy is
 /// being deleted: every file of Dust's goes, and sync is off without a
 /// word of trouble.
