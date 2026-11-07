@@ -93,7 +93,8 @@ pub struct Here<'a> {
     pub listed: &'a BTreeSet<RecordId>,
     /// Of the records the drive holds and the store does not list, those it
     /// deleted by hand: of those the drive holds alive, and of those it
-    /// deleted since the last sync.
+    /// deleted since the last sync, or since this device put them back by
+    /// hand.
     pub forgotten: &'a BTreeSet<RecordId>,
     /// The deletions here the drive holds, each with the time of the
     /// drive's deletion: those taken from the drive and made here, and

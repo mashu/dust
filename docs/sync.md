@@ -59,8 +59,9 @@ by a restore, after a deletion the drive holds is sent as *put back*, so
 that the deletion does not take it again; a device that let it go takes it
 back, and so does a device that deleted it by hand, whose deletion the
 drive holds then, sent from it or made on another device as well, rather
-than send it again. A putting back as late as a deletion stands, here as in
-the drive.
+than send it again. Deleted by hand again after it is put back here, it is
+a deletion by hand as any other, whatever was noted of the one before. A
+putting back as late as a deletion stands, here as in the drive.
 Missing is never deleted: a record is let go only for a deletion.
 A deletion or a putting back is stamped when it is made, or just after the
 latest of the record the device knows the drive to hold, where that is

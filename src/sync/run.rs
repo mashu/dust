@@ -300,6 +300,13 @@ pub async fn sync_once(
         .ok_or_else(|| SyncFailed::Store("the history here could not be read".into()))?
         .into_iter()
         .collect();
+    // A deletion the drive holds is the last word here only while the
+    // session stays gone: one listed here again, or put back here by hand
+    // since the last sync, and deleted after, was deleted by hand, which
+    // the drive is to hear of, or which a deletion it holds accounts for.
+    state
+        .applied
+        .retain(|id, _| !listed.contains(id) && !state.revived.contains_key(id));
     let mut planned = planned(store, &drive, &listed, state).await;
     // A record to take that only a pack read before holds, as where the
     // store here lost one: every pack read again, once.
@@ -393,12 +400,9 @@ pub async fn sync_once(
         synced.took = change.put.len();
         synced.let_go = change.forget.len();
     }
-    // A deletion the drive holds is the last word here only while the
-    // session stays gone: one listed here again, put back by hand say, and
-    // deleted after, was deleted by hand, which the drive is to hear of.
-    // Noted: those let go here, and those deleted here by hand that the
+    // The deletions the drive holds that account for a session gone here,
+    // noted: those let go here, and those deleted here by hand that the
     // drive deleted as well.
-    state.applied.retain(|id, _| !listed.contains(id));
     for &(id, at) in planned.let_go.iter().chain(&planned.deleted_too) {
         state.applied.insert(id, at);
     }
@@ -473,8 +477,10 @@ pub async fn sync_once(
 
 /// The plan for this sync, the store asked which of what the drive holds
 /// and it does not list it deleted by hand: of what the drive holds alive,
-/// and of what it deleted since the last sync that this device has no note
-/// of, as a session deleted on two devices before either synced.
+/// and of what it holds as deleted that this device has no note of, where
+/// the drive deleted it since the last sync, as a session deleted on two
+/// devices before either synced, or this device put it back by hand since
+/// and deleted it again.
 async fn planned(
     store: &dyn Store,
     drive: &DriveState,
@@ -482,7 +488,9 @@ async fn planned(
     state: &SyncState,
 ) -> Plan {
     let deleted_since = drive.tombs.keys().copied().filter(|&id| {
-        drive.deleted(id) && !state.drive.deleted(id) && !state.applied.contains_key(&id)
+        drive.deleted(id)
+            && (!state.drive.deleted(id) || state.revived.contains_key(&id))
+            && !state.applied.contains_key(&id)
     });
     let missing: Vec<RecordId> = drive
         .alive_ids()
