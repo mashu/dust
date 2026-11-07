@@ -247,19 +247,57 @@ async fn read_text(file: &FileData) -> Option<String> {
         return text;
     }
     #[cfg(all(feature = "web", not(test)))]
-    if let Some(file) = file.inner().downcast_ref::<web_sys::File>() {
+    if let Some(file) = file.inner().downcast_ref::<web_sys::File>()
+        && reads_by_promise(file)
+    {
         if file.size() > SLICE_BYTES as f64 {
             return read_in_slices(file).await;
         }
         // Through the browser's own promise, which fails with a file it
         // cannot read, as one moved since it was chosen: the file input's
         // reader hears only a file read, and waits for good on any other.
-        return wasm_bindgen_futures::JsFuture::from(file.text())
+        // What it reads is decoded as that reader decodes it.
+        let read = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
             .await
-            .ok()?
-            .as_string();
+            .ok()?;
+        return Some(text_of(&js_sys::Uint8Array::new(&read).to_vec()));
     }
     file.read_string().await.ok()
+}
+
+/// Whether this browser reads a file through a promise of its own
+/// (`Blob.arrayBuffer`), as every one has since Safari 14: called where
+/// there is none, it would throw through the app. Where there is none, the
+/// file input's reader reads the file.
+#[cfg(all(feature = "web", not(test)))]
+fn reads_by_promise(file: &web_sys::File) -> bool {
+    js_sys::Reflect::get(file, &wasm_bindgen::JsValue::from_str("arrayBuffer"))
+        .is_ok_and(|read| read.is_function())
+}
+
+/// What `bytes`, a whole file, hold as text, decoded by their byte order
+/// mark as a browser's file reader decodes them: UTF-16, little-endian or
+/// big, where they start with its mark, as Windows' Notepad and Excel save
+/// "Unicode" text; else UTF-8, its own mark left out. A byte, or a pair,
+/// that is no character is read as a mark for one, as the reader reads it.
+#[cfg(any(feature = "web", test))]
+fn text_of(bytes: &[u8]) -> String {
+    let utf16 = |bytes: &[u8], unit: fn([u8; 2]) -> u16| {
+        let (pairs, cut) = bytes.as_chunks::<2>();
+        let mut text: String = char::decode_utf16(pairs.iter().map(|pair| unit(*pair)))
+            .map(|read| read.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+        if !cut.is_empty() {
+            text.push(char::REPLACEMENT_CHARACTER);
+        }
+        text
+    };
+    match bytes {
+        [0xff, 0xfe, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xfe, 0xff, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        [0xef, 0xbb, 0xbf, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
 }
 
 /// What the file at `path` holds, as text, read on a thread of its own:
@@ -518,7 +556,7 @@ pub fn FileButton(
 mod tests {
     use super::{
         ChosenFile, Piece, Pieces, SLICE_BYTES, data_dirs, on_path, picker_script,
-        portal_chooses_files, utf8_up_to,
+        portal_chooses_files, text_of, utf8_up_to,
     };
     use crate::testing::{PageStep, on_fake_page};
     use serde_json::Value;
@@ -716,6 +754,34 @@ document.body.appendChild = (input) => {
         film.extend([0x93, 0xff, 0x00]);
         assert_eq!(utf8_up_to(&film, 0), None);
         assert_eq!(utf8_up_to(&film, 4), None, "past the slices before");
+    }
+
+    /// A file a browser reads whole is decoded by its byte order mark, as
+    /// the file input's reader decodes one: UTF-16, little-endian or big,
+    /// as Windows' Notepad and Excel save "Unicode" text, and else UTF-8,
+    /// its own mark left out; a byte, or a pair, that is no character is
+    /// read as a mark for one, as the reader reads it. Read through the
+    /// browser's promise as UTF-8 whatever its mark, a word list saved as
+    /// UTF-16 came back as garbage, its mark read as two marks and a NUL
+    /// after every letter.
+    #[test]
+    fn a_file_read_whole_is_decoded_by_its_byte_order_mark() {
+        let words = "CQ\r\nDE é\r\n";
+        let utf16 = |mark: [u8; 2], unit: fn(u16) -> [u8; 2]| -> Vec<u8> {
+            mark.into_iter()
+                .chain(words.encode_utf16().flat_map(unit))
+                .collect()
+        };
+        assert_eq!(text_of(&utf16([0xff, 0xfe], u16::to_le_bytes)), words);
+        assert_eq!(text_of(&utf16([0xfe, 0xff], u16::to_be_bytes)), words);
+        let marked: Vec<u8> = [0xef, 0xbb, 0xbf]
+            .into_iter()
+            .chain(words.bytes())
+            .collect();
+        assert_eq!(text_of(&marked), words);
+        assert_eq!(text_of(words.as_bytes()), words);
+        assert_eq!(text_of(&[b'C', 0xff, b'Q']), "C\u{fffd}Q");
+        assert_eq!(text_of(&[0xff, 0xfe, b'C', 0, b'Q']), "C\u{fffd}");
     }
 
     /// The phone's picker reads a file as UTF-8 or not at all, as a computer
