@@ -723,10 +723,19 @@ impl MemoryStore {
     /// Store `raw` as a record of its own after every other, the way a
     /// newer build or a damaged disk leaves one this build cannot read.
     pub fn plant_unreadable(&self, raw: &str) -> RecordId {
-        let mut records = self.records.borrow_mut();
-        let newest = records.keys().next_back().copied();
-        let id = RecordId::next(0, newest, raw);
-        records.insert(
+        let newest = self.records.borrow().keys().next_back().copied();
+        self.plant_unreadable_as(RecordId::next(0, newest, raw), raw)
+    }
+
+    /// Store `raw` as a record of its own where a session that finished at
+    /// `timestamp` goes, the way a newer build or a damaged disk leaves one
+    /// this build cannot read.
+    pub fn plant_unreadable_at(&self, timestamp: u64, raw: &str) -> RecordId {
+        self.plant_unreadable_as(RecordId::next(timestamp, None, raw), raw)
+    }
+
+    fn plant_unreadable_as(&self, id: RecordId, raw: &str) -> RecordId {
+        self.records.borrow_mut().insert(
             id,
             Held {
                 json: raw.to_string(),
@@ -736,6 +745,14 @@ impl MemoryStore {
         self.stored.set(true);
         self.changed_here();
         id
+    }
+
+    /// Have the record `id` hold `raw` from now on, under the same name:
+    /// one that could not be read for a moment, and reads now.
+    pub fn mend(&self, id: RecordId, raw: &str) {
+        if let Some(held) = self.records.borrow_mut().get_mut(&id) {
+            held.json = raw.to_string();
+        }
     }
 
     /// The tombstone of the record `id`, if it was deleted.

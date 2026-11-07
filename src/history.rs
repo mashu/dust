@@ -181,6 +181,22 @@ impl StoredHistory {
         self.unread.insert(id);
     }
 
+    /// The records `ids`, of those this build could not read, are no
+    /// longer stored.
+    pub fn forget_unread(&mut self, ids: &[RecordId]) {
+        for id in ids {
+            self.unread.remove(id);
+        }
+    }
+
+    /// The record `id`, which this build could not read, reads after all,
+    /// as one a moment's failure kept from being read does: `session` goes
+    /// in its place.
+    pub fn read_after_all(&mut self, id: RecordId, session: SessionResult) {
+        self.unread.remove(&id);
+        self.insert(id, session);
+    }
+
     /// How many changes the history has had: one more for every session
     /// put in or taken out, and for nothing else written of it.
     pub fn generation(&self) -> u64 {

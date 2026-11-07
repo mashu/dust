@@ -685,8 +685,10 @@ impl AppCtx {
     /// not here is read and put in its place, and each here that is no
     /// longer listed goes, if it was deleted by hand. One missing for any
     /// other reason is stored again: missing is never deleted. What is here
-    /// and not stored yet is left as it is, to be stored. The settings are
-    /// merged as [`Self::store_settings`] merges them, writing nothing.
+    /// and not stored yet is left as it is, to be stored. A record this
+    /// build could not read that is no longer listed is no longer held for
+    /// one stored ([`StoredHistory::unread`]). The settings are merged as
+    /// [`Self::store_settings`] merges them, writing nothing.
     ///
     /// A restore and a backup go by what the store holds, not by what this
     /// copy last saw of it: a restore merged with a history another copy
@@ -734,6 +736,7 @@ impl AppCtx {
                 .filter(|id| !unsaved.contains(id))
                 .copied()
                 .collect();
+            let unread_gone: Vec<RecordId> = unread.difference(&there).copied().collect();
             let read = if new.is_empty() {
                 Vec::new()
             } else {
@@ -748,6 +751,7 @@ impl AppCtx {
                 read,
                 missing,
                 forgotten,
+                unread_gone,
             })
         });
         settle_or_spawn(looking, move |looked| {
@@ -770,9 +774,17 @@ impl AppCtx {
             read,
             missing,
             forgotten,
+            unread_gone,
         } = looked;
         let forgotten: HashSet<RecordId> = forgotten.into_iter().collect();
         let mut sessions = self.sessions;
+        let gone = {
+            let history = sessions.peek();
+            unread_gone.iter().any(|id| history.unread().contains(id))
+        };
+        if gone {
+            sessions.write().forget_unread(&unread_gone);
+        }
         let changes = {
             let history = sessions.peek();
             read.iter().any(|record| match record {
@@ -1271,7 +1283,9 @@ impl AppCtx {
     /// time, a session another copy stored since. So does one that lists a
     /// record it cannot read for now, the first time a restore finds it
     /// so: one still unread at a later restore is taken as one that cannot
-    /// be read at all, and refuses no restore again.
+    /// be read at all, and refuses no restore again. A session of the
+    /// backup that a record stored here may hold, though this build cannot
+    /// read it, is looked at first ([`Self::restore_beside`]).
     ///
     /// Each session it adds is a record where it finished
     /// ([`RecordId::placed`]), so two copies restoring one backup store it
@@ -1291,26 +1305,104 @@ impl AppCtx {
             return;
         }
         under_way.set(true);
-        self.sync_with_store(move |unread| {
-            let mut refused_for = self.restore_refused_for;
-            let ready = unread.is_some_and(|unread| {
-                let new: Vec<RecordId> = unread
-                    .into_iter()
-                    .filter(|id| !refused_for.peek().contains(id))
-                    .collect();
-                let ready = new.is_empty();
-                refused_for.write().extend(new);
-                ready
-            });
-            if ready {
-                self.restore_now(backup);
-                return;
-            }
-            if let Some(why) = why_not_stored(&HistorySaved::Held) {
-                self.toasts.show(format!("Nothing was restored: {why}."));
-            }
-            self.restore_over();
+        self.sync_with_store(move |unread| match unread {
+            Some(unread) => self.restore_beside(backup, unread),
+            None => self.restore_refused(),
         });
+    }
+
+    /// Restore `backup` ([`Self::restore_backup`]), the store looked at,
+    /// `unread` being the records it listed and could not read.
+    ///
+    /// Each record here this build could not read, as the app opened or as
+    /// a look found it, that is named for when a session of the backup not
+    /// here finished is read again first, as that session may be its own:
+    /// - one that reads now, as one a moment's failure kept from being read
+    ///   does, is taken up, and the backup's session merged with it;
+    /// - one that holds a session this build cannot read, as a later build
+    ///   stores one, leaves out each session of the backup that finished
+    ///   when it says its own did, and the user is told: merged with a
+    ///   history short of it, the backup would store that session a second
+    ///   time, beside the record a later build shows;
+    /// - one that holds no session at all, damaged, leaves the backup's to
+    ///   be restored beside it: no build reads it, and the backup may hold
+    ///   the only copy of that session there is;
+    /// - one that cannot be read now counts as one the look could not read.
+    ///
+    /// A record is named for when its session finished, but for one a
+    /// clock set back placed after the newest ([`RecordId::next`]).
+    fn restore_beside(self, backup: Backup, unread: Vec<RecordId>) {
+        let again: Vec<RecordId> = {
+            let history = self.sessions.peek();
+            let finished: HashSet<u64> = backup
+                .sessions
+                .iter()
+                .filter(|session| !history.has_key(&SessionKey::of(session)))
+                .map(|session| session.timestamp)
+                .collect();
+            history
+                .unread()
+                .iter()
+                .filter(|id| finished.contains(&(id.order / 1000)))
+                .copied()
+                .collect()
+        };
+        if again.is_empty() {
+            self.restore_unless_unread(backup, unread, &HashSet::new());
+            return;
+        }
+        let reading = self.app().store.read_records(again);
+        settle_or_spawn(reading, move |read| {
+            let mut unread = unread;
+            let mut later = HashSet::new();
+            let mut reads_now = Vec::new();
+            for record in read {
+                match record {
+                    Err(id) => unread.push(id),
+                    Ok(record) => match read_record(&record.json) {
+                        Some(session) => reads_now.push((record.id, session)),
+                        None => later.extend(finished_at(&record.json)),
+                    },
+                }
+            }
+            if !reads_now.is_empty() {
+                let mut sessions = self.sessions;
+                let mut history = sessions.write();
+                for (id, session) in reads_now {
+                    history.read_after_all(id, session);
+                }
+            }
+            self.restore_unless_unread(backup, unread, &later);
+        });
+    }
+
+    /// Restore `backup`, leaving out each session of it that finished at
+    /// one of the moments `later` ([`Self::restore_beside`]), unless the
+    /// store holds a record it could not read for now, `unread`, that no
+    /// restore was refused for yet: that refuses this one, and the user is
+    /// told why.
+    fn restore_unless_unread(self, backup: Backup, unread: Vec<RecordId>, later: &HashSet<u64>) {
+        let mut refused_for = self.restore_refused_for;
+        let new: Vec<RecordId> = unread
+            .into_iter()
+            .filter(|id| !refused_for.peek().contains(id))
+            .collect();
+        if new.is_empty() {
+            self.restore_now(backup, later);
+        } else {
+            refused_for.write().extend(new);
+            self.restore_refused();
+        }
+    }
+
+    /// Nothing is restored, and the user is told why: the store could not
+    /// be listed, or listed a record it could not read for now
+    /// ([`Self::restore_backup`]).
+    fn restore_refused(self) {
+        if let Some(why) = why_not_stored(&HistorySaved::Held) {
+            self.toasts.show(format!("Nothing was restored: {why}."));
+        }
+        self.restore_over();
     }
 
     /// Whether a restore is under way ([`Self::restore_backup`]).
@@ -1330,7 +1422,12 @@ impl AppCtx {
         }
     }
 
-    fn restore_now(self, backup: Backup) {
+    /// Restore `backup` ([`Self::restore_backup`]), each session of it that
+    /// finished at one of the moments `later` left out, where the history
+    /// holds none like it: a record stored here that this build cannot
+    /// read says it holds the session that finished then
+    /// ([`Self::restore_beside`]).
+    fn restore_now(self, backup: Backup, later: &HashSet<u64>) {
         // As of when it was saved, or now, if a clock set ahead says later.
         let saved_at = backup.saved_at.min(now_ms());
         let at = now_ms();
@@ -1339,17 +1436,21 @@ impl AppCtx {
             restore: true,
             ..HistoryChange::default()
         };
-        let (backed_up, merged, filled_ids) = {
+        let (backed_up, merged, filled_ids, beside_unread) = {
             let history = self.sessions.peek();
             let backed_up = covers_up_to(&backup.sessions, &history, saved_at);
-            let merged = merge_sessions(&history, backup.sessions);
+            let (sessions, beside_unread): (Vec<SessionResult>, Vec<SessionResult>) =
+                backup.sessions.into_iter().partition(|session| {
+                    !later.contains(&session.timestamp) || history.has_key(&SessionKey::of(session))
+                });
+            let merged = merge_sessions(&history, sessions);
             // Each it fills in by its record, where it is now.
             let filled_ids: Vec<Option<RecordId>> = merged
                 .filled
                 .iter()
                 .map(|fill| history.id_at(fill.at))
                 .collect();
-            (backed_up, merged, filled_ids)
+            (backed_up, merged, filled_ids, beside_unread.len())
         };
         let mut added = Vec::new();
         for session in merged.added {
@@ -1399,6 +1500,7 @@ impl AppCtx {
                     filled,
                     brought,
                     left_out,
+                    beside_unread,
                     backed_up,
                     saved_at,
                     restored_at,
@@ -1417,6 +1519,7 @@ impl AppCtx {
             filled,
             brought,
             left_out,
+            beside_unread,
             backed_up,
             saved_at,
             restored_at,
@@ -1489,7 +1592,7 @@ impl AppCtx {
         let (added_count, filled_count) = (added.len(), filled.len());
         // Every session in it was here already: it brought none, and left
         // none out, which may not be here.
-        let all_here = !brought && left_out == 0;
+        let all_here = !brought && left_out == 0 && beside_unread == 0;
         let mut text = match (added_count, filled_count, with_settings) {
             (0, 0, true) if all_here => {
                 format!("Restored your settings{from}. Every session in it was already here.")
@@ -1517,6 +1620,9 @@ impl AppCtx {
             ),
         };
         if let Some(told) = Backup::told_left_out(left_out) {
+            text = format!("{text} {told}");
+        }
+        if let Some(told) = told_beside_unread(beside_unread) {
             text = format!("{text} {told}");
         }
         if let Some(problem) = saved.problem() {
@@ -1708,6 +1814,9 @@ struct Looked {
     missing: Vec<RecordId>,
     /// Of those, the ones deleted by hand.
     forgotten: Vec<RecordId>,
+    /// Each record here this build could not read that was no longer
+    /// listed.
+    unread_gone: Vec<RecordId>,
 }
 
 /// A restore on its way to the store ([`AppCtx::restored`]).
@@ -1718,6 +1827,10 @@ struct Restoring {
     brought: bool,
     /// How many of its sessions this version could not read, and left out.
     left_out: usize,
+    /// How many of its sessions it left out, as records stored here that
+    /// this build cannot read say they hold them
+    /// ([`AppCtx::restore_beside`]).
+    beside_unread: usize,
     /// Whether it holds everything that had finished here by then.
     backed_up: bool,
     /// When it was saved, as the backup mark counts it.
@@ -1746,6 +1859,36 @@ struct FilledIn {
     now: SessionResult,
     was_id: RecordId,
     was: SessionResult,
+}
+
+/// When the session a record holds says it finished, where the record is
+/// JSON that says so, though this build cannot read it as a session: one a
+/// later build stored, most likely ([`AppCtx::restore_beside`]). A damaged
+/// record says nothing.
+fn finished_at(json: &str) -> Option<u64> {
+    #[derive(serde::Deserialize)]
+    struct Finished {
+        timestamp: u64,
+    }
+    serde_json::from_str::<Finished>(json)
+        .ok()
+        .map(|finished| finished.timestamp)
+}
+
+/// What to say of the sessions of a backup a restore left out, `count` of
+/// them, as records stored here that this build cannot read say they hold
+/// them ([`AppCtx::restore_beside`]): nothing, where there are none.
+fn told_beside_unread(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some(
+            "1 session in it was left out: a session from the same moment is stored here in a form this version cannot read, and is left as it is."
+                .to_string(),
+        ),
+        count => Some(format!(
+            "{count} sessions in it were left out: sessions from the same moments are stored here in a form this version cannot read, and are left as they are."
+        )),
+    }
 }
 
 /// Whether `backup`, saved at `saved_at`, holds every one of `here` that
@@ -2702,6 +2845,123 @@ mod tests {
         assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4], "refused once");
         restore(&a, [5]);
         assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4, 5]);
+    }
+
+    /// What a later build stores of a session finished on day 2, in a form
+    /// this build cannot read.
+    fn day_2_as_a_later_build_stores_it() -> String {
+        format!(
+            r#"{{"date":"2026-10-02","timestamp":{},"by":"a later build"}}"#,
+            stamp(2)
+        )
+    }
+
+    /// A restore leaves out the backup's session from the moment of a
+    /// record stored here that this build cannot read, where the record
+    /// says it holds a session that finished then, as a later build stores
+    /// one: a later build reads it, and would show that session twice. The
+    /// user is told, and the record is left as it is, however often the
+    /// restore is asked for. The backup stored each such session a second
+    /// time, beside its record.
+    #[test]
+    fn a_restore_stores_nothing_twice_beside_a_session_a_later_build_stored() {
+        let store = holding([1]);
+        let later = day_2_as_a_later_build_stores_it();
+        let unread = store.plant_unreadable_at(stamp(2), &later);
+        let a = Tab::on(&store);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings. 1 session in it was left out: a session from the same moment is stored here in a form this version cannot read, and is left as it is."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 3]);
+        assert_eq!(store.record(unread), Some(later), "left as it is");
+        restore(&a, [2]);
+        assert_eq!(days(&store.load_sessions()), [1, 3], "however often");
+        assert_eq!(a.shown(), [1, 3]);
+    }
+
+    /// A restore brings back the backup's session from the moment of a
+    /// record stored here that holds no session at all, damaged: no build
+    /// reads that record, and the backup may hold the only copy of its
+    /// session there is. The record is left as it is.
+    #[test]
+    fn a_restore_brings_back_a_session_whose_record_here_is_damaged() {
+        let store = holding([1]);
+        let damaged = store.plant_unreadable_at(stamp(2), "{ damaged");
+        let a = Tab::on(&store);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 2 sessions and your settings."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        assert_eq!(store.record(damaged).as_deref(), Some("{ damaged"));
+    }
+
+    /// A record that could not be read as the app opened, and reads now, is
+    /// taken up by a restore whose backup holds a session from its moment,
+    /// and the backup's session is merged with it: stored once, under the
+    /// record's own name. It stayed unread until the app opened again, and
+    /// the backup stored its session a second time, beside it.
+    #[test]
+    fn a_restore_takes_up_a_record_unread_as_the_app_opened_that_reads_now() {
+        let store = holding([1]);
+        let unread = store.plant_unreadable_at(stamp(2), "{ cut short");
+        let a = Tab::on(&store);
+        assert_eq!(a.shown(), [1]);
+        store.mend(unread, &serde_json::to_string(&day(2)).expect("writes"));
+        restore(&a, [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3], "each once");
+        assert_eq!(a.shown(), [1, 2, 3]);
+        assert_eq!(a.id_of(2), unread, "under its own name");
+    }
+
+    /// A record that could not be read as the app opened, and cannot be
+    /// read at all now, refuses a restore whose backup holds a session from
+    /// its moment the first time, as one a look cannot read does: it may
+    /// be that session, in a form a later build reads. Asked for again, the
+    /// restore brings the session back beside it. It used to bring it back
+    /// at once.
+    #[test]
+    fn a_restore_beside_a_record_that_cannot_be_read_now_is_refused_once() {
+        let store = holding([1]);
+        let unread = store.plant_unreadable_at(stamp(2), &day_2_as_a_later_build_stores_it());
+        let a = Tab::on(&store);
+        store.held_open.borrow_mut().insert(unread);
+        restore(&a, [1, 2, 3]);
+        assert!(
+            a.toast()
+                .is_some_and(|toast| toast.text.starts_with("Nothing was restored:")),
+            "{:?}",
+            a.toast()
+        );
+        assert_eq!(days(&store.load_sessions()), [1], "nothing restored");
+        restore(&a, [1, 2, 3]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+    }
+
+    /// A record this build could not read, deleted in another copy of the
+    /// app, is no longer held as stored once a look finds it gone: a
+    /// restore whose backup holds a session from its moment brings that
+    /// session back at once, refused for no record that is not there.
+    #[test]
+    fn a_record_unread_here_and_gone_since_refuses_no_restore() {
+        let store = holding([1]);
+        let unread = store.plant_unreadable_at(stamp(2), &day_2_as_a_later_build_stores_it());
+        let a = Tab::on(&store);
+        store.lose(unread);
+        restore(&a, [2]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2]);
+        assert!(a.act(|ctx| ctx.sessions.peek().unread().is_empty()));
     }
 
     /// A store that takes no change leaves a restore, and its Undo, undone,
