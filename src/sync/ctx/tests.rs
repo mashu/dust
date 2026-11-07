@@ -528,6 +528,55 @@ fn a_sync_due_while_the_copy_is_deleted_does_not_start() {
     });
 }
 
+/// The copy not deleted, the card says so, and shows sync as it stands:
+/// no sync left under way that ended as the deletion waited for it.
+#[test]
+fn a_copy_not_deleted_is_told_of_and_no_sync_is_left_showing() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(matches!(
+            status(&harness),
+            SyncStatus::On { syncing: true, .. }
+        ));
+        harness.in_app(|| ctx.sync_turn_off(true));
+        *remote.failing.borrow_mut() = Some(RemoteError::Failed("offline".into()));
+        held.hold(false);
+        harness.advance(100).await;
+        assert!(
+            matches!(
+                status(&harness),
+                SyncStatus::On {
+                    last: Some(_),
+                    syncing: false,
+                    problem: Some(p),
+                    needs_sign_in: false,
+                } if p.contains("not deleted: offline")
+            ),
+            "{:?}",
+            status(&harness)
+        );
+        assert!(harness.store.sync.borrow().is_some(), "still on here");
+        // Back online, it syncs as ever.
+        *remote.failing.borrow_mut() = None;
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(matches!(
+            status(&harness),
+            SyncStatus::On {
+                syncing: false,
+                problem: None,
+                ..
+            }
+        ));
+    });
+}
+
 /// A sync asked for just as sync is turned off never starts, and sync
 /// turned on again syncs as ever.
 #[test]

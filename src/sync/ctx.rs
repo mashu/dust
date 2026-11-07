@@ -556,7 +556,6 @@ impl AppCtx {
             self.set_sync_status(SyncStatus::Off { problem: None });
             return;
         }
-        let before = self.sync.status.peek().clone();
         self.set_sync_status(SyncStatus::TurningOff);
         spawn_forever(async move {
             while *self.sync.running.peek() {
@@ -570,10 +569,19 @@ impl AppCtx {
                         "Sync is off, and the synced copy is deleted from your Google Drive.",
                     );
                 }
+                // Said of sync as it stands now: a sync under way as the
+                // deletion was asked for has ended since.
                 Err(err) => {
-                    self.set_sync_status(before);
-                    self.change_on_status(|_, _, problem, _| {
-                        *problem = Some(format!("The synced copy was not deleted: {}.", err.why()));
+                    let problem = Some(format!("The synced copy was not deleted: {}.", err.why()));
+                    let last = self.sync.state.peek().as_ref().map(|state| state.last);
+                    self.set_sync_status(match last {
+                        Some(last) => SyncStatus::On {
+                            last,
+                            syncing: *self.sync.running.peek(),
+                            problem,
+                            needs_sign_in: err == RemoteError::SignIn,
+                        },
+                        None => SyncStatus::Off { problem },
                     });
                 }
             }
