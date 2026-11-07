@@ -218,9 +218,9 @@ async fn read_chosen(file: FileData, max_bytes: u64) -> ChosenFile {
     ChosenFile { name, size, text }
 }
 
-/// What `file` holds, as text: none where it cannot be read as text. A
-/// computer reads it on a thread of its own, and a browser a slice at a
-/// time where it is large.
+/// What `file` holds, as text: none where it cannot be read as text, or
+/// cannot be read at all. A computer reads it on a thread of its own, and a
+/// browser a slice at a time where it is large.
 async fn read_text(file: &FileData) -> Option<String> {
     #[cfg(test)]
     crate::testing::reading_a_file(&file.name()).await;
@@ -229,10 +229,17 @@ async fn read_text(file: &FileData) -> Option<String> {
         return text;
     }
     #[cfg(all(feature = "web", not(test)))]
-    if file.size() > SLICE_BYTES
-        && let Some(file) = file.inner().downcast_ref::<web_sys::File>()
-    {
-        return read_in_slices(file).await;
+    if let Some(file) = file.inner().downcast_ref::<web_sys::File>() {
+        if file.size() > SLICE_BYTES as f64 {
+            return read_in_slices(file).await;
+        }
+        // Through the browser's own promise, which fails with a file it
+        // cannot read, as one moved since it was chosen: the file input's
+        // reader hears only a file read, and waits for good on any other.
+        return wasm_bindgen_futures::JsFuture::from(file.text())
+            .await
+            .ok()?
+            .as_string();
     }
     file.read_string().await.ok()
 }
