@@ -652,15 +652,21 @@ fn a_session_under_two_names_not_alike_is_kept_both_ways() {
     assert_eq!(listing(&phone.store), listing(&computer.store));
 }
 
-/// A pack a later build wrote, which this one cannot read, is told of and
-/// read again at each sync, not passed over for good: what it holds
-/// arrives once this device reads it.
+/// A pack a later build wrote, which this one cannot read, is told of at
+/// each sync as a later build's, not as damaged, and fetched once: not
+/// passed over for good, it is read again once a build of a later layout
+/// is here, and what it holds arrives then. It used to be fetched again,
+/// and told of as damaged, at every sync.
 #[test]
-fn a_pack_of_a_later_build_is_read_again_until_it_reads() {
+fn a_pack_of_a_later_build_is_told_of_and_read_once_dust_is_updated() {
     let remote = MemoryRemote::default();
     let mut phone = Device::keeping(&[]);
     phone.turn_on(&remote, "passphrase").expect("on");
     phone.sync(&remote, 100).expect("synced");
+    // What a sync with nothing new to read fetches.
+    let gets = remote.gets.get();
+    phone.sync(&remote, 105).expect("synced");
+    let each = remote.gets.get() - gets;
     let keys = Keys::of(&DataKey::from_hex(&phone.state.key).expect("a key"));
     let record = Record::of(&at(5), |json| RecordId::next(5, None, json)).expect("a record");
     let name = pack_name().expect("a name");
@@ -676,24 +682,27 @@ fn a_pack_of_a_later_build_is_read_again_until_it_reads() {
     };
     let file =
         now(remote.create(&name, seal_pack(&keys, &name, &later).expect("sealed"))).expect("made");
-    assert_eq!(phone.sync(&remote, 120).expect("synced").unreadable, 1);
-    assert_eq!(
-        phone.sync(&remote, 130).expect("synced").unreadable,
-        1,
-        "told of again"
-    );
+    let synced = phone.sync(&remote, 120).expect("synced");
+    assert_eq!((synced.later, synced.unreadable), (1, 0));
+    let gets = remote.gets.get();
+    let synced = phone.sync(&remote, 130).expect("synced");
+    assert_eq!((synced.later, synced.unreadable), (1, 0), "told of again");
+    assert_eq!(remote.gets.get() - gets, each, "not fetched again");
     assert!(phone.stamps().is_empty());
-    // The same pack, as this build reads it: as it reads to a build that
-    // knows the later layout.
+    // Updated: the same pack, as this build reads it, as it reads to a
+    // build that knows the later layout; and noted as by a build of a
+    // layout before this one's, which could not read it.
     let readable = Pack {
-        dust_pack: 1,
+        dust_pack: PACK_LAYOUT,
         ..later
     };
     now(remote.update(&file, seal_pack(&keys, &name, &readable).expect("sealed")))
         .expect("written");
+    phone.state.later.insert(name, PACK_LAYOUT - 1);
     let synced = phone.sync(&remote, 140).expect("synced");
-    assert_eq!((synced.took, synced.unreadable), (1, 0));
+    assert_eq!((synced.took, synced.later, synced.unreadable), (1, 0, 0));
     assert_eq!(phone.stamps(), [5]);
+    assert!(phone.state.later.is_empty());
 }
 
 /// A store with no room takes nothing, and reads nothing as read: the next

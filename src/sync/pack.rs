@@ -25,7 +25,7 @@ use crate::persist::record::RecordId;
 /// What every pack's name starts with: the rest is at random.
 pub const PACK_PREFIX: &str = "dust-p-";
 /// The layout of a pack.
-const PACK_LAYOUT: u32 = 1;
+pub const PACK_LAYOUT: u32 = 1;
 /// The most a pack holds of sessions as they are written, before it is
 /// packed: four megabytes, under the five Drive takes in one upload
 /// however little it packs.

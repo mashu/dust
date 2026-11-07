@@ -10,9 +10,11 @@ use crate::persist::memory::MemoryStore;
 use crate::persist::record::{HistoryChange, Pending, Record, RecordId};
 use crate::persist::tests::at;
 use crate::sync::drive::fake::FakeAuth;
+use crate::sync::pack::{Pack, pack_name, seal_pack};
 use crate::sync::remote::{MemoryRemote, RemoteFile};
 use crate::sync::run::{join, look, sync_once};
-use crate::sync::seal::Stretch;
+use crate::sync::seal::{DataKey, Keys, Stretch};
+use crate::sync::settings::{SETTINGS_PREFIX, SettingsFile, StampedSettings};
 use crate::testing::{Harness, run};
 
 /// The app, linked to `remote` through `auth`.
@@ -545,6 +547,42 @@ fn a_last_sync_stamped_ahead_of_the_clock_is_synced_again() {
         harness.in_app(|| ctx.sync_if_stale());
         harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
         assert_eq!(remote.lists.get(), lists + 1);
+    });
+}
+
+/// Files in the drive a later build wrote, a pack and a settings file, are
+/// told of as a newer Dust's, with what to do, not as damaged ones.
+#[test]
+fn files_a_later_build_wrote_are_told_of_as_a_newer_dusts() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let kept = harness.store.sync.borrow().clone().expect("kept");
+        let key = DataKey::from_hex(&SyncState::read(&kept).expect("reads").key).expect("a key");
+        let keys = Keys::of(&key);
+        let name = pack_name().expect("a name");
+        let pack = Pack {
+            dust_pack: 2,
+            device: "later".into(),
+            ..Pack::default()
+        };
+        now(remote.create(&name, seal_pack(&keys, &name, &pack).expect("sealed"))).expect("made");
+        let name = keys.name(SETTINGS_PREFIX, "settings", "later");
+        let file = SettingsFile {
+            dust_settings: 2,
+            ..SettingsFile::new("later", 1, StampedSettings::new())
+        };
+        let raw = serde_json::to_vec(&file).expect("JSON");
+        now(remote.create(&name, keys.seal(&name, &raw).expect("sealed"))).expect("made");
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(
+            matches!(&status(&harness), SyncStatus::On { problem: Some(p), .. } if p == "2 files in your Google Drive were written by a newer Dust: update Dust here to read them."),
+            "{:?}",
+            status(&harness)
+        );
     });
 }
 

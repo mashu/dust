@@ -43,6 +43,11 @@ pub struct SyncState {
     /// The packs read, by name.
     #[serde(default)]
     pub read: BTreeSet<String>,
+    /// The packs a later build wrote, by name, which a build of the layout
+    /// beside each could not read: fetched again only by a build of a
+    /// later layout ([`super::pack::PACK_LAYOUT`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub later: BTreeMap<String, u32>,
     /// What those packs put together say.
     #[serde(default, with = "drive_state")]
     pub drive: DriveState,
@@ -191,6 +196,7 @@ mod tests {
         );
         state.last = Some(5);
         state.read.insert("dust-p-1".into());
+        state.later.insert("dust-p-2".into(), 1);
         state.drive.puts.insert(id);
         state.drive.tombs.insert(id, 7);
         state.drive.revives.insert(id, 8);

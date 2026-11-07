@@ -500,6 +500,7 @@ impl AppCtx {
                     put(self.sync.state, Some(state));
                     self.keep_sync_state();
                     self.take_up_synced(&synced);
+                    let unreadable = passed_over(&synced);
                     // What the sync took is laid over the settings as they
                     // are now, not as they were as it began: one changed
                     // here meanwhile stays, and goes with the next sync.
@@ -516,13 +517,6 @@ impl AppCtx {
                     if kept != synced_as {
                         self.sync_soon();
                     }
-                    let unreadable = (synced.unreadable > 0).then(|| {
-                        format!(
-                            "{} in your Google Drive could not be read, damaged perhaps, and {} passed over.",
-                            crate::ui::format::counted(synced.unreadable, "file"),
-                            if synced.unreadable == 1 { "was" } else { "were" }
-                        )
-                    });
                     self.change_on_status(|shown_last, syncing, problem, needs| {
                         *shown_last = last;
                         *syncing = false;
@@ -722,6 +716,33 @@ impl AppCtx {
         let store = self.app().store;
         self.sync = crate::state::in_root(|| SyncCtx::linked(&*store, Some(link)));
         self
+    }
+}
+
+/// What the card says of the files in the drive a sync `synced` passed
+/// over, if any: those that would not open, damaged perhaps, and those a
+/// later build wrote, which an update here reads.
+fn passed_over(synced: &Synced) -> Option<String> {
+    let files = |count: usize| crate::ui::format::counted(count, "file");
+    let were = |count: usize| if count == 1 { "was" } else { "were" };
+    let damaged = (synced.unreadable > 0).then(|| {
+        format!(
+            "{} in your Google Drive could not be read, damaged perhaps, and {} passed over.",
+            files(synced.unreadable),
+            were(synced.unreadable)
+        )
+    });
+    let later = (synced.later > 0).then(|| {
+        format!(
+            "{} in your Google Drive {} written by a newer Dust: update Dust here to read {}.",
+            files(synced.later),
+            were(synced.later),
+            if synced.later == 1 { "it" } else { "them" }
+        )
+    });
+    match (damaged, later) {
+        (Some(damaged), Some(later)) => Some(format!("{damaged} {later}")),
+        (damaged, later) => damaged.or(later),
     }
 }
 

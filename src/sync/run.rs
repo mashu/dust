@@ -9,7 +9,8 @@ use cw_core::{SessionResult, TrainingSettings};
 use serde_json::Map;
 
 use super::pack::{
-    Forget, PACK_PREFIX, Pack, Put, Revive, Unopened, open_pack, pack_name, packs_of, seal_pack,
+    Forget, PACK_LAYOUT, PACK_PREFIX, Pack, Put, Revive, Unopened, open_pack, pack_name, packs_of,
+    seal_pack,
 };
 use super::plan::{DriveState, Here, Plan, plan};
 use super::remote::{Remote, RemoteError, RemoteFile};
@@ -135,6 +136,9 @@ pub struct Synced {
     pub sent: usize,
     /// Files in the drive this key could not open, damaged say.
     pub unreadable: usize,
+    /// Files in the drive a later build wrote, which this one does not
+    /// read: read once it is updated.
+    pub later: usize,
 }
 
 impl Synced {
@@ -189,19 +193,29 @@ impl SyncFailed {
 /// The packs of `files` not yet read, read into `drive`, each noted in
 /// `read`; the records they hold gathered into `bytes`, each as it was
 /// sent, a session put back taking the place of the same record put
-/// before. Says how many files would not open, or not read: one a later
-/// build wrote is not noted, and is read again at the next sync.
+/// before. Says how many files would not open, and how many a later build
+/// wrote: one of those is noted in `later` rather than as read, and is
+/// fetched again only by a build of a later layout than this one, which
+/// may read it.
 async fn read_packs(
     remote: &dyn Remote,
     keys: &Keys,
     files: &[RemoteFile],
     read: &mut BTreeSet<String>,
+    later: &mut BTreeMap<String, u32>,
     drive: &mut DriveState,
     bytes: &mut HashMap<RecordId, String>,
-) -> Result<usize, RemoteError> {
-    let mut unreadable = 0;
+) -> Result<(usize, usize), RemoteError> {
+    let (mut unreadable, mut newer) = (0, 0);
     for file in files {
         if !file.name.starts_with(PACK_PREFIX) || read.contains(&file.name) {
+            continue;
+        }
+        if later
+            .get(&file.name)
+            .is_some_and(|&layout| layout >= PACK_LAYOUT)
+        {
+            newer += 1;
             continue;
         }
         let sealed = match remote.get(&file.id).await {
@@ -224,11 +238,13 @@ async fn read_packs(
                         bytes.insert(id, revive.s);
                     }
                 }
+                later.remove(&file.name);
             }
             Err(Unopened::Damaged) => unreadable += 1,
             // What it holds arrives once this build is updated.
             Err(Unopened::Later) => {
-                unreadable += 1;
+                later.insert(file.name.clone(), PACK_LAYOUT);
+                newer += 1;
                 continue;
             }
         }
@@ -236,7 +252,7 @@ async fn read_packs(
         // next time either.
         read.insert(file.name.clone());
     }
-    Ok(unreadable)
+    Ok((unreadable, newer))
 }
 
 /// Sync the history in `store` and the settings `here` with the drive
@@ -272,8 +288,11 @@ pub async fn sync_once(
     let mut read = state.read.clone();
     let mut drive = state.drive.clone();
     let mut bytes = HashMap::new();
-    synced.unreadable +=
-        read_packs(remote, &keys, &files, &mut read, &mut drive, &mut bytes).await?;
+    let later = &mut state.later;
+    (synced.unreadable, synced.later) = read_packs(
+        remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
+    )
+    .await?;
 
     let listed: BTreeSet<RecordId> = store
         .history_listing()
@@ -295,8 +314,11 @@ pub async fn sync_once(
         read.clear();
         drive = DriveState::default();
         bytes.clear();
-        synced.unreadable =
-            read_packs(remote, &keys, &files, &mut read, &mut drive, &mut bytes).await?;
+        let later = &mut state.later;
+        (synced.unreadable, synced.later) = read_packs(
+            remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
+        )
+        .await?;
         planned = self::planned(store, &drive, &listed, state).await;
     }
 
@@ -619,11 +641,13 @@ async fn sync_settings(
             Err(RemoteError::Gone) => continue,
             Err(err) => return Err(err.into()),
         };
-        let Some(read) = keys
-            .open(&file.name, &sealed)
-            .and_then(|raw| SettingsFile::read(&raw))
-        else {
+        let Some(raw) = keys.open(&file.name, &sealed) else {
             synced.unreadable += 1;
+            continue;
+        };
+        // Sealed with this key, but none this build reads: a later one's.
+        let Some(read) = SettingsFile::read(&raw) else {
+            synced.later += 1;
             continue;
         };
         if file.name == own_name {
