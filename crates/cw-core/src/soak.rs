@@ -763,9 +763,10 @@ fn in_place<'a>(sent: &'a [char], typed: &'a [char]) -> impl Fn(usize) -> bool +
 
 /// The copy-time rule of docs/recognition.md, stated plainly and position
 /// by position, for the soaks to hold [`copy_times`] to: for a group of more
-/// than one character with a first key, not typed along (the box shut, or
-/// that key past when the last character reached you and the slack, and
-/// past 400 ms after the first ended and the slack), each letter typed
+/// than one character with a first key, the earliest of them once its first
+/// position has one, not typed along (the box shut, or that key past when
+/// the last character reached you and the slack, and past 400 ms after the
+/// first ended and the slack), each letter typed
 /// right in its place and not put right, timed from the group's end as
 /// heard for the first, from the key before it for the rest, unless that
 /// one was put right; never from a moment at or after its own key.
@@ -779,7 +780,8 @@ fn stated_copy_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option
     let key = |at: usize| times.keys.get(at).copied().flatten().map(u64::from);
     let reached = |at: usize| u64::from(times.ends[at]) + u64::from(times.latency_ms) + 100;
     let along_by = reached(n - 1).max(reached(0) + 400);
-    let copied = n > 1 && key(0).is_some_and(|first| !times.box_open || first > along_by);
+    let first = key(0).and(times.keys.iter().flatten().min().map(|k| u64::from(*k)));
+    let copied = n > 1 && first.is_some_and(|first| !times.box_open || first > along_by);
     if !copied {
         return vec![None; n];
     }
@@ -815,10 +817,12 @@ fn stated_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>
     }
     let key = |at: usize| times.keys.get(at).copied().flatten();
     let reached = |at: usize| u64::from(times.ends[at]) + u64::from(times.latency_ms) + 100;
-    // The first key in by when the last character reached you, or by 400
-    // ms after the first ended, the delay and the slack on top.
+    // The first key, the earliest of them once the first position has one,
+    // in by when the last character reached you, or by 400 ms after the
+    // first ended, the delay and the slack on top.
+    let first = key(0).and(times.keys.iter().flatten().min().copied());
     let along_by = reached(n - 1).max(reached(0) + 400);
-    if n > 1 && !(times.box_open && key(0).is_some_and(|k| u64::from(k) <= along_by)) {
+    if n > 1 && !(times.box_open && first.is_some_and(|k| u64::from(k) <= along_by)) {
         return vec![None; n];
     }
     let in_place = in_place(&sent, &typed);

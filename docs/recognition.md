@@ -121,7 +121,10 @@ was sent when all of these hold:
    character ended, with the delay and the 100 ms after that — and only
    with the box open. Copied whole and typed after, or with the box shut,
    it says how fast you recall, not recognise: it gets a copy time instead
-   (below).
+   (below). A group's first key is the earliest of its keys, once its first
+   position has one: a letter missed and put in before the rest afterwards
+   holds the moment it was put in, which says nothing of when the group
+   was begun.
 
    The floor is for the first key alone. Behind `ET` at 25 WPM the `T` is
    gone 288 ms after the `E`, sooner than most people key what they heard,

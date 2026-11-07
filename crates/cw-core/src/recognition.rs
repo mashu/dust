@@ -378,13 +378,16 @@ pub fn typed_along(times: &CharTimes) -> bool {
         .max(first_end.saturating_add(ALONG_FLOOR_MS))
         .saturating_add(times.latency_ms)
         .saturating_add(KEEPING_UP_MS);
-    times.box_open
-        && times
-            .keys
-            .first()
-            .copied()
-            .flatten()
-            .is_some_and(|first| first <= by)
+    times.box_open && first_key(times).is_some_and(|first| first <= by)
+}
+
+/// When a group's first key came: the earliest of its keys, so a letter
+/// missed and put in before the rest afterwards, which holds the moment it
+/// was put in, does not move when the group was begun. None without a
+/// moment for its first position: a group that cannot be told either way.
+fn first_key(times: &CharTimes) -> Option<u32> {
+    times.keys.first().copied().flatten()?;
+    times.keys.iter().flatten().copied().min()
 }
 
 /// Whether a group of more than one character was copied after it ended
@@ -393,7 +396,7 @@ pub fn typed_along(times: &CharTimes) -> bool {
 /// time ([`copy_times`]) and never a recognition time; a group of one
 /// character never gets one.
 pub fn copied_after(times: &CharTimes) -> bool {
-    times.ends.len() > 1 && times.keys.first().copied().flatten().is_some() && !typed_along(times)
+    times.ends.len() > 1 && first_key(times).is_some() && !typed_along(times)
 }
 
 /// How long you paused before each character's key as you copied `sent`,
@@ -445,7 +448,7 @@ pub fn copy_times(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u
 /// was sent says of when you started. Negative for a first key while it
 /// still sounded; none without one.
 pub fn first_key_late_ms(times: &CharTimes) -> Option<i64> {
-    let first = times.keys.first().copied().flatten()?;
+    let first = first_key(times)?;
     let heard = i64::from(*times.ends.last()?) + i64::from(times.latency_ms);
     Some(i64::from(first) - heard)
 }
@@ -1038,6 +1041,38 @@ mod tests {
             true,
         );
         assert_eq!(copy_times("KMR", "KMR", &times), [Some(400), None, None]);
+    }
+
+    /// A first letter missed, the rest typed along, and the first put in
+    /// once the group was over: the position put in holds the moment it was
+    /// put in, not when the group was begun, and the group is judged by its
+    /// earliest key, typed along. Judged by its first position's, it was
+    /// taken as copied after it ended: none of it recognised, and the gaps
+    /// between keys typed along with the sending timed as copy times.
+    #[test]
+    fn a_first_letter_put_in_afterwards_leaves_its_group_typed_along() {
+        let mut log = KeyLog::default();
+        for (text, ms) in [
+            ("M", 900),
+            ("MR", 1_250),
+            ("MRS", 1_500),
+            ("MRSU", 1_800),
+            ("KMRSU", 3_000),
+        ] {
+            log.typed(answer_chars(text), at(ms));
+        }
+        let put_in = [3_000, 900, 1_250, 1_500, 1_800].map(Some).to_vec();
+        assert_eq!(keys(&log), (put_in, vec![0]));
+        let ends = [300, 700, 1_000, 1_300, 1_600];
+        let times = CharTimes::of(0, &ends, &log.keys().map(|at| at.0), None, 0, true);
+        assert!(typed_along(&times));
+        assert!(!copied_after(&times));
+        assert_eq!(copy_times("KMRSU", "KMRSU", &times), [None; 5]);
+        assert_eq!(
+            recognise("KMRSU", "KMRSU", &times),
+            [None, None, Some(250), Some(200), Some(200)]
+        );
+        assert_eq!(first_key_late_ms(&times), Some(-700));
     }
 
     /// `KMR` copied after it ended: each later letter timed from the key
