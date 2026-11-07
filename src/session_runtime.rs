@@ -754,7 +754,9 @@ fn finish_session(ctx: AppCtx) -> bool {
 }
 
 /// Store what finishing a session did to its level's run, and move the
-/// level if the run earned it, saying so. What it said, if anything.
+/// level if the run earned it, saying so. A change the level has moved
+/// away from since is not made, and nothing is said of it
+/// ([`apply_auto_level`]). What it said, if anything.
 fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
     let AppCtx {
         mut settings,
@@ -766,20 +768,16 @@ fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
         CountersUpdate::Keep(key, counters) => store.save_auto_counters(key, *counters),
         CountersUpdate::Clear(keys) => store.clear_auto_counters(keys),
     }
-    let message = done
-        .change
-        .as_ref()
-        .map(crate::ui::auto_level::change_message);
-    if let Some(change) = &done.change {
-        // Onto the settings as they are now, not as the session started
-        // with them, so the level is all it moves. Stored by the app's
-        // settings effect.
-        apply_auto_level(&mut settings.write(), change);
+    let change = done.change.as_ref()?;
+    // Onto the settings as they are now, not as the session started with
+    // them, so the level is all it moves. Stored by the app's settings
+    // effect.
+    if !apply_auto_level(&mut settings.write(), change) {
+        return None;
     }
-    if let Some(message) = &message {
-        toasts.show(message.clone());
-    }
-    message
+    let message = crate::ui::auto_level::change_message(change);
+    toasts.show(message.clone());
+    Some(message)
 }
 
 /// Keep what the sessions and runs the app stopped under, `cut`, had done
@@ -2829,6 +2827,58 @@ mod tests {
             let progress = crate::persist::auto_progress(&*h.store, &settings).expect("progress");
             assert_eq!(progress.above_count, 1);
             assert_eq!(progress.above_target, 5);
+        });
+    }
+
+    /// A session the app stopped under is settled at the next launch, on
+    /// the settings as they are by then, and its level may have moved
+    /// since, by hand, in another window or by sync. The change it earned
+    /// is then not put in, and nothing says it was: a rise from 1 to 2,
+    /// settled after the level went to 8, said "Level increased to 2" and
+    /// left it at 8. The run of the level as it is now goes on untouched.
+    #[test]
+    fn a_change_the_level_has_moved_away_from_is_not_told_of() {
+        /// A session that earns a rise at level 1, cut off, and settled at a
+        /// launch whose level is `level`: what it says, where it leaves the
+        /// level, and the run of the level as it was at the launch.
+        async fn settled(level: u32) -> (Option<String>, u32, AutoLevelCounters) {
+            let mut judged_by = test_settings();
+            judged_by.auto_level.auto_adjust_level = true;
+            judged_by.auto_level.auto_adjust_above_threshold_count = 1;
+            judged_by.auto_level.auto_adjust_threshold = 50.0;
+            let mut now = judged_by.clone();
+            now.curriculum.level = level;
+            let mut h = Harness::with_settings(now.clone());
+            let run_now = AutoLevelCounters { above: 0, below: 2 };
+            h.store.save_auto_counters(&CountersKey::of(&now), run_now);
+            let mut result = crate::testing::stored_session("2026-10-02", &[("KM", "KM")]);
+            result.timestamp = now_ms() - 60_000;
+            let cut = CutOff::Marked(OpenSession {
+                so_far: Some(Box::new(SoFar {
+                    result,
+                    settings: Some(judged_by),
+                })),
+                ..OpenSession::starting(false, now_ms() - 120_000)
+            });
+            let ctx = h.ctx;
+            h.in_app(|| spawn(keep_cut_off(ctx, vec![cut])));
+            h.advance(20).await;
+            assert_eq!(h.ctx.sessions.peek().len(), 1, "kept");
+            let kept_run = h.store.load_auto_counters(&CountersKey::of(&now));
+            (h.toast(), h.ctx.settings.peek().curriculum.level, kept_run)
+        }
+        run(|| async {
+            let (said, level, _) = settled(1).await;
+            assert!(
+                said.as_deref()
+                    .is_some_and(|said| said.starts_with("Level increased to 2")),
+                "{said:?}"
+            );
+            assert_eq!(level, 2);
+            let (said, level, kept_run) = settled(8).await;
+            assert_eq!(said, None, "nothing said of a change not made");
+            assert_eq!(level, 8, "left where it is");
+            assert_eq!(kept_run, AutoLevelCounters { above: 0, below: 2 });
         });
     }
 

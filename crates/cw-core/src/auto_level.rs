@@ -426,22 +426,29 @@ pub fn evaluate_auto_level(
     })
 }
 
-/// Put a change into the settings, where the level it moves is still where
-/// the session left it ([`AutoLevelChange::from`]): the change was earned
-/// there, and the runs it clears are that level's. A level moved since, by
-/// hand, in another window or by sync, as a session the app stopped under
-/// is settled only at the next launch, is left where it is now, as is one
-/// a longer alphabet has reached since; so is Mixed's turn.
-pub fn apply_auto_level(settings: &mut TrainingSettings, change: &AutoLevelChange) {
-    let now = settings.level(change.axis);
-    if now != change.from || settings.stored_level(change.axis) > now {
-        return;
+/// Put a change into the settings, where the level it moves is still kept
+/// where the session left it ([`AutoLevelChange::from`]), whatever alphabet
+/// reads it now: the change was earned there, and the runs it clears are
+/// that level's. A level moved since, by hand, in another window or by
+/// sync, as a session the app stopped under is settled only at the next
+/// launch, is left where it is now, as is one a longer alphabet has reached
+/// since; so is Mixed's turn. Whether the change was put in.
+pub fn apply_auto_level(settings: &mut TrainingSettings, change: &AutoLevelChange) -> bool {
+    // A change is only ever made from a level kept inside the alphabet it
+    // was earned in ([`evaluate_auto_level`]), so where it was earned is the
+    // level as it was kept, the axis's bottom for one kept under it.
+    let kept = settings
+        .stored_level(change.axis)
+        .max(change.axis.min_level());
+    if kept != change.from {
+        return false;
     }
     settings.set_level(change.axis, change.to);
     if let Some(axis) = change.next_mixed_axis {
         settings.auto_level.mixed_auto_level_next_axis = axis;
     }
     *settings = std::mem::take(settings).clamp();
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1395,10 +1402,10 @@ mod tests {
             .expect("a rise");
         assert_eq!((change.from, change.to), (5, 6));
         let mut moved = koch(8);
-        apply_auto_level(&mut moved, &change);
+        assert!(!apply_auto_level(&mut moved, &change), "not put in");
         assert_eq!(moved.curriculum.level, 8);
         let mut left = koch(5);
-        apply_auto_level(&mut left, &change);
+        assert!(apply_auto_level(&mut left, &change), "put in");
         assert_eq!(left.curriculum.level, 6);
 
         // A fall earned at the top of a short alphabet, put onto the same
@@ -1426,5 +1433,37 @@ mod tests {
             moved.auto_level.mixed_auto_level_next_axis,
             MixedAutoLevelAxis::Letters
         );
+    }
+
+    /// Koch, an order of your own and Mixed's letters share one stored
+    /// level, and a change is put in where that level is still where the
+    /// session left it, whatever alphabet reads it by then. It was put in
+    /// only where the level read through the alphabet chosen by then was:
+    /// a rise from 35 to 36 earned in LCWO's order, settled once Mixed was
+    /// chosen, whose letters top out at 30, read the level at 30 and was
+    /// dropped, while the runs it cleared were cleared all the same.
+    #[test]
+    fn a_change_moves_the_stored_level_whatever_alphabet_reads_it_now() {
+        let change = complete_result(after(1.0), &koch(35), AutoLevelCounters::default())
+            .change
+            .expect("a rise");
+        assert_eq!((change.from, change.to), (35, 36));
+        let mut now_mixed = koch(35);
+        now_mixed.curriculum.char_set_mode = CharSetMode::Mixed;
+        assert_eq!(now_mixed.level(LevelAxis::Letters), 30);
+        assert!(apply_auto_level(&mut now_mixed, &change), "put in");
+        assert_eq!(now_mixed.curriculum.level, 36);
+        assert_eq!(now_mixed.level(LevelAxis::Letters), 30, "read as ever");
+
+        // A fall the same way, from a level a shorter alphabet reads at its
+        // top.
+        let change = complete_result(after(0.5), &koch(35), AutoLevelCounters::default())
+            .change
+            .expect("a fall");
+        assert_eq!((change.from, change.to), (35, 34));
+        let mut now_own = koch(35);
+        now_own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        assert!(apply_auto_level(&mut now_own, &change), "put in");
+        assert_eq!(now_own.curriculum.level, 34);
     }
 }
