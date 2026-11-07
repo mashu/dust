@@ -610,10 +610,13 @@ impl<S: Aside> BlobHistory<S> {
         }
     }
 
-    /// The whole history, by record.
+    /// The whole history, by record. What it held is noted as seen only
+    /// where it could be read: a history held is still to take up.
     pub(super) fn load(&self) -> HistoryLoad {
         let sessions = self.current();
-        self.seen.set(Some(self.look()));
+        if !self.held.get() {
+            self.seen.set(Some(self.look()));
+        }
         HistoryLoad {
             sessions: sessions
                 .into_iter()
@@ -632,7 +635,12 @@ impl<S: Aside> BlobHistory<S> {
     /// out for another of its key is not remembered as deleted at all. A
     /// session deleted is not stored again unless the change undoes its
     /// deletion.
+    ///
+    /// What it leaves is noted as seen only where nothing changed since
+    /// this copy last looked: the history it writes holds whatever another
+    /// copy stored meanwhile, which is still to take up.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
+        let looked = self.look();
         let mut held = self.current();
         if self.held.get() {
             return HistorySaved::Held;
@@ -735,7 +743,9 @@ impl<S: Aside> BlobHistory<S> {
         if forgotten {
             self.save_deleted(&deleted);
         }
-        self.seen.set(Some(self.look()));
+        if self.seen.get() == Some(looked) {
+            self.seen.set(Some(self.look()));
+        }
         match saved {
             HistorySaved::Squeezed { kept, runs, .. } => HistorySaved::Squeezed {
                 kept,
@@ -748,11 +758,15 @@ impl<S: Aside> BlobHistory<S> {
         }
     }
 
-    /// Every record there is: none where the history cannot be read.
+    /// Every record there is: none where the history cannot be read. What
+    /// it held is noted as seen only once it is listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
         let held = self.current();
+        if self.held.get() {
+            return None;
+        }
         self.seen.set(Some(self.look()));
-        (!self.held.get()).then(|| held.into_iter().map(|(record, _)| record.id).collect())
+        Some(held.into_iter().map(|(record, _)| record.id).collect())
     }
 
     /// Every record there is, as the history holds it, in order: what a
@@ -787,9 +801,11 @@ impl<S: Aside> BlobHistory<S> {
     }
 
     /// Whether the history or its deletions changed since last looked at.
+    /// Nothing is noted: a change is told of each time it is asked, until a
+    /// look that lists the history takes it up ([`Self::listing`]), so one
+    /// whose look could not list it is told of again.
     pub(super) fn changed(&self) -> bool {
-        let now = self.look();
-        self.seen.replace(Some(now)) != Some(now)
+        self.seen.get() != Some(self.look())
     }
 
     /// What reads set aside, not yet told of: taken.
@@ -1377,6 +1393,70 @@ mod tests {
         assert_eq!(whole.listing(), Some(vec![one.id, two.id]));
         assert_eq!(shelf.get("deleted").unwrap().as_deref(), Some("[]"));
         assert!(whole.forgotten(&[one.id]).is_empty());
+    }
+
+    /// A change another tab made to the history kept whole is still to
+    /// take up after a look that could not list it, however often it is
+    /// asked of, until a look that can takes it up. Asking noted it as
+    /// seen, and so did a listing that found the history held, so the
+    /// session the other tab stored never showed here until another change.
+    #[test]
+    fn a_change_is_still_to_take_up_after_a_listing_that_failed() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let (here, there) = (whole_on(&shelf), whole_on(&shelf));
+        here.load();
+        there.load();
+        let theirs = next_after(&finished(1_000), None);
+        there.apply(&HistoryChange {
+            put: vec![theirs.clone()],
+            ..HistoryChange::default()
+        });
+        assert!(here.changed(), "theirs, to take up");
+        assert!(here.changed(), "still, until it is");
+        // Beside it, a session that does not read, and no room to set it
+        // aside: the history is held, and listed by no look.
+        let stored = shelf.get("history").unwrap().unwrap();
+        let with_unread = stored.replacen('[', r#"[{"date":5},"#, 1);
+        shelf.set("history", &with_unread);
+        shelf.room.set(with_unread.len());
+        assert_eq!(here.listing(), None);
+        shelf.room.set(usize::MAX);
+        assert!(here.changed(), "still to take up");
+        assert_eq!(here.listing(), Some(vec![theirs.id]));
+        assert!(!here.changed(), "taken up");
+    }
+
+    /// A change of this tab's own, made after another tab changed the
+    /// history kept whole, leaves the other's change still to take up: the
+    /// history it writes holds what the other stored, which this tab has
+    /// yet to show. Noted as seen with its own, the other's session never
+    /// showed here until another change.
+    #[test]
+    fn a_change_another_tab_made_first_is_taken_up_after_ones_own() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let (here, there) = (whole_on(&shelf), whole_on(&shelf));
+        here.load();
+        there.load();
+        let theirs = next_after(&finished(1_000), None);
+        there.apply(&HistoryChange {
+            put: vec![theirs.clone()],
+            ..HistoryChange::default()
+        });
+        let ours = next_after(&finished(2_000), None);
+        here.apply(&HistoryChange {
+            put: vec![ours.clone()],
+            ..HistoryChange::default()
+        });
+        assert!(here.changed(), "theirs, to take up");
+        assert_eq!(here.listing(), Some(vec![theirs.id, ours.id]));
+        assert!(!here.changed(), "taken up");
+        let more = next_after(&finished(3_000), Some(ours.id));
+        here.apply(&HistoryChange {
+            put: vec![more],
+            ..HistoryChange::default()
+        });
+        assert!(!here.changed(), "its own change");
+        assert!(there.changed());
     }
 
     /// A session stored where it finished, as a restore stores it, keeps

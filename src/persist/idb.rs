@@ -759,10 +759,12 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// another tab told of a change, or left its stamp, or an older build
     /// wrote to the history it keeps whole. A look at the stamp and at the
     /// length of that history, never a read of either.
+    ///
+    /// Nothing is noted: a change is told of each time it is asked, until a
+    /// look that lists the history takes it up ([`Self::listing`]), so one
+    /// whose look could not list it is told of again.
     pub(super) fn changed(&self) -> bool {
-        let now = self.looking();
-        let told = self.seen.replace(Some(now.clone())) != Some(now);
-        told || self.legacy_changed()
+        *self.seen.borrow() != Some(self.looking()) || self.legacy_changed()
     }
 
     /// A wait that ends as another tab tells of a change it made.
