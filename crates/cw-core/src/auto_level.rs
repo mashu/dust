@@ -378,6 +378,13 @@ pub fn evaluate_auto_level(
         .into_iter()
         .find_map(|axis| {
             let from = settings.level(axis);
+            // A level a longer alphabet reached, read at the top of the one
+            // chosen now, has nowhere to go: there is no higher, and a fall
+            // would write this alphabet's top less one over it, which the
+            // longer alphabet would come back to.
+            if settings.stored_level(axis) > from {
+                return None;
+            }
             let to = step_level(from, delta, axis.min_level(), settings.max_level(axis));
             (to != from).then_some((axis, from, to))
         });
@@ -780,6 +787,40 @@ mod tests {
         let mut counters = AutoLevelCounters::default();
         assert!(evaluate_auto_level(&after(1.0), &s, &mut counters).is_none());
         assert_eq!(counters, AutoLevelCounters::default());
+    }
+
+    /// Koch, an order of your own and Mixed's letters share one stored
+    /// level, read at the top of a shorter alphabet. A session that fell
+    /// short there wrote that top less one over the level a longer alphabet
+    /// had reached: 20 in LCWO's order came back as 3 after a session in an
+    /// order of five letters, and Koch's 38 as 29 after one in Mixed.
+    #[test]
+    fn a_fall_in_a_shorter_alphabet_keeps_the_level_a_longer_one_reached() {
+        let mut own = koch(20);
+        own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        own.curriculum.sequence_is_custom = true;
+        assert_eq!(own.level(LevelAxis::Letters), 4);
+        let mut counters = AutoLevelCounters::default();
+        assert_eq!(evaluate_auto_level(&after(0.5), &own, &mut counters), None);
+        assert_eq!(counters.below, 0, "the run is spent, as at the bottom");
+        let done = complete_result(after(0.5), &own, AutoLevelCounters::default());
+        assert_eq!(done.change, None);
+        assert_eq!(done.settings.curriculum.level, 20);
+
+        let mut letters = koch(38);
+        letters.curriculum.char_set_mode = CharSetMode::Mixed;
+        letters.curriculum.mixed_letters_percent = 100;
+        assert_eq!(letters.level(LevelAxis::Letters), 30);
+        let done = complete_result(after(0.5), &letters, AutoLevelCounters::default());
+        assert_eq!(done.change, None);
+        assert_eq!(done.settings.curriculum.level, 38);
+
+        // A level inside the alphabet chosen falls as ever.
+        own.curriculum.level = 4;
+        let done = complete_result(after(0.5), &own, AutoLevelCounters::default());
+        let change = done.change.expect("a fall");
+        assert_eq!((change.from, change.to), (4, 3));
+        assert_eq!(done.settings.curriculum.level, 3);
     }
 
     #[test]
