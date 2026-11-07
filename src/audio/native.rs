@@ -566,6 +566,16 @@ impl MorseBackend for MorsePlayer {
 
     fn set_live_tone(&mut self, tone: ToneRequest) -> Result<(), String> {
         self.sidetone.set(tone);
+        // A stream whose worker is in a loop of errors sounds no tone:
+        // cpal's ALSA worker is, on a device that died, and says nothing of
+        // the stream breaking. Taken for broken now, it is opened again, and
+        // the sidetone is told what the device says, not that it is there
+        // for as long as the stream is given to be called again.
+        if let Some(open) = &self.stream
+            && open.heartbeat.looping()
+        {
+            open.failed.store(true, Ordering::Release);
+        }
         self.ensure_output_unless_refused()
     }
 }
@@ -1257,6 +1267,56 @@ mod device_tests {
                 "{said:?}"
             );
         }
+    }
+
+    thread_local! {
+        /// Whether [`dying`] has found the output on this thread.
+        static FOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// The machine's default output the first time it is asked for, and
+    /// from then on there and will not open, as a device that died is.
+    fn dying() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
+        if FOUND.replace(true) {
+            unplayable()
+        } else {
+            default_output()
+        }
+    }
+
+    /// An output whose worker has fallen into a loop of errors, as cpal's
+    /// ALSA worker does on a device that died, is not said to the sidetone
+    /// to be there: taken for broken, it is opened again, and the sidetone
+    /// is told what the device says as it refuses. It used to be said to be
+    /// there for the second and a half the stream is given to be called
+    /// again, an ALSA device's death being no word that the stream broke.
+    #[test]
+    fn an_output_in_a_loop_of_errors_is_said_to_the_sidetone() {
+        FOUND.set(false);
+        let Some(mut player) = opened(MorsePlayer::probing(dying, false)) else {
+            return;
+        };
+        let open = player.stream.as_ref().expect("open");
+        let words = StreamWords {
+            failed: Arc::clone(&open.failed),
+            heartbeat: Arc::clone(&open.heartbeat),
+            erring: Arc::clone(&open.erring),
+            retired: Arc::clone(&open.retired),
+        };
+        // It asks for no buffer from here, as a worker in a loop of errors
+        // asks for none, and a callback already past its look at `retired`
+        // is let end first.
+        words.retired.store(true, Ordering::Release);
+        std::thread::sleep(Duration::from_millis(100));
+        let gone = cpal::StreamError::BackendSpecific {
+            err: cpal::BackendSpecificError {
+                description: "No such device".into(),
+            },
+        };
+        words.erred(&gone);
+        words.erred(&gone);
+        let said = player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+        assert!(matches!(&said, Err(why) if why.contains("u64")), "{said:?}");
     }
 
     #[test]

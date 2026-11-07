@@ -128,13 +128,18 @@ impl Heartbeat {
         self.looping.store(true, Ordering::Release);
     }
 
+    /// Whether its worker is in a loop of errors ([`Self::erred_again`]).
+    pub fn looping(&self) -> bool {
+        self.looping.load(Ordering::Acquire)
+    }
+
     /// Whether, at `now_sec`, the callback has gone uncalled for longer than
     /// it is given, however long since anything last looked: longer than
     /// [`SILENT_AFTER_SEC`] since it was last called, or, never called,
     /// than [`FIRST_CALL_SEC`] since the stream opened, or than
     /// [`SILENT_AFTER_SEC`] where its worker has erred over and over.
     pub fn went_silent(&self, now_sec: f64) -> bool {
-        let given = if self.called() || self.looping.load(Ordering::Acquire) {
+        let given = if self.called() || self.looping() {
             SILENT_AFTER_SEC
         } else {
             FIRST_CALL_SEC
