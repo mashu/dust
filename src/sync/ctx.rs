@@ -85,7 +85,7 @@ impl Link {
         if cfg!(test) {
             return None;
         }
-        let auth = super::auth::default_auth()?;
+        let auth = super::auth::Counted::of(super::auth::default_auth()?);
         let drive = super::drive::Drive::new(super::http::default_http(), Rc::clone(&auth));
         Some(Self {
             auth,
@@ -835,7 +835,9 @@ fn passed_over(synced: &Synced) -> Option<String> {
 /// still as it was as the sync began: once it is turned off, or on anew,
 /// nothing more is asked of the folder. The sign-in may by then be another
 /// account's, whose drive a sync begun before must not write into, sealed
-/// with a key that account's sync does not go by.
+/// with a key that account's sync does not go by. A request under way by
+/// then goes no further than the sign-in it began with, as the drive sends
+/// it ([`super::drive::Drive`]).
 struct WhileCurrent<'a, F> {
     remote: &'a dyn Remote,
     current: F,
