@@ -368,8 +368,9 @@ pub(super) struct Caller {
     /// to calling since: the exchange it sends when it takes yours again
     /// is then no longer owed, but a repeat.
     had_exchange: bool,
-    /// It has missed your exchange once, and asked for it again: it takes
-    /// it the next time, so a QSO goes on however often callers miss it.
+    /// It has missed your exchange once in this QSO, and asked for it
+    /// again: it takes it the next time, so a QSO goes on however often
+    /// callers miss it.
     missed_exchange: bool,
     /// Whether your TU works as a CQ for it, as in a contest; in an
     /// everyday QSO it does not.
@@ -507,6 +508,7 @@ impl Caller {
         self.silent = 0;
         self.exchanges_sent = 0;
         self.had_exchange = false;
+        self.missed_exchange = false;
         self.signs_off = false;
         self.incomplete = 0;
         self.qrs = 0.0;
@@ -689,9 +691,9 @@ impl Caller {
     }
 
     /// In a pile-up, whether it misses the exchange it is waiting for, and
-    /// asks for it again: once at most, even with every caller set to miss
-    /// it, so the QSO goes on. Drawn all the same after that, so the draws
-    /// that follow are what they always were.
+    /// asks for it again: once a QSO at most, even with every caller set to
+    /// miss it, so the QSO goes on. Drawn all the same after that, so the
+    /// draws that follow are what they always were.
     fn misses_exchange(&mut self) -> bool {
         let misses = self.pileup && self.rng.f64() < self.odds.misses_exchange;
         let misses = misses && !self.missed_exchange;
@@ -2139,6 +2141,30 @@ mod tests {
             caller.hear(&[call("K5XYZ")], &[]);
             let missed = caller.hear(&[Exchange], &[]);
             assert!(missed.missed_exchange, "seed {seed}");
+            assert_eq!(caller.state, CallerState::NeedNr, "seed {seed}");
+            let taken = caller.hear(&[Exchange], &[]);
+            assert!(!taken.missed_exchange && taken.took_exchange, "seed {seed}");
+            assert_eq!(caller.state, CallerState::NeedEnd, "seed {seed}");
+        }
+    }
+
+    /// A caller misses your exchange once at most in each QSO: a dupe that
+    /// calls again is in a QSO of its own, and can miss it once there too.
+    /// The miss of its first QSO used to count against it ever after.
+    #[test]
+    fn a_dupe_can_miss_your_exchange_once_in_its_new_qso() {
+        for seed in 0..50 {
+            let mut caller = pileup_caller(seed, "K5XYZ");
+            caller.odds.misses_exchange = 1.0;
+            caller.hear(&[call("K5XYZ")], &[]);
+            assert!(caller.hear(&[Exchange], &[]).missed_exchange, "seed {seed}");
+            assert!(caller.hear(&[Exchange], &[]).took_exchange, "seed {seed}");
+            caller.hear(&[Tu], &[]);
+            assert_eq!(caller.state, CallerState::Done, "seed {seed}");
+            caller.call_again(612.0, 120_000);
+            caller.hear(&[call("K5XYZ")], &[]);
+            let missed = caller.hear(&[Exchange], &[]);
+            assert!(missed.missed_exchange, "seed {seed}: missed once more");
             assert_eq!(caller.state, CallerState::NeedNr, "seed {seed}");
             let taken = caller.hear(&[Exchange], &[]);
             assert!(!taken.missed_exchange && taken.took_exchange, "seed {seed}");

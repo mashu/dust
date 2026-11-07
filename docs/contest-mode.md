@@ -946,7 +946,10 @@ From phase 2, in pile-ups only:
   built (5a), without full break-in you do not hear it either: the
   receiver is muted while you send (§5.3).
 - **Missed exchanges.** 10% of the time a caller misses your exchange and
-  sends `NR?` or `AGN` (`DxOper.pas:762-770, 844-849`).
+  sends `NR?` or `AGN` (`DxOper.pas:762-770, 844-849`). As built, a caller
+  misses it once at most in a QSO, and takes it sent again, so a QSO goes
+  on however often callers are set to miss it; a dupe calling again is in
+  a QSO of its own, and can miss it once there too.
 
 As built (2a): a caller still sending at your key goes on from the character
 sounding then, sent again whole and, with full break-in, heard over your
