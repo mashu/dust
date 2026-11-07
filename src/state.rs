@@ -1303,10 +1303,13 @@ impl AppCtx {
     /// back, it would take that for sessions already here, and the Undo
     /// delete them.
     pub fn restore_backup(self, backup: Backup) {
-        // The last restore asked for: the one before it is undone no more.
+        // The last restore asked for: the one before it is undone no more,
+        // and its message, while it is up, offers no Undo that would do
+        // nothing.
         let mut before_restore = self.before_restore;
         if before_restore.peek().is_some() {
             before_restore.set(None);
+            self.toasts.withdraw(ToastAction::UndoRestore);
         }
         let mut under_way = self.restore_under_way;
         if *under_way.peek() {
@@ -2176,6 +2179,19 @@ impl Toasts {
         self.0.cloned()
     }
 
+    /// The message up, where it offers `action`, offers it no more: what it
+    /// says stays up, with nothing to do about it.
+    pub fn withdraw(self, action: ToastAction) {
+        let mut shown = self.0;
+        let offers = shown
+            .peek()
+            .as_ref()
+            .is_some_and(|toast| toast.action == Some(action));
+        if offers && let Some(toast) = shown.write().as_mut() {
+            toast.action = None;
+        }
+    }
+
     /// Take `toast` down, unless a newer one has taken its place.
     pub fn dismiss(self, toast: &Toast) {
         let mut shown = self.0;
@@ -2617,6 +2633,26 @@ mod tests {
         a.act(AppCtx::undo_restore);
         assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
         assert_eq!(a.shown(), [1, 2, 5]);
+    }
+
+    /// A restore's message offers its Undo no more once another restore is
+    /// asked for, though it stays up while the other is under way: the
+    /// Undo would undo nothing, and a click on it did nothing, without a
+    /// word.
+    #[test]
+    fn a_restores_undo_is_taken_off_its_message_as_another_is_asked_for() {
+        let store = holding([5]);
+        let a = Tab::on(&store);
+        restore(&a, [1]);
+        assert_eq!(
+            a.toast().and_then(|toast| toast.action),
+            Some(ToastAction::UndoRestore)
+        );
+        store.deferred.set(true);
+        restore(&a, [1]);
+        let toast = a.toast().expect("still up");
+        assert_eq!(toast.text, "Restored 1 session and your settings.");
+        assert_eq!(toast.action, None, "nothing to undo");
     }
 
     /// A restore asked for while the Undo of the one before it is under
