@@ -231,7 +231,8 @@ impl PlaybackPlan {
 
 /// Plan a send from one station. Every repeat of a group uses the same voice.
 /// A voice is taken as it is given, and what of it is no number is planned
-/// as a keyer's at full strength would be.
+/// as a keyer's at full strength would be, at the pitch the receiver is
+/// tuned to.
 pub fn plan_morse_playback_for(
     text: &str,
     settings: &TrainingSettings,
@@ -253,7 +254,7 @@ pub(crate) fn plan_morse_playback_at(
     let resolved_char_wpm = voice.char_wpm.max(1.0);
     let resolved_effective_wpm = voice.effective_wpm.max(1.0).min(resolved_char_wpm);
     let extra = clamp_extra_spacing(settings.playback.extra_word_space_multiplier);
-    let side_tone = voice.tone_hz;
+    let side_tone = finite_or(voice.tone_hz, settings.side_tone_center());
 
     let unit = spacing_unit_sec(resolved_char_wpm, resolved_effective_wpm);
     // The operator's fist. Every element is stretched or clipped by the
@@ -792,6 +793,30 @@ mod tests {
             (plan.duration_sec, tones)
         };
         assert_eq!(tones(&nonsense), tones(&keyer));
+    }
+
+    /// A voice's pitch is planned from as it is given too. One that is no
+    /// number, which a voice drawn from clamped settings never has, planned
+    /// every tone at no pitch; it is planned where the receiver is tuned,
+    /// the middle of the side-tone range.
+    #[test]
+    fn a_voice_of_no_pitch_is_planned_where_the_receiver_is_tuned() {
+        let s = fixed_speed(20.0);
+        for tone_hz in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let voice = StationVoice {
+                tone_hz,
+                char_wpm: 20.0,
+                effective_wpm: 20.0,
+                volume: 1.0,
+                weight: 1.0,
+                dash_ratio: 3.0,
+            };
+            let plan = plan_morse_playback_for("PARIS", &s, &voice);
+            assert!(!plan.events.is_empty());
+            for event in &plan.events {
+                assert_eq!(event.frequency_hz, s.side_tone_center(), "{tone_hz}");
+            }
+        }
     }
 
     /// Weight is how the time inside a character is divided, not how much of
