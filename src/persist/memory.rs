@@ -89,6 +89,11 @@ pub struct MemoryStore {
     pub forgotten_later: Cell<bool>,
     /// What was asked of which records were deleted, and not yet answered.
     asked_forgotten: RefCell<Vec<Rc<RefCell<Forgotten>>>>,
+    /// Records are read only when the test says ([`Self::answer_reads`]),
+    /// the way a browser's database reads them a moment after it is asked.
+    pub reads_later: Cell<bool>,
+    /// The reads asked for and not yet answered.
+    asked_reads: RefCell<Vec<Rc<RefCell<Reads>>>>,
     /// How many records and tombstones have been written.
     pub record_writes: Cell<usize>,
     pub tombstone_writes: Cell<usize>,
@@ -270,6 +275,14 @@ impl Held {
 #[derive(Default)]
 struct Answer {
     saved: Option<HistorySaved>,
+    waker: Option<Waker>,
+}
+
+/// Records asked for, read later ([`MemoryStore::reads_later`]), and what
+/// waits on them.
+struct Reads {
+    ids: Vec<RecordId>,
+    read: Option<Vec<Result<Record, RecordId>>>,
     waker: Option<Waker>,
 }
 
@@ -512,20 +525,25 @@ impl Store for MemoryStore {
         if let Some(page) = &self.page {
             return done(page.read(&ids));
         }
-        let (records, held_open) = (self.records.borrow(), self.held_open.borrow());
-        done(
-            ids.into_iter()
-                .map(|id| match records.get(&id) {
-                    Some(held) if !self.unlistable.get() && !held_open.contains(&id) => {
-                        Ok(Record {
-                            id,
-                            json: held.json.clone(),
-                        })
-                    }
-                    _ => Err(id),
-                })
-                .collect(),
-        )
+        if !self.reads_later.get() {
+            return done(self.read_now(ids));
+        }
+        let asked = Rc::new(RefCell::new(Reads {
+            ids,
+            read: None,
+            waker: None,
+        }));
+        self.asked_reads.borrow_mut().push(asked.clone());
+        Box::pin(std::future::poll_fn(move |waiting| {
+            let mut asked = asked.borrow_mut();
+            match asked.read.take() {
+                Some(read) => Poll::Ready(read),
+                None => {
+                    asked.waker = Some(waiting.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }))
     }
 
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
@@ -695,6 +713,41 @@ impl MemoryStore {
         ids.into_iter()
             .filter(|id| tombstones.contains_key(id))
             .collect()
+    }
+
+    /// The records `ids`, as they are stored now: one that cannot be read
+    /// comes back as its id.
+    fn read_now(&self, ids: Vec<RecordId>) -> Vec<Result<Record, RecordId>> {
+        let (records, held_open) = (self.records.borrow(), self.held_open.borrow());
+        ids.into_iter()
+            .map(|id| match records.get(&id) {
+                Some(held) if !self.unlistable.get() && !held_open.contains(&id) => Ok(Record {
+                    id,
+                    json: held.json.clone(),
+                }),
+                _ => Err(id),
+            })
+            .collect()
+    }
+
+    /// Answer every read asked for ([`Self::reads_later`]), as the store
+    /// holds the records now, and wake what waits on each.
+    pub fn answer_reads(&self) {
+        let asked = std::mem::take(&mut *self.asked_reads.borrow_mut());
+        for reads in asked {
+            let ids = std::mem::take(&mut reads.borrow_mut().ids);
+            let read = self.read_now(ids);
+            let mut reads = reads.borrow_mut();
+            reads.read = Some(read);
+            if let Some(waker) = reads.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
+    /// How many reads are waiting to be answered ([`Self::reads_later`]).
+    pub fn reads_waiting(&self) -> usize {
+        self.asked_reads.borrow().len()
     }
 
     /// Answer every ask of which records were deleted by hand
