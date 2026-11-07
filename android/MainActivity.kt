@@ -51,7 +51,8 @@ class MainActivity : WryActivity() {
     /// Each request's answer, by its number, until the app takes it.
     private val driveAnswers = ConcurrentHashMap<Long, String>()
     private val driveRequests = AtomicLong()
-    /// The request waiting on the user's answer in Play services' sheet.
+    /// The request waiting on the user's answer in Play services' sheet,
+    /// 0 for none: one at a time, as its answer comes back to it alone.
     @Volatile private var driveAsking = 0L
     private lateinit var driveConsent: ActivityResultLauncher<IntentSenderRequest>
 
@@ -63,6 +64,7 @@ class MainActivity : WryActivity() {
             ActivityResultContracts.StartIntentSenderForResult()
         ) { result ->
             val id = driveAsking
+            driveAsking = 0L
             val data = result.data
             if (result.resultCode != Activity.RESULT_OK || data == null) {
                 driveAnswers[id] = "cancelled"
@@ -102,11 +104,14 @@ class MainActivity : WryActivity() {
                         answerDrive(id, result)
                     } else if (!asking) {
                         driveAnswers[id] = "needs-user"
+                    } else if (driveAsking != 0L) {
+                        driveAnswers[id] = "busy"
                     } else {
                         driveAsking = id
                         try {
                             driveConsent.launch(IntentSenderRequest.Builder(consent.intentSender).build())
                         } catch (e: Exception) {
+                            driveAsking = 0L
                             driveAnswers[id] = "error " + (e.message ?: e.javaClass.simpleName)
                         }
                     }
@@ -119,7 +124,8 @@ class MainActivity : WryActivity() {
     }
 
     /// The answer to the request `id`, once there is one, taken: `token
-    /// <token>`, `needs-user`, `cancelled`, or `error <why>`.
+    /// <token>`, `needs-user`, `cancelled`, `busy` (the user is asked
+    /// already, for another request), or `error <why>`.
     @Keep
     fun dustDriveAnswer(id: Long): String? = driveAnswers.remove(id)
 
