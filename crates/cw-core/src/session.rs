@@ -2471,6 +2471,131 @@ mod tests {
         assert_eq!(back.unread, UnreadKeys::default(), "the other let go of");
     }
 
+    /// The keys `T`, a struct, reads, as its reader names them.
+    fn keys_read<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
+        /// Asks a reader for the keys it reads, and gives none of them.
+        struct Keys;
+
+        /// What [`Keys`] was asked to read.
+        #[derive(Debug)]
+        struct Asked(&'static [&'static str]);
+
+        impl std::fmt::Display for Asked {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(formatter, "asked for {:?}", self.0)
+            }
+        }
+
+        impl std::error::Error for Asked {}
+
+        impl serde::de::Error for Asked {
+            fn custom<M: std::fmt::Display>(_: M) -> Self {
+                Self(&[])
+            }
+        }
+
+        impl<'de> Deserializer<'de> for Keys {
+            type Error = Asked;
+
+            fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Asked> {
+                Err(Asked(&[]))
+            }
+
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                keys: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Asked> {
+                Err(Asked(keys))
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map enum identifier ignored_any
+            }
+        }
+
+        T::deserialize(Keys).err().map_or(&[], |asked| asked.0)
+    }
+
+    /// Under every key a group or its timing reads leniently, a value this
+    /// build could not read is kept as it was read, and gives way to the
+    /// part's own once it holds one, as a restore fills in times: the key
+    /// is written once, and the session reads back. Every key each part
+    /// reads is tried, a key read leniently later among them, with a value
+    /// of its own set below. The keys read leniently were each named again
+    /// where a part is written ([`Part::holds`]), and one left out there
+    /// would have been written twice, the session read as no session at
+    /// all, in any build.
+    #[test]
+    fn a_value_kept_under_any_key_read_leniently_gives_way_to_the_parts_own() {
+        // A value of its own under every key each part reads.
+        let group = GroupResult {
+            sent: "KM".into(),
+            received: "KN".into(),
+            correct: false,
+        };
+        let timing = SessionTiming {
+            time_to_complete_ms: 1_200.0,
+            char_wpm: Some(26.0),
+            effective_wpm: Some(20.0),
+            sends: 2,
+            char_times: Some(CharTimes {
+                ends: vec![300],
+                keys: vec![Some(550)],
+                corrected: vec![0],
+                latency_ms: 40,
+                box_open: true,
+            }),
+            untimed: Some(Untimed::Paused),
+        };
+        let mut own = SessionResult::empty_for_test();
+        own.groups = vec![group];
+        own.group_timings = vec![timing];
+        let written = serde_json::to_value(&own).unwrap();
+        let parts = [
+            ("groups", keys_read::<GroupResult>()),
+            ("groupTimings", keys_read::<SessionTiming>()),
+        ];
+        let unreadable = serde_json::json!({ "shape": ["of", "a", "later", "build"] });
+        let mut lenient = Vec::new();
+        for (part, keys) in parts {
+            assert!(!keys.is_empty(), "the keys {part} reads");
+            for key in keys {
+                let held = written[part][0].get(key);
+                assert!(held.is_some(), "a value of its own under {part} {key}");
+            }
+            for key in keys {
+                let mut later = written.clone();
+                later[part][0][key] = unreadable.clone();
+                // Read strictly, the key makes no session at all of it.
+                let Ok(mut read) = serde_json::from_value::<SessionResult>(later) else {
+                    continue;
+                };
+                lenient.push(*key);
+                let unread = &read.unread;
+                let kept = if part == "groups" {
+                    &unread.groups
+                } else {
+                    &unread.timings
+                };
+                let kept = kept.first().and_then(|kept| kept.get(*key));
+                assert_eq!(kept, Some(&unreadable), "{part} {key}: kept as read");
+                read.groups.clone_from(&own.groups);
+                read.group_timings.clone_from(&own.group_timings);
+                // Written as text, as a store writes it: read back as a map,
+                // a key written twice would be read once.
+                let text = serde_json::to_string(&read).unwrap();
+                let back: SessionResult = serde_json::from_str(&text)
+                    .unwrap_or_else(|err| panic!("{part} {key} written twice: {err}"));
+                assert_eq!(back, own, "{part} {key}: its own, the other let go of");
+            }
+        }
+        assert_eq!(lenient, ["charTimes", "untimed"]);
+    }
+
     /// With adaptive group size drawing the lengths, a group is sent long on
     /// purpose, and the characters lost off its end are the length's: each
     /// character's tally leaves them out, as auto level does, while what was
