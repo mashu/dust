@@ -132,10 +132,15 @@ const SLOT: &str = "__dustBack";
 
 /// The script that tells the app, each time the page goes back or forward
 /// through its history, whether it is now on the app's own entry. A
-/// listener left on before is taken off first.
+/// listener left on before is taken off first. A page reloaded while the
+/// app was away from Home is on the app's entry still, of which the app,
+/// opening at Home, knows nothing: it is made a plain one, so the next
+/// screen's is the app's one entry, and Back from that screen goes Home
+/// rather than onto it.
 fn listen_script() -> String {
     format!(
         r#"if (window.{SLOT}) window.{SLOT}();
+if (history.state === "{MARK}") history.replaceState(null, "");
 const heard = (e) => dioxus.send(e.state === "{MARK}");
 window.addEventListener("popstate", heard);
 window.{SLOT} = () => window.removeEventListener("popstate", heard);"#
@@ -239,7 +244,7 @@ pub fn entries() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Ui, contest_settings, run, test_settings};
+    use crate::testing::{PageStep, Ui, contest_settings, on_fake_page, run, test_settings};
 
     /// Away from Home the entry goes on, once, however many screens are
     /// passed through; at Home it comes off.
@@ -377,6 +382,35 @@ mod tests {
             r#"history.pushState("dust-away", "");"#
         );
         assert_eq!(step_script(Step::Back), "history.back();");
+    }
+
+    /// A page reloaded while the app was away from Home is still on the
+    /// app's own entry, of which the app, opening at Home, knows nothing:
+    /// the listener makes it a plain one as it comes on, so the next screen
+    /// opened has the one entry of the app's, and Back from it is the
+    /// learner's, which takes the app Home. Left as it was, Back from that
+    /// screen came back onto the stale entry, the app's own, and did
+    /// nothing.
+    #[test]
+    fn a_page_reloaded_away_from_home_keeps_no_stale_entry() {
+        let Some(heard) = on_fake_page(&[
+            // The page as the app left it, away from Home, then reloaded.
+            PageStep::run(step_script(Step::Push)),
+            PageStep::run(listen_script()),
+            PageStep::run(r#"dioxus.send(history.state);"#),
+            // Another screen, and Back.
+            PageStep::run(step_script(Step::Push)),
+            PageStep::run("history.back();"),
+        ]) else {
+            return;
+        };
+        assert!(heard[1].sent.is_empty(), "nothing said as it came on");
+        assert_eq!(heard[2].sent, [serde_json::Value::Null], "a plain entry");
+        assert_eq!(
+            heard[4].sent,
+            [serde_json::Value::Bool(false)],
+            "the learner's Back"
+        );
     }
 
     /// Back in a contest run pauses it as its Pause does, and Back again
