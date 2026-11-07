@@ -39,6 +39,20 @@ const REOPEN_AFTER: Duration = Duration::from_secs(1);
 /// that loop from taking a core and the log with it.
 const ERROR_BACKOFF: Duration = Duration::from_millis(20);
 
+/// Whether letting go of a stream waits for its worker thread, which may
+/// never come back to be told. cpal 0.15's ALSA host, its one host on
+/// Linux and the BSDs, does: its worker retries a failed write in a loop
+/// that never looks for the word to stop (an unplugged USB device, a PCM
+/// suspended by the system's sleep, a sound server gone), and one blocked
+/// in a write to a device that died never returns at all. Waited for on
+/// the UI thread, either holds the app for good ([`OpenStream`]'s drop).
+const DROP_WAITS_ON_WORKER: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd"
+));
+
 /// Whether the stream opens again on the device and config it last opened
 /// on, rather than probing for them afresh. On Android the device is the
 /// system's default route, which oboe follows by itself, and finding its
@@ -100,11 +114,34 @@ pub struct MorsePlayer {
 /// stream without a word. So the callback notes when it ran, and a stream
 /// found not to have been called for a while is taken for broken too.
 struct OpenStream {
-    _stream: cpal::Stream,
+    /// Taken as the stream is let go of.
+    stream: Option<cpal::Stream>,
     /// The device's name, where it has one to read.
     device: Option<String>,
     failed: Arc<AtomicBool>,
     heartbeat: Arc<Heartbeat>,
+    /// Let go of without its worker being waited for: its callback plays
+    /// silence from then on, and leaves the mixer to the stream after it.
+    retired: Arc<AtomicBool>,
+}
+
+impl Drop for OpenStream {
+    /// A stream that broke, or was found silent, is let go of without its
+    /// worker being waited for where that wait may never end
+    /// ([`DROP_WAITS_ON_WORKER`]): retired, so that its callback, should the
+    /// worker live on after all, plays silence and never takes the mixer
+    /// from the stream opened after it, and left to the process with the
+    /// device it holds. A stream that did not break closes as cpal closes
+    /// it.
+    fn drop(&mut self) {
+        let Some(stream) = self.stream.take() else {
+            return;
+        };
+        if DROP_WAITS_ON_WORKER && self.failed.load(Ordering::Acquire) {
+            self.retired.store(true, Ordering::Release);
+            std::mem::forget(stream);
+        }
+    }
 }
 
 /// The audio buffer iOS is asked for: as short as the desktop's.
@@ -536,17 +573,30 @@ fn latency_frames(info: &cpal::OutputCallbackInfo, sample_rate: u32) -> usize {
         })
 }
 
-/// Build an output stream that plays `output` into `T` samples.
+/// What a stream's callbacks and its player tell each other: that it broke,
+/// that it is still being called, and that it was let go of.
+struct StreamWords {
+    failed: Arc<AtomicBool>,
+    heartbeat: Arc<Heartbeat>,
+    retired: Arc<AtomicBool>,
+}
+
+/// Build an output stream that plays `output` into `T` samples, until it is
+/// retired ([`OpenStream`]'s drop).
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut output: Output,
-    failed: Arc<AtomicBool>,
-    heartbeat: Arc<Heartbeat>,
+    words: StreamWords,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
+    let StreamWords {
+        failed,
+        heartbeat,
+        retired,
+    } = words;
     let channels = usize::from(config.channels).max(1);
     let sample_rate = config.sample_rate.0;
     // One scratch buffer of mono frames, made once: an audio callback must
@@ -561,6 +611,10 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                if retired.load(Ordering::Acquire) {
+                    data.fill(T::EQUILIBRIUM);
+                    return;
+                }
                 heartbeat.beat(clock_sec());
                 let frames = data.len().div_ceil(channels);
                 if scratch.len() < frames {
@@ -639,16 +693,21 @@ fn open_stream(
             config.sample_rate.0,
         );
         let heartbeat = Arc::new(Heartbeat::new(clock_sec()));
-        let (failing, beating) = (Arc::clone(&failed), Arc::clone(&heartbeat));
+        let retired = Arc::new(AtomicBool::new(false));
+        let words = StreamWords {
+            failed: Arc::clone(&failed),
+            heartbeat: Arc::clone(&heartbeat),
+            retired: Arc::clone(&retired),
+        };
         let built = match supported.sample_format() {
-            SampleFormat::F32 => build_stream::<f32>(device, &config, output, failing, beating),
-            SampleFormat::F64 => build_stream::<f64>(device, &config, output, failing, beating),
-            SampleFormat::I16 => build_stream::<i16>(device, &config, output, failing, beating),
-            SampleFormat::I32 => build_stream::<i32>(device, &config, output, failing, beating),
-            SampleFormat::U16 => build_stream::<u16>(device, &config, output, failing, beating),
-            SampleFormat::U32 => build_stream::<u32>(device, &config, output, failing, beating),
-            SampleFormat::I8 => build_stream::<i8>(device, &config, output, failing, beating),
-            SampleFormat::U8 => build_stream::<u8>(device, &config, output, failing, beating),
+            SampleFormat::F32 => build_stream::<f32>(device, &config, output, words),
+            SampleFormat::F64 => build_stream::<f64>(device, &config, output, words),
+            SampleFormat::I16 => build_stream::<i16>(device, &config, output, words),
+            SampleFormat::I32 => build_stream::<i32>(device, &config, output, words),
+            SampleFormat::U16 => build_stream::<u16>(device, &config, output, words),
+            SampleFormat::U32 => build_stream::<u32>(device, &config, output, words),
+            SampleFormat::I8 => build_stream::<i8>(device, &config, output, words),
+            SampleFormat::U8 => build_stream::<u8>(device, &config, output, words),
             other => Err(format!("Unsupported sample format: {other}")),
         };
         match built.and_then(|stream| {
@@ -657,10 +716,11 @@ fn open_stream(
         }) {
             Ok(stream) => {
                 return Ok(OpenStream {
-                    _stream: stream,
+                    stream: Some(stream),
                     device: device.name().ok(),
                     failed,
                     heartbeat,
+                    retired,
                 });
             }
             Err(err) => last_err = Some(err),
@@ -820,6 +880,40 @@ mod device_tests {
     fn counted_probe() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
         PROBES.set(PROBES.get() + 1);
         default_output()
+    }
+
+    /// A stream that broke is let go of without waiting on its worker where
+    /// that wait may never end, as cpal's ALSA worker stuck retrying a
+    /// write to a dead device never ends it: retired, its callback plays
+    /// silence and leaves the mixer to the stream opened after it, which
+    /// plays on. A stream that did not break, closed as the output sleeps,
+    /// is closed as cpal closes it, and retired never.
+    #[test]
+    fn a_broken_stream_is_let_go_of_without_waiting_on_its_worker() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        player.ensure_output().expect("open");
+        let broken = player.stream.as_ref().expect("open");
+        let retired = Arc::clone(&broken.retired);
+        broken.failed.store(true, Ordering::Release);
+        player.ensure_output().expect("opened again");
+        assert_eq!(
+            retired.load(Ordering::Acquire),
+            DROP_WAITS_ON_WORKER,
+            "a broken stream is retired where its worker is not waited for"
+        );
+        let next = player.stream.as_ref().expect("a new stream");
+        let (beat, healthy) = (Arc::clone(&next.heartbeat), Arc::clone(&next.retired));
+        let since = beat.last();
+        let called = Instant::now() + Duration::from_secs(5);
+        while beat.last() <= since {
+            assert!(Instant::now() < called, "the new stream plays");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        player.sleep();
+        assert!(player.stream.is_none(), "asleep, it is closed");
+        assert!(!healthy.load(Ordering::Acquire), "closed, not retired");
     }
 
     /// Where what it opened on is kept, as on Android, the output wakes
