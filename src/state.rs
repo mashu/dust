@@ -200,6 +200,10 @@ pub struct AppCtx {
     /// The settings could not be stored, and the user has been told: not
     /// again until they have been stored since.
     settings_unsaved: CopyValue<bool>,
+    /// The records the store listed and could not read, that a restore was
+    /// refused for already: one still unread at a later restore is taken
+    /// as one that cannot be read at all ([`Self::restore_backup`]).
+    restore_refused_for: CopyValue<BTreeSet<RecordId>>,
     /// Sync with the user's own Google Drive, where it is on
     /// ([`crate::sync::ctx`]).
     pub sync: SyncCtx,
@@ -264,6 +268,7 @@ impl AppCtx {
                 mark: CopyValue::new(None),
                 retrying: CopyValue::new(false),
                 settings_unsaved: CopyValue::new(false),
+                restore_refused_for: CopyValue::new(BTreeSet::new()),
                 sync,
                 app: CopyValue::new(app),
             };
@@ -588,9 +593,10 @@ impl AppCtx {
     }
 
     /// Bring the history and the settings here in line with the store's,
-    /// then do `then`, told whether the store could be listed: at once
-    /// wherever the store answers at once, as every store but a browser's
-    /// database does.
+    /// then do `then`, told whether the store could be listed, and where it
+    /// could, which of the records it listed that were not here could not
+    /// be read: at once wherever the store answers at once, as every store
+    /// but a browser's database does.
     ///
     /// Whatever another tab, window or copy of the app stored or deleted
     /// since this one last looked is taken up: each record listed that is
@@ -605,8 +611,10 @@ impl AppCtx {
     /// has since deleted from takes a session it brings back for one
     /// already here, and a backup of an old copy's history leaves out what
     /// was stored since, though it counts as backed up. Where the store
-    /// cannot be listed, nothing is taken up, and `then` is told so.
-    fn sync_with_store(self, then: impl FnOnce(bool) + 'static) {
+    /// cannot be listed, nothing is taken up, and `then` is told so (none);
+    /// a record listed that could not be read is not taken up either, and
+    /// `then` is told of it.
+    fn sync_with_store(self, then: impl FnOnce(Option<Vec<RecordId>>) + 'static) {
         let store = self.app().store;
         let settings_read = store.read_settings();
         self.tell_of_set_aside();
@@ -661,11 +669,16 @@ impl AppCtx {
             })
         });
         settle_or_spawn(looking, move |looked| {
-            let listed = looked.is_some();
-            if let Some(looked) = looked {
+            let unread = looked.map(|looked| {
+                let unread = looked
+                    .read
+                    .iter()
+                    .filter_map(|record| record.as_ref().err().copied())
+                    .collect();
                 self.take_up(looked);
-            }
-            then(listed);
+                unread
+            });
+            then(unread);
         });
     }
 
@@ -1173,15 +1186,28 @@ impl AppCtx {
     /// cannot take the history leaves everything as it was and says why,
     /// and so does one that cannot be listed for now: merged with what this
     /// copy last saw of the history, the backup would bring back, a second
-    /// time, a session another copy stored since.
+    /// time, a session another copy stored since. So does one that lists a
+    /// record it cannot read for now, the first time a restore finds it
+    /// so: one still unread at a later restore is taken as one that cannot
+    /// be read at all, and refuses no restore again.
     ///
     /// Each session it adds is a record where it finished
     /// ([`RecordId::placed`]), so two copies restoring one backup store it
     /// once; one it fills in is a record in its place
     /// ([`RecordId::beside`]), the one it fills in deleted.
     pub fn restore_backup(self, backup: Backup) {
-        self.sync_with_store(move |listed| {
-            if listed {
+        self.sync_with_store(move |unread| {
+            let mut refused_for = self.restore_refused_for;
+            let ready = unread.is_some_and(|unread| {
+                let new: Vec<RecordId> = unread
+                    .into_iter()
+                    .filter(|id| !refused_for.peek().contains(id))
+                    .collect();
+                let ready = new.is_empty();
+                refused_for.write().extend(new);
+                ready
+            });
+            if ready {
                 self.restore_now(backup);
             } else if let Some(why) = why_not_stored(&HistorySaved::Held) {
                 self.toasts.show(format!("Nothing was restored: {why}."));
@@ -2496,6 +2522,40 @@ mod tests {
         restore(&a, [1, 2, 3]);
         assert_eq!(days(&store.load_sessions()), [1, 2, 3], "each once");
         assert_eq!(a.shown(), [1, 2, 3]);
+    }
+
+    /// A restore asked for while a session another tab stored, listed by
+    /// the store, cannot be read for a moment restores nothing either, and
+    /// says why: merged with a history short of it, the backup brought it
+    /// back a second time. Asked for again, once it reads, the restore
+    /// brings back what is missing, each session once. One that still
+    /// cannot be read is taken as one that cannot be read at all, and
+    /// refuses no restore a second time.
+    #[test]
+    fn a_restore_while_a_listed_session_cannot_be_read_stores_nothing_twice() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(2));
+        store.held_open.borrow_mut().insert(b.id_of(2));
+        restore(&a, [1, 2, 3]);
+        assert!(
+            a.toast()
+                .is_some_and(|toast| toast.text.starts_with("Nothing was restored:")),
+            "{:?}",
+            a.toast()
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2], "nothing restored");
+        store.held_open.borrow_mut().clear();
+        restore(&a, [1, 2, 3]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3], "each once");
+        assert_eq!(a.shown(), [1, 2, 3]);
+
+        b.finish(day(4));
+        store.held_open.borrow_mut().insert(b.id_of(4));
+        restore(&a, [5]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4], "refused once");
+        restore(&a, [5]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4, 5]);
     }
 
     /// A store that takes no change leaves a restore, and its Undo, undone,

@@ -74,6 +74,9 @@ pub struct MemoryStore {
     pub failing: RefCell<Option<String>>,
     /// The history cannot be listed or read.
     pub unlistable: Cell<bool>,
+    /// The records listed that cannot be read for now, the way a file
+    /// another program holds open for a moment cannot.
+    pub held_open: RefCell<BTreeSet<RecordId>>,
     /// Changes to the history are made only when the test says
     /// ([`Self::settle`]), the way a browser's database makes them a
     /// moment after they are asked for.
@@ -505,14 +508,16 @@ impl Store for MemoryStore {
         if let Some(page) = &self.page {
             return done(page.read(&ids));
         }
-        let records = self.records.borrow();
+        let (records, held_open) = (self.records.borrow(), self.held_open.borrow());
         done(
             ids.into_iter()
                 .map(|id| match records.get(&id) {
-                    Some(held) if !self.unlistable.get() => Ok(Record {
-                        id,
-                        json: held.json.clone(),
-                    }),
+                    Some(held) if !self.unlistable.get() && !held_open.contains(&id) => {
+                        Ok(Record {
+                            id,
+                            json: held.json.clone(),
+                        })
+                    }
                     _ => Err(id),
                 })
                 .collect(),
