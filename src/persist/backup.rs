@@ -56,6 +56,17 @@ const SESSION_MAX_BYTES: usize = 4_000_000;
 /// past this is left out, as one that does not read is ([`each_session`]).
 const UNREAD_MAX_BYTES: usize = 16_000_000;
 
+/// How much of the logs of the contest runs in a backup is kept, in all,
+/// as JSON: sixteen megabytes. A run of an hour logs some eighty kilobytes
+/// worked at twenty QSOs a minute, far faster than anyone works, and some
+/// sixteen at 235 an hour, so this is two hundred runs of the one, or a
+/// thousand of the other. A log is kept whole, as it was read, whatever it
+/// holds ([`cw_core::ContestLog`]), and takes some twelve times as much
+/// memory as it does in the file, or more, so a run that would take it
+/// past this is left out, as a session that does not read is
+/// ([`each_session`]).
+const RUN_LOGS_MAX_BYTES: usize = 16_000_000;
+
 /// The longest the settings in a backup may be and still be read: a
 /// megabyte, far more than settings come to, a word list of two thousand
 /// words among them. Longer, they are read as settings that do not read.
@@ -417,10 +428,13 @@ where
 /// lies in the file, and one that does not read is left out alone. No part
 /// is read whole that is far longer than its kind ever is: settings longer
 /// than [`SETTINGS_MAX_BYTES`], or a session longer than
-/// [`SESSION_MAX_BYTES`]. And what the sessions hold that this build does
-/// not read is kept only up to [`UNREAD_MAX_BYTES`] in all. So what a file
-/// takes in memory is what the sessions this build reads in it take, and
-/// a bounded part beside them, whatever else it holds.
+/// [`SESSION_MAX_BYTES`]. And what of the sessions is held as it was read,
+/// to be written back with them, whatever it holds, is held only to a
+/// bound in all: what they hold that this build does not read up to
+/// [`UNREAD_MAX_BYTES`], and the logs of their contest runs up to
+/// [`RUN_LOGS_MAX_BYTES`]. So what a file takes in memory is what the
+/// sessions this build reads in it take, and a bounded part beside them,
+/// whatever else it holds.
 pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
     // A mark of the encoding, as an editor saving a file may put first, is
     // no part of what it holds.
@@ -488,11 +502,15 @@ fn settings_in(raw: &str) -> TrainingSettings {
 /// is one far longer than any session ([`SESSION_MAX_BYTES`]), unread.
 ///
 /// What a session holds that this build does not read is kept as it was
-/// read, to be written back with it, and takes many times as much memory
-/// as it does in the file: a session that would take what is kept of it
-/// past [`UNREAD_MAX_BYTES`], in all, is left out too, rather than kept
-/// without it. Bounded a session at a time, a file of sixty sessions each
-/// of sixteen megabytes of keys no build reads kept a gigabyte of them.
+/// read, to be written back with it, and so is a contest run's log, any
+/// JSON at all; and either takes many times as much memory as it does in
+/// the file. A session that would take what is kept of the one past
+/// [`UNREAD_MAX_BYTES`], in all, or of the other past
+/// [`RUN_LOGS_MAX_BYTES`], is left out too, rather than kept without it.
+/// Bounded a session at a time, a file of sixty sessions each of sixteen
+/// megabytes of keys no build reads kept a gigabyte of them; and with logs
+/// not counted at all, one of two hundred and fifty runs, each with a log
+/// of nearly four megabytes, kept as much.
 ///
 /// None where `raw` is no list. Beside them, how many of its elements were
 /// left out.
@@ -521,16 +539,20 @@ impl<'de> serde::de::Visitor<'de> for EachSession {
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut list: A) -> Result<Self::Value, A::Error> {
         let (mut sessions, mut left_out) = (Vec::new(), 0);
         // What is kept so far of what they hold that this build does not
-        // read, as JSON.
-        let mut unread = 0;
+        // read, and of their runs' logs, as JSON.
+        let (mut unread, mut logs) = (0, 0);
         while let Some(session) = list.next_element::<&RawValue>()? {
             let session = session.get();
             let read = (session.len() <= SESSION_MAX_BYTES)
                 .then(|| serde_json::from_str::<SessionResult>(session).ok())
                 .flatten();
-            match read.map(|session| (unread_bytes(&session), session)) {
-                Some((more, session)) if unread + more <= UNREAD_MAX_BYTES => {
+            let read = read.map(|session| (unread_bytes(&session), log_bytes(&session), session));
+            match read {
+                Some((more, log, session))
+                    if unread + more <= UNREAD_MAX_BYTES && logs + log <= RUN_LOGS_MAX_BYTES =>
+                {
                     unread += more;
+                    logs += log;
                     sessions.push(scored(session));
                 }
                 _ => left_out += 1,
@@ -552,6 +574,17 @@ fn unread_bytes(session: &SessionResult) -> usize {
     {
         // Counting fails nowhere.
         let _ = serde_json::to_writer(&mut counted, part);
+    }
+    counted.0
+}
+
+/// How long the log of `session`, a contest run, is, as JSON: none where it
+/// keeps none.
+fn log_bytes(session: &SessionResult) -> usize {
+    let mut counted = Counted(0);
+    if let Some(log) = &session.contest {
+        // Counting fails nowhere.
+        let _ = serde_json::to_writer(&mut counted, log);
     }
     counted.0
 }
@@ -1261,6 +1294,32 @@ mod tests {
         let backup = read_backup(&raw).expect("a history");
         let days: Vec<u64> = backup.sessions.iter().map(|s| s.timestamp).collect();
         assert_eq!((days, backup.left_out), (vec![9], 1));
+    }
+
+    /// The logs of the runs in a backup are kept, each whole as it was
+    /// read, only up to a bound in all: past it, a run is left out, as a
+    /// session too long to read is, and a session with no log is read all
+    /// the same. A log is any JSON, and was not counted: a file of some two
+    /// hundred and fifty runs, each with a log of nearly four megabytes,
+    /// kept a gigabyte of them, many times over in memory.
+    #[test]
+    fn the_logs_of_the_runs_in_a_backup_are_kept_to_a_bound() {
+        let run = |day: u64, bytes: usize| {
+            let mut run = serde_json::to_value(at(day, &format!("2026-10-{day:02}"))).unwrap();
+            run["contest"] = "x".repeat(bytes).into();
+            run.to_string()
+        };
+        // Five whose logs fit the bound together, and a sixth whose log
+        // does not.
+        let share = RUN_LOGS_MAX_BYTES / 5 - 100;
+        let mut list: Vec<String> = (1..=6).map(|day| run(day, share)).collect();
+        list.push(serde_json::to_string(&at(7, "2026-10-07")).unwrap());
+        let backup = read_backup(&format!("[{}]", list.join(","))).expect("a history");
+        assert_eq!(timestamps(&backup.sessions), [1, 2, 3, 4, 5, 7]);
+        assert_eq!(backup.left_out, 1);
+        let kept = backup.sessions[0].contest.as_ref();
+        let kept = kept.and_then(|log| log.0.as_str()).map(str::len);
+        assert_eq!(kept, Some(share), "kept as it was");
     }
 
     /// `backup` with none of its sessions counted as left out, as Dust
