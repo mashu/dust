@@ -151,8 +151,8 @@ impl PickedFile {
 }
 
 /// A piece of a file the phone's own picker chose, as the picker hands it
-/// over ([`picker_script`]): the file whole, or a slice of its text with
-/// more to come, the last of which ends it.
+/// over ([`picker_script`]): a slice of its text with more to come, or the
+/// last piece, which ends it, with no text for a file that is no text.
 #[derive(Deserialize)]
 #[cfg_attr(
     not(any(target_os = "android", target_os = "ios", test)),
@@ -304,9 +304,10 @@ fn utf8_up_to(bytes: &[u8], from: usize) -> Option<usize> {
 }
 
 /// The script that has the element `id` open the webview's own file picker
-/// for `accept`, and sends back each file chosen as a [`Piece`]: whole,
-/// or, one larger than [`SLICE_BYTES`], its text a slice at a time, as the
-/// webview may not hand over hundreds of megabytes at once. The file input
+/// for `accept`, and sends back each file chosen as [`Piece`]s, its text a
+/// slice of [`SLICE_BYTES`] at a time, as the webview may not hand over
+/// hundreds of megabytes at once: text while it reads as UTF-8, and from
+/// the slice that does not, none, the rest left unread. The file input
 /// it opens is the document body's own, outside the page the renderer
 /// draws, so the renderer leaves its clicks alone. A picker made before for
 /// the same id, by a button drawn before, gives way to this one.
@@ -343,25 +344,32 @@ input.addEventListener("change", () => {{
         send(null, false);
         return;
     }}
-    if (file.size <= {SLICE_BYTES}) {{
-        const reader = new FileReader();
-        reader.onload = () => send(String(reader.result), false);
-        reader.onerror = () => send(null, false);
-        reader.readAsText(file);
-        return;
-    }}
-    // A slice at a time, each decoded as it comes: a character cut in two
-    // by a slice's end is decoded whole with the next.
-    const decoder = new TextDecoder();
+    // A slice at a time, each decoded as it comes, as UTF-8 or not at all,
+    // as a computer reads a file: a character cut in two by a slice's end
+    // is decoded whole with the next, and a slice that is no UTF-8, the
+    // first of a photo or a film, ends the file there, unread.
+    const decoder = new TextDecoder("utf-8", {{ fatal: true }});
+    const decode = (bytes) => {{
+        try {{
+            return bytes ? decoder.decode(bytes, {{ stream: true }}) : decoder.decode();
+        }} catch (notText) {{
+            return null;
+        }}
+    }};
     let at = 0;
     const next = () => {{
         if (at >= file.size) {{
-            send(decoder.decode(), false);
+            send(decode(), false);
             return;
         }}
         const reader = new FileReader();
         reader.onload = () => {{
-            send(decoder.decode(new Uint8Array(reader.result), {{ stream: true }}), true);
+            const text = decode(new Uint8Array(reader.result));
+            if (text === null) {{
+                send(null, false);
+                return;
+            }}
+            send(text, true);
             next();
         }};
         reader.onerror = () => send(null, false);
@@ -467,9 +475,81 @@ mod tests {
         ChosenFile, Piece, Pieces, SLICE_BYTES, data_dirs, on_path, picker_script,
         portal_chooses_files, utf8_up_to,
     };
+    use crate::testing::{PageStep, on_fake_page};
+    use serde_json::Value;
     use std::ffi::OsStr;
     use std::fs;
     use std::path::PathBuf;
+
+    /// What the phone's own picker sends the app, run in Node on a page made
+    /// up for it (`src/fake_page.mjs`), as `choose` has it choose files
+    /// there (`picker.choose(file)`, then `await settled()`), with what
+    /// `choose` sends itself among it. The webview's file input and reader
+    /// are made up beside it, the reader counting the reads it makes in
+    /// `read`. None on a machine with no Node.
+    fn picked_on_page(choose: &str) -> Option<Vec<Value>> {
+        let page = r#"globalThis.reading = 0;
+globalThis.read = 0;
+globalThis.FileReader = class {
+  readAsArrayBuffer(blob) {
+    this.take(blob.arrayBuffer());
+  }
+  readAsText(blob) {
+    this.take(blob.text());
+  }
+  take(reading) {
+    globalThis.reading += 1;
+    globalThis.read += 1;
+    reading.then((result) => {
+      globalThis.reading -= 1;
+      this.result = result;
+      this.onload();
+    });
+  }
+};
+document.createElement = () => {
+  const heard = {};
+  return {
+    style: {},
+    addEventListener: (type, listener) => {
+      heard[type] = listener;
+    },
+    click: () => {},
+    remove: () => {},
+    choose(file) {
+      this.files = [file];
+      heard.change();
+    },
+  };
+};
+document.body.appendChild = (input) => {
+  globalThis.picker = input;
+};"#;
+        let choose = format!(
+            r#"const settled = async () => {{
+  do {{
+    await new Promise((done) => setTimeout(done, 1));
+  }} while (reading > 0);
+}};
+{choose}"#
+        );
+        let heard = on_fake_page(&[
+            PageStep::run(page),
+            PageStep::run(picker_script("file-backup", "", 1 << 30)),
+            PageStep::wait(choose),
+        ])?;
+        Some(heard.into_iter().last()?.sent)
+    }
+
+    /// The files the pieces in `sent` put together, in turn, as the button
+    /// puts them together.
+    fn files_in(sent: &[Value]) -> Vec<ChosenFile> {
+        let mut pieces = Pieces::default();
+        sent.iter()
+            .filter(|said| said.get("name").is_some())
+            .filter_map(|piece| pieces.take(serde_json::from_value(piece.clone()).ok()?))
+            .collect()
+    }
 
     /// A scratch folder, gone again with the test.
     struct Scratch(PathBuf);
@@ -565,12 +645,12 @@ mod tests {
         assert!(script.contains(r##"event.target.closest("#" + id)"##));
         assert!(script.contains("input.click();"));
         assert!(script.contains("if (file.size > 500)"));
-        assert!(script.contains("reader.readAsText(file);"));
         assert!(script.contains("dioxus.send("));
-        // One larger than a slice, a slice at a time.
-        assert!(script.contains(&format!("if (file.size <= {SLICE_BYTES})")));
-        assert!(script.contains("reader.readAsArrayBuffer(file.slice(at, at + "));
-        assert!(script.contains("decoder.decode(new Uint8Array(reader.result), { stream: true })"));
+        // A slice at a time, as UTF-8 or not at all.
+        assert!(script.contains(&format!(
+            "reader.readAsArrayBuffer(file.slice(at, at + {SLICE_BYTES}));"
+        )));
+        assert!(script.contains(r#"new TextDecoder("utf-8", { fatal: true })"#));
         // Drawn again, it takes over from the picker before.
         let takeover = script.find("pickers[id]();").expect("takes over");
         let made = script.find("document.createElement").expect("makes one");
@@ -594,6 +674,51 @@ mod tests {
         film.extend([0x93, 0xff, 0x00]);
         assert_eq!(utf8_up_to(&film, 0), None);
         assert_eq!(utf8_up_to(&film, 4), None, "past the slices before");
+    }
+
+    /// The phone's picker reads a file as UTF-8 or not at all, as a computer
+    /// reads one: its text whole, a character cut in two by the end of a
+    /// slice decoded with the next; a file that is no text handed back
+    /// unread from its first slice, the rest of it never read, as a photo or
+    /// a film among every file a phone offers; and one cut off in the middle
+    /// of a character unread as well. Each was read as text whatever it
+    /// held, a mark for every byte that was not, and a film of a gigabyte
+    /// put together whole in the app, three times over.
+    #[test]
+    fn the_phone_picker_reads_a_file_as_utf8_or_not_at_all() {
+        let slice = SLICE_BYTES;
+        let Some(sent) = picked_on_page(&format!(
+            r#"const big = new Uint8Array({slice} + 1).fill(0x61);
+big.set([0xc3, 0xa9], {slice} - 1);
+picker.choose(new File([big], "big.json"));
+await settled();
+dioxus.send({{ read }});
+picker.choose(new File(['{{"dustBackup":1}} é'], "b.json"));
+await settled();
+const film = new Uint8Array({slice} + 1).fill(0x61);
+film[0] = 0xff;
+picker.choose(new File([film], "film.mp4"));
+await settled();
+dioxus.send({{ read }});
+picker.choose(new File([new Uint8Array([0x61, 0xc3])], "cut.txt"));
+await settled();"#
+        )) else {
+            return;
+        };
+        let files = files_in(&sent);
+        let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(names, ["big.json", "b.json", "film.mp4", "cut.txt"]);
+        let big = files[0].text.as_deref().expect("text");
+        assert_eq!(big.len(), slice as usize + 1);
+        assert!(big.ends_with("aé"), "cut in two by the slice's end");
+        assert_eq!(files[1].text.as_deref(), Some(r#"{"dustBackup":1} é"#));
+        assert_eq!(files[2].text, None, "a film is no text");
+        assert_eq!(files[3].text, None, "cut off mid-character");
+        let read: Vec<u64> = sent
+            .iter()
+            .filter_map(|said| said.get("read")?.as_u64())
+            .collect();
+        assert_eq!(read, [2, 4], "the film's first slice alone");
     }
 
     /// A file handed over a slice at a time is put together whole, and
