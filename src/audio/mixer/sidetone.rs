@@ -97,10 +97,21 @@ impl SidetoneControl {
     /// Play `tone`: its pitch, level and edge from now on, and the gate
     /// opened or closed at the edge it was keyed for, `tone.ago_sec` ago.
     pub fn set(&self, tone: ToneRequest) {
+        debug_assert!(
+            -tone.ago_sec <= AHEAD_US as f64 / 1e6,
+            "an edge keyed {} s ahead of the clock reads as keyed a hundred days before",
+            -tone.ago_sec
+        );
         self.set_at(tone, clock_sec() - tone.ago_sec);
     }
 
-    /// [`Self::set`], the edge keyed at `at_sec` on [`clock_sec`]'s clock.
+    /// [`Self::set`], the edge keyed at `at_sec` on [`clock_sec`]'s clock:
+    /// never more than [`AHEAD_US`] after the clock's reading as it is
+    /// keyed, which [`Self::set`] asserts. The edge's instant is kept modulo
+    /// the hundred days or so that fit in its word, and read back as the
+    /// latest instant so kept no more than that after the callback's own
+    /// reading of the clock ([`unpack`]): one keyed further ahead would read
+    /// as keyed a hundred days before, and sound at once.
     pub(super) fn set_at(&self, tone: ToneRequest, at_sec: f64) {
         self.hz_bits.store(tone.hz.to_bits(), Ordering::Relaxed);
         self.gain_bits.store(tone.gain.to_bits(), Ordering::Relaxed);
@@ -584,6 +595,21 @@ mod tests {
                 "{marks:?}"
             );
         }
+    }
+
+    /// An edge keyed more than a second ahead of the clock would read back
+    /// as keyed a hundred days before, its microseconds kept modulo what
+    /// fits in its word, and sound at once: a bug a debug build says out
+    /// loud as the edge is keyed.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "ahead of the clock")]
+    fn a_debug_build_says_when_an_edge_is_keyed_more_than_a_second_ahead() {
+        let control = SidetoneControl::new();
+        control.set(ToneRequest {
+            ago_sec: -1.5,
+            ..ToneRequest::new(true, 600.0, 0.4)
+        });
     }
 
     /// An edge keyed long ago sounds as soon as it can, rather than never.
