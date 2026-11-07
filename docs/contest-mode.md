@@ -2961,8 +2961,8 @@ exactly as it was while the run went on.
   when it gives up. One it read while no station had taken it, as the next
   caller's call or a slip of it is before it goes out, was typed for
   whichever station takes it from you later, before the copy is made: the
-  station you worked keeps the call you last sent it, as Show copy's copy
-  is settled too. So no lost copy is a call another station took from
+  station you worked keeps the call you last sent it, settled as the
+  copy is made, as Show copy's is. So no lost copy is a call another station took from
   you, which the soak checks as each copy is lost, against the stations
   there then. It is timed as the call was when you last sent it.
 - **A NIL** (`k: "nil"`): a call group, and a group for each field as a

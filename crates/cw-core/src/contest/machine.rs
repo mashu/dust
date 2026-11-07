@@ -2622,10 +2622,10 @@ impl<S: CallSource> ContestMachine<S> {
 
     /// Station `index`'s Call field as last read while you worked it
     /// ([`Self::note_typed`]), settled as its copy is made: in a pile-up, a
-    /// call another station has taken from you since, or signs having heard
-    /// it from you, and this one never took, was typed for that one, as the
-    /// next caller's call, or a slip of it, read before it went out is; and
-    /// this one keeps the call you last sent it.
+    /// call another station took from you for its own, whenever it did, or
+    /// signs having heard it from you, and this one never took, was typed
+    /// for that one, as the next caller's call, or a slip of it, read before
+    /// it went out is; and this one keeps the call you last sent it.
     fn settle_typed(&mut self, index: usize) {
         if self.taken_by_another(index, &self.stations[index].heard.typed.text) {
             let heard = &mut self.stations[index].heard;
@@ -4647,7 +4647,7 @@ impl<S: CallSource> ContestMachine<S> {
     /// Station `index`'s QSO ended unlogged: one call group, copied as the
     /// call first sent with your exchange, as a logged QSO keeps it, or
     /// else as the Call field last read while you worked it, unless another
-    /// station has taken that call from you since ([`Self::settle_typed`]),
+    /// station took that call from you for its own ([`Self::settle_typed`]),
     /// timed as last sent; and a miss for each field, heard or not, as a
     /// QSO logged before its exchange came has. Walking away pays no better
     /// than finishing, and hides no copy.
@@ -11082,6 +11082,34 @@ mod tests {
             let k5xyz = copies.iter().find(|(sent, _)| *sent == "K5XYZ");
             assert_eq!(k5xyz, Some(&("K5XYZ", "K5XYZ")), "{key:?}: {copies:?}");
         }
+    }
+
+    /// The same, the station sent a slip of its call that it took as close:
+    /// it keeps that slip, the call you last sent it, not its own call,
+    /// which would be a clean copy you never made, nor the reading the next
+    /// caller took.
+    #[test]
+    fn a_station_left_with_a_slip_read_keeps_the_slip_you_sent_it() {
+        let mut runtime = pileup(&["K5XYZ", "W7ABC"], 2, 2);
+        runtime.finish_turn();
+        runtime.key(OpKey::HisCall, "K5XYA", "");
+        runtime.finish_turn();
+        assert_eq!(
+            runtime.machine.stations[0].heard.call_sent, "K5XYA",
+            "taken as close"
+        );
+        runtime.key(OpKey::Wipe, "W7ABD", "");
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "W7ABD", "");
+        assert_eq!(runtime.machine.working, Some(1), "W7ABC takes the slip");
+        runtime.finish_turn();
+        let lost = runtime.machine.nil_and_lost_copies();
+        runtime.apply(ContestEvent::FinishNow);
+        assert_eq!(runtime.machine.crossed_since(&lost), []);
+        let (result, _) = result(&runtime);
+        let copies = copies(&result);
+        let k5xyz = copies.iter().find(|(sent, _)| *sent == "K5XYZ");
+        assert_eq!(k5xyz, Some(&("K5XYZ", "K5XYA")), "{copies:?}");
     }
 
     /// A reading of the station you work is checked against the stations
