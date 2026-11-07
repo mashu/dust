@@ -40,6 +40,16 @@ pub const BACKUP_MAX_BYTES: u64 = 1_000_000_000;
 /// while: fifty megabytes, some seven thousand sessions.
 pub const BACKUP_LARGE_BYTES: u64 = 50_000_000;
 
+/// The longest a session in a backup may be and still be read: sixteen
+/// megabytes, far more than any session comes to, at some seven kilobytes
+/// a session, or a run of an hour. One longer is left out unread.
+const SESSION_MAX_BYTES: usize = 16_000_000;
+
+/// The longest the settings in a backup may be and still be read: a
+/// megabyte, far more than settings come to, a word list of two thousand
+/// words among them. Longer, they are read as settings that do not read.
+const SETTINGS_MAX_BYTES: usize = 1_000_000;
+
 /// What a backup holds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Backup {
@@ -341,15 +351,17 @@ impl NotRestored {
 }
 
 /// A backup file as it is read: only what tells it is one, and each part
-/// left as it lies in the file until it is read on its own.
+/// left as it lies in the file until it is read on its own. Even the mark
+/// and the date are read only as whole numbers ([`whole_number`]): a list
+/// of a gigabyte in their place was built up whole first, many times over.
 #[derive(Deserialize)]
 struct OnDisk<'a> {
-    #[serde(rename = "dustBackup", default)]
-    mark: Option<serde_json::Value>,
-    #[serde(rename = "savedAt", default)]
-    saved_at: Option<serde_json::Value>,
+    #[serde(rename = "dustBackup", default, borrow)]
+    mark: Option<&'a RawValue>,
+    #[serde(rename = "savedAt", default, borrow)]
+    saved_at: Option<&'a RawValue>,
     /// Whatever it holds, `null` too: a backup with settings of any kind
-    /// takes them, as read ([`load_settings_from`]).
+    /// takes them, as read ([`settings_in`]).
     #[serde(default, borrow, deserialize_with = "present")]
     settings: Option<&'a RawValue>,
     #[serde(default, borrow)]
@@ -373,8 +385,9 @@ where
 /// back. It holds no settings, and none are taken from it.
 ///
 /// Only the sessions are held as they are read: each is read from where it
-/// lies in the file, and one that does not read is left out alone. A file
-/// of a gigabyte is read in about as much memory again.
+/// lies in the file, and one that does not read is left out alone. No part
+/// is read whole that is far larger than any backup's: a file of a
+/// gigabyte is read in about as much memory again.
 pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
     // A mark of the encoding, as an editor saving a file may put first, is
     // no part of what it holds.
@@ -394,31 +407,53 @@ pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
         return Err(NotRestored::NotABackup);
     }
     let file: OnDisk = serde_json::from_str(json).map_err(|_| NotRestored::NotABackup)?;
-    if !file.mark.as_ref().is_some_and(serde_json::Value::is_u64) {
+    if whole_number(file.mark).is_none() {
         return Err(NotRestored::NotABackup);
     }
-    let settings = file
-        .settings
-        .map(|settings| load_settings_from(settings.get()));
+    let settings = file.settings.map(|settings| settings_in(settings.get()));
     let sessions = file
         .sessions
         .and_then(|sessions| each_session(sessions.get()))
         .ok_or(NotRestored::Unreadable)?;
     Ok(Backup {
-        saved_at: file
-            .saved_at
-            .as_ref()
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        saved_at: whole_number(file.saved_at).unwrap_or(0),
         settings,
         sessions,
     })
 }
 
+/// The whole number `raw`, a part of a backup as it lies in the file, is:
+/// none where it is anything else. A part longer than the longest whole
+/// number, twenty digits, is none without being read at all.
+fn whole_number(raw: Option<&RawValue>) -> Option<u64> {
+    let raw = raw?.get();
+    if raw.len() > 20 {
+        return None;
+    }
+    serde_json::from_str(raw).ok()
+}
+
+/// The settings `raw`, as they lie in a backup, read as the store reads its
+/// own ([`load_settings_from`]), where they are an object no longer than
+/// settings come to ([`SETTINGS_MAX_BYTES`]). Anything else is read as
+/// settings that do not read, as the store reads them, without being read
+/// at all: read whole, a list or an object of a gigabyte was built up many
+/// times over.
+fn settings_in(raw: &str) -> TrainingSettings {
+    if raw.starts_with('{') && raw.len() <= SETTINGS_MAX_BYTES {
+        load_settings_from(raw)
+    } else {
+        TrainingSettings::default().clamp()
+    }
+}
+
 /// Every session of `raw`, a JSON list, that reads, each read from where
 /// it lies as the list is read, and scored as sessions score today: one
-/// that does not read is left out alone, and nothing is held of it. None
-/// where `raw` is no list.
+/// that does not read is left out alone, and nothing is held of it, and so
+/// is one far longer than any session ([`SESSION_MAX_BYTES`]), unread: what
+/// a session holds that this build does not read is kept as it was read,
+/// and one of a gigabyte was built up many times over. None where `raw` is
+/// no list.
 fn each_session(raw: &str) -> Option<Vec<SessionResult>> {
     use serde::Deserializer as _;
     let mut list = serde_json::Deserializer::from_str(raw);
@@ -444,7 +479,11 @@ impl<'de> serde::de::Visitor<'de> for EachSession {
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut list: A) -> Result<Self::Value, A::Error> {
         let mut sessions = Vec::new();
         while let Some(session) = list.next_element::<&RawValue>()? {
-            if let Ok(session) = serde_json::from_str(session.get()) {
+            let session = session.get();
+            if session.len() > SESSION_MAX_BYTES {
+                continue;
+            }
+            if let Ok(session) = serde_json::from_str(session) {
                 sessions.push(scored(session));
             }
         }
@@ -1015,6 +1054,45 @@ mod tests {
         // which used to make it no backup at all.
         let marked = format!("\u{feff}{}", cases[0]);
         assert_eq!(read_backup(&marked), read_backup(&cases[0]));
+    }
+
+    /// A part of a backup far larger than any backup's is never read
+    /// whole: a mark or a date that is no number is none, whatever it
+    /// holds; settings longer than any are read as settings that do not
+    /// read; and a session longer than any is left out unread. Each was
+    /// read whole first, and what it held built up many times over, so a
+    /// file of a gigabyte of any of them stopped the app for want of
+    /// memory. Deeper than a value is ever built up, a date made the file
+    /// no backup at all.
+    #[test]
+    fn a_part_far_larger_than_any_backups_is_not_read_whole() {
+        let good = serde_json::to_string(&at(5, "2026-10-05")).unwrap();
+        let deep = format!("{}{}", "[".repeat(1_000), "]".repeat(1_000));
+        let raw = format!(r#"{{"dustBackup":1,"savedAt":{deep},"sessions":[{good}]}}"#);
+        let backup = read_backup(&raw).expect("a backup");
+        assert_eq!((backup.saved_at, backup.sessions.len()), (0, 1));
+        let raw = format!(r#"{{"dustBackup":{deep},"sessions":[{good}]}}"#);
+        assert_eq!(read_backup(&raw), Err(NotRestored::NotABackup));
+        let long = format!("[{}]", ["0"; 100_000].join(","));
+        let raw = format!(r#"{{"dustBackup":1,"savedAt":{long},"sessions":[{good}]}}"#);
+        assert_eq!(read_backup(&raw).expect("a backup").saved_at, 0);
+
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.level = 14;
+        let mut long = serde_json::to_value(&settings).unwrap();
+        long["later"] = "x".repeat(SETTINGS_MAX_BYTES).into();
+        let raw = format!(r#"{{"dustBackup":1,"settings":{long},"sessions":[{good}]}}"#);
+        assert_eq!(
+            read_backup(&raw).expect("a backup").settings,
+            Some(TrainingSettings::default().clamp())
+        );
+
+        let mut session = serde_json::to_value(at(6, "2026-10-06")).unwrap();
+        session["later"] = "x".repeat(SESSION_MAX_BYTES).into();
+        let raw = format!("[{good},{session}]");
+        let backup = read_backup(&raw).expect("a history");
+        let dates: Vec<&str> = backup.sessions.iter().map(|s| s.date.as_str()).collect();
+        assert_eq!(dates, ["2026-10-05"]);
     }
 
     /// The backup `backup` comes to, written with `stored`, and what it
