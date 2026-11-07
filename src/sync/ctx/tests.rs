@@ -375,6 +375,35 @@ fn a_session_kept_is_synced_a_moment_later() {
     });
 }
 
+/// Coming back into sight syncs where the last sync is stamped ahead of the
+/// clock, as it is once the clock is set back after it: no sync of a moment
+/// ago, however long ago it was. It used to be taken for one until the
+/// clock passed it again.
+#[test]
+fn a_last_sync_stamped_ahead_of_the_clock_is_synced_again() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let lists = remote.lists.get();
+        harness.in_app(|| ctx.sync_if_stale());
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(remote.lists.get(), lists, "synced a moment ago");
+
+        // The clock set back an hour since.
+        harness.in_app(|| {
+            let mut state = ctx.sync.state;
+            if let Some(state) = state.write().as_mut() {
+                state.last = Some(now_ms() + 3_600_000);
+            }
+        });
+        harness.in_app(|| ctx.sync_if_stale());
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(remote.lists.get(), lists + 1);
+    });
+}
+
 /// Signed out at Google, the card asks for a sign-in, and syncs once
 /// given one.
 #[test]

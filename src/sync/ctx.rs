@@ -512,10 +512,12 @@ impl AppCtx {
     }
 
     /// Sync soon, where the last sync was a while ago: as the app comes
-    /// back into sight.
+    /// back into sight. One stamped ahead of the clock, as it is once the
+    /// clock is set back after it, is taken for one a while ago.
     pub fn sync_if_stale(self) {
         let last = self.sync.state.peek().as_ref().and_then(|state| state.last);
-        if last.is_none_or(|last| now_ms().saturating_sub(last) >= SYNC_STALE_MS) {
+        let now = now_ms();
+        if last.is_none_or(|last| last > now || now - last >= SYNC_STALE_MS) {
             self.sync_soon();
         }
     }
