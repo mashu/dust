@@ -350,6 +350,32 @@ fn trying_another_character_set_costs_no_level() {
     });
 }
 
+/// A level typed and not committed is the level of the character set it
+/// was typed for. Another chosen meanwhile, as a tap can while a phone
+/// keeps the box focused, shows its own level in the box, and the box left
+/// after takes nothing to it: the text typed went with the set it was
+/// typed for. The box kept it, showed it as the other set's, and committed
+/// it to that set once it was left.
+#[test]
+fn a_level_typed_for_one_character_set_is_not_another_ones() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 6;
+        settings.curriculum.digits_level = 2;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        ui.type_into("field-level", "9");
+        ui.click("seg-digits");
+        assert_eq!(value_of(&ui, "field-level"), "2", "the Digits level");
+        let shown = value_of(&ui, "field-level");
+        ui.commit("field-level", &shown);
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.digits_level, 2);
+        assert_eq!(stored.curriculum.level, 6);
+    });
+}
+
 /// The unlock order can be emptied and typed out again. It is only read
 /// once it is committed, so an empty box is not refilled with LCWO's order
 /// under the cursor, and typing LCWO's order back is LCWO again.
