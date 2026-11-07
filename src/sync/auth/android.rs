@@ -22,7 +22,8 @@ use crate::persist::record::Pending;
 const LOOK_MS: u32 = 150;
 /// How long an answer is waited for: with the user asked, as long as a
 /// computer's sign-in waits for them; with Play services alone, as long as
-/// a request to Google is given.
+/// a request to Google is given. The activity lets go of an answer kept
+/// longer than the longest of them (`DRIVE_WAIT_MS`).
 const ASKING_MS: u64 = 10 * 60_000;
 const ANSWER_MS: u64 = 2 * 60_000;
 

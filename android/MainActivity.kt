@@ -28,6 +28,7 @@ package dev.dioxus.main
 import android.app.Activity
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.View
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.IntentSenderRequest
@@ -47,9 +48,16 @@ typealias BuildConfig = dev.dust.morse.BuildConfig
 /// Drive's app data folder: the one scope sync asks for.
 private const val DRIVE_APPDATA = "https://www.googleapis.com/auth/drive.appdata"
 
+/// The longest the app waits for an answer (`ASKING_MS`, in
+/// src/sync/auth/android.rs): one it has not taken by then, it gave up
+/// waiting for.
+private const val DRIVE_WAIT_MS = 10 * 60_000L
+
 class MainActivity : WryActivity() {
-    /// Each request's answer, by its number, until the app takes it.
-    private val driveAnswers = ConcurrentHashMap<Long, String>()
+    /// Each request's answer, by its number, with when it came, until the
+    /// app takes it. One the app gave up waiting for is let go as a later
+    /// answer comes, once it is older than the app waits for any.
+    private val driveAnswers = ConcurrentHashMap<Long, Pair<String, Long>>()
     private val driveRequests = AtomicLong()
     /// The request waiting on the user's answer in Play services' sheet,
     /// 0 for none: one at a time, as its answer comes back to it alone.
@@ -67,7 +75,7 @@ class MainActivity : WryActivity() {
             driveAsking = 0L
             val data = result.data
             if (result.resultCode != Activity.RESULT_OK || data == null) {
-                driveAnswers[id] = "cancelled"
+                keepAnswer(id, "cancelled")
                 return@registerForActivityResult
             }
             try {
@@ -75,7 +83,7 @@ class MainActivity : WryActivity() {
                     .getAuthorizationResultFromIntent(data)
                 answerDrive(id, authorized)
             } catch (e: Exception) {
-                driveAnswers[id] = "error " + (e.message ?: e.javaClass.simpleName)
+                keepAnswer(id, "error " + (e.message ?: e.javaClass.simpleName))
             }
         }
         // Before Android 15 the window is not edge to edge: the system keeps
@@ -103,21 +111,21 @@ class MainActivity : WryActivity() {
                     if (!result.hasResolution() || consent == null) {
                         answerDrive(id, result)
                     } else if (!asking) {
-                        driveAnswers[id] = "needs-user"
+                        keepAnswer(id, "needs-user")
                     } else if (driveAsking != 0L) {
-                        driveAnswers[id] = "busy"
+                        keepAnswer(id, "busy")
                     } else {
                         driveAsking = id
                         try {
                             driveConsent.launch(IntentSenderRequest.Builder(consent.intentSender).build())
                         } catch (e: Exception) {
                             driveAsking = 0L
-                            driveAnswers[id] = "error " + (e.message ?: e.javaClass.simpleName)
+                            keepAnswer(id, "error " + (e.message ?: e.javaClass.simpleName))
                         }
                     }
                 }
                 .addOnFailureListener { e ->
-                    driveAnswers[id] = "error " + (e.message ?: e.javaClass.simpleName)
+                    keepAnswer(id, "error " + (e.message ?: e.javaClass.simpleName))
                 }
         }
         return id
@@ -127,16 +135,24 @@ class MainActivity : WryActivity() {
     /// <token>`, `needs-user`, `cancelled`, `busy` (the user is asked
     /// already, for another request), or `error <why>`.
     @Keep
-    fun dustDriveAnswer(id: Long): String? = driveAnswers.remove(id)
+    fun dustDriveAnswer(id: Long): String? = driveAnswers.remove(id)?.first
 
     private fun answerDrive(id: Long, result: AuthorizationResult) {
         val token = result.accessToken
         val granted = result.grantedScopes.any { it == DRIVE_APPDATA }
-        driveAnswers[id] = when {
+        keepAnswer(id, when {
             token == null -> "error no token"
             !granted -> "error Dust was not given its folder in your Google Drive"
             else -> "token $token"
-        }
+        })
+    }
+
+    /// Keep `answer` for the app to take as the answer to the request `id`,
+    /// letting go of every answer kept longer than the app waits for one.
+    private fun keepAnswer(id: Long, answer: String) {
+        val now = SystemClock.elapsedRealtime()
+        driveAnswers.values.removeAll { now - it.second > DRIVE_WAIT_MS }
+        driveAnswers[id] = answer to now
     }
 
     /// The content padded by the bars, a display cutout and the keyboard,
