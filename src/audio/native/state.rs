@@ -146,6 +146,17 @@ impl Heartbeat {
         };
         now_sec - f64::from_bits(self.last.load(Ordering::Relaxed)) > given
     }
+
+    /// Whether, at `now_sec`, the callback has gone uncalled for longer than
+    /// [`SILENT_AFTER_SEC`], called before or not: a worker that has not
+    /// called back in that time may be stuck in a call to its device, which
+    /// letting go of the stream would wait on. A stream slow to start is
+    /// given longer to be called the first time before it is taken for
+    /// broken ([`Self::went_silent`]), not before it is let go of as one
+    /// that may be stuck.
+    pub fn may_be_stuck(&self, now_sec: f64) -> bool {
+        now_sec - f64::from_bits(self.last.load(Ordering::Relaxed)) > SILENT_AFTER_SEC
+    }
 }
 
 /// Whether a stream opened on the device named `opened` should move to the
@@ -321,6 +332,26 @@ mod tests {
         heartbeat.beat(13.0);
         assert!(!heartbeat.went_silent(14.0));
         assert!(heartbeat.went_silent(14.6), "called, then stopped");
+    }
+
+    /// A stream given time to start is not taken for broken meanwhile, but
+    /// its worker may be stuck as soon as one that stopped would be: one
+    /// that has not called back for that long, called before or not, may
+    /// never come back to be told to stop.
+    #[test]
+    fn a_stream_given_time_to_start_may_be_stuck_as_soon_as_one_that_stopped() {
+        let heartbeat = Heartbeat::new(10.0);
+        assert!(!heartbeat.may_be_stuck(10.0 + SILENT_AFTER_SEC));
+        let past = 10.1 + SILENT_AFTER_SEC;
+        assert!(heartbeat.may_be_stuck(past), "never called");
+        assert!(
+            !heartbeat.went_silent(past),
+            "and still given time to start"
+        );
+        heartbeat.beat(13.0);
+        assert!(!heartbeat.may_be_stuck(14.0));
+        assert!(heartbeat.may_be_stuck(14.6), "called, then stopped");
+        assert!(heartbeat.went_silent(14.6));
     }
 
     fn waiter(heartbeat: &Arc<Heartbeat>) -> ToneSignal {

@@ -142,9 +142,11 @@ struct OpenStream {
 }
 
 impl Drop for OpenStream {
-    /// A stream that broke, or has gone uncalled, or whose worker is erring
-    /// still, is let go of without its worker being waited for where that
-    /// wait may never end ([`DROP_WAITS_ON_WORKER`]): retired, so that its
+    /// A stream that broke, or has gone uncalled for as long as one that
+    /// stopped is given, though a send would wait longer for it to start
+    /// ([`Heartbeat::may_be_stuck`]), or whose worker is erring still, is
+    /// let go of without its worker being waited for where that wait may
+    /// never end ([`DROP_WAITS_ON_WORKER`]): retired, so that its
     /// callback, should the worker live on after all, plays silence and
     /// never takes the mixer from the stream opened after it, and left to
     /// the process with the device it holds. One that is not known to have
@@ -159,7 +161,7 @@ impl Drop for OpenStream {
         };
         let broke = self.failed.load(Ordering::Acquire)
             || self.erring.load(Ordering::Acquire)
-            || self.heartbeat.went_silent(clock_sec());
+            || self.heartbeat.may_be_stuck(clock_sec());
         if DROP_WAITS_ON_WORKER && broke {
             self.retired.store(true, Ordering::Release);
             std::mem::forget(stream);
@@ -1099,10 +1101,15 @@ mod device_tests {
     /// A stream its device has yet to call is let go of as one that plays
     /// is, closed as cpal closes it, while it is just opened; and, as one
     /// that stopped is, without its worker being waited for where that wait
-    /// may never end, once it has gone uncalled for longer than a stream is
-    /// given to be called the first time.
+    /// may never end, once it has gone uncalled for as long as one that
+    /// stopped is given, though a send would wait longer for it to start: a
+    /// worker that has not called back by then may be stuck in a call to
+    /// its device, on a sound server's lock or a prepare after an underrun,
+    /// and waited for, it held the UI thread as long. It used to be closed
+    /// as cpal closes it until it had gone uncalled for as long as a stream
+    /// is given to be called the first time.
     #[test]
-    fn a_stream_never_called_is_retired_only_once_its_time_to_start_has_run_out() {
+    fn a_stream_never_called_is_retired_as_soon_as_one_that_stopped_would_be() {
         let Some(mut player) = player() else {
             return;
         };
@@ -1135,6 +1142,16 @@ mod device_tests {
             retired.load(Ordering::Acquire)
         };
         assert!(!let_go(clock_sec()), "just opened, it is closed");
+        assert!(
+            !let_go(clock_sec() - state::SILENT_AFTER_SEC + 0.5),
+            "uncalled for less than one that stopped is given, it is closed"
+        );
+        assert_eq!(
+            let_go(clock_sec() - state::SILENT_AFTER_SEC - 0.5),
+            DROP_WAITS_ON_WORKER,
+            "uncalled for longer, though still given time to start, it is retired where its \
+             worker is not waited for"
+        );
         assert_eq!(
             let_go(clock_sec() - state::FIRST_CALL_SEC - 1.0),
             DROP_WAITS_ON_WORKER,
