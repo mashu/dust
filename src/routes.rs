@@ -478,13 +478,17 @@ fn ResultsRoute() -> Element {
         let mut settings = ctx.settings;
         settings.write().playback.lock_input_during_group_playback = false;
     });
-    let result = match ctx.result.read().clone() {
-        Some(Finished::Kept(result)) => *result,
+    let (result, kept) = match ctx.result.read().clone() {
+        Some(Finished::Kept(result, kept)) => (*result, kept),
         Some(Finished::NothingKept) => return rsx! { NothingKept { on_again, on_home } },
         None => return rsx! { p { class: "muted", "No result." } },
     };
-    let place = *history().figure("board place", result.timestamp, |sessions| {
-        cw_core::board_place(sessions, result.timestamp)
+    // Found by its record, not by when it finished, which another session
+    // can share: no place where it is in no history.
+    let history = history();
+    let at = kept.and_then(|id| history.index_of(id));
+    let place = *history.figure("board place", at, |sessions| {
+        at.and_then(|index| cw_core::board_place_at(sessions, index))
     });
     rsx! {
         ResultsView {
@@ -693,6 +697,30 @@ mod tests {
                 sessions.write().push(another);
             });
             assert_eq!(ui.take_worked_out("board place"), 1);
+        });
+    }
+
+    /// The results of a session just finished place it as it stands on the
+    /// board, though another in the history finished at the same moment, as
+    /// two devices' sessions can once synced: it is found by its record,
+    /// not by when it finished. It was handed the place of the first in the
+    /// history to finish then.
+    #[test]
+    fn a_sessions_results_place_it_beside_another_finished_at_the_same_moment() {
+        run(|| async {
+            let at = crate::time::now_ms();
+            let mut best = stored_session("2026-10-01", &[("KM", "KM"); 10]);
+            best.timestamp = at;
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &[best]);
+            let copied: Vec<_> = [("KM", "KM"); 5]
+                .into_iter()
+                .chain([("KM", "MK"); 5])
+                .collect();
+            let mut worse = stored_session("2026-10-01", &copied);
+            worse.timestamp = at;
+            ui.with_app(|ctx| crate::session_runtime::keep_and_show(ctx, worse));
+            assert_eq!(ui.screen(), "results");
+            assert!(ui.has("2nd best of your 2 Koch sessions"), "{}", ui.html());
         });
     }
 

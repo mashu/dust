@@ -85,6 +85,17 @@ impl History {
         }
     }
 
+    /// Where the session of the record `id` is, if it is here: as
+    /// [`Self::id_at`] names each.
+    pub fn index_of(&self, id: RecordId) -> Option<usize> {
+        match &self.0.sessions {
+            Sessions::App(sessions) => sessions.peek().index_of(id),
+            Sessions::Own(sessions) => usize::try_from(id.order)
+                .ok()
+                .filter(|index| id.nonce == 0 && *index < sessions.len()),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

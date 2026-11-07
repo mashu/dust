@@ -993,22 +993,28 @@ impl AppCtx {
     }
 
     /// Add `session`, just finished here, to the history, after every
-    /// session in it, and store it, then do `then` with what became of it.
-    /// It is kept here until the store has taken it, and carried by this
-    /// copy's mark meanwhile.
-    pub fn keep_finished(self, session: SessionResult, then: impl FnOnce(HistorySaved) + 'static) {
+    /// session in it, and store it, then do `then` with what became of it;
+    /// and hand back the record it is kept under, if it could be written
+    /// down. It is kept here until the store has taken it, and carried by
+    /// this copy's mark meanwhile.
+    pub fn keep_finished(
+        self,
+        session: SessionResult,
+        then: impl FnOnce(HistorySaved) + 'static,
+    ) -> Option<RecordId> {
         let mut sessions = self.sessions;
         let newest = sessions.peek().newest_id();
         let Some(record) = Record::of(&session, |json| {
             RecordId::next(session.timestamp, newest, json)
         }) else {
             then(HistorySaved::Failed("it could not be written down.".into()));
-            return;
+            return None;
         };
+        let id = record.id;
         {
             let mut history = sessions.write();
-            history.insert(record.id, session);
-            history.mark_unsaved(record.id);
+            history.insert(id, session);
+            history.mark_unsaved(id);
         }
         self.change_history(
             HistoryChange {
@@ -1017,6 +1023,7 @@ impl AppCtx {
             },
             then,
         );
+        Some(id)
     }
 
     /// Add `kept`, sessions from elsewhere, each as it is to be stored and
@@ -2049,7 +2056,11 @@ pub enum Notice {
 /// One value, so the screen can never show both.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Finished {
-    Kept(Box<SessionResult>),
+    /// Kept, with the record it is kept under in the history, by which its
+    /// place there and on the board is found, as two sessions can finish at
+    /// one moment: none where it could not be written down, and so is in
+    /// no history.
+    Kept(Box<SessionResult>, Option<RecordId>),
     /// A run that worked nobody, so nothing was kept.
     NothingKept,
 }
@@ -2059,7 +2070,7 @@ impl Finished {
     /// The session kept, if one was.
     pub fn kept(self) -> Option<SessionResult> {
         match self {
-            Self::Kept(result) => Some(*result),
+            Self::Kept(result, _) => Some(*result),
             Self::NothingKept => None,
         }
     }

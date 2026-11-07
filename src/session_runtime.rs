@@ -876,9 +876,10 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
 }
 
 /// Add `finished` to the history, store it, and show it on the results
-/// screen: a session of groups and a contest run alike. Its mark stays, as
-/// it holds it, until the store has taken it, so the app stopping before
-/// then, or a store with no room for it, still keeps it.
+/// screen, with the record it is found by there: a session of groups and a
+/// contest run alike. Its mark stays, as it holds it, until the store has
+/// taken it, so the app stopping before then, or a store with no room for
+/// it, still keeps it.
 pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     let AppCtx {
         mut screen,
@@ -888,7 +889,7 @@ pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     } = ctx;
     ctx.mark_kept();
     let store = ctx.app().store;
-    ctx.keep_finished(finished.clone(), move |saved| {
+    let kept = ctx.keep_finished(finished.clone(), move |saved| {
         // A browser may clear its store to make room; there is now
         // something in it worth asking it to keep.
         store.ask_to_keep();
@@ -897,7 +898,7 @@ pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
             notices.write().push(Notice::History(problem));
         }
     });
-    result.set(Some(Finished::Kept(Box::new(finished))));
+    result.set(Some(Finished::Kept(Box::new(finished), kept)));
     screen.set(Screen::Results);
     // Again starts from a history one session longer.
     ctx.warm_sampler();
