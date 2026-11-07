@@ -80,10 +80,9 @@ fn on_android() -> bool {
     }
 }
 
-/// The backup a chosen file holds, or why it could not be restored from:
-/// read on a thread of its own where there is one, as a backup of years of
-/// sessions takes seconds to read.
-async fn backup_in(file: PickedFile) -> Result<Backup, String> {
+/// What a chosen file holds, as text, with its name; or why it could not
+/// be restored from: far larger than any backup, or not read.
+async fn text_in(file: PickedFile) -> Result<(String, String), String> {
     let ChosenFile { name, size, text } = file.read(BACKUP_MAX_BYTES).await;
     if size > BACKUP_MAX_BYTES {
         return Err(format!(
@@ -91,6 +90,15 @@ async fn backup_in(file: PickedFile) -> Result<Backup, String> {
         ));
     }
     let text = text.ok_or_else(|| format!("{name} could not be read: nothing was restored."))?;
+    Ok((name, text))
+}
+
+/// The backup `text`, what the file `name` holds, reads as, or why it could
+/// not be restored from: read on a thread of its own where there is one, as
+/// a backup of years of sessions takes seconds to read.
+async fn backup_in(name: &str, text: String) -> Result<Backup, String> {
+    #[cfg(test)]
+    crate::testing::rendered("backup read");
     read_backup_apart(text)
         .await
         .map_err(|not| format!("{name} {}: nothing was restored.", not.reason()))
@@ -146,9 +154,10 @@ async fn room_for(size: u64) -> Option<String> {
 /// chosen, so that leaving the History tab, or the screen, while a file of
 /// years of sessions is read leaves it reading and restoring all the same.
 /// One at a time: a file chosen while another is still read takes its
-/// place, and the card says so at once; what the other holds is never
-/// restored, however long its read takes, and a read that never ends, as a
-/// browser's of a file moved after it was chosen, holds nothing off.
+/// place, and the card says so at once; what the other holds is never read
+/// as a backup, nor restored, however long its read takes, and a read that
+/// never ends, as a browser's of a file moved after it was chosen, holds
+/// nothing off.
 #[derive(Clone, Copy)]
 struct Restoring {
     /// What the card says while a file is read and restored.
@@ -211,7 +220,17 @@ impl Restoring {
                 }
                 crate::time::sleep_ms(crate::time::POLL_MS).await;
             }
-            let read = backup_in(file).await;
+            // Another file chosen meanwhile is read in its place: this one
+            // is not read at all, or, chosen over while it is read, not read
+            // as a backup, which on a computer takes a thread of its own.
+            if !chosen_last() {
+                return;
+            }
+            let read = match text_in(file).await {
+                Ok(_) if !chosen_last() => return,
+                Ok((name, text)) => backup_in(&name, text).await,
+                Err(why) => Err(why),
+            };
             // Restored between sessions, as a sync is, never under one: a
             // restore takes its settings, the level among them.
             while ctx.session_running() {

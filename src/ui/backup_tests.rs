@@ -490,6 +490,31 @@ fn a_backup_chosen_while_another_is_read_takes_its_place() {
     });
 }
 
+/// A backup chosen over another still read is the only one read as a
+/// backup: the other's file, once read, is let go without being read as
+/// one. It was read as a backup all the same, a file of up to a gigabyte
+/// on a thread of its own on a computer, and only then let go.
+#[test]
+fn a_backup_chosen_over_another_is_the_only_one_read_as_a_backup() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "first.json", &file, file.len() as u64);
+        ui.choose_file("file-backup", "second.json", &file, file.len() as u64);
+        ui.take_renders("backup read");
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(ui.take_renders("backup read"), 1, "the second's alone");
+    });
+}
+
 /// A file whose read never ends, as a browser's of a file moved after it
 /// was chosen never does, leaves the next one chosen to be restored: the
 /// card says at once that the newer is being read, and what it holds is
