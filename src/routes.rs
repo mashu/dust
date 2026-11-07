@@ -296,13 +296,13 @@ fn StatsRoute() -> Element {
     // the app stored or deleted since taken up as it opens.
     use_hook(move || ctx.take_up_changes());
     let history = use_history(ctx);
+    // The Scores tab says how long ago the best was set, and the sync card
+    // when this device last synced: by the day as it is, past midnight too.
+    let today = use_today(STATS_SHOWN);
     // Made once, as the sync card's are: the History tab, handed the same
     // ones, is drawn again only for what it shows.
     let on_save = use_callback(move |()| ctx.save_backup());
-    let sync = use_sync_view(ctx);
-    // The Scores tab says how long ago the best was set: by the day as it
-    // is, past midnight too.
-    let today = use_today(STATS_SHOWN);
+    let sync = use_sync_view(ctx, today());
     rsx! {
         StatsView {
             settings: ctx.settings.read().clone(),
@@ -322,10 +322,10 @@ fn StatsRoute() -> Element {
     }
 }
 
-/// What the History tab's sync card shows and does: no card where this
-/// build cannot sync at all. What it does is made once, for as long as the
-/// screen is up.
-fn use_sync_view(ctx: AppCtx) -> Option<SyncView> {
+/// What the History tab's sync card shows and does, on `today`: no card
+/// where this build cannot sync at all. What it does is made once, for as
+/// long as the screen is up.
+fn use_sync_view(ctx: AppCtx, today: String) -> Option<SyncView> {
     let on_sign_in = use_callback(move |()| ctx.sync_sign_in());
     let on_passphrase = use_callback(move |(passphrase, repeated)| {
         ctx.sync_passphrase(passphrase, repeated);
@@ -339,6 +339,7 @@ fn use_sync_view(ctx: AppCtx) -> Option<SyncView> {
     }
     Some(SyncView {
         status,
+        today,
         on_sign_in,
         on_passphrase,
         on_cancel,
@@ -572,6 +573,42 @@ mod tests {
             pretend_today(&days_after(&day, 2));
             ui.with_app(|_| crate::page_hidden::show_page());
             assert!(ui.has(" · 2 days ago<"), "{}", ui.html());
+        });
+    }
+
+    /// The sync card left up past midnight says when this device last
+    /// synced by the new day: once the clock passes midnight, and as the
+    /// page comes back into sight. It read the clock only as it was drawn,
+    /// and went on saying a sync made the day before was made today.
+    #[test]
+    fn the_sync_card_left_up_past_midnight_goes_by_the_new_day() {
+        run(|| async {
+            let at = crate::time::now_ms();
+            let day = crate::ui::format::day_of(at).expect("a day");
+            pretend_today(&day);
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.with_app(|ctx| {
+                let mut status = ctx.sync.status;
+                status.set(SyncStatus::On {
+                    last: Some(at),
+                    syncing: false,
+                    problem: None,
+                    needs_sign_in: false,
+                });
+            });
+            ui.click("nav-stats");
+            ui.click("seg-history");
+            let time = crate::ui::format::clock(at).expect("a time");
+            assert!(ui.has(&format!("Synced today at {time}")), "{}", ui.html());
+            pretend_today(&days_after(&day, 1));
+            tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
+            ui.advance(20).await;
+            let yesterday = format!("Synced yesterday at {time}");
+            assert!(ui.has(&yesterday), "{}", ui.html());
+            pretend_today(&days_after(&day, 2));
+            ui.with_app(|_| crate::page_hidden::show_page());
+            let before = format!("Synced {} at {time}", crate::ui::format::short_date(&day));
+            assert!(ui.has(&before), "{}", ui.html());
         });
     }
 
