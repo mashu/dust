@@ -603,11 +603,16 @@ impl Store for MemoryStore {
     /// Whether the history changed since this store last read or listed
     /// it. Tabs sharing one store share what it last saw, so a test of
     /// tabs syncs each by hand.
+    ///
+    /// Nothing is noted: a change is told of each time it is asked, until
+    /// a read or a listing of the history takes it up, as the files and a
+    /// browser's database tell of one, so one whose look could not list
+    /// it is told of again.
     fn history_changed(&self) -> bool {
         if let Some(page) = &self.page {
             return page.changed();
         }
-        self.seen_changes.replace(self.changes.get()) != self.changes.get()
+        self.seen_changes.get() != self.changes.get()
     }
 
     fn history_news(&self) -> Option<Pending<()>> {
@@ -1137,7 +1142,8 @@ mod tests {
         assert_eq!(now(store.read_records(vec![one.id])), [Err(one.id)]);
         store.unlistable.set(false);
         assert!(store.history_changed());
-        assert!(!store.history_changed(), "seen");
+        assert_eq!(now(store.history_listing()), Some(vec![one.id]));
+        assert!(!store.history_changed(), "seen as it was listed");
         store.lose(one.id);
         assert!(store.history_changed());
         assert_eq!(now(store.history_listing()), Some(Vec::new()));
@@ -1150,6 +1156,33 @@ mod tests {
         assert_eq!(read.unread, [unread]);
         assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
         assert!(store.load_history().notices.is_empty(), "told of once");
+    }
+
+    /// A change is told of each time it is asked of, until a look that
+    /// lists the history takes it up, as the files and a browser's
+    /// database tell of one: a look that could not list it leaves it to
+    /// take up. Asking noted it as seen, so a test of a listing that
+    /// failed had the change never taken up, as no real store has it.
+    #[test]
+    fn a_change_is_still_to_take_up_after_a_listing_that_failed() {
+        let store = MemoryStore::default();
+        store.load_history();
+        assert!(!store.history_changed());
+        let one = record(&finished(1_000));
+        now(store.change_history(put(std::slice::from_ref(&one))));
+        assert!(store.history_changed(), "to take up");
+        assert!(store.history_changed(), "still, until it is");
+        store.unlistable.set(true);
+        assert_eq!(now(store.history_listing()), None);
+        store.load_history();
+        store.unlistable.set(false);
+        assert!(store.history_changed(), "still to take up");
+        assert_eq!(now(store.history_listing()), Some(vec![one.id]));
+        assert!(!store.history_changed(), "taken up");
+        store.lose(one.id);
+        assert!(store.history_changed());
+        store.load_history();
+        assert!(!store.history_changed(), "taken up as it is read");
     }
 
     /// Changes made later are made in the order they were asked for, each
