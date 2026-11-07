@@ -5,6 +5,7 @@
 
 mod state;
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -126,20 +127,30 @@ struct OpenStream {
 }
 
 impl Drop for OpenStream {
-    /// A stream that broke, or was found silent, is let go of without its
+    /// A stream that broke, or has gone uncalled, is let go of without its
     /// worker being waited for where that wait may never end
     /// ([`DROP_WAITS_ON_WORKER`]): retired, so that its callback, should the
     /// worker live on after all, plays silence and never takes the mixer
     /// from the stream opened after it, and left to the process with the
-    /// device it holds. A stream that did not break closes as cpal closes
-    /// it.
+    /// device it holds. One that is not known to have broken closes as cpal
+    /// closes it, but whatever that close throws stays here: cpal's ALSA
+    /// worker can die by a panic of its own without a word to the error
+    /// callback (a timestamp it does not expect), and the close then panics
+    /// too, telling a worker that is gone to stop, or rejoining its panic.
+    /// On the UI thread that took the app with it.
     fn drop(&mut self) {
         let Some(stream) = self.stream.take() else {
             return;
         };
-        if DROP_WAITS_ON_WORKER && self.failed.load(Ordering::Acquire) {
+        if DROP_WAITS_ON_WORKER
+            && (self.failed.load(Ordering::Acquire) || self.heartbeat.went_silent(clock_sec()))
+        {
             self.retired.store(true, Ordering::Release);
             std::mem::forget(stream);
+            return;
+        }
+        if catch_unwind(AssertUnwindSafe(move || drop(stream))).is_err() {
+            eprintln!("audio output: the stream's worker had died");
         }
     }
 }
@@ -914,6 +925,54 @@ mod device_tests {
         player.sleep();
         assert!(player.stream.is_none(), "asleep, it is closed");
         assert!(!healthy.load(Ordering::Acquire), "closed, not retired");
+    }
+
+    /// A stream whose worker died without a word is let go of without its
+    /// close taking the app with it: cpal's ALSA close tells the worker to
+    /// stop down a pipe the dead worker no longer reads, and panics; that
+    /// stays in the close. It used to unwind through the UI thread as the
+    /// output went to sleep. Linux alone: on a Mac a panic in the audio
+    /// callback aborts.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stream_whose_worker_died_is_let_go_of_without_a_panic() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        player.sleep();
+        let (device, supported) = default_output().expect("the output");
+        let ran = Arc::new(AtomicBool::new(false));
+        let running = Arc::clone(&ran);
+        let stream = device
+            .build_output_stream_raw(
+                &supported.config(),
+                supported.sample_format(),
+                move |_: &mut cpal::Data, _: &cpal::OutputCallbackInfo| {
+                    running.store(true, Ordering::Release);
+                    panic!("the worker dies");
+                },
+                |_| {},
+                None,
+            )
+            .expect("a stream");
+        stream.play().expect("it plays");
+        let called = Instant::now() + Duration::from_secs(5);
+        while !ran.load(Ordering::Acquire) {
+            assert!(Instant::now() < called, "the callback ran");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The worker unwinds, and the end of the pipe it read goes with it.
+        std::thread::sleep(Duration::from_millis(100));
+        player.stream = Some(OpenStream {
+            stream: Some(stream),
+            device: None,
+            failed: Arc::new(AtomicBool::new(false)),
+            heartbeat: Arc::new(Heartbeat::new(clock_sec())),
+            retired: Arc::new(AtomicBool::new(false)),
+        });
+        let slept = catch_unwind(AssertUnwindSafe(|| player.sleep()));
+        assert!(slept.is_ok(), "the close kept its panic to itself");
+        assert!(player.stream.is_none(), "asleep, it is closed");
     }
 
     /// Where what it opened on is kept, as on Android, the output wakes
