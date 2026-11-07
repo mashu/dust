@@ -2190,6 +2190,25 @@ mod tests {
         });
     }
 
+    /// So is the Space that ends a composition there, a candidate chosen or
+    /// a syllable finished: at the moment one ends in a field, it moves no
+    /// cursor; the next takes it on to Exchange. It took the cursor on
+    /// mid-call.
+    #[test]
+    fn the_space_that_ends_a_composition_in_a_field_moves_no_cursor() {
+        run(|| async {
+            let (mut ui, _recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            ui.end_composition("field-call");
+            let (typed, moved) = press_space(&mut ui, "field-call");
+            assert!(typed, "the input method's Space");
+            assert!(moved.is_empty(), "{moved:?}");
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
+            let (_, moved) = press_space(&mut ui, "field-call");
+            assert_eq!(moved, ["field-exchange"]);
+        });
+    }
+
     /// Each field takes no more than a call or an exchange is typed with: it
     /// says so to the page, and a page pasted in all the same is cut there
     /// and drawn as it is kept. His then sends a call's length, not hours

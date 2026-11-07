@@ -259,19 +259,56 @@ impl AnswerDraft {
 /// types into the box: `none` asks only that no keyboard be drawn on screen.
 pub(crate) const ANSWER_INPUT_MODE: &str = "none";
 
-/// Whether this build's webview hands over the Enter that ends an input
-/// method's composition once the composition is over, not as composing, as
-/// WebKit's does on a Mac and an iPhone: there only its moment tells it from
-/// an Enter of the field's own ([`InputMethod`]). The tests take it so too.
-const ENTER_AFTER_COMPOSITION: bool = cfg!(any(target_os = "macos", target_os = "ios", test));
+/// Whether this build's webview hands over the key that ends an input
+/// method's composition, Enter or Space, once the composition is over, not
+/// as composing, as WebKit's does on a Mac and an iPhone: there only its
+/// moment tells it from a key of the field's own ([`InputMethod`]). The
+/// tests take it so too.
+const KEY_AFTER_COMPOSITION: bool = cfg!(any(target_os = "macos", target_os = "ios", test));
 
-/// How soon after a composition ends an Enter is still the one that ended
-/// it: the two come together, far sooner than a key pressed after.
-const COMPOSITION_ENTER_MS: u64 = 100;
+/// How soon after a composition ends a key is still the one that ended it:
+/// the two come together, far sooner than a key pressed after.
+const COMPOSITION_END_MS: u64 = 100;
+
+/// The key code a browser gives a key the input method took. WebKit, in
+/// Safari and in every browser on an iPhone, hands over the Enter or the
+/// Space that ends a composition once it is over, not as composing, but
+/// with this code; Chrome on Android hands over the Enter that both ends a
+/// word and confirms it with Enter's own.
+const INPUT_METHOD_KEY_CODE: u32 = 229;
+
+/// Whether `key`, at `code`, can end a composition: Enter, which takes what
+/// was composed, and Space, which chooses a candidate or finishes a
+/// syllable.
+fn ends_composition(key: &Key, code: Code) -> bool {
+    *key == Key::Enter || code == Code::Space || *key == Key::Character(" ".to_string())
+}
+
+/// Whether the browser says `key`, at `code`, which it gave `key_code`, was
+/// the input method's: an Enter or a Space with the input method's code.
+fn coded_as_input_methods(key: &Key, code: Code, key_code: u32) -> bool {
+    key_code == INPUT_METHOD_KEY_CODE && ends_composition(key, code)
+}
+
+/// The key code the browser gave `pressed`: the web build's alone has it,
+/// the webview builds handing a key over without it.
+fn key_code(pressed: &KeyboardData) -> Option<u32> {
+    #[cfg(feature = "web")]
+    {
+        pressed
+            .downcast::<web_sys::KeyboardEvent>()
+            .map(web_sys::KeyboardEvent::key_code)
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        let _ = pressed;
+        None
+    }
+}
 
 /// What a field typed in knows of the input method: when its composition
 /// last ended, until the next key is pressed in it, which may be the Enter
-/// that ended it ([`ENTER_AFTER_COMPOSITION`]).
+/// or the Space that ended it ([`KEY_AFTER_COMPOSITION`]).
 #[derive(Clone, Copy)]
 pub(crate) struct InputMethod(CopyValue<Option<u64>>);
 
@@ -282,23 +319,28 @@ impl InputMethod {
 
     /// A composition in the field has ended.
     pub(crate) fn ended(mut self) {
-        if ENTER_AFTER_COMPOSITION {
+        if KEY_AFTER_COMPOSITION {
             self.0.set(Some(mono_ms()));
         }
     }
 
     /// Whether `pressed`, a key pressed in the field, is the input
-    /// method's: any key while it composes, Enter and Space among them, and
-    /// the Enter that ended a composition, come as it ended.
+    /// method's: any key while it composes, Enter and Space among them; and
+    /// the Enter or the Space that ended a composition, which a browser
+    /// gives the input method's code ([`INPUT_METHOD_KEY_CODE`]) and a
+    /// webview hands over as it ended.
     pub(crate) fn has(mut self, pressed: &KeyboardData) -> bool {
-        if pressed.is_composing() {
+        let (key, code) = (pressed.key(), pressed.code());
+        if pressed.is_composing()
+            || key_code(pressed).is_some_and(|coded| coded_as_input_methods(&key, code, coded))
+        {
             return true;
         }
         let Some(ended) = *self.0.peek() else {
             return false;
         };
         self.0.set(None);
-        pressed.key() == Key::Enter && mono_ms().saturating_sub(ended) <= COMPOSITION_ENTER_MS
+        ends_composition(&key, code) && mono_ms().saturating_sub(ended) <= COMPOSITION_END_MS
     }
 }
 
@@ -942,9 +984,29 @@ mod speed_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{PAD_LAST, PAD_ROWS, pad_name};
+    use super::{PAD_LAST, PAD_ROWS, coded_as_input_methods, pad_name};
     use crate::testing::{Ui, run, test_settings};
     use cw_core::CharSetMode;
+    use dioxus::prelude::{Code, Key};
+
+    /// In a browser, an Enter or a Space given the input method's key code
+    /// is its own, as WebKit hands over the one that ends a composition
+    /// once the composition is over; one given its own code, as Chrome on
+    /// Android sends the Enter that ends a word and confirms it, is the
+    /// field's, and so is any other key, whatever its code. WebKit's Enter
+    /// confirmed a group, or keyed a run's message, mid-word, and its Space
+    /// skipped a character, or moved the cursor on.
+    #[test]
+    fn an_enter_or_a_space_coded_as_the_input_methods_is_its_own() {
+        let space = Key::Character(" ".into());
+        assert!(coded_as_input_methods(&Key::Enter, Code::Enter, 229));
+        assert!(coded_as_input_methods(&Key::Enter, Code::NumpadEnter, 229));
+        assert!(coded_as_input_methods(&space, Code::Space, 229));
+        assert!(!coded_as_input_methods(&Key::Enter, Code::Enter, 13));
+        assert!(!coded_as_input_methods(&space, Code::Space, 32));
+        let letter = Key::Character("a".into());
+        assert!(!coded_as_input_methods(&letter, Code::KeyA, 229));
+    }
 
     /// Every character a group can be sent in has a key, once, and every key
     /// a name of its own.

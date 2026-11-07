@@ -5535,6 +5535,29 @@ mod interactions {
         });
     }
 
+    /// So is the Space that ends a composition there, a candidate chosen or
+    /// a syllable finished: at the moment one ends in the box, it skips
+    /// nothing. The next skips, as does one pressed well after a
+    /// composition a click ended. It skipped a character for a word chosen.
+    #[test]
+    fn the_space_that_ends_a_composition_is_the_input_methods() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            let space = || Key::Character(" ".to_string());
+            ui.end_composition("group-input-0");
+            let left = ui.press_key("group-input-0", space(), Code::Space);
+            assert!(left, "the input method's Space");
+            assert!(box_shows(&ui, ""), "{}", ui.input_tag("group-input-0"));
+            let left = ui.press_key("group-input-0", space(), Code::Space);
+            assert!(!left, "the box's Space");
+            assert!(box_shows(&ui, "_"), "{}", ui.input_tag("group-input-0"));
+            ui.end_composition("group-input-0");
+            ui.advance(500).await;
+            ui.press_key("group-input-0", space(), Code::Space);
+            assert!(box_shows(&ui, "__"), "{}", ui.input_tag("group-input-0"));
+        });
+    }
+
     /// The box takes no more than an answer to the longest group could
     /// want: it says so to the page, and a page pasted in all the same is cut
     /// there, drawn as it is kept, and handed on so. It was held whole, a key
