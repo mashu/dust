@@ -71,8 +71,15 @@ impl RecordId {
     /// `newest`, the newest record of the history: at its stamp, or just
     /// after the newest where a clock set back stamped it before that. It
     /// finished after every session there is, whatever the clock said.
+    ///
+    /// A newest at the last place there is, as a session stamped past any
+    /// clock is placed ([`Self::placed`]), has nothing after it: the session
+    /// goes at its stamp, so that every session after goes in the order it
+    /// finished rather than all at that place, in the order of their hashes.
     pub fn next(timestamp: u64, newest: Option<RecordId>, json: &str) -> Self {
-        let after = newest.map_or(0, |newest| newest.order.saturating_add(1));
+        let after = newest
+            .and_then(|newest| newest.order.checked_add(1))
+            .unwrap_or(0);
         Self {
             order: (timestamp.saturating_mul(1000)).max(after),
             nonce: fnv64(json.as_bytes()),
@@ -399,6 +406,23 @@ mod tests {
         let ahead = at(9_000);
         let id = RecordId::next(ahead.timestamp, Some(newest), &json(&ahead));
         assert_eq!(id.order, 9_000_000);
+    }
+
+    /// A session stamped past any clock, as a damaged or hand-made backup
+    /// may hold one, is placed at the last place there is, and every
+    /// session finished after it goes where it finished, in the order it
+    /// finished. Each went to that last place too, after it, as nothing can
+    /// go after it, and from then on the history read in the order of what
+    /// the sessions held, not of when they finished.
+    #[test]
+    fn a_session_stamped_past_any_clock_leaves_the_order_after_it_alone() {
+        let past_any_clock = at(u64::MAX / 1000 + 1);
+        let last = RecordId::placed(past_any_clock.timestamp, &json(&past_any_clock));
+        assert_eq!(last.order, u64::MAX, "the last place there is");
+        let (first, second) = (at(1_000), at(2_000));
+        let one = RecordId::next(first.timestamp, Some(last), &json(&first));
+        let two = RecordId::next(second.timestamp, Some(last), &json(&second));
+        assert_eq!((one.order, two.order), (1_000_000, 2_000_000));
     }
 
     /// A session from elsewhere falls where it finished: after what
