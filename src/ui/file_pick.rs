@@ -223,7 +223,7 @@ async fn read_chosen(file: FileData, max_bytes: u64) -> ChosenFile {
 /// time where it is large.
 async fn read_text(file: &FileData) -> Option<String> {
     #[cfg(test)]
-    crate::testing::reading_a_file().await;
+    crate::testing::reading_a_file(&file.name()).await;
     #[cfg(all(feature = "desktop", not(test)))]
     if let Some(text) = read_apart(file.path()).await {
         return text;

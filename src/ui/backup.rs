@@ -145,8 +145,10 @@ async fn room_for(size: u64) -> Option<String> {
 /// A backup being restored: the app's own from the moment its file is
 /// chosen, so that leaving the History tab, or the screen, while a file of
 /// years of sessions is read leaves it reading and restoring all the same.
-/// One at a time: a file chosen while another is restored is left alone,
-/// and the card goes on saying which is.
+/// One at a time: a file chosen while another is still read takes its
+/// place, and the card says so at once; what the other holds is never
+/// restored, however long its read takes, and a read that never ends, as a
+/// browser's of a file moved after it was chosen, holds nothing off.
 #[derive(Clone, Copy)]
 struct Restoring {
     /// What the card says while a file is read and restored.
@@ -156,6 +158,8 @@ struct Restoring {
     /// How many backup cards are drawn: with none, why a file could not be
     /// restored is said in a message instead.
     cards: CopyValue<usize>,
+    /// How many files have been chosen: the last is the one restored.
+    chosen: CopyValue<u64>,
 }
 
 impl Restoring {
@@ -169,6 +173,7 @@ impl Restoring {
                         under_way: Signal::new(None),
                         problem: Signal::new(None),
                         cards: CopyValue::new(0),
+                        chosen: CopyValue::new(0),
                     })
                 })
             })
@@ -178,16 +183,18 @@ impl Restoring {
     /// Read `file` as a backup and restore what it holds, in a task of the
     /// app's own, once no session or run is under way: the card says it is
     /// being read at once, and why not, if it could not be restored; with no
-    /// card drawn by then, a message does.
+    /// card drawn by then, a message does. Unless another file is chosen
+    /// before it is restored: then that one is, and nothing of this is said.
     fn start(self, ctx: AppCtx, file: PickedFile) {
         let Self {
             mut under_way,
             mut problem,
             cards,
+            mut chosen,
         } = self;
-        if under_way.peek().is_some() {
-            return;
-        }
+        let this = *chosen.peek() + 1;
+        chosen.set(this);
+        let chosen_last = move || *chosen.peek() == this;
         problem.set(None);
         under_way.set(Some(reading_for(&file.name, file.size)));
         spawn_forever(async move {
@@ -196,7 +203,9 @@ impl Restoring {
             // has.
             #[cfg(feature = "web")]
             {
-                if let Some(room) = room_for(file.size).await {
+                if let Some(room) = room_for(file.size).await
+                    && chosen_last()
+                {
                     let reading = reading_for(&file.name, file.size);
                     under_way.set(Some(format!("{reading} {room}")));
                 }
@@ -207,6 +216,10 @@ impl Restoring {
             // restore takes its settings, the level among them.
             while ctx.session_running() {
                 crate::time::sleep_ms(SESSION_WAIT_MS).await;
+            }
+            // Another file chosen meanwhile is restored in its place.
+            if !chosen_last() {
+                return;
             }
             under_way.set(None);
             match read {

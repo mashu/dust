@@ -59,6 +59,10 @@ thread_local! {
     /// A file chosen waits to be read until a test lets it be, as a large
     /// one takes its time ([`Ui::hold_file_reads`]).
     static FILE_READS_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The files, by name, whose read never ends once chosen, as a
+    /// browser's of a file moved after it was chosen never does
+    /// ([`Ui::never_finish_reading`]).
+    static FILES_NEVER_READ: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The page asks for the field with this id to have the cursor, by
@@ -99,10 +103,14 @@ pub fn worked_out(figure: &'static str) {
     count(&WORKED_OUT, figure);
 }
 
-/// A file chosen is being read: on a computer or in a browser, for as long
-/// as it takes a file that size; here, for as long as a test holds file
-/// reads ([`Ui::hold_file_reads`]).
-pub async fn reading_a_file() {
+/// A file chosen, called `name`, is being read: on a computer or in a
+/// browser, for as long as it takes a file that size; here, for as long as
+/// a test holds file reads ([`Ui::hold_file_reads`]), and for good for a
+/// file whose read never ends ([`Ui::never_finish_reading`]).
+pub async fn reading_a_file(name: &str) {
+    if FILES_NEVER_READ.with_borrow(|never| never.iter().any(|held| held == name)) {
+        std::future::pending::<()>().await;
+    }
     while FILE_READS_HELD.get() {
         crate::time::sleep_ms(POLL_MS).await;
     }
@@ -948,6 +956,7 @@ impl Ui {
         SCROLLS_ASKED.take();
         ELSEWHERE.take();
         FILE_READS_HELD.set(false);
+        FILES_NEVER_READ.take();
         let mut ui = Self {
             dom,
             ids: Vec::new(),
@@ -1435,6 +1444,13 @@ impl Ui {
     /// time to read, or let them all be read once the clock moves on.
     pub fn hold_file_reads(&mut self, held: bool) {
         FILE_READS_HELD.set(held);
+    }
+
+    /// Never finish reading a file called `name` chosen from now on, as a
+    /// browser never finishes reading a file moved after it was chosen, or
+    /// a phone's file kept in the cloud while the phone is offline.
+    pub fn never_finish_reading(&mut self, name: &str) {
+        FILES_NEVER_READ.with_borrow_mut(|never| never.push(name.to_string()));
     }
 
     /// Choose a file called `name` in the file input with this id, the way

@@ -454,12 +454,14 @@ fn a_file_found_no_backup_once_its_tab_is_left_is_said_in_a_message() {
     });
 }
 
-/// One backup is restored at a time: another chosen while one is read is
-/// left alone, and the card goes on saying which is read, until it is
-/// restored. Both were read, and the first done said nothing was under way
-/// while the other was; then both were merged in, with both their settings.
+/// One backup is restored at a time: another chosen while one is read takes
+/// its place, the card saying at once that it is the one read, and it alone
+/// is restored, whenever the first is done. Both were read, and the first
+/// done said nothing was under way while the other was; then both were
+/// merged in, with both their settings. Then the second was left alone
+/// while the first was read, never restored, and nothing said so.
 #[test]
-fn a_backup_chosen_while_another_is_restored_is_left_alone() {
+fn a_backup_chosen_while_another_is_read_takes_its_place() {
     run(|| async {
         let all = history(7);
         let mut ui = open(MemoryStore::default(), &all[3..5]);
@@ -472,19 +474,53 @@ fn a_backup_chosen_while_another_is_restored_is_left_alone() {
         ui.hold_file_reads(true);
         ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
         ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
-        assert!(ui.has("Reading first.json…"), "{}", ui.html());
-        assert!(!ui.has("Reading second.json"), "{}", ui.html());
+        assert!(ui.has("Reading second.json…"), "{}", ui.html());
+        assert!(!ui.has("Reading first.json"), "{}", ui.html());
         ui.hold_file_reads(false);
         ui.advance(100).await;
-        assert!(ui.has("Restored 3 sessions and your settings."));
-        assert_eq!(stored_dates(&ui).len(), 5, "the first backup's alone");
-        assert_eq!(ui.store.load_settings().curriculum.level, 9);
+        assert!(ui.has("Restored 2 sessions and your settings."));
+        assert_eq!(stored_dates(&ui).len(), 4, "the second backup's alone");
+        assert_eq!(ui.store.load_settings().curriculum.level, 4);
         assert!(!ui.has("Reading"), "{}", ui.html());
         // Once it is done, another is restored as any is.
-        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
         ui.advance(100).await;
         assert_eq!(stored_dates(&ui).len(), 7);
-        assert_eq!(ui.store.load_settings().curriculum.level, 4);
+        assert_eq!(ui.store.load_settings().curriculum.level, 9);
+    });
+}
+
+/// A file whose read never ends, as a browser's of a file moved after it
+/// was chosen never does, leaves the next one chosen to be restored: the
+/// card says at once that the newer is being read, and what it holds is
+/// restored. The first held off every restore after it until the app was
+/// opened again, the card saying for good that it was being read.
+#[test]
+fn a_backup_chosen_while_another_is_never_read_is_restored() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let mut saved = test_settings();
+        saved.curriculum.level = 9;
+        let file = write_backup(&saved, &all, 0);
+        ui.never_finish_reading("moved.json");
+        ui.choose_file("file-backup", "moved.json", &file, file.len() as u64);
+        ui.advance(100).await;
+        assert!(ui.has("Reading moved.json…"), "{}", ui.html());
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        assert!(ui.has("Reading dust-backup.json…"), "{}", ui.html());
+        assert!(!ui.has("Reading moved.json"), "{}", ui.html());
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(stored_dates(&ui).len(), 5);
+        assert_eq!(ui.store.load_settings().curriculum.level, 9);
+        assert!(!ui.has("Reading"), "{}", ui.html());
     });
 }
 
