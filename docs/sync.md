@@ -58,6 +58,10 @@ latest putting back) is deleted here. A session put back here by Undo, or
 by a restore, after a deletion the drive holds is sent as *put back*, so
 that the deletion does not take it again; a device that let it go takes it
 back. Missing is never deleted: a record is let go only for a deletion.
+A deletion or a putting back is stamped when it is made, or just after the
+latest of the record the device knows the drive to hold, where that is
+later (`SyncState::stamp_change`): one made after another is the later,
+however far apart the devices' clocks are.
 
 One session can be two records: a backup restored on one device names each
 session where it finished (`RecordId::placed`), while the device it came

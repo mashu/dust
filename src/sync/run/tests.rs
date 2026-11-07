@@ -117,7 +117,8 @@ impl Device {
             ..HistoryChange::default()
         }));
         assert!(saved.kept().is_some());
-        self.state.revived.insert(id, when);
+        let at = self.state.stamp_change(id, when);
+        self.state.revived.insert(id, at);
     }
 }
 
@@ -296,6 +297,47 @@ fn a_session_put_back_after_its_deletion_comes_back_everywhere() {
         (phone.stamps(), computer.stamps()),
         (vec![1, 2], vec![1, 2])
     );
+}
+
+/// A session deleted by hand after another device put it back, with that
+/// device's clock an hour ahead, is deleted on every device: the deletion
+/// is stamped after the putting back it follows. It used to be stamped by
+/// the clock behind alone, earlier than the putting back, and to reach no
+/// other device until that clock caught up.
+#[test]
+fn a_deletion_after_a_session_put_back_ahead_reaches_every_device() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    // The computer's clock is an hour ahead of the phone's.
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 3_600_110).expect("synced");
+    let id = computer.id_of(2);
+    let session = computer
+        .store
+        .load_history()
+        .sessions
+        .into_iter()
+        .find(|(held, _)| *held == id)
+        .expect("held")
+        .1;
+    computer.delete(2, 3_600_120);
+    computer.sync(&remote, 3_600_130).expect("synced");
+    phone.sync(&remote, 140).expect("synced");
+    assert_eq!(phone.stamps(), [1]);
+    computer.undo(id, &session, 3_600_150);
+    computer.sync(&remote, 3_600_160).expect("synced");
+    phone.sync(&remote, 170).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "put back");
+
+    phone.delete(2, 180);
+    phone.sync(&remote, 190).expect("synced");
+    computer.sync(&remote, 3_600_200).expect("synced");
+    assert_eq!(computer.stamps(), [1], "deleted there too");
+    phone.sync(&remote, 210).expect("synced");
+    assert_eq!(phone.stamps(), [1]);
 }
 
 /// A setting changed on one device reaches the other, and one changed on

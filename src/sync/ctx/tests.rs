@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use super::*;
+use crate::persist::Deleted;
 use crate::persist::memory::MemoryStore;
 use crate::persist::record::{HistoryChange, Pending, Record, RecordId};
 use crate::persist::tests::at;
@@ -821,6 +822,65 @@ fn undo_after_a_synced_deletion_keeps_the_session_everywhere() {
         harness.in_app(|| ctx.sync_now());
         harness.pump();
         assert_eq!(stamps(&harness), [1, 2]);
+    });
+}
+
+/// A session put back by Undo after a deletion another device made with its
+/// clock an hour ahead, which this device has synced, stays: it is put
+/// back after the deletion it follows, whatever the clocks say, and the
+/// drive says so to every device. It used to be stamped by this device's
+/// clock alone, earlier than that deletion, and deleted again by it at the
+/// next sync.
+#[test]
+fn undo_after_a_deletion_stamped_ahead_keeps_the_session() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        let ahead = now_ms() + 3_600_000;
+        let session = other
+            .load_history()
+            .sessions
+            .into_iter()
+            .find(|(id, _)| *id == two)
+            .expect("taken")
+            .1;
+        assert!(
+            now(other.change_history(HistoryChange {
+                forget: vec![(two, Deleted::of(&session, ahead))],
+                ..HistoryChange::default()
+            }))
+            .kept()
+            .is_some()
+        );
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &Default::default(),
+            ahead,
+        ))
+        .expect("synced");
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| ctx.undo_delete());
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(stamps(&harness), [1, 2], "not deleted again");
+        let (joined, _) = another_device(&remote, "a long passphrase", &[]);
+        let theirs: Vec<u64> = joined
+            .load_history()
+            .sessions
+            .iter()
+            .map(|(_, s)| s.timestamp)
+            .collect();
+        assert_eq!(theirs, [1, 2], "the drive's word");
     });
 }
 

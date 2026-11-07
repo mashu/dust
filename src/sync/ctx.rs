@@ -538,19 +538,24 @@ impl AppCtx {
 
     /// The sessions `ids` were put back by hand, after a deletion, by Undo
     /// or a restore: the drive is told, so that a deletion it already holds
-    /// does not take them away again.
+    /// does not take them away again. Each is put back after the deletion
+    /// of it this device knows of ([`SyncState::stamp_change`]).
     pub fn sync_revived(self, ids: impl IntoIterator<Item = RecordId>) {
-        if self.sync.state.peek().is_none() {
-            return;
-        }
-        let at = now_ms();
+        let now = now_ms();
+        let revived: Vec<(RecordId, u64)> = match self.sync.state.peek().as_ref() {
+            Some(state) => ids
+                .into_iter()
+                .map(|id| (id, state.stamp_change(id, now)))
+                .collect(),
+            None => return,
+        };
         if *self.sync.running.peek() {
-            let mut revived = self.sync.revived;
-            revived.write().extend(ids.into_iter().map(|id| (id, at)));
+            let mut noted = self.sync.revived;
+            noted.write().extend(revived);
         } else {
             let mut state = self.sync.state;
             if let Some(state) = state.write().as_mut() {
-                state.revived.extend(ids.into_iter().map(|id| (id, at)));
+                state.revived.extend(revived);
             }
             self.keep_sync_state();
         }

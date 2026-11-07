@@ -393,9 +393,9 @@ pub async fn sync_once(
     let forget: Vec<Forget> = planned
         .send_deleted
         .iter()
-        .map(|id| Forget {
+        .map(|&id| Forget {
             id: id.name(),
-            at: now,
+            at: state.stamp_change(id, now),
         })
         .collect();
     let revive: Vec<Revive> = planned

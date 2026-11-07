@@ -85,6 +85,18 @@ impl SyncState {
     pub fn written(&self) -> Option<String> {
         serde_json::to_string(self).ok()
     }
+
+    /// When a change this device makes to the record `id` at `now`, by its
+    /// own clock, is stamped: a deletion by hand, or a putting back. At
+    /// `now`, or just after the latest deletion or putting back of it this
+    /// device knows the drive to hold, where that is later: the drive's
+    /// word on a record goes by which came last ([`super::plan`]), and a
+    /// change made after another is so the later, however far apart the
+    /// clocks of the devices that made them are.
+    pub fn stamp_change(&self, id: RecordId, now: u64) -> u64 {
+        let seen = self.drive.tombs.get(&id).max(self.drive.revives.get(&id));
+        seen.map_or(now, |&seen| now.max(seen.saturating_add(1)))
+    }
 }
 
 /// Records by name, as JSON keys must be strings.
