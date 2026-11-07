@@ -503,6 +503,69 @@ fn sync_turned_off_while_it_syncs_stays_off() {
     });
 }
 
+/// A sync due a moment after a change does not start while the copy is
+/// being deleted: every file of Dust's goes, and sync is off without a
+/// word of trouble.
+#[test]
+fn a_sync_due_while_the_copy_is_deleted_does_not_start() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        harness.in_app(|| ctx.keep_finished(at(5), |_| {}));
+        held.hold(true);
+        harness.in_app(|| ctx.sync_turn_off(true));
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(status(&harness), SyncStatus::TurningOff);
+        let lists = remote.lists.get();
+        held.hold(false);
+        harness.advance(100).await;
+        assert_eq!(remote.lists.get(), lists + 1, "the deletion's alone");
+        assert!(remote.names().is_empty(), "{:?}", remote.names());
+        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        assert_eq!(*harness.store.sync.borrow(), None);
+    });
+}
+
+/// A sync asked for just as sync is turned off never starts, and sync
+/// turned on again syncs as ever.
+#[test]
+fn a_sync_asked_for_as_sync_is_turned_off_never_starts() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let lists = remote.lists.get();
+        harness.in_app(|| {
+            ctx.sync_now();
+            ctx.sync_turn_off(false);
+        });
+        harness.pump();
+        assert_eq!(remote.lists.get(), lists);
+        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        assert_eq!(*harness.store.sync.borrow(), None);
+
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(
+            matches!(
+                status(&harness),
+                SyncStatus::On {
+                    last: Some(_),
+                    syncing: false,
+                    ..
+                }
+            ),
+            "{:?}",
+            status(&harness)
+        );
+    });
+}
+
 /// Signed in again while a sync is under way, the new sign-in is the one
 /// kept: the sync, as it ends, does not put back the one it began with.
 #[test]

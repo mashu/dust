@@ -357,9 +357,10 @@ impl AppCtx {
         }
     }
 
-    /// Sync now: or, where a sync is under way, once more after it.
+    /// Sync now: or, where a sync is under way, once more after it. None
+    /// starts while the copy is being deleted.
     pub fn sync_now(self) {
-        if self.sync.state.peek().is_none() {
+        if self.sync.state.peek().is_none() || *self.sync.status.peek() == SyncStatus::TurningOff {
             return;
         }
         if *self.sync.running.peek() {
@@ -373,7 +374,11 @@ impl AppCtx {
         self.change_on_status(|_, syncing, _, _| *syncing = true);
         spawn_forever(async move {
             let epoch = *self.sync.epoch.peek();
-            let mut state = self.sync.state.peek().clone().expect("sync is on");
+            // Turned off before it began.
+            let Some(mut state) = self.sync.state.peek().clone() else {
+                self.sync_over();
+                return;
+            };
             state.revived.extend(take(self.sync.revived));
             let here = self.settings.peek().clone().clamp();
             let store = self.app().store;
@@ -467,14 +472,7 @@ impl AppCtx {
     /// however many changes ask in the meantime, and once any session under
     /// way is over.
     pub fn sync_soon(self) {
-        let on = matches!(
-            *self.sync.status.peek(),
-            SyncStatus::On {
-                needs_sign_in: false,
-                ..
-            }
-        );
-        if !on || *self.sync.soon.peek() {
+        if !self.syncs_unasked() || *self.sync.soon.peek() {
             return;
         }
         put(self.sync.soon, true);
@@ -484,8 +482,22 @@ impl AppCtx {
                 sleep_ms(SESSION_WAIT_MS).await;
             }
             put(self.sync.soon, false);
-            self.sync_now();
+            // Unless sync was turned off meanwhile, or is being.
+            if self.syncs_unasked() {
+                self.sync_now();
+            }
         });
+    }
+
+    /// Sync is on, and signed in: the app syncs by itself.
+    fn syncs_unasked(self) -> bool {
+        matches!(
+            *self.sync.status.peek(),
+            SyncStatus::On {
+                needs_sign_in: false,
+                ..
+            }
+        )
     }
 
     /// Sync soon, where the last sync was a while ago: as the app comes
