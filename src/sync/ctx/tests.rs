@@ -615,6 +615,64 @@ fn a_sync_asked_for_as_sync_is_turned_off_never_starts() {
     });
 }
 
+/// A setting changed here while a sync is under way stays, laid over what
+/// that sync takes from another device, and reaches that device next.
+#[test]
+fn a_setting_changed_while_it_syncs_stays_and_goes_next() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        // Another device joins, and changes a setting there.
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let mut theirs = harness.in_app(|| ctx.settings.peek().clone().clamp());
+        theirs.curriculum.num_groups = 9;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms() + 1_000,
+        ))
+        .expect("synced");
+
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // Changed here meanwhile, and stored as the app stores it.
+        harness.in_app(|| {
+            let mut settings = ctx.settings;
+            settings.write().playback.keyer_wpm = 31.0;
+            ctx.store_settings();
+        });
+        held.hold(false);
+        harness.advance(100).await;
+        let here = harness.in_app(|| ctx.settings.peek().clone());
+        assert_eq!(here.curriculum.num_groups, 9, "the other device's");
+        assert_eq!(here.playback.keyer_wpm, 31.0, "as changed here");
+        let stored = harness.store.read_settings().expect("stored");
+        assert_eq!(
+            (stored.curriculum.num_groups, stored.playback.keyer_wpm),
+            (9, 31.0)
+        );
+
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        let synced = now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms() + 2_000,
+        ))
+        .expect("synced");
+        assert_eq!(
+            synced.settings.map(|settings| settings.playback.keyer_wpm),
+            Some(31.0)
+        );
+    });
+}
+
 /// Signed in again while a sync is under way, the new sign-in is the one
 /// kept: the sync, as it ends, does not put back the one it began with.
 #[test]

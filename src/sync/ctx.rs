@@ -18,8 +18,8 @@ use super::seal::{MIN_PASSPHRASE, Stretch};
 use super::settings::{as_keys, settings_keys};
 use super::state::SyncState;
 use super::text::random_hex;
-use crate::persist::Store;
 use crate::persist::record::RecordId;
+use crate::persist::{Store, merge_settings};
 use crate::state::AppCtx;
 use crate::time::{POLL_MS, now_ms, sleep_ms};
 
@@ -424,10 +424,21 @@ impl AppCtx {
                     put(self.sync.state, Some(state));
                     self.keep_sync_state();
                     self.take_up_synced(&synced);
-                    if let Some(settings) = synced.settings {
+                    // What the sync took is laid over the settings as they
+                    // are now, not as they were as it began: one changed
+                    // here meanwhile stays, and goes with the next sync.
+                    let now = self.settings.peek().clone().clamp();
+                    let (kept, synced_as) = match synced.settings {
+                        Some(taken) => (merge_settings(&here, &now, &taken), taken),
+                        None => (now.clone(), here),
+                    };
+                    if kept != now {
                         let mut shown = self.settings;
-                        shown.set(settings);
+                        shown.set(kept.clone());
                         self.store_settings();
+                    }
+                    if kept != synced_as {
+                        self.sync_soon();
                     }
                     let unreadable = (synced.unreadable > 0).then(|| {
                         format!(
