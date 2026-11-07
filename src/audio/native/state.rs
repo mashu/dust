@@ -75,12 +75,17 @@ const SILENT_CONFIRM_SEC: f64 = 0.25;
 /// When a stream's callback last ran, in seconds on [`clock_sec`]'s clock:
 /// what tells a stream stopped without a word, as an iOS interruption stops
 /// one, from one that plays. Opened, it is given [`FIRST_CALL_SEC`] to be
-/// called the first time, and [`SILENT_AFTER_SEC`] each time after.
+/// called the first time, unless its worker errs over and over first, and
+/// [`SILENT_AFTER_SEC`] each time after.
 pub struct Heartbeat {
     /// When the callback last ran, or, till it has, the stream opened.
     last: AtomicU64,
     /// Whether the callback has run at all.
     called: AtomicBool,
+    /// Whether its worker has reported one error after another, no buffer
+    /// asked for between them, since the callback last ran, or the stream
+    /// opened: a worker in a loop of them.
+    looping: AtomicBool,
 }
 
 impl Heartbeat {
@@ -88,6 +93,7 @@ impl Heartbeat {
         Self {
             last: AtomicU64::new(now_sec.to_bits()),
             called: AtomicBool::new(false),
+            looping: AtomicBool::new(false),
         }
     }
 
@@ -96,6 +102,9 @@ impl Heartbeat {
         self.last.store(now_sec.to_bits(), Ordering::Relaxed);
         if !self.called.load(Ordering::Relaxed) {
             self.called.store(true, Ordering::Release);
+        }
+        if self.looping.load(Ordering::Relaxed) {
+            self.looping.store(false, Ordering::Release);
         }
     }
 
@@ -110,12 +119,22 @@ impl Heartbeat {
         self.called.load(Ordering::Acquire)
     }
 
+    /// Its worker reported an error after another, with no buffer asked
+    /// for between them: a worker in a loop of them, until the callback next
+    /// runs. Before the callback has ever run, the device will not start,
+    /// not one slow to, and the stream is given no longer to be called the
+    /// first time than one that stopped is to be called again.
+    pub fn erred_again(&self) {
+        self.looping.store(true, Ordering::Release);
+    }
+
     /// Whether, at `now_sec`, the callback has gone uncalled for longer than
     /// it is given, however long since anything last looked: longer than
     /// [`SILENT_AFTER_SEC`] since it was last called, or, never called,
-    /// than [`FIRST_CALL_SEC`] since the stream opened.
+    /// than [`FIRST_CALL_SEC`] since the stream opened, or than
+    /// [`SILENT_AFTER_SEC`] where its worker has erred over and over.
     pub fn went_silent(&self, now_sec: f64) -> bool {
-        let given = if self.called() {
+        let given = if self.called() || self.looping.load(Ordering::Acquire) {
             SILENT_AFTER_SEC
         } else {
             FIRST_CALL_SEC

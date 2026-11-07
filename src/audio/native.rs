@@ -621,12 +621,17 @@ impl StreamWords {
     /// on it is told so at once; anything else may pass, as a poll a signal
     /// cut short does, and the stream is taken for broken only once it is
     /// no longer called ([`Heartbeat`]). Whether another came before it
-    /// with no buffer asked for since: a worker in a loop of them.
+    /// with no buffer asked for since: a worker in a loop of them, which,
+    /// before the stream was ever called, has a device that will not start.
     fn erred(&self, err: &cpal::StreamError) -> bool {
         if matches!(err, cpal::StreamError::DeviceNotAvailable) {
             self.failed.store(true, Ordering::Release);
         }
-        self.erring.swap(true, Ordering::AcqRel)
+        let again = self.erring.swap(true, Ordering::AcqRel);
+        if again {
+            self.heartbeat.erred_again();
+        }
+        again
     }
 }
 
@@ -821,6 +826,39 @@ mod word_tests {
         words.retired.store(true, Ordering::Release);
         assert!(!words.called(3.0), "retired, it plays silence");
         assert_eq!(words.heartbeat.last(), 2.0);
+    }
+
+    /// A stream whose worker errs over and over before it is ever called
+    /// has a device that will not start, not one slow to: it is given no
+    /// longer to be called the first time than a stream that stopped is to
+    /// be called again, and a send on it fails as soon. One error alone may
+    /// pass, as a poll a signal cut short does, and leaves it its time.
+    #[test]
+    fn a_stream_erring_over_and_over_before_it_is_called_is_given_no_time_to_start() {
+        let passing = cpal::StreamError::BackendSpecific {
+            err: cpal::BackendSpecificError {
+                description: "Interrupted system call".into(),
+            },
+        };
+        let looked = state::SILENT_AFTER_SEC + 0.1;
+        let unstarted = words();
+        unstarted.erred(&passing);
+        assert!(
+            !unstarted.heartbeat.went_silent(looked),
+            "one error may pass"
+        );
+        unstarted.erred(&passing);
+        assert!(unstarted.heartbeat.went_silent(looked), "a loop of them");
+
+        let started = words();
+        assert!(started.called(1.0));
+        started.erred(&passing);
+        started.erred(&passing);
+        assert!(!started.heartbeat.went_silent(1.0 + state::SILENT_AFTER_SEC));
+        assert!(
+            started.heartbeat.went_silent(1.1 + state::SILENT_AFTER_SEC),
+            "called, then erring: as one that stopped"
+        );
     }
 }
 
