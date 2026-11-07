@@ -29,10 +29,15 @@ use state::{Heartbeat, PlayerState, ToneSignal, moved_off_default};
 const MAX_LATENCY_SEC: f64 = 0.5;
 
 /// How long after a device refused to open before a paddle squeeze or a
-/// slider move tries it again. Opening probes the device and tries four
-/// buffer sizes on the UI thread; a send, which reports the failure, always
-/// tries.
+/// slider move tries it again, and after a stream in a loop of errors was
+/// opened again before another is, whatever asks. Opening probes the device
+/// and tries four buffer sizes on the UI thread; a send, which reports the
+/// failure, always tries a device that refused.
 const REOPEN_AFTER: Duration = Duration::from_secs(1);
+
+/// Why the output is not up while a stream opened in place of one in a loop
+/// of errors has fallen into one of its own.
+const LOOPING: &str = "Audio stream: the device reports one error after another";
 
 /// How long a stream that reports one error after another, with no buffer
 /// asked for between them, is made to wait before reporting the next. Some
@@ -83,8 +88,12 @@ pub struct MorsePlayer {
     /// keeps running between groups instead of restarting with every send.
     opened_at: Instant,
     fade_origin_sec: f64,
-    /// When the device last refused to open, and why.
+    /// When the device last refused to open, or a stream opened in place of
+    /// one in a loop of errors fell into one of its own, and why.
     refused: Option<(Instant, String)>,
+    /// When a stream was last taken for broken for its worker being in a
+    /// loop of errors ([`MorsePlayer::fail_a_looping_stream`]).
+    loop_failed_at: Option<Instant>,
     /// When the system's default output was last asked after.
     default_asked: Option<Instant>,
     /// When the send playing is heard from, as this player said it would
@@ -253,6 +262,7 @@ impl MorsePlayer {
             opened_at: Instant::now(),
             fade_origin_sec: fade_origin_sec(),
             refused: None,
+            loop_failed_at: None,
             default_asked: None,
             heard_at: None,
             gains: Gains::UNITY,
@@ -285,8 +295,11 @@ impl MorsePlayer {
     }
 
     /// Make sure the output stream is up: opened again after it slept, or
-    /// after the device broke.
+    /// after the device broke, or, at most once a [`REOPEN_AFTER`], after
+    /// its worker fell into a loop of errors
+    /// ([`MorsePlayer::fail_a_looping_stream`]).
     fn ensure_output(&mut self) -> Result<(), String> {
+        self.fail_a_looping_stream()?;
         if self.stream.as_ref().is_some_and(|open| {
             if open.heartbeat.went_silent(clock_sec()) {
                 // Broken without a word: a send waiting on it is told so.
@@ -317,6 +330,34 @@ impl MorsePlayer {
         };
         self.open(&device, &supported)?;
         self.keep_probed(device, supported);
+        Ok(())
+    }
+
+    /// Take the stream for broken if its worker is in a loop of errors, as
+    /// cpal's ALSA worker is on a device that died, or after an underrun it
+    /// never recovers from: it sounds nothing, and says nothing of the
+    /// stream breaking. At most once a [`REOPEN_AFTER`], whatever asks: each
+    /// time, the device is probed and opened again on the UI thread, the
+    /// band is cleared, the old stream's worker is left looping where it is
+    /// not waited for ([`DROP_WAITS_ON_WORKER`]), and the stream opened in
+    /// its place can fall into a loop of its own at once. One that has,
+    /// sooner than that, is said to have refused, and why.
+    fn fail_a_looping_stream(&mut self) -> Result<(), String> {
+        let Some(open) = &self.stream else {
+            return Ok(());
+        };
+        if !open.heartbeat.looping() || open.failed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self
+            .loop_failed_at
+            .is_some_and(|at| at.elapsed() < REOPEN_AFTER)
+        {
+            self.note_refusal(LOOPING);
+            return Err(LOOPING.to_string());
+        }
+        open.failed.store(true, Ordering::Release);
+        self.loop_failed_at = Some(Instant::now());
         Ok(())
     }
 
@@ -564,18 +605,12 @@ impl MorseBackend for MorsePlayer {
         self.with_mixer(|mixer, swept| mixer.sweep(swept));
     }
 
+    /// A stream whose worker is in a loop of errors sounds no tone, and is
+    /// taken for broken here as anywhere ([`MorsePlayer::ensure_output`]):
+    /// the sidetone is told what the device says, not that it is there for
+    /// as long as the stream is given to be called again.
     fn set_live_tone(&mut self, tone: ToneRequest) -> Result<(), String> {
         self.sidetone.set(tone);
-        // A stream whose worker is in a loop of errors sounds no tone:
-        // cpal's ALSA worker is, on a device that died, and says nothing of
-        // the stream breaking. Taken for broken now, it is opened again, and
-        // the sidetone is told what the device says, not that it is there
-        // for as long as the stream is given to be called again.
-        if let Some(open) = &self.stream
-            && open.heartbeat.looping()
-        {
-            open.failed.store(true, Ordering::Release);
-        }
         self.ensure_output_unless_refused()
     }
 }
@@ -1284,19 +1319,10 @@ mod device_tests {
         }
     }
 
-    /// An output whose worker has fallen into a loop of errors, as cpal's
-    /// ALSA worker does on a device that died, is not said to the sidetone
-    /// to be there: taken for broken, it is opened again, and the sidetone
-    /// is told what the device says as it refuses. It used to be said to be
-    /// there for the second and a half the stream is given to be called
-    /// again, an ALSA device's death being no word that the stream broke.
-    #[test]
-    fn an_output_in_a_loop_of_errors_is_said_to_the_sidetone() {
-        FOUND.set(false);
-        let Some(mut player) = opened(MorsePlayer::probing(dying, false)) else {
-            return;
-        };
-        let open = player.stream.as_ref().expect("open");
+    /// `open`'s worker falls into a loop of errors, as cpal's ALSA worker
+    /// does on a device that died: it reports one error after another, and
+    /// asks for no buffer between them.
+    fn fall_into_a_loop(open: &OpenStream) {
         let words = StreamWords {
             failed: Arc::clone(&open.failed),
             heartbeat: Arc::clone(&open.heartbeat),
@@ -1315,8 +1341,106 @@ mod device_tests {
         };
         words.erred(&gone);
         words.erred(&gone);
+    }
+
+    /// An output whose worker has fallen into a loop of errors, as cpal's
+    /// ALSA worker does on a device that died, is not said to the sidetone
+    /// to be there: taken for broken, it is opened again, and the sidetone
+    /// is told what the device says as it refuses. It used to be said to be
+    /// there for the second and a half the stream is given to be called
+    /// again, an ALSA device's death being no word that the stream broke.
+    #[test]
+    fn an_output_in_a_loop_of_errors_is_said_to_the_sidetone() {
+        FOUND.set(false);
+        let Some(mut player) = opened(MorsePlayer::probing(dying, false)) else {
+            return;
+        };
+        fall_into_a_loop(player.stream.as_ref().expect("open"));
         let said = player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
         assert!(matches!(&said, Err(why) if why.contains("u64")), "{said:?}");
+    }
+
+    /// A stream in a loop of errors is opened again at most once a
+    /// [`REOPEN_AFTER`], however many edges the paddle keys meanwhile, and
+    /// however soon the stream opened in its place falls into a loop of its
+    /// own, as each can after an underrun cpal's ALSA host never recovers
+    /// from: every opening probes the device and tries four buffer sizes on
+    /// the UI thread, clears the band, and on Linux leaves the worker of the
+    /// stream it replaced looping for good. In between, the sidetone is told
+    /// the output is not there. It used to be opened again at every edge, a
+    /// thread left behind each time.
+    #[test]
+    fn a_stream_in_a_loop_of_errors_is_opened_again_at_most_once_a_while() {
+        PROBES.set(0);
+        let Some(mut player) = opened(MorsePlayer::probing(counted_probe, false)) else {
+            return;
+        };
+        // An edge keyed, every stream the player has falling into a loop
+        // of errors before it: whether it had the output opened again, and
+        // what the sidetone was told.
+        let key = |player: &mut MorsePlayer, on: bool| {
+            if let Some(open) = &player.stream
+                && !open.heartbeat.looping()
+            {
+                fall_into_a_loop(open);
+            }
+            let probes = PROBES.get();
+            let said = player.set_live_tone(ToneRequest::new(on, 600.0, 0.2));
+            (PROBES.get() > probes, said)
+        };
+        let began = Instant::now();
+        let mut reopened = 0u32;
+        for edge in 0..40 {
+            let (opened_again, said) = key(&mut player, edge % 2 == 0);
+            if opened_again {
+                reopened += 1;
+            } else {
+                assert!(said.is_err(), "edge {edge}: {said:?}");
+            }
+        }
+        let windows = began.elapsed().as_secs_f64() / REOPEN_AFTER.as_secs_f64();
+        assert!(reopened >= 1, "the first edge opened it again");
+        assert!(
+            f64::from(reopened) <= windows.floor() + 1.0,
+            "opened again {reopened} times in {windows:.2} windows"
+        );
+        std::thread::sleep(REOPEN_AFTER);
+        let (opened_again, said) = key(&mut player, false);
+        assert!(opened_again, "a while on, it is opened again: {said:?}");
+        player.shutdown();
+    }
+
+    /// A send finds a stream in a loop of errors as the sidetone does: it
+    /// is opened again before the send starts, and the send plays on the
+    /// one opened in its place, not on one that plays nothing until it has
+    /// gone uncalled long enough to be taken for broken. Should that one
+    /// fall into a loop of its own a moment later, the next send fails at
+    /// once rather than open a third.
+    #[test]
+    fn a_send_on_a_stream_in_a_loop_of_errors_plays_on_one_opened_in_its_place() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
+        let send = |player: &mut MorsePlayer| {
+            crate::audio::start_send(player, &Transmission::alone("K", voice), &settings())
+        };
+        let looping = player.stream.as_ref().expect("open");
+        fall_into_a_loop(looping);
+        let looping = Arc::clone(&looping.heartbeat);
+        let began = Instant::now();
+        send(&mut player).expect("the send starts");
+        let open = player.stream.as_ref().expect("open");
+        assert!(
+            !Arc::ptr_eq(&open.heartbeat, &looping),
+            "the send plays on a stream opened in its place"
+        );
+        fall_into_a_loop(open);
+        let said = send(&mut player).map(|_| ());
+        if began.elapsed() < REOPEN_AFTER {
+            assert!(said.is_err(), "{said:?}");
+        }
+        player.shutdown();
     }
 
     #[test]
