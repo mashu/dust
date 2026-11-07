@@ -63,7 +63,7 @@ pub(super) struct HistoryJobs {
 
 enum Run {
     /// Each job done then and there, on the caller's thread.
-    Inline(HistoryFiles),
+    Inline(Box<HistoryFiles>),
     /// Each job sent to the worker's thread, which owns the files.
     Worker(mpsc::Sender<Job>),
 }
@@ -97,7 +97,7 @@ impl HistoryJobs {
         Self {
             watch: files.watch(),
             size: files.size(),
-            run: Run::Inline(files),
+            run: Run::Inline(Box::new(files)),
         }
     }
 

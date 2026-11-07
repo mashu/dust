@@ -37,6 +37,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::num::NonZeroUsize;
@@ -118,6 +119,10 @@ pub(super) struct HistoryFiles {
     /// every change since: what the app asks, on its own thread, of how
     /// large the history has grown ([`Self::size`]).
     size: Arc<AtomicU64>,
+    /// The records each pack held when it last opened, by the pack's name:
+    /// what one that cannot be opened for now holds, for all this copy
+    /// knows ([`Self::packed`]).
+    pack_records: RefCell<HashMap<OsString, Vec<RecordId>>>,
     /// What another copy of the app does while this one lists or reads the
     /// history, for a test to set: done each time a folder of it has been
     /// read ([`Self::meanwhile()`]).
@@ -150,14 +155,15 @@ struct Stamps {
 
 /// What the history's folders hold.
 struct Listing {
-    /// Every record, loose or packed, in order.
+    /// Every record, loose or packed, in order: one in a pack that could
+    /// not be opened among them where the pack held it when it last opened.
     records: BTreeSet<RecordId>,
     /// Every tombstone.
     gone: BTreeSet<RecordId>,
     /// What each packed record holds, as it was written.
     packed: BTreeMap<RecordId, String>,
     /// Whether a pack could not be opened: what it holds is in none of
-    /// the above.
+    /// the above, but for the records it held when it last opened.
     skipped: bool,
 }
 
@@ -169,6 +175,9 @@ struct Packs {
     records: BTreeMap<RecordId, String>,
     /// Whether a pack could not be opened, and gave up none of its records.
     skipped: bool,
+    /// The records the packs that could not be opened held when they last
+    /// opened: there still, for all this copy knows, though not to be read.
+    unopened: BTreeSet<RecordId>,
 }
 
 /// A record as a pack holds it: one line.
@@ -217,6 +226,7 @@ impl HistoryFiles {
             keys: RefCell::new(HashMap::new()),
             on_worker: false,
             size: Arc::new(AtomicU64::new(0)),
+            pack_records: RefCell::new(HashMap::new()),
             #[cfg(test)]
             elsewhere: RefCell::new(None),
         }
@@ -656,6 +666,7 @@ impl HistoryFiles {
         self.meanwhile();
         let packs = self.packed()?;
         records.extend(packs.records.keys().copied());
+        records.extend(packs.unopened.iter().copied());
         let gone = ids_in(&self.tombstones())?;
         self.meanwhile();
         Ok(Listing {
@@ -689,6 +700,11 @@ impl HistoryFiles {
     /// skipped: the rest are read all the same, and every pack is left as
     /// it is. A test's other copy acts once they are read, whatever they
     /// are read for ([`Self::meanwhile()`]).
+    ///
+    /// A pack skipped that opened before, held by another program for a
+    /// moment, say, still holds the records it held then, for all this copy
+    /// knows ([`Packs::unopened`]): a listing without them would have the
+    /// app take each for lost in passing, and store it again beside it.
     fn packed(&self) -> io::Result<Packs> {
         let packs = self.read_packs();
         self.meanwhile();
@@ -699,17 +715,19 @@ impl HistoryFiles {
     fn read_packs(&self) -> io::Result<Packs> {
         let entries = match fs::read_dir(self.dir.join(PACKS)) {
             Ok(entries) => entries,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Packs::default()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                self.pack_records.borrow_mut().clear();
+                return Ok(Packs::default());
+            }
             Err(err) => return Err(err),
         };
         let mut packs = Packs::default();
+        let mut held = self.pack_records.borrow_mut();
+        let mut now = HashMap::new();
         for entry in entries {
             let entry = entry?;
-            if !entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with(PACK_EXTENSION)
-            {
+            let name = entry.file_name();
+            if !name.to_string_lossy().ends_with(PACK_EXTENSION) {
                 continue;
             }
             let pack = match fs::File::open(entry.path()) {
@@ -717,22 +735,30 @@ impl HistoryFiles {
                 Err(err) => {
                     eprintln!(
                         "could not read {} of the history: {err}",
-                        entry.file_name().to_string_lossy()
+                        name.to_string_lossy()
                     );
                     packs.skipped = true;
+                    if let Some(ids) = held.remove(&name) {
+                        packs.unopened.extend(ids.iter().copied());
+                        now.insert(name, ids);
+                    }
                     continue;
                 }
             };
+            let mut ids = Vec::new();
             let lines = io::BufReader::new(GzDecoder::new(pack)).lines();
             for line in lines.map_while(Result::ok) {
                 let Ok(line) = serde_json::from_str::<PackLine>(&line) else {
                     continue;
                 };
                 if let Some(id) = RecordId::parse(&line.id) {
+                    ids.push(id);
                     packs.records.entry(id).or_insert(line.s);
                 }
             }
+            now.insert(name, ids);
         }
+        *held = now;
         Ok(packs)
     }
 
@@ -2917,6 +2943,26 @@ mod tests {
         assert_eq!(files.listing(), Some(vec![one.id, two.id]));
     }
 
+    /// A pack that opened before and cannot be opened now, held by another
+    /// program for a moment, say, or put back by a later build as it is
+    /// listed, still lists the records it held, which the app holds: a
+    /// listing without them had the app take them for lost in passing, and
+    /// store each again beside its pack.
+    #[cfg(unix)]
+    #[test]
+    fn a_pack_that_opened_before_still_lists_its_records() {
+        let (dir, files) = history("pack-opened-before");
+        files.load();
+        let (one, two) = (record(&finished(1_000)), record(&finished(2_000)));
+        let packed = pack(&dir.0, "packed.jsonl.gz", &[&one], &[]);
+        files.apply(&put(std::slice::from_ref(&two)));
+        assert_eq!(files.listing(), Some(vec![one.id, two.id]));
+        fs::remove_file(&packed).unwrap();
+        std::os::unix::fs::symlink(dir.0.join("nowhere"), &packed).unwrap();
+        assert_eq!(files.listing(), Some(vec![one.id, two.id]));
+        assert_eq!(files.read(&[one.id]), [Err(one.id)], "read nowhere");
+    }
+
     /// A pack that cannot be opened leaves a backup to what the app holds:
     /// the rest of what is stored is not all there is. Written from the
     /// rest, the backup left out the sessions of that pack, and said
@@ -3013,5 +3059,7 @@ mod tests {
         records_packed_in_two_passes_as_they_are_read_are_read_all_the_same,
         #[cfg(unix)]
         a_pack_that_cannot_be_opened_costs_only_its_own_records,
+        #[cfg(unix)]
+        a_pack_that_opened_before_still_lists_its_records,
     }
 }
