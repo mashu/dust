@@ -474,6 +474,70 @@ fn a_session_deleted_on_two_devices_and_put_back_on_one_comes_back_on_both() {
     assert_eq!(phone.stamps(), [1, 2], "not deleted again");
 }
 
+/// What sync keeps, `state`, as a build before deletions by hand were
+/// noted kept it: with no note of the deletion of `id`, which this build
+/// noted, nor of having looked for such deletions since.
+fn as_an_earlier_build_kept(state: &SyncState, id: RecordId) -> SyncState {
+    let mut kept: serde_json::Value =
+        serde_json::from_str(&state.written().expect("written")).expect("JSON");
+    let fields = kept.as_object_mut().expect("fields");
+    let notes = fields
+        .get_mut("applied")
+        .and_then(|notes| notes.as_object_mut())
+        .expect("notes");
+    assert!(notes.remove(&id.name()).is_some(), "noted by this build");
+    fields.remove("deletionsNoted");
+    SyncState::read(&kept.to_string()).expect("read")
+}
+
+/// A session deleted by hand on one device with an earlier build, its
+/// deletion sent from there or held by the drive already, and put back on
+/// another device after, comes back on the first once it is updated, and
+/// stays on both: the first sync after the update notes each deletion by
+/// hand the drive held that the earlier build kept no note of, as this
+/// build notes its own. A deletion by hand not yet sent is sent all the
+/// same. The first device used to send its deletion again as it found the
+/// session back in the drive, and the session was gone from both.
+#[test]
+fn a_session_deleted_with_an_earlier_build_and_put_back_elsewhere_comes_back() {
+    for sent_from_here in [true, false] {
+        let remote = MemoryRemote::default();
+        let mut phone = Device::keeping(&sessions(&[1, 2, 3]));
+        phone.turn_on(&remote, "passphrase").expect("on");
+        phone.sync(&remote, 100).expect("synced");
+        let mut computer = Device::keeping(&[]);
+        computer.turn_on(&remote, "passphrase").expect("on");
+        computer.sync(&remote, 110).expect("synced");
+        let two = computer.id_of(2);
+        let session = computer.session(two);
+        if sent_from_here {
+            phone.delete(2, 120);
+            phone.sync(&remote, 130).expect("synced");
+            computer.sync(&remote, 140).expect("synced");
+            assert_eq!(computer.stamps(), [1, 3], "let go");
+        } else {
+            computer.delete(2, 120);
+            computer.sync(&remote, 130).expect("synced");
+            phone.delete(2, 135);
+            assert_eq!(phone.sync(&remote, 140).expect("synced").sent, 0);
+        }
+        phone.delete(3, 145);
+        // Updated since: what sync keeps, as the earlier build kept it.
+        phone.state = as_an_earlier_build_kept(&phone.state, two);
+        computer.undo(two, &session, 150);
+        computer.sync(&remote, 160).expect("synced");
+
+        phone.sync(&remote, 170).expect("synced");
+        assert_eq!(phone.stamps(), [1, 2], "taken back");
+        computer.sync(&remote, 180).expect("synced");
+        assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+        let mut joined = Device::keeping(&[]);
+        joined.turn_on(&remote, "passphrase").expect("on");
+        joined.sync(&remote, 190).expect("synced");
+        assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+    }
+}
+
 /// A session deleted by hand on one device, then put back there by hand
 /// and deleted there by hand again before it syncs, is deleted on every
 /// device where another device put it back before that: the deletion

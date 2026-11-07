@@ -307,6 +307,12 @@ pub async fn sync_once(
     state
         .applied
         .retain(|id, _| !listed.contains(id) && !state.revived.contains_key(id));
+    // Once, at the first sync after an update from a build that noted no
+    // deletion by hand: those it made that the drive holds, noted.
+    if !state.deletions_noted {
+        note_deletions_by_hand(store, &listed, state).await;
+        state.deletions_noted = true;
+    }
     let mut planned = planned(store, &drive, &listed, state).await;
     // A record to take that only a pack read before holds, as where the
     // store here lost one: every pack read again, once.
@@ -473,6 +479,42 @@ pub async fn sync_once(
     sync_settings(store, remote, &keys, &files, state, here, now, &mut synced).await?;
     state.last = Some(now);
     Ok(synced)
+}
+
+/// Note the deletions by hand made here that a build before this one,
+/// which noted none, left with no note: those of the sessions the drive
+/// held as deleted as this device last synced, each deleted by hand here
+/// and sent from here, or found deleted in the drive already. Each is noted
+/// with the drive's deletion, as this build notes one it finds the drive
+/// holding ([`Plan::deleted_too`]): a putting back the drive holds after it
+/// brings the session back here, rather than this device sending its
+/// deletion again. One put back here by hand since the last sync is left
+/// out: deleted again, it is a deletion by hand as any other.
+async fn note_deletions_by_hand(
+    store: &dyn Store,
+    listed: &BTreeSet<RecordId>,
+    state: &mut SyncState,
+) {
+    let unnoted: Vec<RecordId> = state
+        .drive
+        .tombs
+        .keys()
+        .copied()
+        .filter(|&id| {
+            state.drive.deleted(id)
+                && !listed.contains(&id)
+                && !state.applied.contains_key(&id)
+                && !state.revived.contains_key(&id)
+        })
+        .collect();
+    if unnoted.is_empty() {
+        return;
+    }
+    for id in store.forgotten(unnoted).await {
+        if let Some(&at) = state.drive.tombs.get(&id) {
+            state.applied.insert(id, at);
+        }
+    }
 }
 
 /// The plan for this sync, the store asked which of what the drive holds

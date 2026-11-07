@@ -62,6 +62,12 @@ pub struct SyncState {
     /// ([`super::plan::Here::revived`]).
     #[serde(default, with = "times")]
     pub revived: BTreeMap<RecordId, u64>,
+    /// The deletions by hand a build before this one made here, and noted
+    /// nothing of in [`Self::applied`], have been looked for and noted:
+    /// those the drive held as deleted, sent from here or found there
+    /// already. Looked for once, at the first sync after an update.
+    #[serde(default)]
+    pub deletions_noted: bool,
     /// The settings as they were at the last sync, to tell what changed
     /// since: none before the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +211,7 @@ mod tests {
         state.drive.revives.insert(id, 8);
         state.applied.insert(id, 7);
         state.revived.insert(id, 9);
+        state.deletions_noted = true;
         state.settings = Some(Map::from_iter([("numGroups".to_string(), Value::from(5))]));
         state.stamps.insert("numGroups".into(), 3);
         let written = state.written().expect("written");
@@ -229,5 +236,6 @@ mod tests {
             least,
             SyncState::new("d".into(), "k".into(), String::new(), None)
         );
+        assert!(!least.deletions_noted, "looked for at the next sync");
     }
 }
