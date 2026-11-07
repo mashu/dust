@@ -33,7 +33,8 @@ const MAX_LATENCY_SEC: f64 = 0.5;
 /// slider move tries it again, and after a stream in a loop of errors was
 /// opened again before another is, whatever asks. Opening probes the device
 /// and tries four buffer sizes on the UI thread; a send, which reports the
-/// failure, always tries a device that refused.
+/// failure, always tries a device that refused, but for one whose every
+/// stream falls into a loop of errors ([`MorsePlayer::refuse_while_looping`]).
 const REOPEN_AFTER: Duration = Duration::from_secs(1);
 
 /// Why the output is not up while a stream opened in place of one in a loop
@@ -96,6 +97,13 @@ thread_local! {
     /// broken at once, opening another and leaving one more looping worker
     /// behind on every try.
     static LOOP_FAILED_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// Whether a stream opened since the one at [`LOOP_FAILED_AT`] was
+    /// taken for broken has fallen into a loop of its own within the while,
+    /// and been refused for it ([`LOOPING`]), as the one opened in its place
+    /// does at once on a device whose every stream falls into one as it
+    /// opens: none is opened on this thread until the while is out
+    /// ([`MorsePlayer::refuse_while_looping`]).
+    static LOOPED_AGAIN: Cell<bool> = const { Cell::new(false) };
 }
 
 pub struct MorsePlayer {
@@ -264,8 +272,10 @@ fn claim_volume_keys() {
 impl MorsePlayer {
     /// A player on the default output, with its stream opened now so the
     /// first squeeze of the paddle is not a stream start. A device that
-    /// refuses to open gets another chance on first use; no device at all is
-    /// an error.
+    /// refuses to open gets another chance on first use, and one whose every
+    /// stream falls into a loop of errors once the while is out
+    /// ([`MorsePlayer::refuse_while_looping`]); no device at all is an
+    /// error.
     pub fn new() -> Result<Self, String> {
         Self::probing(default_output, KEEP_PROBED)
     }
@@ -295,7 +305,10 @@ impl MorsePlayer {
             keeps_probed,
             probed: None,
         };
-        match player.open(&device, &supported) {
+        let opened = player
+            .refuse_while_looping()
+            .and_then(|()| player.open(&device, &supported));
+        match opened {
             Ok(()) => player.keep_probed(device, supported),
             Err(err) => eprintln!("audio output: {err}"),
         }
@@ -321,7 +334,9 @@ impl MorsePlayer {
     /// Make sure the output stream is up: opened again after it slept, or
     /// after the device broke, or, at most once a [`REOPEN_AFTER`], after
     /// its worker fell into a loop of errors
-    /// ([`MorsePlayer::fail_a_looping_stream`]).
+    /// ([`MorsePlayer::fail_a_looping_stream`]); but not on a device whose
+    /// every stream falls into one, until the while is out
+    /// ([`MorsePlayer::refuse_while_looping`]).
     fn ensure_output(&mut self) -> Result<(), String> {
         self.fail_a_looping_stream()?;
         if self.stream.as_ref().is_some_and(|open| {
@@ -348,6 +363,7 @@ impl MorsePlayer {
         if self.stream.is_some() {
             return Ok(());
         }
+        self.refuse_while_looping()?;
         let (device, supported) = match self.probed.take() {
             Some(probed) => probed,
             None => (self.probe)().inspect_err(|why| self.note_refusal(why))?,
@@ -366,7 +382,8 @@ impl MorsePlayer {
     /// old stream's worker is left looping where it is not waited for
     /// ([`DROP_WAITS_ON_WORKER`]), and the stream opened in its place can
     /// fall into a loop of its own at once. One that has, sooner than that,
-    /// is said to have refused, and why.
+    /// is said to have refused, and why, and no other stream is opened
+    /// until the while is out ([`LOOPED_AGAIN`]).
     fn fail_a_looping_stream(&mut self) -> Result<(), String> {
         let Some(open) = &self.stream else {
             return Ok(());
@@ -378,11 +395,35 @@ impl MorsePlayer {
             .get()
             .is_some_and(|at| at.elapsed() < REOPEN_AFTER)
         {
+            LOOPED_AGAIN.set(true);
             self.note_refusal(LOOPING);
             return Err(LOOPING.to_string());
         }
         open.failed.store(true, Ordering::Release);
         LOOP_FAILED_AT.set(Some(Instant::now()));
+        LOOPED_AGAIN.set(false);
+        Ok(())
+    }
+
+    /// Refuse to open a stream, saying why ([`LOOPING`]), on a device whose
+    /// every stream falls into a loop of errors as it opens: once a stream
+    /// opened since one in a loop was taken for broken has fallen into a
+    /// loop of its own ([`LOOPED_AGAIN`]), until a [`REOPEN_AFTER`] is out
+    /// since that one was, whichever player asks, a player built afresh as
+    /// it is made included. Every stream opened on such a device leaves its
+    /// worker looping for good once it is let go of
+    /// ([`DROP_WAITS_ON_WORKER`]), and a send that fails is tried again on
+    /// a player built afresh ([`crate::player`]): one that opened a stream
+    /// as it was made left one more worker behind on every try.
+    fn refuse_while_looping(&mut self) -> Result<(), String> {
+        let looping = LOOPED_AGAIN.get()
+            && LOOP_FAILED_AT
+                .get()
+                .is_some_and(|at| at.elapsed() < REOPEN_AFTER);
+        if looping {
+            self.note_refusal(LOOPING);
+            return Err(LOOPING.to_string());
+        }
         Ok(())
     }
 
@@ -1569,6 +1610,62 @@ mod device_tests {
             assert_eq!(PROBES.get(), probes, "opened again: {said:?}");
             assert_eq!(said, Err(LOOPING.to_string()));
         }
+        rebuilt.shutdown();
+    }
+
+    /// Once the stream opened in place of one in a loop of errors has
+    /// fallen into a loop of its own, the device is one whose every stream
+    /// does, and no stream is opened on the thread until a [`REOPEN_AFTER`]
+    /// is out, whichever player asks: a player built afresh, as a send that
+    /// failed is tried again on one, opens none as it is made, and a send
+    /// and the sidetone on it are refused, saying why, the device not
+    /// probed for them; a while on, it opens one. A player built afresh
+    /// used to open a stream as it was made, which on such a device fell
+    /// into a loop of its own at once: every try of a failed send left one
+    /// more worker looping for good, some four a send.
+    #[test]
+    fn a_player_built_afresh_opens_no_stream_while_every_stream_opened_falls_into_a_loop() {
+        let Some(mut failed) = opened(MorsePlayer::probing(counted_probe, false)) else {
+            return;
+        };
+        fall_into_a_loop(failed.stream.as_ref().expect("open"));
+        let began = Instant::now();
+        failed
+            .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
+            .expect("opened again in its place");
+        fall_into_a_loop(failed.stream.as_ref().expect("opened again"));
+        let refused = failed.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+        failed.shutdown();
+        drop(failed);
+        let Some(mut rebuilt) = opened(MorsePlayer::probing(counted_probe, false)) else {
+            return;
+        };
+        let opened_afresh = rebuilt.stream.is_some();
+        let probes = PROBES.get();
+        let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
+        let sent =
+            crate::audio::start_send(&mut rebuilt, &Transmission::alone("K", voice), &settings())
+                .map(|_| ());
+        let toned = rebuilt.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+        if began.elapsed() < REOPEN_AFTER {
+            assert_eq!(refused, Err(LOOPING.to_string()));
+            assert!(!opened_afresh, "a player built afresh opened a stream");
+            assert!(
+                matches!(&sent, Err(why) if why.contains(LOOPING)),
+                "{sent:?}"
+            );
+            assert_eq!(toned, Err(LOOPING.to_string()));
+            assert!(
+                rebuilt.stream.is_none(),
+                "the send or the sidetone opened one"
+            );
+            assert_eq!(PROBES.get(), probes, "probed for the send or the sidetone");
+        }
+        std::thread::sleep(REOPEN_AFTER);
+        rebuilt
+            .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
+            .expect("a while on, it opens one");
+        assert!(rebuilt.stream.is_some(), "a while on, it opens one");
         rebuilt.shutdown();
     }
 
