@@ -194,6 +194,10 @@ pub struct AppCtx {
     /// This copy's mark, as it was written last, while it holds one
     /// ([`Store::mark_open`]).
     mark: CopyValue<Option<OpenSession>>,
+    /// What the marks of sessions cut off carried, taken from the store as
+    /// they were told of, until the history holds it: this copy's mark
+    /// holds it meanwhile, as nothing else does ([`Self::tell_of_cut_off`]).
+    cut_off_carried: CopyValue<Vec<SessionResult>>,
     /// A try at storing what the store has yet to take is waiting
     /// ([`RETRY_MS`]).
     retrying: CopyValue<bool>,
@@ -266,6 +270,7 @@ impl AppCtx {
                 before_starter_words: Signal::new(None),
                 stored_settings,
                 mark: CopyValue::new(None),
+                cut_off_carried: CopyValue::new(Vec::new()),
                 retrying: CopyValue::new(false),
                 settings_unsaved: CopyValue::new(false),
                 restore_refused_for: CopyValue::new(BTreeSet::new()),
@@ -340,20 +345,32 @@ impl AppCtx {
     }
 
     /// Write this copy's mark as `open` says, carrying every session the
-    /// store has yet to take but the one it holds so far; or, once its
-    /// session or run is over and nothing is left to carry, take it away.
+    /// store has yet to take but the one it holds so far, and what the
+    /// marks of sessions cut off carried that the history has yet to hold
+    /// ([`Self::cut_off_carried`]); or, once its session or run is over and
+    /// nothing is left to carry, take it away.
     fn write_mark(self, mut open: OpenSession) {
         let own = open
             .so_far
             .as_ref()
             .map(|so_far| SessionKey::of(&so_far.result));
-        open.unstored = self
+        let mut unstored: Vec<SessionResult> = self
             .sessions
             .peek()
             .unsaved_sessions()
             .filter(|session| own.as_ref() != Some(&SessionKey::of(session)))
             .cloned()
             .collect();
+        let mut keys: HashSet<SessionKey> = unstored.iter().map(SessionKey::of).collect();
+        keys.extend(own);
+        unstored.extend(
+            self.cut_off_carried
+                .peek()
+                .iter()
+                .filter(|session| keys.insert(SessionKey::of(session)))
+                .cloned(),
+        );
+        open.unstored = unstored;
         let store = self.app().store;
         let mut mark = self.mark;
         if open.over && open.so_far.is_none() && open.unstored.is_empty() {
@@ -369,7 +386,8 @@ impl AppCtx {
     /// a change to the history: a session over and stored, or deleted, is
     /// held by its mark no more, a mark left with nothing to carry goes, and
     /// one short of a session the store has yet to take carries it, should
-    /// the app stop before the store takes it. With no mark held, one is
+    /// the app stop before the store takes it, and so does one short of
+    /// what a mark of a session cut off carried. With no mark held, one is
     /// made for that: a session cut off and kept, say, whose own mark was
     /// taken as it was told of.
     fn settle_mark(self) {
@@ -377,6 +395,7 @@ impl AppCtx {
             .sessions
             .peek()
             .unsaved_sessions()
+            .chain(self.cut_off_carried.peek().iter())
             .map(SessionKey::of)
             .collect();
         let held = self.mark.peek().clone();
@@ -425,6 +444,12 @@ impl AppCtx {
     /// mark carries, and stopped before its mark went, kept it already,
     /// though a copy open all along may not have taken it up yet. Told of
     /// as kept, it is not stored a second time.
+    ///
+    /// The marks are taken from the store as they are told of, so what
+    /// they carry is held with this copy's mark at once, before the store
+    /// is taken up, which on a computer or a phone is a look on a thread of
+    /// its own, and in a browser a moment later still: until the history
+    /// holds it ([`keep_cut_off`]), nothing else does.
     pub fn tell_of_cut_off(self) {
         // This copy's own mark, which it holds still, is no other copy's
         // cut off, whatever a store says of it.
@@ -439,6 +464,7 @@ impl AppCtx {
             if cut.is_empty() {
                 return;
             }
+            self.carry_cut_off(&cut);
             // Kept whether or not the store could be listed: its marks are
             // taken from it already, so what they carry is kept here or
             // nowhere. Stored twice at worst, never lost.
@@ -457,6 +483,54 @@ impl AppCtx {
                 spawn_forever(keep_cut_off(self, cut));
             });
         });
+    }
+
+    /// Hold what `cut`, the marks of sessions cut off, carry, that the
+    /// history does not hold, with this copy's mark, until the history
+    /// holds it or lets it go ([`Self::let_go_of_carried`]).
+    fn carry_cut_off(self, cut: &[CutOff]) {
+        let mut carried = self.cut_off_carried;
+        {
+            let history = self.sessions.peek();
+            let mut held = carried.write();
+            let mut keys: HashSet<SessionKey> = held.iter().map(SessionKey::of).collect();
+            let sessions = cut
+                .iter()
+                .filter_map(CutOff::so_far)
+                .map(|so_far| &so_far.result)
+                .chain(cut.iter().flat_map(CutOff::unstored));
+            for session in sessions {
+                let key = SessionKey::of(session);
+                if !history.has_key(&key) && keys.insert(key) {
+                    held.push(session.clone());
+                }
+            }
+        }
+        self.settle_mark();
+    }
+
+    /// What `cut`, the marks of sessions cut off, carried is held by the
+    /// history now, or let go: this copy's mark holds it no longer for
+    /// their sake ([`Self::carry_cut_off`]).
+    pub fn let_go_of_carried(self, cut: &[CutOff]) {
+        let keys: HashSet<SessionKey> = cut
+            .iter()
+            .filter_map(CutOff::so_far)
+            .map(|so_far| &so_far.result)
+            .chain(cut.iter().flat_map(CutOff::unstored))
+            .map(SessionKey::of)
+            .collect();
+        let mut carried = self.cut_off_carried;
+        let held = carried
+            .peek()
+            .iter()
+            .any(|session| keys.contains(&SessionKey::of(session)));
+        if held {
+            carried
+                .write()
+                .retain(|session| !keys.contains(&SessionKey::of(session)));
+            self.settle_mark();
+        }
     }
 
     /// Tell of whatever reading the store has set aside since it was last
@@ -3054,6 +3128,37 @@ mod tests {
         assert_eq!(next.shown(), [2], "deleted by hand, it goes");
         assert_eq!(days(&store.load_sessions()), [2]);
         assert_eq!(store.open(), None, "nor held");
+    }
+
+    /// A session cut off is held by this copy's mark as soon as the mark
+    /// that carried it is taken from the store, while what the store holds
+    /// is taken up first: that look, made on a thread of its own on a
+    /// computer or a phone, and a moment later in a browser, came before
+    /// anything held the session, and the app stopping meanwhile lost it
+    /// for good.
+    #[test]
+    fn a_session_cut_off_is_held_while_the_store_is_taken_up() {
+        let store = holding([1]);
+        cut_off_keeping(&store, day(2));
+        let mut next = Tab::on(&store);
+        // The look at the store waits on whether the session lost from
+        // under it was deleted by hand.
+        store.lose(next.id_of(1));
+        store.forgotten_later.set(true);
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        let held = store
+            .open()
+            .map(|open| days(&open.unstored))
+            .unwrap_or_default();
+        assert_eq!(held, [2], "held by this copy's mark meanwhile");
+        store.answer_forgotten();
+        next.pump();
+        store.answer_forgotten();
+        next.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2]);
+        assert_eq!(next.shown(), [1, 2]);
+        assert_eq!(store.open(), None, "stored, so no longer marked");
     }
 
     /// A session another copy of the app kept, which the store took before
