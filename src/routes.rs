@@ -10,7 +10,9 @@ use std::rc::Rc;
 use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
-use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
+use crate::page_hidden::{
+    LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden, use_page_shown,
+};
 use crate::persist::auto_progress;
 use crate::persist::record::RecordId;
 use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
@@ -40,6 +42,18 @@ pub(crate) const BAND_SETTLE_MS: u64 = 150;
 /// follows the settings as they stand this long after the first move it has
 /// not followed yet, so a long drag is still heard as it goes.
 pub(crate) const BAND_FOLLOW_MAX_MS: u64 = 600;
+
+/// The longest Home goes without reading the day again: it reads it just
+/// past each midnight, but a clock put right, a time zone left behind or a
+/// computer asleep moves midnight meanwhile.
+const DAY_LOOK_MS: u32 = 15 * 60 * 1_000;
+
+/// How long past midnight Home reads the new day: past any difference
+/// between the clock it waits by and the one that says the day.
+const MIDNIGHT_PASSED_MS: u32 = 1_000;
+
+/// Where Home keeps its listener for the page coming back into sight.
+const HOME_SHOWN: &str = "__dustHomeShown";
 
 /// The screen `screen` names.
 #[component]
@@ -90,8 +104,8 @@ fn HomeRoute() -> Element {
     // the app stored or deleted since is taken up as it opens.
     use_hook(move || ctx.take_up_changes());
     let history = use_history(ctx);
-    let today = local_date_string();
-    let practice = use_memo(use_reactive!(|today| Practice::of(&history(), &today)));
+    let today = use_today();
+    let practice = use_memo(move || Practice::of(&history(), &today.read()));
     let settings = ctx.settings.read();
     rsx! {
         Home {
@@ -108,6 +122,53 @@ fn HomeRoute() -> Element {
             on_section,
         }
     }
+}
+
+/// The day it is where you are, for as long as Home is up: read again just
+/// past each midnight, and as the page comes back into sight, so that an
+/// app left open overnight goes by the new day.
+fn use_today() -> Signal<String> {
+    let mut today = use_signal(today_here);
+    let mut look = move || {
+        let now = today_here();
+        if *today.peek() != now {
+            today.set(now);
+        }
+    };
+    use_page_shown(HOME_SHOWN, look);
+    use_hook(move || {
+        spawn(async move {
+            loop {
+                sleep_ms(until_tomorrow_ms()).await;
+                look();
+            }
+        })
+    });
+    today
+}
+
+/// How long until just past the next midnight where you are, as the clock
+/// reads it, but [`DAY_LOOK_MS`] at the longest.
+fn until_tomorrow_ms() -> u32 {
+    let now = chrono::Local::now();
+    now.date_naive()
+        .succ_opt()
+        .and_then(|tomorrow| tomorrow.and_hms_opt(0, 0, 0))
+        .and_then(|midnight| midnight.and_local_timezone(chrono::Local).earliest())
+        .and_then(|midnight| u32::try_from((midnight - now).num_milliseconds()).ok())
+        .map_or(DAY_LOOK_MS, |until| {
+            until.saturating_add(MIDNIGHT_PASSED_MS).min(DAY_LOOK_MS)
+        })
+}
+
+/// The day it is where you are, as the clock reads it; in a test, the day
+/// the test says it is (`tests::pretend_today`).
+fn today_here() -> String {
+    #[cfg(test)]
+    if let Some(day) = tests::PRETENDED_TODAY.with_borrow(Clone::clone) {
+        return day;
+    }
+    local_date_string()
 }
 
 #[component]
@@ -462,7 +523,57 @@ fn ResultsRoute() -> Element {
 mod tests {
     use super::*;
     use crate::state::AppState;
-    use crate::testing::{Ui, run, test_settings};
+    use crate::testing::{Ui, run, stored_session, test_settings};
+
+    thread_local! {
+        /// The day a test says it is, in place of the clock's.
+        pub(super) static PRETENDED_TODAY: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// From now on in this test, it is `day` where you are.
+    fn pretend_today(day: &str) {
+        PRETENDED_TODAY.set(Some(day.to_string()));
+    }
+
+    /// Home left up past midnight goes by the new day: its streak and its
+    /// calendar take it once the clock passes midnight, and as the page
+    /// comes back into sight. Home read the day only as it was drawn, and an
+    /// app left open overnight said the next morning that the day before's
+    /// practice was the day's, the streak safe.
+    #[test]
+    fn home_left_up_past_midnight_goes_by_the_new_day() {
+        run(|| async {
+            pretend_today("2026-09-02");
+            let sessions: Vec<_> = (1..=2)
+                .map(|day| {
+                    let mut session = stored_session(&format!("2026-09-0{day}"), &[("KM", "KM")]);
+                    session.timestamp = day * 86_400_000;
+                    session
+                })
+                .collect();
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &sessions);
+            assert!(
+                ui.has("2-day streak — today is in the bag."),
+                "{}",
+                ui.html()
+            );
+            pretend_today("2026-09-03");
+            tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
+            ui.advance(20).await;
+            assert!(
+                ui.has("2-day streak at risk — practice today to keep it alive."),
+                "{}",
+                ui.html()
+            );
+            pretend_today("2026-09-04");
+            ui.with_app(|_| crate::page_hidden::show_page());
+            assert!(
+                ui.has("Your 2-day streak ended — one session today starts the next one."),
+                "{}",
+                ui.html()
+            );
+        });
+    }
 
     /// A screen with nothing behind it yet: the moment between starting a
     /// session and its first group, or a results screen with nothing to show.
