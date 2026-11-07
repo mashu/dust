@@ -27,6 +27,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::state::SessionPick;
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::figures::History;
 use crate::ui::format::short_date;
@@ -81,10 +82,20 @@ fn rating_said(ranking: Ranking, rating: f64) -> String {
     }
 }
 
-/// When the session marked on the timeline was set: the row pointed at or
-/// tapped, else the best's, set at `best_at`.
-fn focus(marked: Memo<Option<u64>>, best_at: u64) -> u64 {
-    marked().unwrap_or(best_at)
+/// The session marked on the timeline: the row pointed at or tapped, else
+/// the best, `best`.
+fn focus(marked: Memo<Option<SessionPick>>, best: Option<SessionPick>) -> Option<SessionPick> {
+    marked().or(best)
+}
+
+/// The session a row of the board is: where it sits in the history the
+/// board was read from, which no two rows share, though two sessions may
+/// have been set at the same moment, and when it was set.
+fn pick(entry: &BoardEntry) -> SessionPick {
+    SessionPick {
+        index: entry.index,
+        timestamp: entry.timestamp,
+    }
 }
 
 /// What a row of the board was, in figures: "500 points over 20 groups", or
@@ -274,8 +285,8 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
     let mode = use_signal(|| None::<CharSetMode>);
     let kind = use_signal(|| None::<ContestKind>);
     let rank = use_signal(|| None::<Ranking>);
-    let hovered = use_signal(|| None::<u64>);
-    let pinned = use_signal(|| None::<u64>);
+    let hovered = use_signal(|| None::<SessionPick>);
+    let pinned = use_signal(|| None::<SessionPick>);
     // The row marked, read by what draws the mark alone: the tab reads
     // every stored run's log to build the board, and must not again for
     // each row a mouse crosses.
@@ -353,7 +364,7 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
                     BoardList {
                         board: Vec::new(),
                         assisted: board.assisted.clone(),
-                        best_at: 0,
+                        best: None,
                         marked,
                         hovered,
                         pinned,
@@ -367,7 +378,7 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
             }
         };
     };
-    let best_at = best.timestamp;
+    let best_pick = Some(pick(&best));
     let form = board.timeline.last().map(|point| point.form);
     let form_over = board.timeline.len().min(FORM_SESSIONS);
     let total = board.entries.len();
@@ -388,7 +399,7 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
                 timeline: board.timeline.clone(),
                 dots: board.dots.clone(),
                 board: board.entries.clone(),
-                best_at,
+                best: best_pick,
                 marked,
                 total,
                 first_date: board.first_date.clone(),
@@ -398,7 +409,7 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
             BoardList {
                 board: board.entries.clone(),
                 assisted: board.assisted.clone(),
-                best_at,
+                best: best_pick,
                 marked,
                 hovered,
                 pinned,

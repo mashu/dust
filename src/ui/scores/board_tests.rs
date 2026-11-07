@@ -83,6 +83,30 @@ fn a_row_marks_its_session_on_the_timeline() {
     assert!(ui.has("1st</span> · 90.0 a group"));
 }
 
+/// Two sessions set at the same moment, which a history can hold, are two
+/// rows: each drawn again on its own, and each marked alone, on the board
+/// and on the timeline. Keyed and marked by when they were set, the two
+/// shared a key, which a redraw cannot tell apart, and pointing at one
+/// marked both.
+#[test]
+fn two_sessions_set_at_one_moment_are_two_rows() {
+    let mut ui = board(vec![koch(1, 30.0), koch(2, 90.0), koch(2, 50.0)]);
+    assert_eq!(ui.controls("board-").len(), 3);
+    ui.point_at("board-2", "mouse", (0.0, 0.0), (0.0, 0.0));
+    assert!(ui.input_tag("board-2").contains("focused"));
+    assert!(
+        !ui.input_tag("board-1").contains("focused"),
+        "{}",
+        ui.input_tag("board-1")
+    );
+    assert!(ui.has("2nd</span> · 50.0 a group"), "{}", ui.html());
+    ui.point_away("board-2");
+    ui.click("board-1");
+    assert!(ui.input_tag("board-1").contains("pinned"));
+    assert!(!ui.input_tag("board-2").contains("focused"));
+    assert!(ui.has("1st</span> · 90.0 a group"));
+}
+
 /// Pointing at a row redraws the rows it moves between, the mark and what
 /// is said of it, and nothing else: the tab reads every stored run's log to
 /// build the board, and the timeline draws a dot a session, so neither is
