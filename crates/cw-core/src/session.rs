@@ -1603,6 +1603,31 @@ mod tests {
         );
     }
 
+    /// Every stored session is scored again as it is read, and a save is
+    /// not trusted to hold sane counts and speeds. A count of sends of 2³¹
+    /// panicked there, and one just past it, or a speed past all reason,
+    /// made the score infinite: written as null, which no save reads back,
+    /// so the session dropped out of the history.
+    #[test]
+    fn a_stored_session_past_all_reason_scores_and_reads_back() {
+        let today = copied_at(30.0, 1);
+        for (sends, wpm) in [(1u64 << 31, 30.0), ((1 << 31) + 1, 30.0), (1, 1e200)] {
+            let mut json = serde_json::to_value(&today).expect("serializes");
+            for timing in json["groupTimings"].as_array_mut().expect("timings") {
+                timing["sends"] = serde_json::json!(sends);
+                timing["charWpm"] = serde_json::json!(wpm);
+                timing["effectiveWpm"] = serde_json::json!(wpm);
+            }
+            let mut read: SessionResult = serde_json::from_value(json).expect("a save reads");
+            read.score = read.points();
+            let case = format!("{sends} sends at {wpm} WPM: {}", read.score);
+            assert!(read.score.is_finite(), "{case}");
+            let written = serde_json::to_string(&read).expect("writes");
+            let again: SessionResult = serde_json::from_str(&written).expect(&case);
+            assert_eq!(again.score, read.score, "{case}");
+        }
+    }
+
     #[test]
     fn an_empty_answer_is_scored_wrong() {
         let result = result(&answered(TrainingSettings::default(), &[("KM", "", 400)]));

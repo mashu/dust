@@ -127,9 +127,10 @@ pub fn time_factor(ms_per_char: f64) -> f64 {
 }
 
 /// What is left of a group heard `sends` times: half for each send after
-/// the first.
+/// the first. A count read back from a save is not trusted to be small:
+/// past 64 sends what is left is next to nothing, and stays so.
 pub fn repeat_factor(sends: u32) -> f64 {
-    RESENT_KEEPS.powi(sends.max(1) as i32 - 1)
+    RESENT_KEEPS.powi(sends.saturating_sub(1).min(64) as i32)
 }
 
 /// What a group earns.
@@ -154,11 +155,15 @@ pub fn alphabet_weight(effective_size: f64) -> f64 {
 }
 
 /// What a session earns: its groups' points added up, each character worth
-/// what it tells you from the alphabet the session drew on.
+/// what it tells you from the alphabet the session drew on. A total that
+/// comes to no number, from a save's speed past all reason, earns nothing:
+/// a score is written with the session, and one written as no number is
+/// never read back.
 pub fn session_points(copies: &[GroupCopy], effective_alphabet_size: f64) -> f64 {
     let points: f64 = copies.iter().map(group_points).sum();
     let score = points * alphabet_weight(effective_alphabet_size);
-    (score * 100.0).round() / 100.0
+    let score = (score * 100.0).round() / 100.0;
+    if score.is_finite() { score } else { 0.0 }
 }
 
 /// The characters missed, wrong or typed in excess, copying `sent` as
@@ -330,6 +335,32 @@ mod tests {
         assert_eq!(repeat_factor(1), 1.0);
         assert_eq!(repeat_factor(2), 0.5);
         assert_eq!(repeat_factor(3), 0.25);
+    }
+
+    /// A count of sends read back from a save is not trusted to be small:
+    /// one of 2³¹ panicked working out the cut, and one just past it
+    /// multiplied the points up to infinity instead of halving them.
+    #[test]
+    fn a_send_count_past_all_reason_still_leaves_next_to_nothing() {
+        for sends in [1 << 31, (1 << 31) + 1, u32::MAX] {
+            let left = repeat_factor(sends);
+            assert!((0.0..1e-18).contains(&left), "{sends}: {left}");
+        }
+    }
+
+    /// A score has to be a number to be written and read back: a session
+    /// whose points come to no number, from a speed past all reason, scores
+    /// nothing.
+    #[test]
+    fn a_session_whose_points_are_no_number_scores_nothing() {
+        let wild = GroupCopy {
+            wpm: 1e200,
+            ..clean(5, 20.0)
+        };
+        assert_eq!(group_points(&wild), f64::INFINITY);
+        assert_eq!(session_points(&[clean(5, 20.0), wild], 26.0), 0.0);
+        let empty = GroupCopy { chars: 0, ..wild };
+        assert_eq!(session_points(&[empty], 26.0), 0.0);
     }
 
     /// A character from two Koch letters tells you a bit; one from the
