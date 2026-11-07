@@ -1047,6 +1047,29 @@ fn a_text_file_loads_as_the_words() {
     });
 }
 
+/// A text file chosen while another is still read takes its place: the
+/// other, done reading after it, is left unread as the words, which are the
+/// newer file's. Handed on last, the older was taken in its place.
+#[test]
+fn a_text_file_chosen_while_another_is_read_takes_its_place() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        let (first, second) = ("CQ\nDE\n", "TEST\nQRL\nQTH\n");
+        ui.hold_file_reads(true);
+        ui.choose_file("file-word-list", "first.txt", first, first.len() as u64);
+        ui.hold_file_reads(false);
+        ui.choose_file("file-word-list", "second.txt", second, second.len() as u64);
+        assert_eq!(word_report(&ui), "second.txt: 3 words");
+        ui.advance(100).await;
+        assert_eq!(word_report(&ui), "second.txt: 3 words");
+        assert_eq!(value_of(&ui, "field-word-list"), "TEST\nQRL\nQTH");
+        assert_eq!(
+            ui.stored_settings().await.curriculum.word_list,
+            ["TEST", "QRL", "QTH"]
+        );
+    });
+}
+
 /// A file with nothing in it that can be sent, or far too large to be a
 /// word list, leaves the words as they were, and says why.
 #[test]

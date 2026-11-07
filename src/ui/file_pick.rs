@@ -423,9 +423,10 @@ pickers[id] = () => {{
 }
 
 /// A button that chooses a file of the kinds `accept` names, reads it as
-/// text up to `max_bytes`, and hands it to `on_choose`; or, given
-/// `on_pick`, hands it to that the moment it is chosen, unread, to be read
-/// by a task that may outlast the button, which goes with its screen.
+/// text up to `max_bytes`, and hands it to `on_choose`, unless another is
+/// chosen while it is read, which takes its place; or, given `on_pick`,
+/// hands it to that the moment it is chosen, unread, to be read by a task
+/// that may outlast the button, which goes with its screen.
 #[component]
 pub fn FileButton(
     /// The button's id, and its file input's.
@@ -489,8 +490,15 @@ pub fn FileButton(
                                 });
                                 return;
                             }
+                            // Handed on unless another file is chosen
+                            // before it is read: that one takes its place,
+                            // read sooner or later.
+                            let pick = *picked.peek();
                             spawn(async move {
-                                on_choose.call(read_chosen(file, max_bytes).await);
+                                let file = read_chosen(file, max_bytes).await;
+                                if *picked.peek() == pick {
+                                    on_choose.call(file);
+                                }
                             });
                         } else if !file_chooser_here()
                             && let Some(ctx) = try_consume_context::<AppCtx>()
