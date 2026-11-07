@@ -117,12 +117,24 @@ impl TrainingSettings {
     }
 
     /// The characters the words are made of, each once, in the order they
-    /// first come.
+    /// first come: one look at each character of the list, as a draw of a
+    /// word reads them for every word it draws.
     pub fn word_characters(&self) -> Vec<char> {
         let mut characters = Vec::new();
+        // Morse's characters are ASCII: a bit for each marks those seen.
+        let mut seen = 0u128;
         for word in self.words() {
             for ch in word.chars() {
-                if !characters.contains(&ch) {
+                let first = match u32::from(ch) {
+                    code @ 0..128 => {
+                        let bit = 1u128 << code;
+                        let first = seen & bit == 0;
+                        seen |= bit;
+                        first
+                    }
+                    _ => !characters.contains(&ch),
+                };
+                if first {
                     characters.push(ch);
                 }
             }
@@ -276,5 +288,14 @@ mod tests {
             settings.word_characters(),
             ['P', 'A', 'R', 'I', 'S', 'C', 'O', 'D', 'E', 'X']
         );
+    }
+
+    /// Each character comes once, where it first comes, however often the
+    /// words repeat it, and whatever it is, Morse's ASCII or not.
+    #[test]
+    fn the_characters_of_the_words_come_once_each_in_their_first_order() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.word_list = ["ABBA", "CAB", "ÉÉA", "C/"].map(String::from).to_vec();
+        assert_eq!(settings.word_characters(), ['A', 'B', 'C', 'É', '/']);
     }
 }
