@@ -98,7 +98,8 @@ stored, and synced, once it ends.
 - **Keyring**: the data key sealed under a key stretched from the
   passphrase with **Argon2id** (19 MiB, 2 passes, 1 lane: OWASP's first
   choice), with a random salt. The stretch is written in the keyring, so a
-  later build can stretch harder.
+  later build can stretch harder, up to 256 MiB and 16 passes: a keyring
+  asking for more is not opened, as the stretch runs on the app's thread.
 - **Sealing**: **XChaCha20-Poly1305**, a fresh random 192-bit nonce for
   every file, the file's name bound in as associated data, so no file can
   stand in for another. Packs are deflated first.

@@ -88,12 +88,20 @@ impl Stretch {
     #[cfg(test)]
     pub const QUICK: Self = Self { m: 8, t: 1, p: 1 };
 
+    /// The most memory a keyring may ask for, in kibibytes: 256 MiB, which
+    /// a phone or a browser can still give the app, thirteen times the
+    /// app's own.
+    const MOST_MEMORY: u32 = 262_144;
+    /// The most passes it may ask for: eight times the app's own, each
+    /// over all of that memory, on the app's thread.
+    const MOST_PASSES: u32 = 16;
+
     /// These, if they are any a device can stretch with in reason: a
     /// keyring asking for more memory than a phone has, or passes enough
     /// to hang it, is not opened at all.
     fn checked(self) -> Option<Self> {
-        let sane = (8..=1_048_576).contains(&self.m)
-            && (1..=64).contains(&self.t)
+        let sane = (8..=Self::MOST_MEMORY).contains(&self.m)
+            && (1..=Self::MOST_PASSES).contains(&self.t)
             && (1..=16).contains(&self.p)
             && self.m >= 8 * self.p;
         sane.then_some(self)
@@ -348,6 +356,29 @@ mod tests {
         assert_eq!(
             open_keyring(file.to_string().as_bytes(), "passphrase"),
             Err(Unlock::Wrong)
+        );
+    }
+
+    /// The most a keyring may ask of a device is 256 MiB and sixteen
+    /// passes, far past the app's own stretch: one asking for more is not
+    /// opened, and nothing is stretched for it.
+    #[test]
+    fn a_keyring_asking_more_than_a_device_should_give_is_not_opened() {
+        let most = Stretch {
+            m: 262_144,
+            t: 16,
+            p: 1,
+        };
+        assert_eq!(most.checked(), Some(most));
+        assert_eq!(Stretch { m: 262_145, ..most }.checked(), None);
+        assert_eq!(Stretch { t: 17, ..most }.checked(), None);
+        assert!(Stretch::DEFAULT.m * 8 <= most.m && Stretch::DEFAULT.t * 8 <= most.t);
+        let (raw, _) = new_keyring("passphrase", Stretch::QUICK).expect("a keyring");
+        let mut file: serde_json::Value = serde_json::from_slice(&raw).expect("JSON");
+        file["t"] = 17.into();
+        assert_eq!(
+            open_keyring(file.to_string().as_bytes(), "passphrase"),
+            Err(Unlock::Unreadable)
         );
     }
 
