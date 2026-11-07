@@ -585,8 +585,9 @@ impl AppCtx {
     }
 
     /// Bring the history and the settings here in line with the store's,
-    /// then do `then`: at once wherever the store answers at once, as every
-    /// store but a browser's database does.
+    /// then do `then`, told whether the store could be listed: at once
+    /// wherever the store answers at once, as every store but a browser's
+    /// database does.
     ///
     /// Whatever another tab, window or copy of the app stored or deleted
     /// since this one last looked is taken up: each record listed that is
@@ -600,8 +601,9 @@ impl AppCtx {
     /// copy last saw of it: a restore merged with a history another copy
     /// has since deleted from takes a session it brings back for one
     /// already here, and a backup of an old copy's history leaves out what
-    /// was stored since, though it counts as backed up.
-    fn sync_with_store(self, then: impl FnOnce() + 'static) {
+    /// was stored since, though it counts as backed up. Where the store
+    /// cannot be listed, nothing is taken up, and `then` is told so.
+    fn sync_with_store(self, then: impl FnOnce(bool) + 'static) {
         let store = self.app().store;
         let settings_read = store.read_settings();
         self.tell_of_set_aside();
@@ -656,10 +658,11 @@ impl AppCtx {
             })
         });
         settle_or_spawn(looking, move |looked| {
+            let listed = looked.is_some();
             if let Some(looked) = looked {
                 self.take_up(looked);
             }
-            then();
+            then(listed);
         });
     }
 
@@ -738,7 +741,7 @@ impl AppCtx {
     /// Take up what the store holds now, whatever it says of having
     /// changed: as sync has just changed it ([`crate::sync::ctx`]).
     pub(crate) fn take_up_store(self) {
-        self.sync_with_store(|| {});
+        self.sync_with_store(|_| {});
     }
 
     /// Take up whatever another tab, window or copy of the app stored or
@@ -747,7 +750,7 @@ impl AppCtx {
     /// the page comes back into sight.
     pub fn take_up_changes(self) {
         if self.app().store.history_changed() {
-            self.sync_with_store(|| {});
+            self.sync_with_store(|_| {});
         }
     }
 
@@ -1076,7 +1079,7 @@ impl AppCtx {
     /// what the app shows, as it did before stores were read a session at
     /// a time. It is how the sessions only the app holds are kept safe.
     pub fn save_backup(self) {
-        self.sync_with_store(move || self.save_backup_now());
+        self.sync_with_store(move |_| self.save_backup_now());
     }
 
     fn save_backup_now(self) {
@@ -1146,14 +1149,23 @@ impl AppCtx {
     /// and its settings, level and all, where it holds any, but for this
     /// device's own ([`TrainingSettings::keep_device_settings`]). Until
     /// another restore, Undo puts both back as they were. A store that
-    /// cannot take the history leaves everything as it was and says why.
+    /// cannot take the history leaves everything as it was and says why,
+    /// and so does one that cannot be listed for now: merged with what this
+    /// copy last saw of the history, the backup would bring back, a second
+    /// time, a session another copy stored since.
     ///
     /// Each session it adds is a record where it finished
     /// ([`RecordId::placed`]), so two copies restoring one backup store it
     /// once; one it fills in is a record in its place
     /// ([`RecordId::beside`]), the one it fills in deleted.
     pub fn restore_backup(self, backup: Backup) {
-        self.sync_with_store(move || self.restore_now(backup));
+        self.sync_with_store(move |listed| {
+            if listed {
+                self.restore_now(backup);
+            } else if let Some(why) = why_not_stored(&HistorySaved::Held) {
+                self.toasts.show(format!("Nothing was restored: {why}."));
+            }
+        });
     }
 
     fn restore_now(self, backup: Backup) {
@@ -1826,7 +1838,7 @@ mod tests {
         /// Take up what the store holds, as a screen that shows the history
         /// does as it opens.
         fn sync(&self) {
-            self.act(|ctx| ctx.sync_with_store(|| {}));
+            self.act(|ctx| ctx.sync_with_store(|_| {}));
         }
 
         /// The days of the sessions this copy shows.
@@ -2147,12 +2159,17 @@ mod tests {
     #[test]
     fn two_tabs_restoring_one_backup_store_each_session_once() {
         let store = holding([3]);
-        let (a, b) = (Tab::on(&store), Tab::on(&store));
-        // Neither can see what the other stored as it restores.
-        store.unlistable.set(true);
+        let (mut a, mut b) = (Tab::on(&store), Tab::on(&store));
+        // Neither can see what the other stored as it restores: both are
+        // asked for before either is made, as a browser's database makes
+        // each a moment after it is asked for.
+        store.deferred.set(true);
         restore(&a, [1, 2]);
         restore(&b, [1, 2]);
-        store.unlistable.set(false);
+        store.deferred.set(false);
+        store.settle();
+        a.pump();
+        b.pump();
         assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
         a.sync();
         b.sync();
@@ -2412,6 +2429,33 @@ mod tests {
                 sessions,
             })
         });
+    }
+
+    /// A restore asked for while the store cannot be listed restores
+    /// nothing, and says why: merged with what this tab last saw of the
+    /// history, it took a session another tab stored since for one the
+    /// backup brings back, and stored it a second time, under the name a
+    /// restore gives it. Once the store can be listed, the restore brings
+    /// back what is missing, each session once.
+    #[test]
+    fn a_restore_while_the_store_cannot_be_listed_stores_nothing_twice() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(2));
+        store.unlistable.set(true);
+        restore(&a, [1, 2, 3]);
+        store.unlistable.set(false);
+        assert_eq!(days(&store.load_sessions()), [1, 2], "nothing restored");
+        assert!(
+            a.toast()
+                .is_some_and(|toast| toast.text.starts_with("Nothing was restored:")),
+            "{:?}",
+            a.toast()
+        );
+        assert_eq!(a.shown(), [1]);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3], "each once");
+        assert_eq!(a.shown(), [1, 2, 3]);
     }
 
     /// A store that takes no change leaves a restore, and its Undo, undone,
