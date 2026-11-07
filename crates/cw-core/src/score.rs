@@ -18,7 +18,7 @@
 //! its characters fast and the gaps between them long, so its speed is the
 //! two speeds together.
 
-use crate::alignment::edit_distance;
+use crate::alignment::align_group;
 use crate::morse::is_scored_char;
 use crate::session::{GroupResult, SessionTiming};
 
@@ -168,14 +168,28 @@ pub fn session_points(copies: &[GroupCopy], effective_alphabet_size: f64) -> f64
 
 /// The characters missed, wrong or typed in excess, copying `sent` as
 /// `received`: what a group's points are cut for. Each is one edit of the
-/// fewest that turn one into the other.
+/// fewest that turn one into the other, as the copy's alignment reads it
+/// ([`align_group`]): a skip is the character whose place it holds,
+/// missed, and one that holds no character's place, past the group's end,
+/// is nothing. Without a skip, they are the fewest edits themselves.
 pub(crate) fn count_errors(sent: &str, received: &str) -> u32 {
     // A clean copy is the common case, and needs no table.
     if sent.eq_ignore_ascii_case(received) {
         0
     } else {
-        edit_distance(sent, received)
+        let missed = align_group(sent, received)
+            .into_iter()
+            .filter(|pair| !pair.matched)
+            .count();
+        u32::try_from(missed).unwrap_or(u32::MAX)
     }
+}
+
+/// Whether `received` copies the whole of `sent`: every character in its
+/// place and nothing added, as its errors are counted ([`count_errors`]).
+/// What a group is kept as copied right by.
+pub(crate) fn copied_whole(sent: &str, received: &str) -> bool {
+    count_errors(sent, received) == 0
 }
 
 /// The characters of `text` that are scored: what a group's points are for.
@@ -290,6 +304,30 @@ mod tests {
             one_extra.errors, 1,
             "typing a character too many is an error"
         );
+    }
+
+    /// Errors are read as the alignment reads a copy: a skip is the
+    /// character whose place it holds, missed, and one that holds no
+    /// character's place, past the group's end, is nothing. It cost a
+    /// group whose every letter was right three quarters of its points.
+    /// Without a skip they are the fewest edits, as they always were.
+    #[test]
+    fn a_skip_is_an_error_only_where_it_stands_for_a_character() {
+        let errors = |sent, received| GroupCopy::of(sent, received, 20.0, 100.0, 1).errors;
+        assert_eq!(errors("KMRSU", "KMRSU_"), 0);
+        assert_eq!(errors("KMRSU", "KMRS_"), 1);
+        assert_eq!(errors("KMRSU", "K_R_U"), 2);
+        for (sent, received) in [
+            ("K5XYW", "K5XYZ"),
+            ("K5XY", "K5XYZ"),
+            ("K5ZYX", "K5XYZ"),
+            ("", "K5XYZ"),
+            ("KMRSU", ""),
+            ("kmrsu", "KMRSU"),
+        ] {
+            let fewest = crate::alignment::edit_distance(sent, received);
+            assert_eq!(errors(sent, received), fewest, "{sent} as {received}");
+        }
     }
 
     /// A group of five at a tenth of its characters missed keeps on average

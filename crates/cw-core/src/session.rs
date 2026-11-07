@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use crate::alignment::{CopyTally, LetterAccuracy};
+use crate::alignment::{CopyTally, LetterAccuracy, SKIPPED};
 use crate::auto_level::judged_copy;
 use crate::contest::{CONTEST_MARK, ContestLog, PauseWhy};
 use crate::level::LEVEL_MIN;
@@ -16,7 +16,7 @@ use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
 use crate::sampling::length_floor;
 use crate::score::{
     GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
-    compute_average_response_ms, copy_speed, session_points,
+    compute_average_response_ms, copied_whole, copy_speed, session_points,
 };
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
 
@@ -889,7 +889,7 @@ impl GroupSession {
             .map(|group| GroupResult {
                 sent: group.sent.clone(),
                 received: group.input.clone(),
-                correct: group.sent == group.input,
+                correct: copied_whole(&group.sent, &group.input),
             })
             .collect();
         let avg_response_ms = compute_average_response_ms(&groups, &timings);
@@ -1287,12 +1287,20 @@ fn split_unread<T>(
 
 impl From<StoredSession> for SessionResult {
     /// A contest run is known by its log, or by its mark once a build that
-    /// knew no contests has saved it without the log.
+    /// knew no contests has saved it without the log. A group answered with
+    /// a skip that holds no character's place, kept by a build that took it
+    /// for an error, is copied whole, as it is scored ([`copied_whole`]).
     fn from(stored: StoredSession) -> Self {
         let run = stored.contest.is_some() || stored.alphabet_fingerprint.starts_with(CONTEST_MARK);
         let mut unread = stored.unread;
         unread.retain(|key, _| !RETIRED_SESSION_KEYS.contains(&key.as_str()));
-        let (groups, unread_groups) = split_unread(stored.groups, &[]);
+        let (mut groups, unread_groups) = split_unread(stored.groups, &[]);
+        for group in groups
+            .iter_mut()
+            .filter(|group| !group.correct && group.received.contains(SKIPPED))
+        {
+            group.correct = copied_whole(&group.sent, &group.received);
+        }
         let (group_timings, unread_timings) =
             split_unread(stored.group_timings, RETIRED_TIMING_KEYS);
         Self {
@@ -1634,6 +1642,46 @@ mod tests {
         assert_eq!(result.groups.len(), 1);
         assert!(!result.groups[0].correct);
         assert!(result.accuracy < 0.01);
+    }
+
+    /// A skip past a group's end holds no character's place: its alignment
+    /// reads it as nothing, and now so does the rest. Space after the last
+    /// letter, which the box takes, left the group at 100% but scored as an
+    /// error, a quarter of its points, and kept as not copied whole, so the
+    /// history counted it among the groups missed.
+    #[test]
+    fn a_skip_past_the_end_of_a_group_is_no_error() {
+        let copied = |typed: &str| {
+            result(&answered(
+                TrainingSettings::default(),
+                &[("KMRSU", typed, 400)],
+            ))
+        };
+        let (clean, skipped) = (copied("KMRSU"), copied("KMRSU "));
+        assert_eq!(skipped.groups[0].received, "KMRSU");
+        let skipped = copied(&format!("KMRSU{}", crate::SKIPPED));
+        assert_eq!(skipped.accuracy, 1.0);
+        assert!(skipped.groups[0].correct);
+        assert_eq!(skipped.score, clean.score);
+        // One that holds a letter's place is that letter missed.
+        let missed = copied(&format!("KMRS{}", crate::SKIPPED));
+        assert!(!missed.groups[0].correct);
+        assert!(missed.score < clean.score / 3.0);
+    }
+
+    /// A group kept by an earlier build with a skip past its end, and so
+    /// as not copied whole, reads as copied whole, as it is now scored.
+    #[test]
+    fn a_group_kept_with_a_skip_past_its_end_reads_as_copied_whole() {
+        let session = answered(
+            TrainingSettings::default(),
+            &[("KMRSU", "KMRSU_", 400), ("KMRSU", "K_RSU_", 400)],
+        );
+        let mut json = serde_json::to_value(result(&session)).expect("serializes");
+        json["groups"][0]["correct"] = serde_json::json!(false);
+        let read: SessionResult = serde_json::from_value(json).expect("a save reads");
+        assert!(read.groups[0].correct);
+        assert!(!read.groups[1].correct);
     }
 
     /// Answers typed while the group is still being sent used to be timed at
