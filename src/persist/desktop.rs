@@ -765,6 +765,13 @@ impl Store for DesktopStore {
         fs::read_to_string(self.sync_dir.join(SYNC)).ok()
     }
 
+    fn sync_cleared(&self) -> bool {
+        matches!(
+            fs::metadata(self.sync_dir.join(SYNC)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound
+        )
+    }
+
     fn save_sync(&self, state: Option<&str>) -> Result<(), String> {
         let path = self.sync_dir.join(SYNC);
         match state {

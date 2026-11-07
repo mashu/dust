@@ -246,7 +246,7 @@ impl AppCtx {
     fn take_up_sync_off(self) -> bool {
         let off = *self.sync.stored.peek()
             && self.sync.state.peek().is_some()
-            && self.app().store.load_sync().is_none();
+            && self.app().store.sync_cleared();
         if off {
             self.sync_forget();
             self.set_sync_status(SyncStatus::Off { problem: None });

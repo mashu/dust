@@ -690,6 +690,10 @@ impl Store for WebStore {
         storage()?.get_item(SYNC_KEY).ok().flatten()
     }
 
+    fn sync_cleared(&self) -> bool {
+        storage().is_some_and(|store| matches!(store.get_item(SYNC_KEY), Ok(None)))
+    }
+
     fn save_sync(&self, state: Option<&str>) -> Result<(), String> {
         let store = storage().ok_or("this browser keeps nothing for this site")?;
         match state {

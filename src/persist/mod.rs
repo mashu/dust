@@ -176,6 +176,15 @@ pub trait Store {
     fn load_sync(&self) -> Option<String> {
         None
     }
+    /// Whether the store holds nothing for sync, as far as it can tell:
+    /// only where it looked and found nothing kept, never for a look that
+    /// failed. Sync takes a state gone from the store for sync turned off
+    /// in another copy of the app, and forgets its own with it; a read that
+    /// failed for a moment, as a file another program holds open fails,
+    /// must not turn it off.
+    fn sync_cleared(&self) -> bool {
+        self.load_sync().is_none()
+    }
     /// Keep `state` for sync, or, given none, forget what sync kept; or say
     /// why not. It holds the key everything in the drive is sealed with, so
     /// it is kept where only the app reads it, and out of the device's own

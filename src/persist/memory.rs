@@ -123,6 +123,9 @@ pub struct MemoryStore {
     pub sync: RefCell<Option<String>>,
     /// What sync keeps cannot be written, as a full disk refuses it.
     pub sync_refused: Cell<bool>,
+    /// What sync keeps cannot be read just now, as a file another program
+    /// holds open cannot, though it is there.
+    pub sync_unreadable: Cell<bool>,
 }
 
 /// How many changes other copies have told of, and what waits on the next.
@@ -514,11 +517,15 @@ impl Store for MemoryStore {
         )
     }
 
-    /// Whether the history changed since this store last read or listed
-    /// it. Tabs sharing one store share what it last saw, so a test of
-    /// tabs syncs each by hand.
     fn load_sync(&self) -> Option<String> {
+        if self.sync_unreadable.get() {
+            return None;
+        }
         self.sync.borrow().clone()
+    }
+
+    fn sync_cleared(&self) -> bool {
+        self.sync.borrow().is_none()
     }
 
     fn save_sync(&self, state: Option<&str>) -> Result<(), String> {
@@ -535,6 +542,9 @@ impl Store for MemoryStore {
         self.page.is_none()
     }
 
+    /// Whether the history changed since this store last read or listed
+    /// it. Tabs sharing one store share what it last saw, so a test of
+    /// tabs syncs each by hand.
     fn history_changed(&self) -> bool {
         if let Some(page) = &self.page {
             return page.changed();

@@ -1020,6 +1020,28 @@ fn sync_turned_off_in_another_copy_of_the_app_stays_off() {
     });
 }
 
+/// What sync keeps, there but unreadable for a moment, as a file another
+/// program holds open is, is no sync turned off in another copy: sync
+/// stays on, and what it keeps stays where it is. A read that failed used
+/// to read as nothing kept, and sync forgot its key and its sign-in.
+#[test]
+fn sync_whose_state_cannot_be_read_for_a_moment_stays_on() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, _held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let kept = harness.store.sync.borrow().clone();
+        assert!(kept.is_some(), "kept as it was turned on");
+        harness.store.sync_unreadable.set(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(100).await;
+        harness.store.sync_unreadable.set(false);
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        assert!(harness.store.sync.borrow().is_some(), "still kept");
+    });
+}
+
 /// What sync keeps, which the store would not take as sync was turned on,
 /// is not taken for sync turned off in another copy: sync stays on, and
 /// what it keeps is kept once the store takes it.
