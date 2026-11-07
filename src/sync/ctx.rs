@@ -688,6 +688,9 @@ impl AppCtx {
         if let Some(link) = self.sync_link() {
             link.auth.forget();
         }
+        // A sign-in still under way is given up too: finishing after this,
+        // it keeps nothing.
+        self.next_sign_in();
         self.next_sync_epoch();
         put(self.sync.state, None);
         put(self.sync.stored, false);

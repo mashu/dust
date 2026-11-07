@@ -496,6 +496,38 @@ fn a_sign_in_cancelled_as_it_finishes_stays_cancelled() {
     });
 }
 
+/// A sign-in asked for again while sync is on, still under way as sync is
+/// turned off, keeps nothing once it finishes: sync is off, and no one is
+/// signed in. It used to keep its sign-in for as long as the app ran.
+#[test]
+fn a_sign_in_under_way_as_sync_is_turned_off_keeps_nothing() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t", "u"]);
+        let finishing = Finishing::of(&auth);
+        let ctx = linked_through(
+            &mut harness,
+            Rc::clone(&remote) as Rc<dyn Remote>,
+            Rc::clone(&finishing) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.advance(100).await;
+        let passphrase = || "a long passphrase".to_string();
+        harness.in_app(|| ctx.sync_passphrase(passphrase(), Some(passphrase())));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        finishing.hold(true);
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_turn_off(false));
+        finishing.hold(false);
+        harness.advance(100).await;
+        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        assert!(!auth.signed_in.get(), "forgotten as it finished");
+    });
+}
+
 /// On, the app syncs by itself a moment after a session is kept, and
 /// waits for a session under way to end first.
 #[test]
