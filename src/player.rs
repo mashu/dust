@@ -236,20 +236,20 @@ impl Player {
 
     /// Open the silent sidetone stream, so the first paddle squeeze is one
     /// audio buffer of lag rather than a stream start. Says why when it
-    /// cannot.
+    /// cannot: no player to be had, or an output there that will not open.
     pub fn ensure_live_sidetone(&self, settings: &TrainingSettings) -> Result<(), AudioError> {
         self.gate_live_tone(ToneRequest::keyed(false, settings, 0.0))
     }
 
     fn gate_live_tone(&self, tone: ToneRequest) -> Result<(), AudioError> {
-        {
+        let gated = {
             let mut backend = self.opened()?;
             backend.resume_from_gesture();
-            backend.set_live_tone(tone);
-        }
+            backend.set_live_tone(tone)
+        };
         self.0.keyed.set(tone.on);
         self.stir(self.0.held.get());
-        Ok(())
+        gated.map_err(AudioError::Device)
     }
 
     fn next_turn(&self) -> u64 {
@@ -282,7 +282,9 @@ impl Player {
         let mut backend = self.opened()?;
         backend.resume_from_gesture();
         backend.apply_band(settings);
-        backend.set_live_tone(ToneRequest::keyed(false, settings, 0.0));
+        // An output that will not open is the next send's to report, as it
+        // is the band's: a sidetone is told of where it is asked for.
+        let _ = backend.set_live_tone(ToneRequest::keyed(false, settings, 0.0));
         self.0.keyed.set(false);
         Ok(())
     }
@@ -635,6 +637,22 @@ mod tests {
             );
             assert!(!first.is_current());
         });
+    }
+
+    /// A player that is there with an output that will not open says so to
+    /// the sidetone, in the output's own words, as a player that cannot be
+    /// had at all does; and once the output opens, says nothing.
+    #[test]
+    fn a_sidetone_that_cannot_sound_says_why() {
+        let (player, recorder) = player();
+        *recorder.sidetone_refused.borrow_mut() = Some("Audio stream: device busy".into());
+        assert_eq!(
+            player.ensure_live_sidetone(&test_settings()),
+            Err(AudioError::Device("Audio stream: device busy".into()))
+        );
+        recorder.sidetone_refused.take();
+        assert_eq!(player.ensure_live_sidetone(&test_settings()), Ok(()));
+        assert_eq!(recorder.players_built.get(), 1, "one player all along");
     }
 
     #[test]

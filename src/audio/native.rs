@@ -82,8 +82,8 @@ pub struct MorsePlayer {
     /// keeps running between groups instead of restarting with every send.
     opened_at: Instant,
     fade_origin_sec: f64,
-    /// When the device last refused to open.
-    refused_at: Option<Instant>,
+    /// When the device last refused to open, and why.
+    refused: Option<(Instant, String)>,
     /// When the system's default output was last asked after.
     default_asked: Option<Instant>,
     /// When the send playing is heard from, as this player said it would
@@ -245,7 +245,7 @@ impl MorsePlayer {
             stream: None,
             opened_at: Instant::now(),
             fade_origin_sec: fade_origin_sec(),
-            refused_at: None,
+            refused: None,
             default_asked: None,
             heard_at: None,
             gains: Gains::UNITY,
@@ -306,7 +306,7 @@ impl MorsePlayer {
         }
         let (device, supported) = match self.probed.take() {
             Some(probed) => probed,
-            None => (self.probe)().inspect_err(|_| self.note_refusal())?,
+            None => (self.probe)().inspect_err(|why| self.note_refusal(why))?,
         };
         self.open(&device, &supported)?;
         self.keep_probed(device, supported);
@@ -349,17 +349,16 @@ impl MorsePlayer {
 
     /// [`MorsePlayer::ensure_output`], unless the device refused a moment
     /// ago: a squeeze of the paddle or a slider being dragged would otherwise
-    /// probe it again on every event.
-    fn ensure_output_unless_refused(&mut self) {
-        if self
-            .refused_at
-            .is_some_and(|at| at.elapsed() < REOPEN_AFTER)
+    /// probe it again on every event. Why the output is not open, if it is
+    /// not: what it said as it refused, a moment ago or now.
+    fn ensure_output_unless_refused(&mut self) -> Result<(), String> {
+        if let Some((at, why)) = &self.refused
+            && at.elapsed() < REOPEN_AFTER
         {
-            return;
+            return Err(why.clone());
         }
-        if let Err(err) = self.ensure_output() {
-            eprintln!("audio output: {err}");
-        }
+        self.ensure_output()
+            .inspect_err(|err| eprintln!("audio output: {err}"))
     }
 
     /// Open the stream on `device`.
@@ -387,16 +386,16 @@ impl MorsePlayer {
             self.latency_device = name;
         }
         let open = open_stream(device, supported, &self.mixer, &self.sidetone)
-            .inspect_err(|_| self.note_refusal())?;
+            .inspect_err(|why| self.note_refusal(why))?;
         self.stream = Some(open);
-        self.refused_at = None;
+        self.refused = None;
         Ok(())
     }
 
-    /// The device refused to open, or could not be found: the next try
-    /// probes for the default output afresh.
-    fn note_refusal(&mut self) {
-        self.refused_at = Some(Instant::now());
+    /// The device refused to open, or could not be found, saying `why`:
+    /// the next try probes for the default output afresh.
+    fn note_refusal(&mut self, why: &str) {
+        self.refused = Some((Instant::now(), why.to_string()));
         self.probed = None;
     }
 }
@@ -407,7 +406,7 @@ impl MorseBackend for MorsePlayer {
     fn apply_band(&mut self, settings: &TrainingSettings) {
         self.follow_default();
         // A stream that will not open is reported by the next send.
-        self.ensure_output_unless_refused();
+        let _ = self.ensure_output_unless_refused();
         let gains = Gains::of(settings);
         let rate = self.mixer().sample_rate();
         match self.state.band_change(settings) {
@@ -557,9 +556,9 @@ impl MorseBackend for MorsePlayer {
         self.with_mixer(|mixer, swept| mixer.sweep(swept));
     }
 
-    fn set_live_tone(&mut self, tone: ToneRequest) {
+    fn set_live_tone(&mut self, tone: ToneRequest) -> Result<(), String> {
         self.sidetone.set(tone);
-        self.ensure_output_unless_refused();
+        self.ensure_output_unless_refused()
     }
 }
 
@@ -876,7 +875,9 @@ mod device_tests {
         player.shutdown();
         player.sleep();
         assert!(player.stream.is_none(), "asleep, it is closed");
-        player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+        player
+            .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
+            .expect("the sidetone opened it");
         assert!(player.stream.is_some(), "the sidetone opened it");
         assert!(called(&player, 300), "woken, it plays");
         player.shutdown();
@@ -1006,7 +1007,7 @@ mod device_tests {
         assert_eq!(PROBES.get(), 2, "a broken stream has the output probed");
         wake(&mut player);
         assert_eq!(PROBES.get(), 2);
-        player.note_refusal();
+        player.note_refusal("refused");
         wake(&mut player);
         assert_eq!(PROBES.get(), 3, "a refusal has the output probed");
         wake(&mut player);
@@ -1024,15 +1025,52 @@ mod device_tests {
         probing.shutdown();
     }
 
+    /// The machine's default output, at a sample format no stream takes:
+    /// an output that is there, and will not open.
+    fn unplayable() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
+        let (device, supported) = default_output()?;
+        let refused = cpal::SupportedStreamConfig::new(
+            supported.channels(),
+            supported.sample_rate(),
+            *supported.buffer_size(),
+            SampleFormat::U64,
+        );
+        Ok((device, refused))
+    }
+
+    /// An output that is there and will not open is said to the sidetone,
+    /// as the pad asks before the first squeeze, for it to show and to key
+    /// nothing into it; and said again while the output is not tried
+    /// again. It used to be said only where there was no output at all.
+    #[test]
+    fn an_output_that_will_not_open_is_said_to_the_sidetone() {
+        if opened(MorsePlayer::probing(unplayable, false)).is_none() {
+            return;
+        }
+        let player = crate::player::Player::new(Rc::new(|| {
+            let made: Box<dyn MorseBackend> = Box::new(MorsePlayer::probing(unplayable, false)?);
+            Ok(made)
+        }));
+        for _ in 0..2 {
+            let said = player.ensure_live_sidetone(&settings());
+            assert!(
+                matches!(&said, Err(crate::player::AudioError::Device(why)) if why.contains("u64")),
+                "{said:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_paddle_sidetone_opens_a_stream_before_the_first_squeeze() {
         let Some(mut player) = player() else {
             return;
         };
         assert!(player.stream.is_some(), "opened with the player");
-        player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
-        player.set_live_tone(ToneRequest::new(true, 600.0, 0.2));
-        player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+        for on in [false, true, false] {
+            player
+                .set_live_tone(ToneRequest::new(on, 600.0, 0.2))
+                .expect("keyed");
+        }
         assert!(player.stream.is_some(), "and kept through the squeeze");
         player.shutdown();
     }

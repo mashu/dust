@@ -90,8 +90,12 @@ pub trait MorseBackend {
     /// a constant lead after the instant the keyer meant it for, so each
     /// element and space is as long as it was keyed. Kept as a running
     /// stream so a squeeze is that lead late, not a stream start.
-    fn set_live_tone(&mut self, tone: ToneRequest) {
+    ///
+    /// Says why it cannot sound: an output that will not open, or a page's
+    /// audio gone. A player with no device to open has nothing to say.
+    fn set_live_tone(&mut self, tone: ToneRequest) -> Result<(), String> {
         let _ = tone;
+        Ok(())
     }
 }
 
@@ -247,6 +251,9 @@ pub mod fake {
         /// [`Self::skip_next`], once that is spent: a stream that keeps
         /// falling behind.
         pub skip_every: Cell<Option<(f64, f64)>>,
+        /// The sidetone cannot sound, for the reason given, as an output
+        /// that is there and will not open refuses it.
+        pub sidetone_refused: RefCell<Option<String>>,
     }
 
     impl Recorder {
@@ -505,12 +512,16 @@ pub mod fake {
             self.recorder.sleeps.set(self.recorder.sleeps.get() + 1);
         }
 
-        fn set_live_tone(&mut self, tone: ToneRequest) {
+        fn set_live_tone(&mut self, tone: ToneRequest) -> Result<(), String> {
             self.recorder.asleep.set(false);
             self.recorder
                 .calls
                 .borrow_mut()
                 .push(Call::LiveTone(tone.on));
+            match self.recorder.sidetone_refused.borrow().clone() {
+                Some(why) => Err(why),
+                None => Ok(()),
+            }
         }
     }
 }
