@@ -258,6 +258,47 @@ fn sync_dir_for(root: &Path) -> PathBuf {
     root.to_path_buf()
 }
 
+/// Write `name` in `dir` whole or not at all, as [`write_whole`] does, for
+/// the user alone to read: what sync keeps holds the key to the synced copy
+/// and the sign-in. The file is the user's alone before anything is written
+/// in it.
+fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let tmp = temporary(dir, name);
+    let written = (|| {
+        let mut file = private_file(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, dir.join(name))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written?;
+    sync_dir(dir)
+}
+
+/// The file at `path`, made empty, that the user alone can read and write:
+/// one already there is made so too.
+#[cfg(unix)]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// Elsewhere, as any other file is made.
+#[cfg(not(unix))]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    fs::File::create(path)
+}
+
 /// Move a file in `root` that cannot be read, `stem`.json at `path`, out of
 /// the way of the next save, keeping it beside the new one to be recovered,
 /// and say what it is called now: nothing, when it could not be moved.
@@ -698,7 +739,7 @@ impl Store for DesktopStore {
         match state {
             Some(state) => {
                 fs::create_dir_all(&self.sync_dir).map_err(|err| err.to_string())?;
-                write_whole(&self.sync_dir, SYNC, state.as_bytes()).map_err(|err| err.to_string())
+                write_private(&self.sync_dir, SYNC, state.as_bytes()).map_err(|err| err.to_string())
             }
             None => match fs::remove_file(&path) {
                 Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.to_string()),
@@ -1990,6 +2031,37 @@ pub(super) mod tests {
             android_files_dir_of(10, "dev.dust.morse"),
             PathBuf::from("/data/user/10/dev.dust.morse/files")
         );
+    }
+
+    /// What sync keeps, the key to the synced copy and the sign-in, is the
+    /// user's alone to read, whatever the folder's other files are; and so
+    /// is one an earlier build left open to every user, once written again.
+    #[cfg(unix)]
+    #[test]
+    fn what_sync_keeps_is_for_the_user_alone_to_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, store) = store("sync-kept");
+        let mode = || {
+            fs::metadata(dir.0.join(SYNC))
+                .expect("kept")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        store.save_sync(Some(r#"{"key":"secret"}"#)).expect("saved");
+        assert_eq!(mode(), 0o600, "{:o}", mode());
+        assert_eq!(store.load_sync().as_deref(), Some(r#"{"key":"secret"}"#));
+        fs::set_permissions(dir.0.join(SYNC), fs::Permissions::from_mode(0o644)).unwrap();
+        store.save_sync(Some("{}")).expect("saved");
+        assert_eq!(mode(), 0o600, "{:o}", mode());
+        assert_eq!(store.load_sync().as_deref(), Some("{}"));
+        assert!(
+            files(&dir).iter().all(|name| !name.ends_with(".tmp")),
+            "{:?}",
+            files(&dir)
+        );
+        store.save_sync(None).expect("cleared");
+        assert_eq!(store.load_sync(), None);
     }
 
     /// On Android, a history past 20 MB is about to outgrow Android's own
