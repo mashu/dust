@@ -496,6 +496,7 @@ fn stats_count_sessions_from_every_character_set() {
             on_delete: None,
             backups: None,
             sync: None,
+            today: crate::time::local_date_string(),
         },
     );
     assert!(
@@ -1870,6 +1871,7 @@ fn the_level_up_line_shows_only_where_it_is_what_levels_you_up() {
                 on_delete: None,
                 backups: None,
                 sync: None,
+                today: crate::time::local_date_string(),
             },
         )
     };
@@ -3028,6 +3030,7 @@ mod interactions {
             ScoresTab,
             ScoresTabProps {
                 sessions: contest_history(3).into(),
+                today: crate::time::local_date_string(),
             },
         );
         // The personal best names its contest.
@@ -3056,6 +3059,7 @@ mod interactions {
             ScoresTab,
             ScoresTabProps {
                 sessions: contest_history(3).into(),
+                today: crate::time::local_date_string(),
             },
         );
         assert!(ui.shows("pill-all-modes") && ui.shows("pill-contest"));

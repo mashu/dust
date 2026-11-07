@@ -24,6 +24,7 @@ fn board(sessions: Vec<SessionResult>) -> Ui {
         ScoresTab,
         ScoresTabProps {
             sessions: sessions.into(),
+            today: crate::time::local_date_string(),
         },
     )
 }

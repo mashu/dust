@@ -421,6 +421,11 @@ pub fn StatsView(
     backups: Option<Backups>,
     /// Sync with the user's own Google Drive, on the History tab.
     sync: Option<crate::ui::sync::SyncView>,
+    /// The day it is where you are, which the Scores tab tells how long ago
+    /// its best was set by: as the screen keeps it, past midnight too
+    /// ([`crate::ui::today::use_today`]), or else as the clock reads it.
+    #[props(default = crate::time::local_date_string())]
+    today: String,
 ) -> Element {
     let mut tab = use_signal(|| StatsTab::Overview);
     // Accuracy, letters and mistakes are counted over the whole history: a
@@ -461,7 +466,7 @@ pub fn StatsView(
                 StatsTab::Overview => rsx! {
                     OverviewTab { settings, sessions }
                 },
-                StatsTab::Scores => rsx! { ScoresTab { sessions } },
+                StatsTab::Scores => rsx! { ScoresTab { sessions, today } },
                 StatsTab::Letters => rsx! { LettersTab { settings, sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },

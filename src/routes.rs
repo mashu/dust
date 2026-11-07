@@ -10,16 +10,14 @@ use std::rc::Rc;
 use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
-use crate::page_hidden::{
-    LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden, use_page_shown,
-};
+use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
 use crate::persist::record::RecordId;
 use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen};
 use crate::sync::ctx::SyncStatus;
-use crate::time::{local_date_string, mono_ms, sleep_ms};
+use crate::time::{mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
 use crate::ui::contest_results::NothingKept;
@@ -30,6 +28,7 @@ use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::sync::SyncView;
+use crate::ui::today::use_today;
 use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
 
 /// How long the settings have to stay still, while the band is being
@@ -43,17 +42,10 @@ pub(crate) const BAND_SETTLE_MS: u64 = 150;
 /// not followed yet, so a long drag is still heard as it goes.
 pub(crate) const BAND_FOLLOW_MAX_MS: u64 = 600;
 
-/// The longest Home goes without reading the day again: it reads it just
-/// past each midnight, but a clock put right, a time zone left behind or a
-/// computer asleep moves midnight meanwhile.
-const DAY_LOOK_MS: u32 = 15 * 60 * 1_000;
-
-/// How long past midnight Home reads the new day: past any difference
-/// between the clock it waits by and the one that says the day.
-const MIDNIGHT_PASSED_MS: u32 = 1_000;
-
-/// Where Home keeps its listener for the page coming back into sight.
+/// Where Home, and Stats, keep their listeners for the page coming back
+/// into sight, to read the day again.
 const HOME_SHOWN: &str = "__dustHomeShown";
+const STATS_SHOWN: &str = "__dustStatsShown";
 
 /// The screen `screen` names.
 #[component]
@@ -104,7 +96,7 @@ fn HomeRoute() -> Element {
     // the app stored or deleted since is taken up as it opens.
     use_hook(move || ctx.take_up_changes());
     let history = use_history(ctx);
-    let today = use_today();
+    let today = use_today(HOME_SHOWN);
     let practice = use_memo(move || Practice::of(&history(), &today.read()));
     let settings = ctx.settings.read();
     rsx! {
@@ -122,53 +114,6 @@ fn HomeRoute() -> Element {
             on_section,
         }
     }
-}
-
-/// The day it is where you are, for as long as Home is up: read again just
-/// past each midnight, and as the page comes back into sight, so that an
-/// app left open overnight goes by the new day.
-fn use_today() -> Signal<String> {
-    let mut today = use_signal(today_here);
-    let mut look = move || {
-        let now = today_here();
-        if *today.peek() != now {
-            today.set(now);
-        }
-    };
-    use_page_shown(HOME_SHOWN, look);
-    use_hook(move || {
-        spawn(async move {
-            loop {
-                sleep_ms(until_tomorrow_ms()).await;
-                look();
-            }
-        })
-    });
-    today
-}
-
-/// How long until just past the next midnight where you are, as the clock
-/// reads it, but [`DAY_LOOK_MS`] at the longest.
-fn until_tomorrow_ms() -> u32 {
-    let now = chrono::Local::now();
-    now.date_naive()
-        .succ_opt()
-        .and_then(|tomorrow| tomorrow.and_hms_opt(0, 0, 0))
-        .and_then(|midnight| midnight.and_local_timezone(chrono::Local).earliest())
-        .and_then(|midnight| u32::try_from((midnight - now).num_milliseconds()).ok())
-        .map_or(DAY_LOOK_MS, |until| {
-            until.saturating_add(MIDNIGHT_PASSED_MS).min(DAY_LOOK_MS)
-        })
-}
-
-/// The day it is where you are, as the clock reads it; in a test, the day
-/// the test says it is (`tests::pretend_today`).
-fn today_here() -> String {
-    #[cfg(test)]
-    if let Some(day) = tests::PRETENDED_TODAY.with_borrow(Clone::clone) {
-        return day;
-    }
-    local_date_string()
 }
 
 #[component]
@@ -355,10 +300,14 @@ fn StatsRoute() -> Element {
     // ones, is drawn again only for what it shows.
     let on_save = use_callback(move |()| ctx.save_backup());
     let sync = use_sync_view(ctx);
+    // The Scores tab says how long ago the best was set: by the day as it
+    // is, past midnight too.
+    let today = use_today(STATS_SHOWN);
     rsx! {
         StatsView {
             settings: ctx.settings.read().clone(),
             sessions: history(),
+            today: today(),
             on_delete: move |picked: Vec<RecordId>| ctx.delete_sessions(&picked),
             backups: Backups {
                 last: *ctx.last_backup.read(),
@@ -558,16 +507,7 @@ mod tests {
     use super::*;
     use crate::state::AppState;
     use crate::testing::{Ui, run, stored_session, test_settings};
-
-    thread_local! {
-        /// The day a test says it is, in place of the clock's.
-        pub(super) static PRETENDED_TODAY: RefCell<Option<String>> = const { RefCell::new(None) };
-    }
-
-    /// From now on in this test, it is `day` where you are.
-    fn pretend_today(day: &str) {
-        PRETENDED_TODAY.set(Some(day.to_string()));
-    }
+    use crate::ui::today::{DAY_LOOK_MS, days_after, pretend_today};
 
     /// Home left up past midnight goes by the new day: its streak and its
     /// calendar take it once the clock passes midnight, and as the page
@@ -606,6 +546,32 @@ mod tests {
                 "{}",
                 ui.html()
             );
+        });
+    }
+
+    /// The Scores tab left up past midnight says how long ago the best was
+    /// set by the new day: once the clock passes midnight, and as the page
+    /// comes back into sight. It read the day only as it was drawn, and
+    /// went on saying a best set the day before was set today.
+    #[test]
+    fn the_scores_tab_left_up_past_midnight_goes_by_the_new_day() {
+        run(|| async {
+            let at = crate::time::now_ms();
+            let day = crate::ui::format::day_of(at).expect("a day");
+            pretend_today(&day);
+            let mut best = stored_session(&day, &[("KM", "KM"); 10]);
+            best.timestamp = at;
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &[best]);
+            ui.click("nav-stats");
+            ui.click("seg-scores");
+            assert!(ui.has(" · today<"), "{}", ui.html());
+            pretend_today(&days_after(&day, 1));
+            tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
+            ui.advance(20).await;
+            assert!(ui.has(" · yesterday<"), "{}", ui.html());
+            pretend_today(&days_after(&day, 2));
+            ui.with_app(|_| crate::page_hidden::show_page());
+            assert!(ui.has(" · 2 days ago<"), "{}", ui.html());
         });
     }
 

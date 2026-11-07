@@ -6,24 +6,32 @@ use dioxus::prelude::*;
 
 use crate::persist::{CutOff, SetAside};
 use crate::state::{AppCtx, Notice};
-use crate::time::local_date_string;
 use crate::ui::format::{clock, counted, day_of, short_date};
+use crate::ui::today::use_today;
 use crate::ui::widgets::{Icon, IconName, control_id};
+
+/// Where the notice keeps its listener for the page coming back into sight,
+/// to read the day again.
+const NOTICE_SHOWN: &str = "__dustNoticeShown";
 
 #[component]
 pub fn NoticeBanner() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut notices = ctx.notices;
+    // A session cut off today is told by its time alone: by the day as it
+    // is, past midnight too.
+    let today = use_today(NOTICE_SHOWN);
     let shown = notices.read();
     if shown.is_empty() {
         return rsx! {};
     }
+    let today = today.read();
     rsx! {
         div { class: "notice notice-up", role: "alert",
             Icon { name: IconName::Info }
             div { class: "notice-lines",
                 for notice in shown.iter() {
-                    p { "{notice_text(notice)}" }
+                    p { "{notice_text(notice, &today)}" }
                 }
             }
             button {
@@ -38,8 +46,8 @@ pub fn NoticeBanner() -> Element {
     }
 }
 
-/// A notice in words.
-fn notice_text(notice: &Notice) -> String {
+/// A notice in words, on `today`.
+fn notice_text(notice: &Notice, today: &str) -> String {
     match notice {
         Notice::CutOff(CutOff::Marked(open)) if open.over => {
             // Over, and held only for what the store had yet to take.
@@ -54,7 +62,7 @@ fn notice_text(notice: &Notice) -> String {
         }
         Notice::CutOff(CutOff::Marked(open)) => {
             let what = if open.run { "contest run" } else { "session" };
-            let when = started(open.started_at)
+            let when = started(open.started_at, today)
                 .map(|when| format!(" {when}"))
                 .unwrap_or_default();
             let kept = match (open.so_far.is_some(), open.run) {
@@ -123,11 +131,11 @@ fn set_aside_text(set_aside: &SetAside) -> String {
     }
 }
 
-/// When something started at `at`: "started at 14:32" today, "started Fri
-/// 16 Oct 2026 at 14:32" before.
-fn started(at: u64) -> Option<String> {
+/// When something started at `at`: "started at 14:32" `today`, "started
+/// Fri 16 Oct 2026 at 14:32" before.
+fn started(at: u64, today: &str) -> Option<String> {
     let (day, time) = (day_of(at)?, clock(at)?);
-    Some(if day == local_date_string() {
+    Some(if day == today {
         format!("started at {time}")
     } else {
         format!("started {} at {time}", short_date(&day))
@@ -138,11 +146,18 @@ fn started(at: u64) -> Option<String> {
 mod tests {
     use super::*;
     use crate::persist::OpenSession;
+    use crate::testing::{Ui, run, test_settings};
+    use crate::ui::today::{DAY_LOOK_MS, days_after, pretend_today};
+
+    /// A notice in words, on the day it is where the test runs.
+    fn told(notice: &Notice) -> String {
+        notice_text(notice, &crate::time::local_date_string())
+    }
 
     #[test]
     fn a_cut_off_session_says_when_it_started_and_that_it_was_not_kept() {
         let at = crate::time::now_ms();
-        let text = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession::starting(
+        let text = told(&Notice::CutOff(CutOff::Marked(OpenSession::starting(
             false, at,
         ))));
         let time = clock(at).expect("a time today");
@@ -152,14 +167,14 @@ mod tests {
                 "Your session started at {time} was cut off: Dust closed while it ran, so it was not kept."
             )
         );
-        let run = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession::starting(
+        let run = told(&Notice::CutOff(CutOff::Marked(OpenSession::starting(
             true,
             at - 3 * 86_400_000,
         ))));
         assert!(run.starts_with("Your contest run started "), "{run}");
         assert!(run.contains(" at "), "{run}");
         assert_eq!(
-            notice_text(&Notice::CutOff(CutOff::Unread)),
+            told(&Notice::CutOff(CutOff::Unread)),
             "Your last session was cut off: Dust closed while it ran, so it was not kept."
         );
     }
@@ -168,7 +183,7 @@ mod tests {
     /// where it can be reached, or else from a backup.
     #[test]
     fn what_was_set_aside_says_how_to_have_it_back() {
-        let text = |set_aside| notice_text(&Notice::SetAside(set_aside));
+        let text = |set_aside| told(&Notice::SetAside(set_aside));
         assert_eq!(
             text(SetAside::Settings {
                 kept: Some("/d/settings.unreadable-9.json".into())
@@ -201,7 +216,7 @@ mod tests {
         let at = crate::time::now_ms();
         let time = clock(at).expect("a time today");
         let kept = |run| {
-            notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
+            told(&Notice::CutOff(CutOff::Marked(OpenSession {
                 so_far: Some(Box::new(crate::persist::SoFar {
                     result: cw_core::SessionResult::empty_for_test(),
                     settings: None,
@@ -232,7 +247,7 @@ mod tests {
         let time = clock(at).expect("a time today");
         let session = cw_core::SessionResult::empty_for_test();
         let carrying = |count, over| {
-            notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
+            told(&Notice::CutOff(CutOff::Marked(OpenSession {
                 unstored: vec![session.clone(); count],
                 over,
                 ..OpenSession::starting(false, at)
@@ -258,7 +273,7 @@ mod tests {
             carrying(3, true),
             "Dust closed before 3 of your sessions were saved. They are kept now."
         );
-        let finished = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
+        let finished = told(&Notice::CutOff(CutOff::Marked(OpenSession {
             so_far: Some(Box::new(crate::persist::SoFar {
                 result: session.clone(),
                 settings: None,
@@ -270,5 +285,36 @@ mod tests {
             finished,
             "Dust closed before your last session was saved. It is kept now."
         );
+    }
+
+    /// The notice of a session cut off, left up past midnight, says the day
+    /// it started once that is no longer today. It read the day only as it
+    /// was drawn, and went on giving the time alone, as of a session
+    /// started today.
+    #[test]
+    fn a_notice_left_up_past_midnight_says_the_day_it_started() {
+        run(|| async {
+            let at = crate::time::now_ms();
+            let day = day_of(at).expect("a day");
+            pretend_today(&day);
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.with_app(|ctx| {
+                let mut notices = ctx.notices;
+                notices.set(vec![Notice::CutOff(CutOff::Marked(OpenSession::starting(
+                    false, at,
+                )))]);
+            });
+            let time = clock(at).expect("a time");
+            let today = format!("Your session started at {time} was cut off");
+            assert!(ui.has(&today), "{}", ui.html());
+            pretend_today(&days_after(&day, 1));
+            tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
+            ui.advance(20).await;
+            let before = format!(
+                "Your session started {} at {time} was cut off",
+                short_date(&day)
+            );
+            assert!(ui.has(&before), "{}", ui.html());
+        });
     }
 }

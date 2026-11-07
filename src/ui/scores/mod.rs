@@ -296,7 +296,11 @@ fn timeline_dots(sessions: &[SessionResult], timeline: &[TimelinePoint]) -> Vec<
 /// history, and for what it is of and ranks by, and found again as the
 /// pills go back to it ([`History::figure`]).
 #[component]
-pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
+pub fn ScoresTab(
+    #[props(into)] sessions: History,
+    /// The day it is where you are, to say how long ago the best was set.
+    today: String,
+) -> Element {
     #[cfg(test)]
     crate::testing::rendered("ScoresTab");
     let mode = use_signal(|| None::<CharSetMode>);
@@ -352,7 +356,6 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
     let board = sessions.figure("score board", (of, ranking), |sessions| {
         Board::of(sessions, of, ranking)
     });
-    let today = crate::time::local_date_string();
     let runs_of = match of {
         BoardOf::Contest(kind) => Some(kind),
         _ => None,
