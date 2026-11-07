@@ -3448,7 +3448,10 @@ impl<S: CallSource> ContestMachine<S> {
     /// the character a splice before sent again, from where it is
     /// ([`Self::going_on_from`]). One carried on from an earlier turn whose
     /// rest has not reached the ear yet goes on as it was: it began before,
-    /// and the player's lead is no gap in it. A
+    /// and the player's lead is no gap in it. No other send that has not
+    /// reached the ear goes on, though counted: one the browser skipped
+    /// ahead of the ear ([`Self::missed`]) never began, and is heard no
+    /// more than one that went out under your message. A
     /// station goes on with one send: a later one, counted as begun before
     /// a retry of the sound moved the ear back, is no second voice of it.
     /// A send some of which went out under your message, the receiver
@@ -3468,10 +3471,12 @@ impl<S: CallSource> ContestMachine<S> {
         let mut going_on = BTreeSet::new();
         callers
             .zip(air.replies.iter().zip(&air.counted))
-            .filter_map(|((segment, whole), ((reply, says), counted))| {
+            .enumerate()
+            .filter_map(|(place, ((segment, whole), ((reply, says), counted)))| {
                 let start = heard_run + whole_ms(segment.start_sec);
                 let end = heard_run + whole_ms(segment.end_sec);
-                if start >= run_now && *counted != Counted::Nothing {
+                let rest = place < air.carried;
+                if start >= run_now && rest && *counted != Counted::Nothing {
                     return Some(Overlapping {
                         reply: reply.clone(),
                         says: *says,
@@ -3828,7 +3833,7 @@ impl<S: CallSource> ContestMachine<S> {
         let keyed_from = unheard.as_ref().map_or(0, |unheard| unheard.from);
         let parts: Vec<MessagePart> = air.parts.iter().map(|(part, _)| part.clone()).collect();
         let sent_by = air.sent_by(run_ms);
-        let carried = self.cut(air, run_ms, false, &mut effects);
+        let mut carried = self.cut(air, run_ms, false, &mut effects);
         // What is carried is the tail of the parts; the rest went out whole.
         let sent = parts.len() - carried.parts.len();
         let unheard =
@@ -3836,6 +3841,10 @@ impl<S: CallSource> ContestMachine<S> {
         if let Some(unheard) = unheard {
             let from = unheard.from.min(sent);
             self.unhear(unheard, &parts[from..sent], run_ms);
+            // A caller the message brought went with it: nothing of what it
+            // was sending goes on.
+            let stations = self.stations.len();
+            carried.callers.retain(|over| over.reply.station < stations);
         }
         for (at, (part, _)) in carried.parts.iter().enumerate() {
             if sent + at < keyed_from {
@@ -6536,6 +6545,74 @@ mod tests {
         logged.apply(ContestEvent::FinishNow);
         let (_, run) = self::result(&logged);
         assert_eq!(run.qsos.len(), 1, "logged once, and not lost as well");
+    }
+
+    /// A caller's send the browser skipped before it reached the ear
+    /// ([`ContestEvent::TurnMissed`] reaching past the ear) never began: it
+    /// counts as unheard, but it is no rest still going on. Esc on the CQ
+    /// that brought the caller takes the caller back with the message, so
+    /// nothing of its send goes on past the Esc; the run goes on, and the
+    /// next CQ brings a caller again. It used to go on as a caller still
+    /// sending, after the station it belonged to was gone, and the run
+    /// panicked looking it up.
+    #[test]
+    fn a_send_skipped_before_it_began_never_goes_on_past_esc() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let cq = runtime.playing_id().expect("the first CQ on the air");
+        assert_eq!(replies(runtime.last_turn()), ["K5XYZ"]);
+        runtime.now = 500;
+        runtime.apply(ContestEvent::TurnMissed {
+            id: cq,
+            from_sec: 0.0,
+            until_sec: 60.0,
+        });
+        runtime.now = 1_000;
+        let effects = runtime.key(OpKey::StopTx, "", "");
+        assert!(effects.contains(&ContestEffect::StopAudio), "{effects:?}");
+        assert!(
+            played(&effects).is_none_or(|turn| replies(turn).is_empty()),
+            "the caller went with the CQ that brought it: {effects:?}"
+        );
+        runtime.key(OpKey::Cq, "", "");
+        runtime.finish_turn();
+        assert_eq!(replies(runtime.last_turn()).len(), 1);
+    }
+
+    /// Keyed over instead, a send skipped before it began goes on no more
+    /// than one that had not begun at all: none of it is carried into the
+    /// next turn, to be sent again from its start under your message. A
+    /// caller's send carried over a key starts the turn, under yours; a
+    /// reply to it comes after.
+    #[test]
+    fn a_send_skipped_before_it_began_is_not_carried_over_a_key() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let cq = runtime.playing_id().expect("the first CQ on the air");
+        let skipped = runtime
+            .last_turn()
+            .segments
+            .iter()
+            .find(|segment| segment.who.is_caller())
+            .expect("the caller's send")
+            .clone();
+        runtime.now = 500;
+        assert!(
+            whole_ms(skipped.start_sec) > runtime.now,
+            "the call starts after the key: {skipped:?}"
+        );
+        runtime.apply(ContestEvent::TurnMissed {
+            id: cq,
+            from_sec: 0.0,
+            until_sec: 60.0,
+        });
+        let effects = runtime.key(OpKey::Cq, "", "");
+        let next = played(&effects).expect("a CQ keyed over the first");
+        assert!(
+            !next
+                .segments
+                .iter()
+                .any(|segment| segment.who.is_caller() && segment.start_sec <= 0.0),
+            "nothing is sent again from its start under your CQ: {next:?}"
+        );
     }
 
     fn paused_by_sound(runtime: &Runtime<ScriptCalls>) -> bool {
