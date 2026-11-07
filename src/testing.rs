@@ -1469,6 +1469,21 @@ impl Ui {
         self.key_down(id, key, code, dioxus::prelude::Modifiers::empty(), true)
     }
 
+    /// Press `key` in the element `id` while an input method is composing
+    /// a character, as the Enter that ends a composition is pressed:
+    /// whether the page left the key to the input method.
+    pub fn press_key_composing(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) -> bool {
+        let pressed = dioxus::html::SerializedKeyboardData::new(
+            key,
+            code,
+            dioxus::prelude::Location::Standard,
+            false,
+            dioxus::prelude::Modifiers::empty(),
+            true,
+        );
+        self.fire("keydown", id, Box::new(pressed))
+    }
+
     fn key_down(
         &mut self,
         id: &str,

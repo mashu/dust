@@ -382,6 +382,11 @@ fn AnswerBox(
                     e.prevent_default();
                     return;
                 }
+                // An input method composing a character has its own Enter,
+                // which ends the composition, and its own Space.
+                if e.is_composing() {
+                    return;
+                }
                 // What is typed reaches the session ahead of the confirm. A
                 // key held down repeats; only its press is an Enter.
                 if e.key() == Key::Enter && !e.is_auto_repeating() {

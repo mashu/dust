@@ -5483,6 +5483,27 @@ mod interactions {
         });
     }
 
+    /// While an input method composes a character in the box, Enter and
+    /// Space are its own: the Enter that ends the composition confirms
+    /// nothing, and a Space it takes skips nothing. Once it is done, Enter
+    /// confirms the group again. Each used to be the box's.
+    #[test]
+    fn keys_an_input_method_composes_with_are_its_own() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            ui.click("key-k");
+            let left = ui.press_key_composing("group-input-0", Key::Enter, Code::Enter);
+            assert!(left, "the input method's Enter");
+            assert!(ui.has("confirmed:0"), "{}", ui.html());
+            let space = Key::Character(" ".to_string());
+            let left = ui.press_key_composing("group-input-0", space, Code::Space);
+            assert!(left, "the input method's Space");
+            assert!(box_shows(&ui, "K"), "{}", ui.input_tag("group-input-0"));
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:1"), "{}", ui.html());
+        });
+    }
+
     /// A key types as the finger lands: a touch the browser sends no click
     /// for — one that slid as it tapped — types all the same, and the click
     /// it does send after a clean tap is not a second key. A click with no

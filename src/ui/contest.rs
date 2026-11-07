@@ -520,6 +520,12 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
                 entry.set_focus(field);
             },
             onkeydown: move |e| {
+                // An input method composing a character has its own Enter,
+                // which ends the composition, and its own Space: the run's
+                // keys pass them by as well.
+                if e.is_composing() {
+                    return;
+                }
                 // Enter, or Enter with the Command key, which the run's keys
                 // pass by; held with Shift, Ctrl or Alt it logs without
                 // sending, which the run's keys hear on the page. Held
@@ -2126,6 +2132,34 @@ mod tests {
             assert_eq!(script, &focus_end_script(field), "{field}: at its end");
         }
         (typed, given.into_iter().map(|(field, _)| field).collect())
+    }
+
+    /// While an input method composes a character in a field, Enter and
+    /// Space are its own: the Enter that ends the composition sends nothing,
+    /// and a Space it takes moves no cursor. Once it is done, Enter sends
+    /// again. Each used to be the run's, the Enter keying a message.
+    #[test]
+    fn keys_an_input_method_composes_with_are_its_own() {
+        run(|| async {
+            let (mut ui, recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            let starts = recorder.starts().len();
+            let left = ui.press_key_composing("field-call", Key::Enter, Code::Enter);
+            assert!(left, "the input method's Enter");
+            assert_eq!(recorder.starts().len(), starts, "nothing sent");
+            ui.take_focused();
+            let space = Key::Character(" ".into());
+            let left = ui.press_key_composing("field-call", space, Code::Space);
+            assert!(left, "the input method's Space");
+            assert!(ui.take_focused().is_empty());
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
+            ui.press_enter("field-call");
+            assert_eq!(
+                recorder.starts().len(),
+                starts + 1,
+                "your call and exchange"
+            );
+        });
     }
 
     /// Space in the Call field moves on to Exchange, as a call has no
