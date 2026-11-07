@@ -110,6 +110,10 @@ pub struct SyncCtx {
     epoch: CopyValue<u64>,
     /// What the sign-in found in the drive, for the passphrase to open.
     found: CopyValue<Option<Found>>,
+    /// Which asking for a sign-in is the latest: moved on as each is asked
+    /// for, and as one is cancelled, so that one finishing after either
+    /// goes no further.
+    attempt: CopyValue<u64>,
     /// A sync is under way, and another is asked for after it.
     running: CopyValue<bool>,
     again: CopyValue<bool>,
@@ -157,6 +161,7 @@ impl SyncCtx {
             state: CopyValue::new(state),
             epoch: CopyValue::new(0),
             found: CopyValue::new(None),
+            attempt: CopyValue::new(0),
             running: CopyValue::new(false),
             again: CopyValue::new(false),
             soon: CopyValue::new(false),
@@ -229,6 +234,7 @@ impl AppCtx {
         let Some(link) = self.sync_link() else {
             return;
         };
+        let attempt = self.next_sign_in();
         let was_on = self.sync.state.peek().is_some();
         let signing_in = link.auth.sign_in();
         if !was_on {
@@ -236,6 +242,9 @@ impl AppCtx {
         }
         spawn_forever(async move {
             let signed_in = signing_in.await;
+            if self.sign_in_given_up(attempt, &link) {
+                return;
+            }
             if was_on {
                 match signed_in {
                     Ok(()) => {
@@ -262,7 +271,11 @@ impl AppCtx {
                 self.set_sync_status(SyncStatus::Off { problem });
                 return;
             }
-            match look(&*link.remote).await {
+            let found = look(&*link.remote).await;
+            if self.sign_in_given_up(attempt, &link) {
+                return;
+            }
+            match found {
                 Ok(found) => {
                     let new = found == Found::Nothing;
                     put(self.sync.found, Some(found));
@@ -340,9 +353,34 @@ impl AppCtx {
         });
     }
 
+    /// Whether the sign-in `attempt` was cancelled, or another asked for,
+    /// since it was asked for: then it goes no further. What it signed in
+    /// as it finished is forgotten, as Cancel forgot what it had before,
+    /// where sync is off and no other sign-in is under way.
+    fn sign_in_given_up(self, attempt: u64, link: &Link) -> bool {
+        if *self.sync.attempt.peek() == attempt {
+            return false;
+        }
+        if self.sync.state.peek().is_none()
+            && matches!(*self.sync.status.peek(), SyncStatus::Off { .. })
+        {
+            link.auth.forget();
+        }
+        true
+    }
+
+    /// Move on to the next asking for a sign-in ([`SyncCtx::attempt`]), and
+    /// say which it is.
+    fn next_sign_in(self) -> u64 {
+        let next = *self.sync.attempt.peek() + 1;
+        put(self.sync.attempt, next);
+        next
+    }
+
     /// Stop turning sync on: the sign-in waiting, or the passphrase asked
-    /// for.
+    /// for. A sign-in finishing as it is cancelled goes no further.
     pub fn sync_cancel(self) {
+        self.next_sign_in();
         if let Some(link) = self.sync_link() {
             link.auth.cancel();
             if self.sync.state.peek().is_none() {

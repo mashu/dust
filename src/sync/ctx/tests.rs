@@ -22,13 +22,63 @@ fn linked(harness: &mut Harness, remote: &Rc<MemoryRemote>, auth: &Rc<FakeAuth>)
 
 /// The app, linked to `remote`, whatever folder it is, through `auth`.
 fn linked_to(harness: &mut Harness, remote: Rc<dyn Remote>, auth: &Rc<FakeAuth>) -> AppCtx {
-    let link = Link {
-        auth: Rc::clone(auth) as Rc<dyn Auth>,
-        remote,
-    };
+    linked_through(harness, remote, Rc::clone(auth) as Rc<dyn Auth>)
+}
+
+/// The app, linked to `remote` through `auth`, whatever sign-in it is.
+fn linked_through(harness: &mut Harness, remote: Rc<dyn Remote>, auth: Rc<dyn Auth>) -> AppCtx {
+    let link = Link { auth, remote };
     let ctx = harness.in_app(|| harness.ctx.link_sync(link));
     harness.ctx = ctx;
     ctx
+}
+
+/// A sign-in that finishes only once a test lets go, as one does whose
+/// code is being traded for a token, and then as `auth` signs in.
+struct Finishing {
+    auth: Rc<FakeAuth>,
+    held: Rc<Cell<bool>>,
+}
+
+impl Finishing {
+    fn of(auth: &Rc<FakeAuth>) -> Rc<Self> {
+        Rc::new(Self {
+            auth: Rc::clone(auth),
+            held: Rc::new(Cell::new(false)),
+        })
+    }
+
+    fn hold(&self, held: bool) {
+        self.held.set(held);
+    }
+}
+
+impl Auth for Finishing {
+    fn token(&self, fresh: bool) -> Pending<Result<String, AuthError>> {
+        self.auth.token(fresh)
+    }
+
+    fn sign_in(&self) -> Pending<Result<(), AuthError>> {
+        let (auth, held) = (Rc::clone(&self.auth), Rc::clone(&self.held));
+        Box::pin(async move {
+            while held.get() {
+                sleep_ms(POLL_MS).await;
+            }
+            auth.sign_in().await
+        })
+    }
+
+    fn kept(&self) -> Option<String> {
+        self.auth.kept()
+    }
+
+    fn keep(&self, kept: Option<String>) {
+        self.auth.keep(kept);
+    }
+
+    fn forget(&self) {
+        self.auth.forget();
+    }
 }
 
 /// A folder that answers nothing while a test holds it, and then answers
@@ -377,6 +427,57 @@ fn a_sign_in_turned_down_leaves_sync_off() {
         harness.pump();
         harness.in_app(|| ctx.sync_cancel());
         assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        assert!(remote.names().is_empty());
+    });
+}
+
+/// Cancelled as the sign-in finishes, its code traded for a token or the
+/// drive looked at, sync stays off, and the sign-in is forgotten: Cancel is
+/// the last word. The sign-in used to go on to ask for the passphrase once
+/// it had finished, signed in still.
+#[test]
+fn a_sign_in_cancelled_as_it_finishes_stays_cancelled() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let held = Held::of(&remote);
+        let auth = FakeAuth::giving(&["t"]);
+        let finishing = Finishing::of(&auth);
+        let ctx = linked_through(
+            &mut harness,
+            Rc::clone(&held) as Rc<dyn Remote>,
+            Rc::clone(&finishing) as Rc<dyn Auth>,
+        );
+        finishing.hold(true);
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        assert_eq!(status(&harness), SyncStatus::SigningIn);
+        harness.in_app(|| ctx.sync_cancel());
+        finishing.hold(false);
+        harness.advance(100).await;
+        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        assert!(!auth.signed_in.get(), "forgotten as it finished");
+
+        held.hold(true);
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        assert_eq!(status(&harness), SyncStatus::SigningIn, "looking");
+        harness.in_app(|| ctx.sync_cancel());
+        held.hold(false);
+        harness.advance(100).await;
+        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        assert!(!auth.signed_in.get(), "forgotten as it looked");
+
+        // Asked for again, it goes on as ever.
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.advance(100).await;
+        assert_eq!(
+            status(&harness),
+            SyncStatus::Passphrase {
+                new: true,
+                problem: None
+            }
+        );
         assert!(remote.names().is_empty());
     });
 }
