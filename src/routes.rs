@@ -239,11 +239,16 @@ fn use_preview_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
 /// While a screen with a session, a run or a stream a tap away is up, the
 /// prior the sampler starts from is built once it is drawn, and again
 /// whenever the history changes under it, rather than in the tap
-/// ([`AppCtx::warm_sampler`]).
+/// ([`AppCtx::warm_sampler`]). A change is one to its sessions
+/// ([`crate::history::StoredHistory::generation`]): what else is written
+/// of the history, as the store saying it took a session, changes none.
 fn use_warm_sampler(ctx: AppCtx) {
+    let generation = use_memo(move || ctx.sessions.read().generation());
     use_effect(move || {
-        // Read to build it again for every change of the history.
-        let _ = ctx.sessions.read();
+        // Read to build it again for every change of the sessions.
+        let _ = generation();
+        #[cfg(test)]
+        crate::testing::rendered("warm sampler");
         ctx.warm_sampler();
     });
 }
@@ -666,6 +671,35 @@ mod tests {
                 sessions.write().push(another);
             });
             assert_eq!(ui.take_worked_out("board place"), 1);
+        });
+    }
+
+    /// The store saying it took a session writes the history and changes
+    /// none of its sessions: the sampler's prior is not looked at again for
+    /// it, every session keyed, as it is for a session added. It was, on
+    /// every screen a session or a run is a tap away from, for every word
+    /// the store sent.
+    #[test]
+    fn a_history_written_with_no_session_changed_warms_no_sampler() {
+        run(|| async {
+            let first = stored_session("2026-10-01", &[("KM", "KM")]);
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &[first]);
+            ui.advance(100).await;
+            ui.take_renders("warm sampler");
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let first = sessions.peek().id_at(0).expect("the session kept");
+                sessions.write().mark_saved(first);
+            });
+            ui.advance(100).await;
+            assert_eq!(ui.take_renders("warm sampler"), 0);
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let another = stored_session("2026-10-02", &[("KM", "KM")]);
+                sessions.write().push(another);
+            });
+            ui.advance(100).await;
+            assert_eq!(ui.take_renders("warm sampler"), 1);
         });
     }
 
