@@ -1950,7 +1950,13 @@ pub(super) mod tests {
         let read = read_backup(&written).expect("a backup");
         assert_eq!(read.sessions.len(), 1, "once, and what this build reads");
         assert_eq!(read.sessions[0].date, first.date);
-        assert_eq!(read_backup_as_0_16_2(&written), Ok(read));
+        assert_eq!(read.left_out, 1, "and what it does not, counted");
+        // As 0.16.2 read it, which counted none it left out.
+        let uncounted = crate::persist::backup::Backup {
+            left_out: 0,
+            ..read
+        };
+        assert_eq!(read_backup_as_0_16_2(&written), Ok(uncounted));
     }
 
     /// A history whose folder cannot be listed saves no backup of its own,

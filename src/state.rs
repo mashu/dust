@@ -1231,6 +1231,7 @@ impl AppCtx {
         }
         let restored_at = backup.saved_at;
         let restored_settings = backup.settings;
+        let left_out = backup.left_out;
         self.change_history(change, move |saved| {
             self.restored(
                 saved,
@@ -1238,6 +1239,7 @@ impl AppCtx {
                     added,
                     filled,
                     brought,
+                    left_out,
                     backed_up,
                     saved_at,
                     restored_at,
@@ -1254,6 +1256,7 @@ impl AppCtx {
             added,
             filled,
             brought,
+            left_out,
             backed_up,
             saved_at,
             restored_at,
@@ -1324,11 +1327,14 @@ impl AppCtx {
             from
         };
         let (added_count, filled_count) = (added.len(), filled.len());
+        // Every session in it was here already: it brought none, and left
+        // none out, which may not be here.
+        let all_here = !brought && left_out == 0;
         let mut text = match (added_count, filled_count, with_settings) {
-            (0, 0, true) if !brought => {
+            (0, 0, true) if all_here => {
                 format!("Restored your settings{from}. Every session in it was already here.")
             }
-            (0, 0, false) if !brought => "Every session in it was already here.".into(),
+            (0, 0, false) if all_here => "Every session in it was already here.".into(),
             (0, 0, true) => format!("Restored your settings{from}."),
             (0, 0, false) => format!("Restored no sessions{from}."),
             (0, _, true) => format!(
@@ -1350,6 +1356,9 @@ impl AppCtx {
                 counted(added_count, "session")
             ),
         };
+        if let Some(told) = Backup::told_left_out(left_out) {
+            text = format!("{text} {told}");
+        }
         if let Some(problem) = saved.problem() {
             text = format!("{text} {problem}");
         }
@@ -1547,6 +1556,8 @@ struct Restoring {
     filled: Vec<FilledIn>,
     /// Whether the backup held anything the history did not.
     brought: bool,
+    /// How many of its sessions this version could not read, and left out.
+    left_out: usize,
     /// Whether it holds everything that had finished here by then.
     backed_up: bool,
     /// When it was saved, as the backup mark counts it.
@@ -2014,6 +2025,7 @@ mod tests {
                 saved_at: 0,
                 settings: Some(TrainingSettings::default()),
                 sessions: vec![day(1), day(2)],
+                left_out: 0,
             })
         });
         b.finish(day(8));
@@ -2124,6 +2136,7 @@ mod tests {
                 saved_at: 0,
                 settings: Some(TrainingSettings::default()),
                 sessions: vec![day(1), day(2)],
+                left_out: 0,
             })
         });
         assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
@@ -2198,6 +2211,7 @@ mod tests {
                 saved_at: 0,
                 settings: Some(backup.clone()),
                 sessions: Vec::new(),
+                left_out: 0,
             });
             ctx.store_settings();
         });
@@ -2220,6 +2234,7 @@ mod tests {
             saved_at: stamp(20),
             settings: Some(TrainingSettings::default()),
             sessions,
+            left_out: 0,
         };
         a.act(|ctx| ctx.restore_backup(from_elsewhere(vec![day(15)])));
         assert_eq!(store.last_backup(), None);
@@ -2364,6 +2379,7 @@ mod tests {
                 saved_at: 0,
                 settings: None,
                 sessions: vec![day(1)],
+                left_out: 0,
             })
         });
         assert_eq!(days(&store.load_sessions()), [1, 3]);
@@ -2397,6 +2413,7 @@ mod tests {
                 saved_at: crate::time::now_ms() + year,
                 settings: None,
                 sessions: vec![day(1)],
+                left_out: 0,
             })
         });
         let marked = store.last_backup().expect("marked");
@@ -2416,6 +2433,7 @@ mod tests {
                 saved_at: stamp(20),
                 settings: Some(TrainingSettings::default()),
                 sessions: vec![day(1), day(2)],
+                left_out: 0,
             })
         });
         assert_eq!(store.last_backup(), Some(stamp(30)));
@@ -2430,6 +2448,7 @@ mod tests {
                 saved_at: 0,
                 settings: Some(TrainingSettings::default()),
                 sessions,
+                left_out: 0,
             })
         });
     }
@@ -2545,6 +2564,35 @@ mod tests {
         assert_eq!(days(&store.load_sessions()), [3]);
     }
 
+    /// A restore says how many of the backup's sessions this version could
+    /// not read, and left out, and never that every session in it was here
+    /// already: those it left out may not be. A backup none of whose
+    /// sessions it could read was said to hold only what was here.
+    #[test]
+    fn a_restore_tells_of_the_sessions_it_could_not_read() {
+        let store = holding([1]);
+        let a = Tab::on(&store);
+        let settings = serde_json::to_string(&TrainingSettings::default()).unwrap();
+        let here = serde_json::to_string(&day(1)).unwrap();
+        let raw = format!(
+            r#"{{"dustBackup":1,"settings":{settings},"sessions":[{here},{{"date":5}},{{"date":6}}]}}"#
+        );
+        let backup = crate::persist::backup::read_backup(&raw).expect("a backup");
+        a.act(|ctx| ctx.restore_backup(backup));
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored your settings. 2 sessions in it could not be read by this version and were left out."
+        );
+        let raw = r#"{"dustBackup":1,"sessions":[{"date":5}]}"#;
+        let backup = crate::persist::backup::read_backup(raw).expect("a backup");
+        a.act(|ctx| ctx.restore_backup(backup));
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored no sessions. 1 session in it could not be read by this version and was left out."
+        );
+        assert_eq!(days(&store.load_sessions()), [1]);
+    }
+
     /// A session a restore filled in goes back as it was on Undo, among
     /// whatever another tab did meanwhile; one filled in already by another
     /// tab's restore stays filled in.
@@ -2565,6 +2613,7 @@ mod tests {
                     saved_at: 0,
                     settings: Some(TrainingSettings::default()),
                     sessions: vec![run(true)],
+                    left_out: 0,
                 })
             })
         };
@@ -2614,6 +2663,7 @@ mod tests {
                 saved_at: 0,
                 settings: None,
                 sessions: vec![run(true)],
+                left_out: 0,
             })
         });
         assert_eq!(a.toast().expect("told").text, "Filled in 1 session.");
