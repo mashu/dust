@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use cw_core::TrainingSettings;
+use cw_core::{SessionResult, TrainingSettings};
 use serde_json::Map;
 
 use super::pack::{
@@ -300,6 +300,27 @@ pub async fn sync_once(
         planned = self::planned(store, &drive, &listed, state).await;
     }
 
+    // One session under two names, here and in the drive, as a backup
+    // restored on one device names its sessions anew: the smaller name is
+    // kept on every device alike, and the other let go everywhere, but only
+    // once the one kept is in the drive for every device to take.
+    let mut twins_here = Vec::new();
+    let mut not_taken = BTreeSet::new();
+    for twin in twins(store, &planned, &bytes, &listed).await {
+        if twin.theirs < twin.ours {
+            twins_here.push((twin.ours, twin.json));
+            planned.send_deleted.push(twin.ours);
+        } else {
+            not_taken.insert(twin.theirs);
+            if drive.alive(twin.ours) {
+                planned.send_deleted.push(twin.theirs);
+            }
+        }
+    }
+    let let_go_here: BTreeSet<RecordId> = twins_here.iter().map(|(id, _)| *id).collect();
+    planned.take.retain(|id| !not_taken.contains(id));
+    planned.send.retain(|id| !let_go_here.contains(id));
+
     // What the drive holds, taken here.
     let here_bytes = read_here(store, &planned).await;
     let mut change = HistoryChange::default();
@@ -330,6 +351,11 @@ pub async fn sync_once(
             },
         };
         change.forget.push((id, deleted));
+    }
+    for (id, json) in &twins_here {
+        if let Some(session) = read_record(json) {
+            change.forget.push((*id, Deleted::of(&session, now)));
+        }
     }
     if !change.is_empty() {
         let saved = store.change_history(change.clone()).await;
@@ -429,6 +455,99 @@ async fn planned(
             revived: &state.revived,
         },
     )
+}
+
+/// A record the drive holds that is a session this device holds already
+/// under another name, alike in everything: as one device keeps a session
+/// under the name it was kept by, and another that restored it from a
+/// backup under the name the restore gave it ([`RecordId::placed`]).
+struct Twin {
+    theirs: RecordId,
+    ours: RecordId,
+    /// What this device stored of it.
+    json: String,
+}
+
+/// The twins of the records `planned` takes, the drive's read into `bytes`:
+/// each looked for only among the records here of the same millisecond, as
+/// a session's name falls where it finished, and only where one of the
+/// drive's and one of this device's are alike, so that sessions alike in
+/// everything twice over stay as many as they are.
+async fn twins(
+    store: &dyn Store,
+    planned: &Plan,
+    bytes: &HashMap<RecordId, String>,
+    listed: &BTreeSet<RecordId>,
+) -> Vec<Twin> {
+    // Those going here, or put back, are no twin of any.
+    let busy: BTreeSet<RecordId> = planned
+        .let_go
+        .iter()
+        .chain(&planned.send_back)
+        .map(|(id, _)| *id)
+        .collect();
+    let mut near: Vec<(RecordId, Vec<RecordId>)> = Vec::new();
+    for &theirs in &planned.take {
+        let from = theirs.order / 1000 * 1000;
+        let start = RecordId {
+            order: from,
+            nonce: 0,
+        };
+        let end = RecordId {
+            order: from.saturating_add(999),
+            nonce: u64::MAX,
+        };
+        let here: Vec<RecordId> = listed
+            .range(start..=end)
+            .copied()
+            .filter(|id| !busy.contains(id))
+            .collect();
+        if !here.is_empty() {
+            near.push((theirs, here));
+        }
+    }
+    if near.is_empty() {
+        return Vec::new();
+    }
+    let wanted: BTreeSet<RecordId> = near.iter().flat_map(|(_, here)| here.clone()).collect();
+    let held: HashMap<RecordId, (SessionResult, String)> = store
+        .read_records(wanted.into_iter().collect())
+        .await
+        .into_iter()
+        .flatten()
+        .filter_map(|record| Some((record.id, (read_record(&record.json)?, record.json))))
+        .collect();
+    let mut found: Vec<(RecordId, RecordId)> = Vec::new();
+    for (theirs, here) in near {
+        let Some(session) = bytes.get(&theirs).and_then(|json| read_record(json)) else {
+            continue;
+        };
+        let alike: Vec<RecordId> = here
+            .into_iter()
+            .filter(|id| held.get(id).is_some_and(|(ours, _)| *ours == session))
+            .collect();
+        if let [ours] = alike[..] {
+            found.push((theirs, ours));
+        }
+    }
+    // One of this device's alike to two of the drive's is a twin of neither.
+    let mut matched: HashMap<RecordId, usize> = HashMap::new();
+    for (_, ours) in &found {
+        *matched.entry(*ours).or_default() += 1;
+    }
+    let mut twins = Vec::new();
+    for &(theirs, ours) in &found {
+        if matched[&ours] == 1
+            && let Some((_, json)) = held.get(&ours)
+        {
+            twins.push(Twin {
+                theirs,
+                ours,
+                json: json.clone(),
+            });
+        }
+    }
+    twins
 }
 
 /// What the store holds of each record the plan sends, or deletes here for

@@ -59,6 +59,14 @@ by a restore, after a deletion the drive holds is sent as *put back*, so
 that the deletion does not take it again; a device that let it go takes it
 back. Missing is never deleted: a record is let go only for a deletion.
 
+One session can be two records: a backup restored on one device names each
+session where it finished (`RecordId::placed`), while the device it came
+from named each as it kept it. A record to take that is alike in everything
+to one this device holds under another name is its twin: the smaller name
+is kept on every device, and the other let go everywhere, as a deletion
+sent only once the one kept is in the drive. Two records of a session that
+differ, as one a restore filled in, are both kept.
+
 What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads
 every pack again and comes to the same. A sync cut short leaves the store

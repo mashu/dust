@@ -64,7 +64,6 @@ impl DriveState {
     }
 
     /// The drive holds `id`, and does not say it is deleted.
-    #[cfg(test)]
     pub fn alive(&self, id: RecordId) -> bool {
         (self.puts.contains(&id) || self.revives.contains_key(&id)) && !self.deleted(id)
     }

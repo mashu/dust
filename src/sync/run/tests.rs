@@ -480,6 +480,110 @@ fn a_damaged_pack_is_passed_over() {
     assert_eq!(computer.sync(&remote, 130).expect("synced").unreadable, 0);
 }
 
+/// Store `sessions` in `store` as a restore stores a backup's: each named
+/// where it finished, as a session from elsewhere ([`RecordId::placed`]).
+fn restore(store: &MemoryStore, sessions: &[SessionResult]) {
+    let put = sessions
+        .iter()
+        .map(|session| {
+            Record::of(session, |json| RecordId::placed(session.timestamp, json)).expect("a record")
+        })
+        .collect();
+    let saved = now(store.change_history(HistoryChange {
+        put,
+        ..HistoryChange::default()
+    }));
+    assert!(saved.kept().is_some(), "{saved:?}");
+}
+
+/// A history kept on one device and restored from its backup on another
+/// before either synced is one history once they do, each session once,
+/// under one name on both: never held twice, nor gone from either at any
+/// sync, whichever syncs first.
+#[test]
+fn a_session_under_two_names_ends_as_one_on_every_device() {
+    for computer_first in [false, true] {
+        let remote = MemoryRemote::default();
+        let phone = Device::keeping(&sessions(&[1, 2, 3]));
+        let computer = Device::keeping(&[]);
+        restore(&computer.store, &sessions(&[1, 2, 3]));
+        assert!(
+            listing(&phone.store)
+                .iter()
+                .all(|id| !listing(&computer.store).contains(id))
+        );
+        let mut devices = if computer_first {
+            [computer, phone]
+        } else {
+            [phone, computer]
+        };
+        for device in &mut devices {
+            device.turn_on(&remote, "passphrase").expect("on");
+        }
+        for round in 0..3 {
+            for (n, device) in devices.iter_mut().enumerate() {
+                device
+                    .sync(&remote, 100 + round * 10 + n as u64)
+                    .expect("synced");
+                assert_eq!(device.stamps(), [1, 2, 3], "never twice, never gone");
+            }
+        }
+        assert_eq!(listing(&devices[0].store), listing(&devices[1].store));
+        for device in &mut devices {
+            assert_eq!(
+                device.sync(&remote, 200).expect("synced"),
+                Synced::default()
+            );
+        }
+    }
+}
+
+/// Of a session under two names, the one let go is let go only once the
+/// one kept is in the drive: a device whose only record of it is the other
+/// is never told to let it go before it can take the one kept.
+#[test]
+fn a_twin_is_let_go_only_once_the_one_kept_is_in_the_drive() {
+    let remote = MemoryRemote::default();
+    let mut computer = Device::keeping(&[]);
+    restore(&computer.store, &sessions(&[1]));
+    let restored = listing(&computer.store)[0];
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 100).expect("synced");
+    let mut phone = Device::keeping(&sessions(&[1]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 110).expect("synced");
+    assert_eq!(phone.stamps(), [1], "not taken twice");
+    assert!(
+        !phone.state.drive.deleted(restored),
+        "the phone's own was not in the drive yet"
+    );
+    phone.sync(&remote, 120).expect("synced");
+    assert!(phone.state.drive.deleted(restored));
+    computer.sync(&remote, 130).expect("synced");
+    assert_eq!(computer.stamps(), [1]);
+    assert_eq!(listing(&computer.store), listing(&phone.store));
+}
+
+/// Two records of one session that are not alike in everything, as one a
+/// restore filled in, are not taken for one: neither is let go.
+#[test]
+fn a_session_under_two_names_not_alike_is_kept_both_ways() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1]));
+    let mut computer = Device::keeping(&[]);
+    let mut filled = at(1);
+    filled.avg_response_ms += 1.0;
+    restore(&computer.store, &[filled]);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    computer.turn_on(&remote, "passphrase").expect("on");
+    for at in [100, 110, 120, 130] {
+        phone.sync(&remote, at).expect("synced");
+        computer.sync(&remote, at + 5).expect("synced");
+    }
+    assert_eq!(phone.stamps(), [1, 1]);
+    assert_eq!(listing(&phone.store), listing(&computer.store));
+}
+
 /// A pack a later build wrote, which this one cannot read, is told of and
 /// read again at each sync, not passed over for good: what it holds
 /// arrives once this device reads it.
