@@ -480,6 +480,50 @@ fn a_damaged_pack_is_passed_over() {
     assert_eq!(computer.sync(&remote, 130).expect("synced").unreadable, 0);
 }
 
+/// A pack a later build wrote, which this one cannot read, is told of and
+/// read again at each sync, not passed over for good: what it holds
+/// arrives once this device reads it.
+#[test]
+fn a_pack_of_a_later_build_is_read_again_until_it_reads() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&[]);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let keys = Keys::of(&DataKey::from_hex(&phone.state.key).expect("a key"));
+    let record = Record::of(&at(5), |json| RecordId::next(5, None, json)).expect("a record");
+    let name = pack_name().expect("a name");
+    let later = Pack {
+        dust_pack: 2,
+        device: "later".into(),
+        at: 110,
+        put: vec![Put {
+            id: record.id.name(),
+            s: record.json,
+        }],
+        ..Pack::default()
+    };
+    let file =
+        now(remote.create(&name, seal_pack(&keys, &name, &later).expect("sealed"))).expect("made");
+    assert_eq!(phone.sync(&remote, 120).expect("synced").unreadable, 1);
+    assert_eq!(
+        phone.sync(&remote, 130).expect("synced").unreadable,
+        1,
+        "told of again"
+    );
+    assert!(phone.stamps().is_empty());
+    // The same pack, as this build reads it: as it reads to a build that
+    // knows the later layout.
+    let readable = Pack {
+        dust_pack: 1,
+        ..later
+    };
+    now(remote.update(&file, seal_pack(&keys, &name, &readable).expect("sealed")))
+        .expect("written");
+    let synced = phone.sync(&remote, 140).expect("synced");
+    assert_eq!((synced.took, synced.unreadable), (1, 0));
+    assert_eq!(phone.stamps(), [5]);
+}
+
 /// A store with no room takes nothing, and reads nothing as read: the next
 /// sync, with room, takes it all. Nothing is taken twice.
 #[test]

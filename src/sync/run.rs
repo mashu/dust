@@ -9,7 +9,7 @@ use cw_core::TrainingSettings;
 use serde_json::Map;
 
 use super::pack::{
-    Forget, PACK_PREFIX, Pack, Put, Revive, open_pack, pack_name, packs_of, seal_pack,
+    Forget, PACK_PREFIX, Pack, Put, Revive, Unopened, open_pack, pack_name, packs_of, seal_pack,
 };
 use super::plan::{DriveState, Here, Plan, plan};
 use super::remote::{Remote, RemoteError, RemoteFile};
@@ -189,7 +189,8 @@ impl SyncFailed {
 /// The packs of `files` not yet read, read into `drive`, each noted in
 /// `read`; the records they hold gathered into `bytes`, each as it was
 /// sent, a session put back taking the place of the same record put
-/// before. Says how many files would not open.
+/// before. Says how many files would not open, or not read: one a later
+/// build wrote is not noted, and is read again at the next sync.
 async fn read_packs(
     remote: &dyn Remote,
     keys: &Keys,
@@ -211,7 +212,7 @@ async fn read_packs(
             Err(err) => return Err(err),
         };
         match open_pack(keys, &file.name, &sealed) {
-            Some(pack) => {
+            Ok(pack) => {
                 drive.take(&pack);
                 for put in pack.put {
                     if let Some(id) = put.record_id() {
@@ -224,10 +225,15 @@ async fn read_packs(
                     }
                 }
             }
-            None => unreadable += 1,
+            Err(Unopened::Damaged) => unreadable += 1,
+            // What it holds arrives once this build is updated.
+            Err(Unopened::Later) => {
+                unreadable += 1;
+                continue;
+            }
         }
-        // Read, whether it opened or not: one that will not open does not
-        // open the next time either.
+        // Read, whether it opened or not: one damaged does not open the
+        // next time either.
         read.insert(file.name.clone());
     }
     Ok(unreadable)

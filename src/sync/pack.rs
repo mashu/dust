@@ -107,17 +107,31 @@ pub fn seal_pack(keys: &Keys, name: &str, pack: &Pack) -> Option<Vec<u8>> {
     keys.seal(name, &packer.finish().ok()?)
 }
 
-/// The pack `sealed`, found in the drive as `name`: none where it is no
-/// pack this key sealed, or none this build reads.
-pub fn open_pack(keys: &Keys, name: &str, sealed: &[u8]) -> Option<Pack> {
-    let packed = keys.open(name, sealed)?;
+/// Why a pack found in the drive was not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unopened {
+    /// It is no pack this key sealed under its name, or it was changed
+    /// since: damaged, say. It opens no better the next time.
+    Damaged,
+    /// It opened, but holds no pack this build reads: one a later build
+    /// wrote, which this one reads once updated.
+    Later,
+}
+
+/// The pack `sealed`, found in the drive as `name`, or why not.
+pub fn open_pack(keys: &Keys, name: &str, sealed: &[u8]) -> Result<Pack, Unopened> {
+    let packed = keys.open(name, sealed).ok_or(Unopened::Damaged)?;
     let mut json = Vec::new();
     DeflateDecoder::new(packed.as_slice())
         .take(UNPACKED_MAX)
         .read_to_end(&mut json)
-        .ok()?;
-    let pack: Pack = serde_json::from_slice(&json).ok()?;
-    (pack.dust_pack == PACK_LAYOUT).then_some(pack)
+        .map_err(|_| Unopened::Later)?;
+    let pack: Pack = serde_json::from_slice(&json).map_err(|_| Unopened::Later)?;
+    if pack.dust_pack == PACK_LAYOUT {
+        Ok(pack)
+    } else {
+        Err(Unopened::Later)
+    }
 }
 
 /// What one sync sends, in as many packs as it takes to keep each to its
@@ -208,10 +222,16 @@ mod tests {
             }],
         };
         let sealed = seal_pack(&keys, &name, &pack).expect("sealed");
-        assert_eq!(open_pack(&keys, &name, &sealed), Some(pack.clone()));
+        assert_eq!(open_pack(&keys, &name, &sealed), Ok(pack.clone()));
         assert!(!sealed.windows(5).any(|w| w == b"KMURE"));
-        assert_eq!(open_pack(&keys, "dust-p-other", &sealed), None);
-        assert_eq!(open_pack(&self::keys(), &name, &sealed), None);
+        assert_eq!(
+            open_pack(&keys, "dust-p-other", &sealed),
+            Err(Unopened::Damaged)
+        );
+        assert_eq!(
+            open_pack(&self::keys(), &name, &sealed),
+            Err(Unopened::Damaged)
+        );
         assert_eq!(
             pack.put[0].record_id(),
             Some(RecordId { order: 5, nonce: 9 })
@@ -224,13 +244,16 @@ mod tests {
             .record_id(),
             None
         );
-        // A pack of another layout, sealed as well as any, is not read.
+        // A pack of another layout, sealed as well as any, is not read, and
+        // is no damaged one.
         let later = Pack {
             dust_pack: 2,
             ..pack
         };
         let sealed = seal_pack(&keys, &name, &later).expect("sealed");
-        assert_eq!(open_pack(&keys, &name, &sealed), None);
+        assert_eq!(open_pack(&keys, &name, &sealed), Err(Unopened::Later));
+        let unpacked = keys.seal(&name, b"not deflated").expect("sealed");
+        assert_eq!(open_pack(&keys, &name, &unpacked), Err(Unopened::Later));
     }
 
     /// What a later build adds to a pack is passed over, and the rest read.
