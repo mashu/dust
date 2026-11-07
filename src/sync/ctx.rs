@@ -104,6 +104,10 @@ pub struct SyncCtx {
     link: CopyValue<Option<Link>>,
     /// What sync keeps, while it is on.
     state: CopyValue<Option<SyncState>>,
+    /// The store holds what sync keeps as this copy of the app found it or
+    /// last kept it there: gone from the store since, it was turned off by
+    /// another copy on the same store, a tab or a window.
+    stored: CopyValue<bool>,
     /// Which turning on of sync `state` is of: moved on as sync is turned
     /// off here, and as it is turned on, so that a sync under way across
     /// either keeps nothing of what it did.
@@ -158,6 +162,7 @@ impl SyncCtx {
             status: Signal::new(status),
             theme: Signal::new(None),
             link: CopyValue::new(link),
+            stored: CopyValue::new(state.is_some()),
             state: CopyValue::new(state),
             epoch: CopyValue::new(0),
             found: CopyValue::new(None),
@@ -215,16 +220,38 @@ impl AppCtx {
     }
 
     /// Keep what sync keeps, as it is now: told of where it cannot be.
+    /// Where another copy of the app turned sync off since, nothing is
+    /// kept, and sync is off here too ([`Self::take_up_sync_off`]).
     fn keep_sync_state(self) {
-        let written = self.sync.state.peek().as_ref().and_then(SyncState::written);
-        if let Some(written) = written
-            && let Err(why) = self.app().store.save_sync(Some(&written))
-        {
-            self.toasts.show(format!(
-                "What sync keeps could not be saved: {}.",
-                why.trim_end_matches('.')
-            ));
+        if self.take_up_sync_off() {
+            return;
         }
+        let written = self.sync.state.peek().as_ref().and_then(SyncState::written);
+        if let Some(written) = written {
+            match self.app().store.save_sync(Some(&written)) {
+                Ok(()) => put(self.sync.stored, true),
+                Err(why) => self.toasts.show(format!(
+                    "What sync keeps could not be saved: {}.",
+                    why.trim_end_matches('.')
+                )),
+            }
+        }
+    }
+
+    /// Turn sync off here, where another copy of the app on the same store,
+    /// a tab or a window, has turned it off since this one found or last
+    /// kept what sync keeps there; and say whether it was. Each copy keeps
+    /// the whole of what sync keeps, so one keeping it again would turn
+    /// sync back on in the store, for every copy.
+    fn take_up_sync_off(self) -> bool {
+        let off = *self.sync.stored.peek()
+            && self.sync.state.peek().is_some()
+            && self.app().store.load_sync().is_none();
+        if off {
+            self.sync_forget();
+            self.set_sync_status(SyncStatus::Off { problem: None });
+        }
+        off
     }
 
     /// Ask the user to sign in to Google: to turn sync on, or to sync again
@@ -412,8 +439,9 @@ impl AppCtx {
         put(self.sync.running, true);
         self.change_on_status(|_, syncing, _, _| *syncing = true);
         spawn_forever(async move {
+            self.take_up_sync_off();
             let epoch = *self.sync.epoch.peek();
-            // Turned off before it began.
+            // Turned off before it began, here or in another copy.
             let Some(mut state) = self.sync.state.peek().clone() else {
                 self.sync_over();
                 return;
@@ -426,13 +454,14 @@ impl AppCtx {
                 current: move || *self.sync.epoch.peek() == epoch,
             };
             let synced = sync_once(&*store, &remote, &mut state, &here, now_ms()).await;
+            self.take_up_sync_off();
             if *self.sync.epoch.peek() != epoch {
-                // Sync was turned off meanwhile, or turned on anew: what
-                // this sync stored is taken up, and none of what it would
-                // keep is kept. What was put back by hand since is sync's
-                // as it is now, and waits for its next sync. One stopped
-                // as it asked the drive for more may have stored what it
-                // took before then.
+                // Sync was turned off meanwhile, here or in another copy,
+                // or turned on anew: what this sync stored is taken up,
+                // and none of what it would keep is kept. What was put
+                // back by hand since is sync's as it is now, and waits for
+                // its next sync. One stopped as it asked the drive for
+                // more may have stored what it took before then.
                 match &synced {
                     Ok(synced) => self.take_up_synced(synced),
                     Err(_) => self.take_up_store(),
@@ -662,6 +691,7 @@ impl AppCtx {
         }
         self.next_sync_epoch();
         put(self.sync.state, None);
+        put(self.sync.stored, false);
         put(self.sync.found, None);
         put(self.sync.revived, BTreeMap::new());
         if let Err(why) = self.app().store.save_sync(None) {
