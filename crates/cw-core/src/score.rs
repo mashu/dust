@@ -42,6 +42,11 @@ const TIME_COST_PER_DECADE: f64 = 0.25;
 const SLOWEST_KEEPS: f64 = 0.25;
 /// What each send of a group after the first leaves, as RufzXP's replay.
 const RESENT_KEEPS: f64 = 0.5;
+/// The most characters a group's misses are counted over, by their chances
+/// ([`expected_error_factor`]): longer than any group is sent
+/// ([`crate::GROUP_SIZE_MAX`]), and few enough that the ways its misses
+/// could fall stay a number.
+const MOST_CHARS_COUNTED: u32 = 64;
 
 /// The average answer of a session with none to average: a second a
 /// character.
@@ -100,8 +105,11 @@ pub fn error_factor(errors: u32) -> f64 {
 
 /// What is left, on average, of a group of `chars` characters each missed
 /// at `miss_rate`: [`error_factor`] for every count of misses the group
-/// could have, by its chance. Nothing missed leaves it all.
+/// could have, by its chance. Nothing missed leaves it all. A length is not
+/// trusted to be small: a group past [`MOST_CHARS_COUNTED`] characters is
+/// worked out as one that long.
 pub fn expected_error_factor(chars: u32, miss_rate: f64) -> f64 {
+    let chars = chars.min(MOST_CHARS_COUNTED);
     let miss = if miss_rate.is_finite() {
         miss_rate.clamp(0.0, 1.0)
     } else {
@@ -401,6 +409,24 @@ mod tests {
             ..clean(5, 20.0)
         };
         assert!((0.0..1e-15).contains(&group_points(&wild)));
+    }
+
+    /// Nor is a group's length, for what a rate of misses leaves of it: a
+    /// group of two thousand characters came to no number, the ways its
+    /// misses could fall past what a float holds, and one of `u32::MAX`
+    /// took billions of steps to come to no number, or to overflow counting
+    /// its misses. A longer group keeps no more than a shorter one, worked
+    /// out at once.
+    #[test]
+    fn a_group_length_past_all_reason_still_works_out() {
+        for miss in [0.0, 0.01, 0.5, 1.0] {
+            let mut shorter = 1.0;
+            for chars in [5, 64, 65, 2_000, u32::MAX] {
+                let left = expected_error_factor(chars, miss);
+                assert!((0.0..=shorter).contains(&left), "{chars} at {miss}: {left}");
+                shorter = left;
+            }
+        }
     }
 
     /// A score has to be a number to be written and read back: a session
