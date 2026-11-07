@@ -1,7 +1,7 @@
 use cw_core::{BoardEntry, FORM_SESSIONS, PER_SESSION_UP_TO, Ranking, TimelinePoint};
 use dioxus::prelude::*;
 
-use super::{focus, pick, rating_said, what_it_was};
+use super::{Marked, focus, pick, rating_said, what_it_was};
 use crate::state::SessionPick;
 use crate::ui::chart::path;
 use crate::ui::format::{clock, counted, ordinal, short_date};
@@ -103,8 +103,8 @@ pub(super) fn ScoreTimeline(
     board: Vec<BoardEntry>,
     /// The best, marked while no row is.
     best: Option<SessionPick>,
-    /// The row pointed at, else the row tapped.
-    marked: Memo<Option<SessionPick>>,
+    /// The rows pointed at and tapped.
+    marked: Memo<Marked>,
     /// How many sessions are on the board.
     total: usize,
     /// The dates of the first session and the last, under either end.
@@ -210,7 +210,7 @@ fn TimelineMark(
     /// Each session, and where its dot sits.
     spots: Vec<(SessionPick, f64, f64)>,
     best: Option<SessionPick>,
-    marked: Memo<Option<SessionPick>>,
+    marked: Memo<Marked>,
     /// The ring, else the guide.
     ring: bool,
 ) -> Element {
@@ -241,7 +241,7 @@ fn TimelineMark(
 fn TimelineFocus(
     board: Vec<BoardEntry>,
     best: Option<SessionPick>,
-    marked: Memo<Option<SessionPick>>,
+    marked: Memo<Marked>,
     ranking: Ranking,
 ) -> Element {
     let focus = focus(marked, best, |at| {

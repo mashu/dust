@@ -1,7 +1,7 @@
 use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode, Ranking};
 use dioxus::prelude::*;
 
-use super::{Medal, focus, mode_label, pick, rating_label, run_rule, speed};
+use super::{Marked, Medal, focus, mode_label, pick, rating_label, run_rule, speed};
 use crate::state::SessionPick;
 use crate::ui::format::day_and_clock;
 use crate::ui::help;
@@ -91,8 +91,8 @@ pub(super) fn BoardList(
     assisted: Vec<BoardEntry>,
     /// The best, marked while no row is.
     best: Option<SessionPick>,
-    /// The row pointed at, else the row tapped.
-    marked: Memo<Option<SessionPick>>,
+    /// The rows pointed at and tapped.
+    marked: Memo<Marked>,
     /// The row a mouse is pointing at.
     hovered: Signal<Option<SessionPick>>,
     /// The row tapped to keep marked.

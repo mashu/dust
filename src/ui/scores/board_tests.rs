@@ -137,6 +137,31 @@ fn a_row_tapped_on_another_board_leaves_the_best_marked() {
     assert!(ui.input_tag("board-1").contains("pinned"));
 }
 
+/// A row pointed at as the board changes under it goes with no word that
+/// the mouse left it, and leaves a row tapped marked where the board holds
+/// it, on the timeline and beneath it. The row pointed at was marked over
+/// the one tapped whether this board held it or not, so with it gone the
+/// best was marked, not the row tapped.
+#[test]
+fn a_row_pointed_at_as_its_board_goes_leaves_the_tapped_row_marked() {
+    let mut ui = board(vec![
+        koch(1, 30.0),
+        run_of(2, 90.0, CharSetMode::Callsign),
+        koch(3, 50.0),
+    ]);
+    ui.click("board-3");
+    ui.point_at("board-1", "mouse", (0.0, 0.0), (0.0, 0.0));
+    assert!(ui.has("1st</span> · 90.0 a group"));
+    // Chosen from the keyboard: the mouse never leaves the row.
+    ui.click("pill-koch");
+    assert!(ui.has("2nd</span> · 30.0 a group"), "{}", ui.html());
+    let tapped = ui.input_tag("board-2");
+    assert!(
+        tapped.contains("focused") && tapped.contains("pinned"),
+        "{tapped}"
+    );
+}
+
 /// Pointing at a row redraws the rows it moves between, the mark and what
 /// is said of it, and nothing else: the tab reads every stored run's log to
 /// build the board, and the timeline draws a dot a session, so neither is

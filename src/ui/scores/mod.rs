@@ -82,16 +82,27 @@ fn rating_said(ranking: Ranking, rating: f64) -> String {
     }
 }
 
-/// The session marked on the timeline: the row pointed at or tapped, where
-/// the board holds it, as `held` says, else the best, `best`. A row tapped
-/// on another board, or pointed at as the board changed under it, leaves
-/// the best marked on this one.
+/// The rows marked: the one a mouse is pointing at, and the one tapped to
+/// keep marked.
+#[derive(Clone, Copy, PartialEq)]
+struct Marked {
+    hovered: Option<SessionPick>,
+    pinned: Option<SessionPick>,
+}
+
+/// The session marked on the timeline: the row pointed at, where the board
+/// holds it, as `held` says, else the row tapped, where it holds that, else
+/// the best, `best`. A row tapped on another board leaves the best marked
+/// on this one, and a row pointed at as the board changed under it leaves
+/// the row tapped, or the best.
 fn focus(
-    marked: Memo<Option<SessionPick>>,
+    marked: Memo<Marked>,
     best: Option<SessionPick>,
     held: impl Fn(SessionPick) -> bool,
 ) -> Option<SessionPick> {
-    marked().filter(|marked| held(*marked)).or(best)
+    let Marked { hovered, pinned } = marked();
+    let held = |at: &SessionPick| held(*at);
+    hovered.filter(held).or(pinned.filter(held)).or(best)
 }
 
 /// The session a row of the board is: where it sits in the history the
@@ -293,10 +304,13 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
     let rank = use_signal(|| None::<Ranking>);
     let hovered = use_signal(|| None::<SessionPick>);
     let pinned = use_signal(|| None::<SessionPick>);
-    // The row marked, read by what draws the mark alone: the tab reads
+    // The rows marked, read by what draws the mark alone: the tab reads
     // every stored run's log to build the board, and must not again for
     // each row a mouse crosses.
-    let marked = use_memo(move || hovered().or(pinned()));
+    let marked = use_memo(move || Marked {
+        hovered: hovered(),
+        pinned: pinned(),
+    });
     // The run whose results are open, from the Runs card.
     let mut opened = use_opened_run();
     // The Contest pill is always there; a chip for each contest the
