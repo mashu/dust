@@ -56,6 +56,9 @@ thread_local! {
     /// How many times each figure of the history has been worked out since a
     /// test last looked, by name.
     static WORKED_OUT: std::cell::RefCell<Vec<(&'static str, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// A file chosen waits to be read until a test lets it be, as a large
+    /// one takes its time ([`Ui::hold_file_reads`]).
+    static FILE_READS_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The page asks for the field with this id to have the cursor, by
@@ -94,6 +97,15 @@ pub fn rendered(component: &'static str) {
 /// reads its figures from one that works them out again.
 pub fn worked_out(figure: &'static str) {
     count(&WORKED_OUT, figure);
+}
+
+/// A file chosen is being read: on a computer or in a browser, for as long
+/// as it takes a file that size; here, for as long as a test holds file
+/// reads ([`Ui::hold_file_reads`]).
+pub async fn reading_a_file() {
+    while FILE_READS_HELD.get() {
+        crate::time::sleep_ms(POLL_MS).await;
+    }
 }
 
 /// One more of `what` in `counts`.
@@ -935,6 +947,7 @@ impl Ui {
         FOCUS_ASKED.take();
         SCROLLS_ASKED.take();
         ELSEWHERE.take();
+        FILE_READS_HELD.set(false);
         let mut ui = Self {
             dom,
             ids: Vec::new(),
@@ -1416,6 +1429,12 @@ impl Ui {
     /// Commit a field, the way leaving it does.
     pub fn commit(&mut self, id: &str, value: &str) {
         self.fire("change", id, Self::form(value));
+    }
+
+    /// Hold every file chosen from now on unread, as a large one takes its
+    /// time to read, or let them all be read once the clock moves on.
+    pub fn hold_file_reads(&mut self, held: bool) {
+        FILE_READS_HELD.set(held);
     }
 
     /// Choose a file called `name` in the file input with this id, the way

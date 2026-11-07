@@ -115,6 +115,41 @@ pub struct ChosenFile {
     pub text: Option<String>,
 }
 
+/// A file chosen, handed over the moment it is chosen, unread: its name and
+/// size, and the file, read as text by whatever takes it, a task that may
+/// outlast the button ([`PickedFile::read`]). The phone's own picker reads
+/// a file before it hands it over, so one it chose comes read.
+#[derive(Clone)]
+pub struct PickedFile {
+    pub name: String,
+    pub size: u64,
+    file: Picked,
+}
+
+/// A file chosen, read or not.
+#[derive(Clone)]
+enum Picked {
+    /// Chosen by a file input, and still to be read.
+    Unread(FileData),
+    /// Read already, by the phone's own picker.
+    Read(Option<String>),
+}
+
+impl PickedFile {
+    /// What the file holds, read as text up to `max_bytes`, as the button
+    /// reads a file it hands to `on_choose`.
+    pub async fn read(self, max_bytes: u64) -> ChosenFile {
+        match self.file {
+            Picked::Unread(file) => read_chosen(file, max_bytes).await,
+            Picked::Read(text) => ChosenFile {
+                name: self.name,
+                size: self.size,
+                text,
+            },
+        }
+    }
+}
+
 /// A piece of a file the phone's own picker chose, as the picker hands it
 /// over ([`picker_script`]): the file whole, or a slice of its text with
 /// more to come, the last of which ends it.
@@ -187,6 +222,8 @@ async fn read_chosen(file: FileData, max_bytes: u64) -> ChosenFile {
 /// computer reads it on a thread of its own, and a browser a slice at a
 /// time where it is large.
 async fn read_text(file: &FileData) -> Option<String> {
+    #[cfg(test)]
+    crate::testing::reading_a_file().await;
     #[cfg(all(feature = "desktop", not(test)))]
     if let Some(text) = read_apart(file.path()).await {
         return text;
@@ -334,7 +371,9 @@ pickers[id] = () => {{
 }
 
 /// A button that chooses a file of the kinds `accept` names, reads it as
-/// text up to `max_bytes`, and hands it to `on_choose`.
+/// text up to `max_bytes`, and hands it to `on_choose`; or, given
+/// `on_pick`, hands it to that the moment it is chosen, unread, to be read
+/// by a task that may outlast the button, which goes with its screen.
 #[component]
 pub fn FileButton(
     /// The button's id, and its file input's.
@@ -344,7 +383,8 @@ pub fn FileButton(
     max_bytes: u64,
     icon: IconName,
     label: &'static str,
-    on_choose: EventHandler<ChosenFile>,
+    #[props(default)] on_choose: EventHandler<ChosenFile>,
+    #[props(default)] on_pick: Option<EventHandler<PickedFile>>,
 ) -> Element {
     // Moved on by every file chosen, to draw a fresh file input: the same
     // file chosen again in the old one would change nothing, and not load.
@@ -356,8 +396,16 @@ pub fn FileButton(
                 let mut picker = document::eval(&script);
                 let mut pieces = Pieces::default();
                 while let Ok(piece) = picker.recv::<Piece>().await {
-                    if let Some(file) = pieces.take(piece) {
-                        on_choose.call(file);
+                    let Some(file) = pieces.take(piece) else {
+                        continue;
+                    };
+                    match on_pick {
+                        Some(on_pick) => on_pick.call(PickedFile {
+                            name: file.name,
+                            size: file.size,
+                            file: Picked::Read(file.text),
+                        }),
+                        None => on_choose.call(file),
                     }
                 }
             })
@@ -381,6 +429,14 @@ pub fn FileButton(
                     onchange: move |e| {
                         if let Some(file) = e.files().into_iter().next() {
                             picked += 1;
+                            if let Some(on_pick) = on_pick {
+                                on_pick.call(PickedFile {
+                                    name: file.name(),
+                                    size: file.size(),
+                                    file: Picked::Unread(file),
+                                });
+                                return;
+                            }
                             spawn(async move {
                                 on_choose.call(read_chosen(file, max_bytes).await);
                             });

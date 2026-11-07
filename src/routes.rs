@@ -278,7 +278,6 @@ fn StatsRoute() -> Element {
                 inside_app: ctx.app().store.backups_inside_app(),
                 outgrows_device_backup: ctx.app().store.outgrows_device_backup(),
                 on_save: EventHandler::new(move |()| ctx.save_backup()),
-                on_restore: EventHandler::new(move |backup| ctx.restore_backup(backup)),
             },
             sync: sync_view(ctx),
         }
