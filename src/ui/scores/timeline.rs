@@ -214,7 +214,8 @@ fn TimelineMark(
     /// The ring, else the guide.
     ring: bool,
 ) -> Element {
-    let focus = focus(marked, best);
+    let held = |at| spots.iter().any(|(spot, ..)| *spot == at);
+    let focus = focus(marked, best, held);
     let Some(&(_, x, y)) = spots.iter().find(|(at, ..)| Some(*at) == focus) else {
         return rsx! {};
     };
@@ -243,7 +244,9 @@ fn TimelineFocus(
     marked: Memo<Option<SessionPick>>,
     ranking: Ranking,
 ) -> Element {
-    let focus = focus(marked, best);
+    let focus = focus(marked, best, |at| {
+        board.iter().any(|entry| pick(entry) == at)
+    });
     let Some(entry) = board.iter().find(|entry| Some(pick(entry)) == focus) else {
         return rsx! {};
     };

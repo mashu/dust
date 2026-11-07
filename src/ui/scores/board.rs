@@ -111,12 +111,15 @@ pub(super) fn BoardList(
     let runs_only = board.iter().chain(&assisted).all(is_run);
     let runs_among_others = !runs_only && board.iter().any(is_run);
     let note = ranked_by(ranking, runs_only);
+    let focus = focus(marked, best, |at| {
+        board.iter().any(|entry| pick(entry) == at)
+    });
+    let tapped = pinned();
     let (mut rows, mut greyed) = (board, assisted);
     if !show_all() {
         rows.truncate(BOARD_TOP);
         greyed.truncate(BOARD_TOP - rows.len());
     }
-    let (focus, tapped) = (focus(marked, best), pinned());
     rsx! {
         div { class: "card stack-sm",
             CardHead {

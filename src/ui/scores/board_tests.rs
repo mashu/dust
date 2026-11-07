@@ -107,6 +107,36 @@ fn two_sessions_set_at_one_moment_are_two_rows() {
     assert!(ui.has("1st</span> · 90.0 a group"));
 }
 
+/// A row tapped stays marked on a board that holds its session, and on one
+/// that does not, the best is marked, on the timeline and beneath it, until
+/// the board that holds it is shown again. The timeline used to mark
+/// nothing, and say nothing under it, for a row of another board.
+#[test]
+fn a_row_tapped_on_another_board_leaves_the_best_marked() {
+    let mut ui = board(vec![
+        koch(1, 30.0),
+        run_of(2, 90.0, CharSetMode::Callsign),
+        koch(3, 50.0),
+    ]);
+    ui.click("board-3");
+    assert!(ui.has("3rd</span> · 30.0 a group"));
+    ui.click("pill-koch");
+    assert!(
+        ui.input_tag("board-2").contains("pinned"),
+        "on this board too"
+    );
+    assert!(ui.has("2nd</span> · 30.0 a group"));
+    ui.click("pill-all-modes");
+    ui.click("board-1");
+    assert!(ui.has("1st</span> · 90.0 a group"));
+    ui.click("pill-koch");
+    assert!(ui.input_tag("board-1").contains("focused"), "{}", ui.html());
+    assert!(ui.has("1st</span> · 50.0 a group"), "{}", ui.html());
+    assert!(ui.has("timeline-mark") && ui.has("timeline-guide"));
+    ui.click("pill-all-modes");
+    assert!(ui.input_tag("board-1").contains("pinned"));
+}
+
 /// Pointing at a row redraws the rows it moves between, the mark and what
 /// is said of it, and nothing else: the tab reads every stored run's log to
 /// build the board, and the timeline draws a dot a session, so neither is

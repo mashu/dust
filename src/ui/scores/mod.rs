@@ -82,10 +82,16 @@ fn rating_said(ranking: Ranking, rating: f64) -> String {
     }
 }
 
-/// The session marked on the timeline: the row pointed at or tapped, else
-/// the best, `best`.
-fn focus(marked: Memo<Option<SessionPick>>, best: Option<SessionPick>) -> Option<SessionPick> {
-    marked().or(best)
+/// The session marked on the timeline: the row pointed at or tapped, where
+/// the board holds it, as `held` says, else the best, `best`. A row tapped
+/// on another board, or pointed at as the board changed under it, leaves
+/// the best marked on this one.
+fn focus(
+    marked: Memo<Option<SessionPick>>,
+    best: Option<SessionPick>,
+    held: impl Fn(SessionPick) -> bool,
+) -> Option<SessionPick> {
+    marked().filter(|marked| held(*marked)).or(best)
 }
 
 /// The session a row of the board is: where it sits in the history the
