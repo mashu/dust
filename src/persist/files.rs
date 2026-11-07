@@ -87,6 +87,12 @@ const READ_APART_FROM: usize = 512;
 /// How many threads at most read the history as it loads.
 const READERS: usize = 4;
 
+/// How many threads at most store the records the move makes
+/// ([`place_each`]): a filesystem makes the flushes of many files at once
+/// durable together, where flushed one after another each waits for the
+/// disk on its own.
+const WRITERS: usize = 8;
+
 /// The history as files under one folder.
 pub(super) struct HistoryFiles {
     /// The store's folder, where an older build keeps the history whole.
@@ -461,25 +467,7 @@ impl HistoryFiles {
     /// already, the next free one: no record is ever written over. The
     /// name it is stored under.
     fn place_record(&self, record: &Record) -> io::Result<RecordId> {
-        let mut id = record.id;
-        for _ in 0..BUMPS {
-            let name = file_name(id);
-            match fs::read(self.records().join(&name)) {
-                Ok(held) if held == record.json.as_bytes() => return Ok(id),
-                Ok(_) => id = id.bumped(),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    place_whole(&self.records(), &name, record.json.as_bytes())?;
-                    self.size
-                        .fetch_add(record.json.len() as u64, Ordering::Relaxed);
-                    return Ok(id);
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(io::Error::other(format!(
-            "no name was free for the session stored as {}",
-            record.id
-        )))
+        place(&self.records(), record, &self.size)
     }
 
     /// `bytes` fewer stored, as a record goes: never fewer than none.
@@ -740,9 +728,8 @@ impl HistoryFiles {
         let deleted = legacy_deleted(&self.root);
         let (records, layout) =
             legacy::moved(&sessions, fingerprint, &deleted, crate::time::now_ms());
-        for record in self.not_moved_yet(records).map_err(|err| err.to_string())? {
-            self.place_record(&record).map_err(|err| err.to_string())?;
-        }
+        let moving = self.not_moved_yet(records).map_err(|err| err.to_string())?;
+        place_each(&self.records(), &moving, &self.size).map_err(|err| err.to_string())?;
         sync_if_there(&self.records()).map_err(|err| err.to_string())?;
         layout
             .written()
@@ -1096,6 +1083,69 @@ fn read_each(
                     .unwrap_or_else(|| ids.iter().map(one).collect())
             })
             .collect()
+    })
+}
+
+/// Store `record` in `records` under its name, or, where other bytes have
+/// that name already, the next free one: no record is ever written over.
+/// The name it is stored under, and its bytes counted in `size` where they
+/// were written.
+fn place(records: &Path, record: &Record, size: &AtomicU64) -> io::Result<RecordId> {
+    let mut id = record.id;
+    for _ in 0..BUMPS {
+        let name = file_name(id);
+        match fs::read(records.join(&name)) {
+            Ok(held) if held == record.json.as_bytes() => return Ok(id),
+            Ok(_) => id = id.bumped(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                place_whole(records, &name, record.json.as_bytes())?;
+                size.fetch_add(record.json.len() as u64, Ordering::Relaxed);
+                return Ok(id);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::other(format!(
+        "no name was free for the session stored as {}",
+        record.id
+    )))
+}
+
+/// Store each of `records` in `dir` ([`place`]), on as many as [`WRITERS`]
+/// threads at once, a part each, as the move to records stores a whole
+/// history while the app's first window waits on it: one after another,
+/// each waiting for its own flush of the disk, three thousand sessions
+/// kept it waiting for seconds, on a slow disk for a minute.
+///
+/// Each record is flushed before it takes its name, as ever, so a move
+/// cut short leaves every record whole or not there at all, in whatever
+/// order they were stored, and is made again to the same records before
+/// its layout is written. Each record has a place of its own, so no two
+/// parts ever reach for the same name.
+fn place_each(dir: &Path, records: &[Record], size: &AtomicU64) -> io::Result<()> {
+    let one = |record: &Record| place(dir, record, size).map(|_| ());
+    if records.len() < 2 {
+        return records.iter().try_for_each(one);
+    }
+    let part = records.len().div_ceil(WRITERS);
+    thread::scope(|scope| {
+        let placing: Vec<_> = records
+            .chunks(part)
+            .map(|records| {
+                let started = thread::Builder::new()
+                    .name("dust-history-write".into())
+                    .spawn_scoped(scope, move || records.iter().try_for_each(one));
+                (records, started)
+            })
+            .collect();
+        // A part whose thread would not start, or stopped short, is stored
+        // here instead: what it stored already is found stored.
+        placing.into_iter().try_for_each(|(records, started)| {
+            started
+                .ok()
+                .and_then(|writer| writer.join().ok())
+                .unwrap_or_else(|| records.iter().try_for_each(one))
+        })
     })
 }
 
@@ -2192,6 +2242,24 @@ mod tests {
         assert_eq!(stamps(&read), [5, 3, 9]);
         assert_eq!(everything(&dir.0.join(HISTORY).join(RECORDS)), moved);
         assert!(dir.0.join(HISTORY).join(LAYOUT_FILE).exists());
+    }
+
+    /// A history of three thousand sessions kept whole is moved to records
+    /// in a moment, the first time this layout opens: the app's first
+    /// window waits on it.
+    #[test]
+    #[ignore = "a timing, on a disk of its own: run by hand"]
+    fn three_thousand_sessions_kept_whole_move_in_a_moment() {
+        let dir = TempDir::new("move-timing");
+        let whole: Vec<SessionResult> = (1..=3_000).map(|n| finished(n * 60_000)).collect();
+        keep_whole(&dir, &whole);
+        let started = std::time::Instant::now();
+        let read = Files::at(&dir.0).load();
+        let took = started.elapsed();
+        assert_eq!(read.sessions.len(), whole.len());
+        assert!(read.complete);
+        eprintln!("3,000 sessions moved in {took:?}");
+        assert!(took < Duration::from_secs(1), "{took:?}");
     }
 
     /// A history file that is no list at all is set aside as it always
