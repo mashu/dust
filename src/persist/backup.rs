@@ -416,15 +416,40 @@ pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
 }
 
 /// Every session of `raw`, a JSON list, that reads, each read from where
-/// it lies, and scored as sessions score today: one that does not read is
-/// left out alone. None where `raw` is no list.
+/// it lies as the list is read, and scored as sessions score today: one
+/// that does not read is left out alone, and nothing is held of it. None
+/// where `raw` is no list.
 fn each_session(raw: &str) -> Option<Vec<SessionResult>> {
-    let each: Vec<&RawValue> = serde_json::from_str(raw).ok()?;
-    Some(
-        each.into_iter()
-            .filter_map(|session| serde_json::from_str(session.get()).ok().map(scored))
-            .collect(),
-    )
+    use serde::Deserializer as _;
+    let mut list = serde_json::Deserializer::from_str(raw);
+    let sessions = (&mut list).deserialize_seq(EachSession).ok()?;
+    list.end().ok()?;
+    Some(sessions)
+}
+
+/// What reads a list of sessions an element at a time ([`each_session`]),
+/// so that a list holds no more memory than the sessions in it take: a
+/// file of a gigabyte of nothing but `0,` was a list of five hundred
+/// million elements held at once, some eight gigabytes, and the app was
+/// stopped for want of them.
+struct EachSession;
+
+impl<'de> serde::de::Visitor<'de> for EachSession {
+    type Value = Vec<SessionResult>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a list of sessions")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut list: A) -> Result<Self::Value, A::Error> {
+        let mut sessions = Vec::new();
+        while let Some(session) = list.next_element::<&RawValue>()? {
+            if let Ok(session) = serde_json::from_str(session.get()) {
+                sessions.push(scored(session));
+            }
+        }
+        Ok(sessions)
+    }
 }
 
 /// How Dust 0.16.2 read a backup, kept as it was: a backup this version
@@ -971,6 +996,17 @@ mod tests {
             format!(r#"[{good},{{"date":"broken"}}]"#),
             format!("  \n[{good}]"),
             format!(r#"{{"dustBackup":1,"sessions":[{good}]}} trailing"#),
+            // Lists of anything but sessions, long ones among them: read an
+            // element at a time, and none of it held.
+            format!("[{}]", ["0"; 100_000].join(",")),
+            format!(r#"[0,{good},[],{{}},"x",null,{good}]"#),
+            format!(
+                r#"{{"dustBackup":1,"sessions":[{}]}}"#,
+                ["0"; 100_000].join(",")
+            ),
+            format!(r#"{{"dustBackup":1,"sessions":[{good},0,{good}]}}"#),
+            format!("[{good},0"),
+            format!("[{good}]]"),
         ];
         for raw in &cases {
             assert_eq!(read_backup(raw), read_backup_as_0_16_2(raw), "{raw}");
