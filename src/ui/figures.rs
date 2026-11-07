@@ -192,15 +192,28 @@ pub fn without_band(settings: &TrainingSettings) -> TrainingSettings {
 /// scope the first time a screen asks for it, so it lasts as long as the
 /// app does, and a screen opened again finds it, and what was worked out of
 /// it, as it was left.
+///
+/// A change is one to its sessions ([`StoredHistory::generation`]). What
+/// else is written of the history changes none, as the store saying it took
+/// a session does after every change, and leaves the handle as it was.
 pub fn use_history(ctx: AppCtx) -> Memo<History> {
     use_hook(|| {
         in_root(|| {
             try_consume_context::<Memo<History>>().unwrap_or_else(|| {
+                // The handle made last, and the sessions it was made for.
+                let mut made = CopyValue::new(None::<(u64, History)>);
                 provide_context(Memo::new(move || {
-                    // Read, so that every change to the history makes a
-                    // new handle; the handle reads it where it is.
-                    let _ = ctx.sessions.read();
-                    History::new(Sessions::App(ctx.sessions))
+                    // Read, so that every write to the history looks again;
+                    // the handle reads it where it is.
+                    let generation = ctx.sessions.read().generation();
+                    if let Some((made_for, history)) = &*made.peek()
+                        && *made_for == generation
+                    {
+                        return history.clone();
+                    }
+                    let history = History::new(Sessions::App(ctx.sessions));
+                    made.set(Some((generation, history.clone())));
+                    history
                 }))
             })
         })
@@ -397,6 +410,27 @@ mod tests {
             ui.click("nav-practice");
             ui.click("nav-stats");
             assert_eq!(ui.take_worked_out("overview"), 0);
+        });
+    }
+
+    /// What the store says of a session it took, saved, changes no session:
+    /// the history is the same, and nothing a tab shows is worked out again.
+    /// Every write to the history made a new one, and the store says it
+    /// after each session kept, after a sync, after every change.
+    #[test]
+    fn a_session_marked_saved_works_no_figure_out_again() {
+        run(|| async {
+            let mut ui = stats_seen(12);
+            ui.take_all_worked_out();
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let first = sessions.peek().id_at(0).expect("a session");
+                sessions.write().mark_saved(first);
+            });
+            for tab in TABS {
+                ui.click(tab);
+            }
+            assert_eq!(ui.take_all_worked_out(), []);
         });
     }
 

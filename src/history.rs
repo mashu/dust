@@ -181,8 +181,8 @@ impl StoredHistory {
         self.unread.insert(id);
     }
 
-    /// How many changes the history has had.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// How many changes the history has had: one more for every session
+    /// put in or taken out, and for nothing else written of it.
     pub fn generation(&self) -> u64 {
         self.generation
     }
