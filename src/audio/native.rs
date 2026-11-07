@@ -46,6 +46,18 @@ const LOOPING: &str = "Audio stream: the device reports one error after another"
 /// log with it.
 const ERROR_BACKOFF: Duration = Duration::from_millis(20);
 
+/// How long a retired stream's worker ([`OpenStream`]'s drop) is made to
+/// wait after each error it reports before it reports the next. Nothing
+/// will tell it to stop: cpal 0.15's ALSA worker, on a device that reports
+/// POLLERR, reports an error each time round and never prepares the device
+/// again, and it ends only as its stream closes, which a retired stream
+/// never does. Made to wait [`ERROR_BACKOFF`], it woke some fifty times a
+/// second for as long as the app ran, and every stream retired left one
+/// more. A wait, and not a stop for good: a test marks streams retired
+/// that are then closed where closing waits on the worker, as on macOS and
+/// Windows.
+const RETIRED_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Whether letting go of a stream waits for its worker thread, which may
 /// never come back to be told. cpal 0.15's ALSA host, its one host on
 /// Linux and the BSDs, does: its worker retries a failed write in a loop
@@ -137,7 +149,8 @@ struct OpenStream {
     /// ([`StreamWords`]).
     erring: Arc<AtomicBool>,
     /// Let go of without its worker being waited for: its callback plays
-    /// silence from then on, and leaves the mixer to the stream after it.
+    /// silence from then on, and leaves the mixer to the stream after it,
+    /// and its worker waits [`RETIRED_BACKOFF`] after every error.
     retired: Arc<AtomicBool>,
 }
 
@@ -680,6 +693,19 @@ impl StreamWords {
         }
         again
     }
+
+    /// The stream reports `err` ([`Self::erred`]): how long its worker is
+    /// made to wait before it reports the next, if at all. A live stream's
+    /// waits [`ERROR_BACKOFF`] in a loop of errors; a retired stream's,
+    /// [`RETIRED_BACKOFF`] after every error.
+    fn backoff_after(&self, err: &cpal::StreamError) -> Option<Duration> {
+        let again = self.erred(err);
+        if self.retired.load(Ordering::Acquire) {
+            Some(RETIRED_BACKOFF)
+        } else {
+            again.then_some(ERROR_BACKOFF)
+        }
+    }
 }
 
 /// Build an output stream that plays `output` into `T` samples, until it is
@@ -723,8 +749,8 @@ where
                 interleave(data, channels, mono);
             },
             move |err| {
-                if words.erred(&err) {
-                    std::thread::sleep(ERROR_BACKOFF);
+                if let Some(backoff) = words.backoff_after(&err) {
+                    std::thread::sleep(backoff);
                 } else if !told {
                     // The first error is the one worth reading.
                     told = true;
@@ -905,6 +931,48 @@ mod word_tests {
         assert!(
             started.heartbeat.went_silent(1.1 + state::SILENT_AFTER_SEC),
             "called, then erring: as one that stopped"
+        );
+    }
+
+    /// A retired stream's worker, left looping on errors with nothing ever
+    /// to tell it to stop, as cpal's ALSA worker is on a device that
+    /// reports POLLERR, waits about a second after each error before it
+    /// reports the next, from the first error after it was retired; a
+    /// live stream's worker in a loop of errors waits [`ERROR_BACKOFF`],
+    /// and after an error that may pass, not at all. About a second, and
+    /// not for good: a stream a test marks retired may be closed after all
+    /// where closing waits on its worker. A retired stream's worker used to
+    /// wait [`ERROR_BACKOFF`] too, and woke some fifty times a second for
+    /// as long as the app ran, a thread more for every stream retired.
+    #[test]
+    fn a_retired_stream_in_a_loop_of_errors_waits_a_second_between_them() {
+        let pollerr = cpal::StreamError::BackendSpecific {
+            err: cpal::BackendSpecificError {
+                description: "`alsa::poll()` returned POLLERR".into(),
+            },
+        };
+        let about_a_second = Duration::from_secs(1)..=Duration::from_secs(2);
+        let looping = words();
+        assert_eq!(looping.backoff_after(&pollerr), None, "the first");
+        assert_eq!(
+            looping.backoff_after(&pollerr),
+            Some(ERROR_BACKOFF),
+            "a loop of them"
+        );
+        looping.retired.store(true, Ordering::Release);
+        for error in 0..3 {
+            let waits = looping.backoff_after(&pollerr);
+            assert!(
+                waits.is_some_and(|waits| about_a_second.contains(&waits)),
+                "retired, error {error}: {waits:?}"
+            );
+        }
+        let retired = words();
+        retired.retired.store(true, Ordering::Release);
+        let waits = retired.backoff_after(&pollerr);
+        assert!(
+            waits.is_some_and(|waits| about_a_second.contains(&waits)),
+            "retired before it ever erred: {waits:?}"
         );
     }
 }
