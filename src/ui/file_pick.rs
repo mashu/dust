@@ -283,13 +283,14 @@ async fn read_apart(path: std::path::PathBuf) -> Option<Option<String>> {
 /// browser may not read a file of hundreds of megabytes at all. A file that
 /// is no UTF-8 is no text, as a computer reads it: none, found at the slice
 /// that shows it, the first of a photo or a film, rather than once the whole
-/// of it is held, and held again as text. So is a file there is no room for:
-/// a browser's memory has an end, and running out of it would end the app.
+/// of it is held, and held again as text; room for the whole of a file is
+/// made only once its first slice reads as text, as the page keeps for good
+/// the memory it grows to. So is a file there is no room for: a browser's
+/// memory has an end, and running out of it would end the app.
 #[cfg(all(feature = "web", not(test)))]
 async fn read_in_slices(file: &web_sys::File) -> Option<String> {
     let size = file.size();
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(size as usize).ok()?;
     let (mut at, mut text_up_to) = (0.0, 0);
     while at < size {
         let end = (at + SLICE_BYTES as f64).min(size);
@@ -303,6 +304,11 @@ async fn read_in_slices(file: &web_sys::File) -> Option<String> {
         bytes.resize(from + length, 0);
         read.copy_to(&mut bytes[from..]);
         text_up_to = utf8_up_to(&bytes, text_up_to)?;
+        if from == 0 {
+            bytes
+                .try_reserve_exact((size as usize).saturating_sub(length))
+                .ok()?;
+        }
         at = end;
     }
     String::from_utf8(bytes).ok()
