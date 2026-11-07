@@ -390,6 +390,10 @@ pub async fn sync_once(
         synced.took = change.put.len();
         synced.let_go = change.forget.len();
     }
+    // A deletion taken from the drive is the last word here only while the
+    // session stays gone: one listed here again, put back by hand say, and
+    // deleted after, was deleted by hand, which the drive is to hear of.
+    state.applied.retain(|id, _| !listed.contains(id));
     for &(id, at) in &planned.let_go {
         state.applied.insert(id, at);
     }

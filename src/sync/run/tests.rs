@@ -340,6 +340,57 @@ fn a_deletion_after_a_session_put_back_ahead_reaches_every_device() {
     assert_eq!(phone.stamps(), [1]);
 }
 
+/// Sessions a device let go as the drive deleted them, put back there by
+/// hand since, by a restore say, and deleted there by hand after, stay
+/// deleted, and the deletions reach every device: the deletion the device
+/// took from the drive is no longer the last word on a session once it is
+/// back, whether its putting back went to the drive or the drive had it
+/// back already. It used to be, and the drive's putting back, later than
+/// it, brought each session back at the next sync, the deletion by hand
+/// undone and never sent.
+#[test]
+fn sessions_let_go_then_put_back_and_deleted_by_hand_stay_deleted() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2, 3]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let held = |device: &Device, id: RecordId| {
+        device
+            .store
+            .load_history()
+            .sessions
+            .into_iter()
+            .find(|(held, _)| *held == id)
+            .expect("held")
+            .1
+    };
+    let (two, three) = (computer.id_of(2), computer.id_of(3));
+    let (session_two, session_three) = (held(&computer, two), held(&computer, three));
+    phone.delete(2, 120);
+    phone.delete(3, 120);
+    phone.sync(&remote, 130).expect("synced");
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "let go");
+    // 3 put back on the phone, and so in the drive before the computer
+    // puts it back: the computer has nothing of it to send.
+    phone.undo(three, &session_three, 150);
+    phone.sync(&remote, 160).expect("synced");
+
+    // Both put back on the computer by hand, then deleted there by hand.
+    computer.undo(two, &session_two, 170);
+    computer.undo(three, &session_three, 170);
+    computer.sync(&remote, 180).expect("synced");
+    computer.delete(2, 190);
+    computer.delete(3, 190);
+    computer.sync(&remote, 200).expect("synced");
+    assert_eq!(computer.stamps(), [1], "neither taken back");
+    phone.sync(&remote, 210).expect("synced");
+    assert_eq!(phone.stamps(), [1], "deleted there too");
+}
+
 /// A setting changed on one device reaches the other, and one changed on
 /// the other comes back, each the newest of its own.
 #[test]

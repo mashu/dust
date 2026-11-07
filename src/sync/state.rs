@@ -52,7 +52,8 @@ pub struct SyncState {
     #[serde(default, with = "drive_state")]
     pub drive: DriveState,
     /// The deletions taken from the drive and made here, each with the
-    /// time of the drive's deletion ([`super::plan::Here::applied`]).
+    /// time of the drive's deletion ([`super::plan::Here::applied`]): each
+    /// until a sync finds its session here again.
     #[serde(default, with = "times")]
     pub applied: BTreeMap<RecordId, u64>,
     /// The sessions put back here by hand since the last sync, and when
