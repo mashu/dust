@@ -1037,10 +1037,13 @@ impl HistoryFiles {
 
 impl Watch {
     /// Whether anything changed since this copy last looked, here or in
-    /// the history kept whole: noted as seen, so it is told once.
+    /// the history kept whole. Nothing is noted: a change is told of each
+    /// time it is asked, until a look that lists the history takes it up
+    /// ([`Self::looked`]), so one whose look could not list it is told of
+    /// again.
     pub(super) fn changed(&self) -> bool {
         let now = self.stamps();
-        self.seen().replace(now) != Some(now)
+        *self.seen() != Some(now)
     }
 
     /// Note the folders as `before` found them, just before this copy
@@ -1055,10 +1058,17 @@ impl Watch {
     /// it to take up. Where they had changed since it last looked, as
     /// another copy changed them, nothing is noted, and what the other did
     /// is taken up at the next look, with this change beside it.
+    ///
+    /// The folders are looked at before what was seen is taken: the app's
+    /// own thread takes it to ask whether anything changed, and waits on
+    /// no disk for it. Only the thread that reads and writes the files
+    /// notes anything, so what was seen is as it was when they were looked
+    /// at.
     fn made(&self, before: Stamps) {
+        let after = self.stamps();
         let mut seen = self.seen();
         if *seen == Some(before) {
-            *seen = Some(self.stamps());
+            *seen = Some(after);
         }
     }
 
@@ -2026,6 +2036,37 @@ mod tests {
         assert!(!files.changed(), "taken up");
     }
 
+    /// A change another copy made is still to take up after a look that
+    /// could not list the history, however often it is asked of, until a
+    /// look that can takes it up. Asking noted it as seen, so a listing
+    /// that failed left it for good: the session another copy stored never
+    /// showed here for as long as the app ran.
+    #[test]
+    fn a_change_is_still_to_take_up_after_a_listing_that_failed() {
+        let dir = TempDir::new("listing-failed");
+        let (here, there) = (Files::at(&dir.0), Files::at(&dir.0));
+        here.load();
+        there.load();
+        let one = record(&finished(1_000));
+        there.apply(&put(std::slice::from_ref(&one)));
+        assert!(here.changed(), "theirs, to take up");
+        assert!(here.changed(), "still, until it is");
+        // Once the records are listed, the packs cannot be: a file stands
+        // where their folder goes, for this one look.
+        let packs = dir.0.join(HISTORY).join(PACKS);
+        let mut in_the_way = Some(packs.clone());
+        here.meanwhile(move || {
+            if let Some(packs) = in_the_way.take() {
+                fs::write(packs, "in the way").unwrap();
+            }
+        });
+        assert_eq!(here.listing(), None);
+        fs::remove_file(&packs).unwrap();
+        assert!(here.changed(), "still to take up");
+        assert_eq!(here.listing(), Some(vec![one.id]));
+        assert!(!here.changed(), "taken up");
+    }
+
     /// A restore of many sessions at once that stops before it is done is
     /// told of by the next to read the history, once; one still running
     /// in another copy is left to it.
@@ -2822,6 +2863,7 @@ mod tests {
         two_copies_on_one_folder_take_up_each_others_changes,
         a_change_another_copy_made_first_is_taken_up_after_ones_own,
         what_another_copy_stores_while_the_history_is_read_is_taken_up,
+        a_change_is_still_to_take_up_after_a_listing_that_failed,
         a_restore_that_fails_is_not_told_of_as_cut_short,
         a_store_from_a_newer_incompatible_layout_is_only_read,
         a_later_compatible_layout_keeps_what_it_added,
