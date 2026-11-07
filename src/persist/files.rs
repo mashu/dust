@@ -582,11 +582,14 @@ impl HistoryFiles {
         }
     }
 
-    /// Every record and tombstone there is.
+    /// Every record and tombstone there is. The loose records are listed
+    /// before the packs: a later build packs records by writing the pack
+    /// before it takes their loose copies away, so one packed meanwhile is
+    /// found loose, or else in its pack, and never in neither.
     fn listing_now(&self) -> io::Result<Listing> {
-        let packed = self.packed()?;
-        self.meanwhile();
         let mut records = ids_in(&self.records())?;
+        self.meanwhile();
+        let packed = self.packed()?;
         self.meanwhile();
         records.extend(packed.keys().copied());
         let gone = ids_in(&self.tombstones())?;
@@ -615,7 +618,9 @@ impl HistoryFiles {
 
     /// Every record a later build packed together, and what each holds,
     /// as it was written. A line that does not read, or a pack cut short,
-    /// gives up what it can: the pack is left as it is.
+    /// gives up what it can, and a pack that cannot be opened, gone since
+    /// its folder was read, say, gives up nothing: the rest are read all
+    /// the same, and every pack is left as it is.
     fn packed(&self) -> io::Result<BTreeMap<RecordId, String>> {
         let entries = match fs::read_dir(self.dir.join(PACKS)) {
             Ok(entries) => entries,
@@ -632,7 +637,17 @@ impl HistoryFiles {
             {
                 continue;
             }
-            let lines = io::BufReader::new(GzDecoder::new(fs::File::open(entry.path())?)).lines();
+            let pack = match fs::File::open(entry.path()) {
+                Ok(pack) => pack,
+                Err(err) => {
+                    eprintln!(
+                        "could not read {} of the history: {err}",
+                        entry.file_name().to_string_lossy()
+                    );
+                    continue;
+                }
+            };
+            let lines = io::BufReader::new(GzDecoder::new(pack)).lines();
             for line in lines.map_while(Result::ok) {
                 let Ok(line) = serde_json::from_str::<PackLine>(&line) else {
                     continue;
@@ -2462,11 +2477,11 @@ mod tests {
         );
     }
 
-    /// Write a pack of `records`, as a later build packs them, with
-    /// `extra` lines after them.
-    fn pack(dir: &TempDir, name: &str, records: &[&Record], extra: &[&str]) -> PathBuf {
+    /// Write a pack of `records` in the history in `root`, as a later
+    /// build packs them, with `extra` lines after them.
+    fn pack(root: &Path, name: &str, records: &[&Record], extra: &[&str]) -> PathBuf {
         use flate2::write::GzEncoder;
-        let packs = dir.0.join(HISTORY).join(PACKS);
+        let packs = root.join(HISTORY).join(PACKS);
         fs::create_dir_all(&packs).unwrap();
         let mut lines = String::new();
         for record in records {
@@ -2495,7 +2510,7 @@ mod tests {
         let (first, second, third) = (finished(1_000), finished(2_000), finished(3_000));
         let (one, two, three) = (record(&first), record(&second), record(&third));
         let packed = pack(
-            &dir,
+            &dir.0,
             &format!("{}-{}{PACK_EXTENSION}", one.id, two.id),
             &[&one, &two],
             &["not a line", r#"{"id":"not a name","s":"{}"}"#],
@@ -2516,6 +2531,54 @@ mod tests {
         assert_eq!(files.listing(), Some(vec![two.id, three.id]));
         assert_eq!(files.forgotten(&[one.id]), [one.id]);
         assert_eq!(fs::read(&packed).unwrap(), before, "never written");
+    }
+
+    /// A record a later build packs while this one lists the history, its
+    /// pack written and then its loose copy taken away, is listed all the
+    /// same, and read, wherever the listing had got to. The packs were read
+    /// before the loose records, so one packed in between was in neither,
+    /// and the app stored it again as lost.
+    #[test]
+    fn a_record_packed_while_the_history_is_listed_is_listed_all_the_same() {
+        let (dir, files) = history("packed-meanwhile");
+        files.load();
+        let (one, two) = (record(&finished(1_000)), record(&finished(2_000)));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        let root = dir.0.clone();
+        let mut packing = Some(one.clone());
+        files.meanwhile(move || {
+            // Halfway through the listing, once one folder of it is read.
+            if let Some(one) = packing.take() {
+                pack(&root, "packed.jsonl.gz", &[&one], &[]);
+                let loose = root.join(HISTORY).join(RECORDS).join(file_name(one.id));
+                fs::remove_file(loose).unwrap();
+            }
+        });
+        assert_eq!(files.listing(), Some(vec![one.id, two.id]));
+        assert_eq!(files.read(&[one.id]), [Ok(one)]);
+    }
+
+    /// A pack that cannot be opened, gone between the look at its folder
+    /// and the read, say, costs only the records it holds: the rest of the
+    /// history is read and listed. It used to leave the whole history
+    /// unlisted, and the app opened on none of it, nor took up anything for
+    /// as long as it ran.
+    #[cfg(unix)]
+    #[test]
+    fn a_pack_that_cannot_be_opened_costs_only_its_own_records() {
+        let (dir, files) = history("pack-unopened");
+        files.load();
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        pack(&dir.0, "packed.jsonl.gz", &[&one], &[]);
+        files.apply(&put(std::slice::from_ref(&two)));
+        let gone = dir.0.join(HISTORY).join(PACKS).join("gone.jsonl.gz");
+        std::os::unix::fs::symlink(dir.0.join("nowhere"), gone).unwrap();
+        assert_eq!(
+            Files::at(&dir.0).load().sessions,
+            [(one.id, first), (two.id, second)]
+        );
+        assert_eq!(files.listing(), Some(vec![one.id, two.id]));
     }
 
     /// Each test of the files that reaches them as the app does, made
@@ -2569,5 +2632,8 @@ mod tests {
         a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
         a_pack_and_a_loose_copy_of_one_record_read_as_one,
+        a_record_packed_while_the_history_is_listed_is_listed_all_the_same,
+        #[cfg(unix)]
+        a_pack_that_cannot_be_opened_costs_only_its_own_records,
     }
 }
