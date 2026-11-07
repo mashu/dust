@@ -110,10 +110,14 @@ pub fn next_wait_step(
     {
         return WaitStep::Done(PlaybackOutcome::Completed);
     }
-    // A send whose clock is parked is not stalling, it is waiting for the
-    // listener to come back, and the scheduled tone is still there to play
-    // when they do. Failing here would end a session because someone looked
-    // at another tab.
+    // A send whose clock is parked is not stalling. It is waiting for the
+    // listener to come back to a hidden tab or a locked phone, and the
+    // scheduled tone is still there to play when they do; or for a sound
+    // device slow to start, a Bluetooth headset or a USB sound card woken
+    // from saving power, to call its stream the first time, for as long as
+    // the native backend gives the stream to start, past which it says the
+    // stream failed. Failing here would end a session because someone
+    // looked at another tab, or because their headset took seconds to wake.
     if flags.suspended {
         return WaitStep::KeepWaiting;
     }
