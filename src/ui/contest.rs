@@ -14,7 +14,9 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::contest_runtime::{change_speed, focus_field, pause_run, press_key, resume_run, tick};
+use crate::contest_runtime::{
+    change_speed, focus_field, pause_run, press_key, resume_run, tick, typed_len_max,
+};
 use crate::page_hidden::{RUN_HIDDEN, use_page_hidden};
 use crate::session_runtime::{abort_run, finish_run};
 use crate::state::AppCtx;
@@ -500,6 +502,7 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
             spellcheck: false,
             enterkeyhint: "send",
             inputmode: ANSWER_INPUT_MODE,
+            maxlength: "{typed_len_max(field)}",
             lang: "zxx",
             oninput: move |e| {
                 // The key's moment, before anything else is done with it.
@@ -2159,6 +2162,37 @@ mod tests {
                 starts + 1,
                 "your call and exchange"
             );
+        });
+    }
+
+    /// Each field takes no more than a call or an exchange is typed with: it
+    /// says so to the page, and a page pasted in all the same is cut there
+    /// and drawn as it is kept. His then sends a call's length, not hours
+    /// of Morse.
+    #[test]
+    fn the_fields_take_no_more_than_a_call_or_an_exchange() {
+        run(|| async {
+            let (mut ui, recorder, _call) = first_caller().await;
+            for (id, field) in [
+                ("field-call", EntryField::Call),
+                ("field-exchange", EntryField::Exchange),
+            ] {
+                let most = typed_len_max(field);
+                let tag = ui.input_tag(id);
+                assert!(tag.contains(&format!("maxlength=\"{most}\"")), "{tag}");
+                ui.type_into(id, &"K".repeat(100_000));
+                let kept = ui.with_app(|ctx| ctx.entry.shown(field));
+                assert_eq!(kept, "K".repeat(most), "{id}");
+                let tag = ui.input_tag(id);
+                assert!(tag.contains(&format!("value=\"{kept}\"")), "{tag}");
+            }
+            ui.with_app(|ctx| press_key(ctx, OpKey::HisCall));
+            let sent = recorder
+                .starts()
+                .last()
+                .map(|start| start.transcript.text.clone());
+            let call = "K".repeat(typed_len_max(EntryField::Call));
+            assert_eq!(sent, Some(call));
         });
     }
 

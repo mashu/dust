@@ -1,4 +1,4 @@
-use cw_core::{ChosenSpeed, CountdownTo, MonoMs, SKIPPED, answer_length_matches};
+use cw_core::{ChosenSpeed, CountdownTo, GROUP_SIZE_MAX, MonoMs, SKIPPED, answer_length_matches};
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
@@ -16,6 +16,12 @@ use crate::ui::widgets::{
 pub(crate) const INPUT_COMMIT_DEBOUNCE_MS: u32 = 48;
 
 const _: () = assert!(INPUT_COMMIT_DEBOUNCE_MS < cw_core::AUTO_CONFIRM_DELAY_MS);
+
+/// The most the answer box takes, in characters: twice what the session
+/// keeps of an answer to the longest group, itself twice the group's length
+/// ([`GROUP_SIZE_MAX`]). Nothing the session would keep is cut, spaces among
+/// it and all; a page pasted in is.
+pub(crate) const ANSWER_LEN_MAX: usize = 4 * GROUP_SIZE_MAX as usize;
 
 /// Whether the box in focus is the one being answered: the current group's,
 /// not answered yet. Between two groups it is not, for the focus has moved on
@@ -155,11 +161,20 @@ impl AnswerDraft {
     /// is new in it keyed at `keyed`, or typed for you, untimed, at `None`.
     /// The session is handed it at once when its length matches the group's
     /// — auto-confirm starts from there — and otherwise once typing has
-    /// paused, or sooner if anything happens to the session first.
-    fn edit(mut self, idx: usize, text: String, sent: &str, keyed: Option<MonoMs>) {
+    /// paused, or sooner if anything happens to the session first. Past
+    /// what the box takes ([`ANSWER_LEN_MAX`]) it is cut, and the box drawn
+    /// as it is kept.
+    fn edit(mut self, idx: usize, mut text: String, sent: &str, keyed: Option<MonoMs>) {
+        let cut = text.char_indices().nth(ANSWER_LEN_MAX).map(|(at, _)| at);
+        if let Some(at) = cut {
+            text.truncate(at);
+        }
         let full = answer_length_matches(sent, &text);
         self.at.set(Some(idx));
         self.text.set(text.clone());
+        if cut.is_some() {
+            self.redraw();
+        }
         self.outbox.hold(idx, text, keyed);
         let epoch = self.cancel_pending();
         if full {
@@ -365,6 +380,7 @@ fn AnswerBox(
             spellcheck: false,
             enterkeyhint: "done",
             inputmode: ANSWER_INPUT_MODE,
+            maxlength: "{ANSWER_LEN_MAX}",
             lang: "zxx",
             oninput: move |e| {
                 // The key's moment, before anything else is done with it.

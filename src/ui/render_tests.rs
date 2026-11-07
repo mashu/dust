@@ -5504,6 +5504,25 @@ mod interactions {
         });
     }
 
+    /// The box takes no more than an answer to the longest group could
+    /// want: it says so to the page, and a page pasted in all the same is cut
+    /// there, drawn as it is kept, and handed on so. It was held whole, a key
+    /// timed for each of its characters, and handed to the session.
+    #[test]
+    fn the_box_takes_no_more_than_an_answer_wants() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            let most = crate::ui::training::ANSWER_LEN_MAX;
+            let tag = ui.input_tag("group-input-0");
+            assert!(tag.contains(&format!("maxlength=\"{most}\"")), "{tag}");
+            ui.type_into("group-input-0", &"E".repeat(100_000));
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            let kept = "E".repeat(most);
+            assert!(box_shows(&ui, &kept), "{}", ui.input_tag("group-input-0"));
+            assert!(ui.has(&format!("committed:{kept}</p>")));
+        });
+    }
+
     /// A key types as the finger lands: a touch the browser sends no click
     /// for — one that slid as it tapped — types all the same, and the click
     /// it does send after a clean tap is not a second key. A click with no
