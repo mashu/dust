@@ -489,19 +489,23 @@ pub fn auto_level_progress(
         .auto_level
         .auto_adjust_threshold
         .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT);
-    // With no session yet to say which axis fell short, every one being
-    // practised is in the running ([`candidate_axes`]); a fall none of them
-    // can make never comes.
-    let falls = candidate_axes(&CopyTally::default(), settings, false, threshold)
-        .into_iter()
-        .any(|axis| step_axis(settings, axis, -1).is_some());
+    // With no session yet to say which axis did well or fell short, every
+    // one being practised is in the running ([`candidate_axes`]); a move
+    // none of them can make never comes, a rise past the top of every
+    // alphabet no more than a fall below the bottom of every one.
+    let moves = |raise: bool, delta: i32| {
+        candidate_axes(&CopyTally::default(), settings, raise, threshold)
+            .into_iter()
+            .any(|axis| step_axis(settings, axis, delta).is_some())
+    };
+    let (rises, falls) = (moves(true, 1), moves(false, -1));
     Some(AutoLevelProgress {
         threshold,
         above_count: counters.above,
         below_count: counters.below,
         above_target,
         below_target,
-        above_disabled: above_target == 0,
+        above_disabled: above_target == 0 || !rises,
         below_disabled: below_target == 0 || !falls,
         alternating_mixed: mixed,
         next_mixed_axis,
@@ -1087,6 +1091,45 @@ mod tests {
             let change = evaluate_auto_level(&after(0.0), &settings, &mut Default::default());
             assert_eq!(change.is_some(), coming, "{case}: a session short of it");
         }
+    }
+
+    /// A rise with nowhere to go never comes either: a letter level at the
+    /// top of its alphabet, or kept above the top of the one chosen now,
+    /// with no other axis in the running. Home counted up to such a rise all
+    /// the same, and the Overview's chart drew the line to reach for it. It
+    /// says none is coming, as for a fall with nowhere to go.
+    #[test]
+    fn progress_says_no_rise_is_coming_where_one_has_nowhere_to_go() {
+        let rises = |settings: &TrainingSettings| {
+            let progress = auto_level_progress(settings, AutoLevelCounters::default());
+            !progress.expect("progress").above_disabled
+        };
+        let top = koch(1).max_level(LevelAxis::Letters);
+        let mut letters = koch(35);
+        letters.curriculum.char_set_mode = CharSetMode::Mixed;
+        letters.curriculum.mixed_letters_percent = 100;
+        let mut beside_digits = letters.clone();
+        beside_digits.curriculum.mixed_letters_percent = 50;
+        beside_digits.curriculum.digits_level = 5;
+        let mut digits_at_the_top = beside_digits.clone();
+        digits_at_the_top.curriculum.digits_level = crate::morse::MAX_DIGITS_LEVEL;
+        let mut own = koch(20);
+        own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        let cases = [
+            ("Koch at 5", koch(5), true),
+            ("Koch at its top", koch(top), false),
+            ("Mixed's letters alone", letters, false),
+            ("Mixed's digits beside them", beside_digits, true),
+            ("Mixed's digits at their top", digits_at_the_top, false),
+            ("an order of five", own, false),
+        ];
+        for (case, settings, coming) in cases {
+            assert_eq!(rises(&settings), coming, "{case}");
+            let change = evaluate_auto_level(&after(1.0), &settings, &mut Default::default());
+            assert_eq!(change.is_some(), coming, "{case}: a session over it");
+        }
+        assert_eq!(level_up_line(&koch(top)), None, "no line to reach");
+        assert!(level_up_line(&koch(5)).is_some());
     }
 
     /// The keys are where counters already sit in people's saves, so their
