@@ -116,7 +116,8 @@ pub struct SyncCtx {
     /// A sync is waiting to start ([`AppCtx::sync_soon`]).
     soon: CopyValue<bool>,
     /// Sessions put back by hand while a sync was under way: noted once it
-    /// is over.
+    /// is over, or by the next, where that one was of a turning on of sync
+    /// gone since.
     revived: CopyValue<BTreeMap<RecordId, u64>>,
 }
 
@@ -383,18 +384,19 @@ impl AppCtx {
             let here = self.settings.peek().clone().clamp();
             let store = self.app().store;
             let synced = sync_once(&*store, &*link.remote, &mut state, &here, now_ms()).await;
-            // Put back by hand meanwhile: noted with the rest.
-            state.revived.extend(take(self.sync.revived));
             if *self.sync.epoch.peek() != epoch {
                 // Sync was turned off meanwhile, or turned on anew: what
                 // this sync stored is taken up, and none of what it would
-                // keep is kept.
+                // keep is kept. What was put back by hand since is sync's
+                // as it is now, and waits for its next sync.
                 if let Ok(synced) = &synced {
                     self.take_up_synced(synced);
                 }
                 self.sync_over();
                 return;
             }
+            // Put back by hand meanwhile: noted with the rest.
+            state.revived.extend(take(self.sync.revived));
             // The sign-in is no sync's to keep: one made meanwhile stays.
             state.sign_in = self
                 .sync
@@ -616,6 +618,7 @@ impl AppCtx {
         self.next_sync_epoch();
         put(self.sync.state, None);
         put(self.sync.found, None);
+        put(self.sync.revived, BTreeMap::new());
         if let Err(why) = self.app().store.save_sync(None) {
             self.toasts.show(format!(
                 "What sync kept could not be cleared: {}.",

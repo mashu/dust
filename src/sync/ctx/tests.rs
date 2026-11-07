@@ -32,10 +32,13 @@ fn linked_to(harness: &mut Harness, remote: Rc<dyn Remote>, auth: &Rc<FakeAuth>)
 }
 
 /// A folder that answers nothing while a test holds it, and then answers
-/// as `remote` does: a sync under way, for as long as the test likes.
+/// as `remote` does: a sync under way, for as long as the test likes. Held
+/// at its writes alone, it answers what is read of it at once: a sync under
+/// way past its reading, while the card's sign-in looks at the folder.
 struct Held {
     remote: Rc<MemoryRemote>,
     held: Rc<Cell<bool>>,
+    writes: Rc<Cell<bool>>,
 }
 
 impl Held {
@@ -43,6 +46,7 @@ impl Held {
         Rc::new(Self {
             remote: Rc::clone(remote),
             held: Rc::new(Cell::new(false)),
+            writes: Rc::new(Cell::new(false)),
         })
     }
 
@@ -50,14 +54,21 @@ impl Held {
         self.held.set(held);
     }
 
-    /// What `asked` of the folder comes to, asked once the test lets go.
+    fn hold_writes(&self, held: bool) {
+        self.writes.set(held);
+    }
+
+    /// What `asked` of the folder comes to, asked once the test lets go:
+    /// of what it holds, where `writes`.
     fn once_let_go<T: 'static>(
         &self,
+        writes: bool,
         asked: impl FnOnce(&MemoryRemote) -> Pending<T> + 'static,
     ) -> Pending<T> {
-        let (remote, held) = (Rc::clone(&self.remote), Rc::clone(&self.held));
+        let remote = Rc::clone(&self.remote);
+        let (held, writes_held) = (Rc::clone(&self.held), Rc::clone(&self.writes));
         Box::pin(async move {
-            while held.get() {
+            while held.get() || (writes && writes_held.get()) {
                 sleep_ms(POLL_MS).await;
             }
             asked(&remote).await
@@ -67,27 +78,27 @@ impl Held {
 
 impl Remote for Held {
     fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
-        self.once_let_go(|remote| remote.list())
+        self.once_let_go(false, |remote| remote.list())
     }
 
     fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
         let id = id.to_string();
-        self.once_let_go(move |remote| remote.get(&id))
+        self.once_let_go(false, move |remote| remote.get(&id))
     }
 
     fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
         let name = name.to_string();
-        self.once_let_go(move |remote| remote.create(&name, bytes))
+        self.once_let_go(true, move |remote| remote.create(&name, bytes))
     }
 
     fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
         let id = id.to_string();
-        self.once_let_go(move |remote| remote.update(&id, bytes))
+        self.once_let_go(true, move |remote| remote.update(&id, bytes))
     }
 
     fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
         let id = id.to_string();
-        self.once_let_go(move |remote| remote.delete(&id))
+        self.once_let_go(true, move |remote| remote.delete(&id))
     }
 }
 
@@ -146,6 +157,25 @@ fn another_device(
     ))
     .expect("synced");
     (store, state)
+}
+
+/// Delete the record `id` by hand in `store`, another device's, at `at`.
+fn delete_in(store: &MemoryStore, id: RecordId, at: u64) {
+    let session = store
+        .load_history()
+        .sessions
+        .into_iter()
+        .find(|(held, _)| *held == id)
+        .expect("held")
+        .1;
+    assert!(
+        now(store.change_history(HistoryChange {
+            forget: vec![(id, Deleted::of(&session, at))],
+            ..HistoryChange::default()
+        }))
+        .kept()
+        .is_some()
+    );
 }
 
 fn now<T>(pending: impl Future<Output = T>) -> T {
@@ -845,21 +875,7 @@ fn undo_after_a_deletion_stamped_ahead_keeps_the_session() {
             .expect("two");
         harness.in_app(|| ctx.delete_sessions(&[two]));
         let ahead = now_ms() + 3_600_000;
-        let session = other
-            .load_history()
-            .sessions
-            .into_iter()
-            .find(|(id, _)| *id == two)
-            .expect("taken")
-            .1;
-        assert!(
-            now(other.change_history(HistoryChange {
-                forget: vec![(two, Deleted::of(&session, ahead))],
-                ..HistoryChange::default()
-            }))
-            .kept()
-            .is_some()
-        );
+        delete_in(&other, two, ahead);
         now(sync_once(
             &*other,
             &*remote,
@@ -881,6 +897,78 @@ fn undo_after_a_deletion_stamped_ahead_keeps_the_session() {
             .map(|(_, s)| s.timestamp)
             .collect();
         assert_eq!(theirs, [1, 2], "the drive's word");
+    });
+}
+
+/// A session put back by Undo while a sync begun before sync was turned off
+/// and on again is still under way stays: the sync after it, of sync as it
+/// is on now, sends it as put back, and the drive's deletion of it does
+/// not take it away again. The sync under way used to take the note of it
+/// as it ended, and keep nothing of it, as sync was turned on anew since.
+#[test]
+fn undo_while_a_sync_from_before_sync_was_turned_on_anew_ends_keeps_the_session() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        // Deleted on another device, and here.
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        delete_in(&other, two, 2);
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &Default::default(),
+            2,
+        ))
+        .expect("synced");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        keep(&harness, &[5]);
+        held.hold_writes(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+
+        harness.in_app(|| ctx.sync_turn_off(false));
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        harness.in_app(|| ctx.undo_delete());
+        held.hold_writes(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(stamps(&harness), [1, 2, 5], "not deleted again");
+    });
+}
+
+/// What sync noted of a session put back while a sync was under way goes
+/// with everything else sync keeps as sync is turned off here, as one put
+/// back while none was would: turned on again, sync begins from nothing.
+#[test]
+fn a_session_put_back_while_it_syncs_is_forgotten_as_sync_is_turned_off() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| ctx.undo_delete());
+        let noted = || harness.in_app(|| ctx.sync.revived.peek().len());
+        assert_eq!(noted(), 1, "noted for once the sync is over");
+        harness.in_app(|| ctx.sync_turn_off(false));
+        assert_eq!(noted(), 0);
     });
 }
 
