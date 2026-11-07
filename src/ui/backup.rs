@@ -190,11 +190,12 @@ impl Restoring {
     }
 
     /// Read `file` as a backup and restore what it holds, in a task of the
-    /// app's own, once no session or run, nor another restore, is under
-    /// way: the card says it is being read at once, and until it has been
-    /// restored, and why not, if it could not be; with no card drawn by
-    /// then, a message does. Unless another file is chosen before it is
-    /// restored: then that one is, and nothing of this is said.
+    /// app's own, once no session or run, nor another restore or the Undo
+    /// of one, is under way: the card says it is being read at once, and
+    /// until it has been restored, and why not, if it could not be; with
+    /// no card drawn by then, a message does. Unless another file is
+    /// chosen before it is restored: then that one is, and nothing of this
+    /// is said.
     fn start(self, ctx: AppCtx, file: PickedFile) {
         let Self {
             mut under_way,
@@ -234,8 +235,8 @@ impl Restoring {
             };
             // Restored between sessions, as a sync is, never under one: a
             // restore takes its settings, the level among them. And after
-            // any restore still under way, to be merged with the history
-            // that one restored.
+            // any restore, or Undo of one, still under way, to be merged
+            // with the history that one left.
             while ctx.session_running() || ctx.restore_under_way() {
                 let wait = if ctx.session_running() {
                     SESSION_WAIT_MS

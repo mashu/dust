@@ -180,7 +180,8 @@ pub struct AppCtx {
     /// The sessions deleted last, each by its record, for Undo to put back
     /// exactly where it was.
     trash: Signal<Vec<(RecordId, SessionResult)>>,
-    /// What the last restore changed, for Undo to put back.
+    /// What the last restore changed, for Undo to put back, until another
+    /// restore is asked for ([`Self::undo_restore`]).
     before_restore: Signal<Option<Restored>>,
     /// The settings card reset last, and the settings before it, for Undo
     /// to put back.
@@ -208,11 +209,11 @@ pub struct AppCtx {
     /// refused for already: one still unread at a later restore is taken
     /// as one that cannot be read at all ([`Self::restore_backup`]).
     restore_refused_for: CopyValue<BTreeSet<RecordId>>,
-    /// A restore is under way: from its being asked for until what became
-    /// of it has been told ([`Self::restore_backup`]).
+    /// A restore, or the Undo of one, is under way: from its being asked
+    /// for until what became of it has been told ([`Self::restore_backup`]).
     restore_under_way: CopyValue<bool>,
-    /// The restores asked for while another was under way, each made in
-    /// turn once the one before it is over.
+    /// The restores asked for while another, or an Undo, was under way,
+    /// each made in turn once the one before it is over.
     restores_waiting: CopyValue<VecDeque<Backup>>,
     /// Sync with the user's own Google Drive, where it is on
     /// ([`crate::sync::ctx`]).
@@ -1276,16 +1277,17 @@ impl AppCtx {
     /// Put back what `backup` holds: every session of it not already here,
     /// and its settings, level and all, where it holds any, but for this
     /// device's own ([`TrainingSettings::keep_device_settings`]). Until
-    /// another restore, Undo puts both back as they were. A store that
-    /// cannot take the history leaves everything as it was and says why,
-    /// and so does one that cannot be listed for now: merged with what this
-    /// copy last saw of the history, the backup would bring back, a second
-    /// time, a session another copy stored since. So does one that lists a
-    /// record it cannot read for now, the first time a restore finds it
-    /// so: one still unread at a later restore is taken as one that cannot
-    /// be read at all, and refuses no restore again. A session of the
-    /// backup that a record stored here may hold, though this build cannot
-    /// read it, is looked at first ([`Self::restore_beside`]).
+    /// another restore is asked for, Undo puts both back as they were
+    /// ([`Self::undo_restore`]). A store that cannot take the history
+    /// leaves everything as it was and says why, and so does one that
+    /// cannot be listed for now: merged with what this copy last saw of the
+    /// history, the backup would bring back, a second time, a session
+    /// another copy stored since. So does one that lists a record it cannot
+    /// read for now, the first time a restore finds it so: one still unread
+    /// at a later restore is taken as one that cannot be read at all, and
+    /// refuses no restore again. A session of the backup that a record
+    /// stored here may hold, though this build cannot read it, is looked at
+    /// first ([`Self::restore_beside`]).
     ///
     /// Each session it adds is a record where it finished
     /// ([`RecordId::placed`]), so two copies restoring one backup store it
@@ -1294,10 +1296,18 @@ impl AppCtx {
     ///
     /// One at a time: a restore asked for while another is under way, as a
     /// store that takes a moment to list or change the history leaves one,
-    /// is made once that is over, merged with the history it restored.
-    /// Merged with a history short of what the other brings back, it would
-    /// take that for its own, and its Undo take it back as well.
+    /// or while the Undo of one is, is made once that is over, merged with
+    /// the history it left. Merged with a history short of what the other
+    /// brings back, it would take that for its own, and its Undo take it
+    /// back as well; merged with one that still holds what the Undo takes
+    /// back, it would take that for sessions already here, and the Undo
+    /// delete them.
     pub fn restore_backup(self, backup: Backup) {
+        // The last restore asked for: the one before it is undone no more.
+        let mut before_restore = self.before_restore;
+        if before_restore.peek().is_some() {
+            before_restore.set(None);
+        }
         let mut under_way = self.restore_under_way;
         if *under_way.peek() {
             let mut waiting = self.restores_waiting;
@@ -1410,13 +1420,14 @@ impl AppCtx {
         self.restore_over();
     }
 
-    /// Whether a restore is under way ([`Self::restore_backup`]).
+    /// Whether a restore, or the Undo of one, is under way
+    /// ([`Self::restore_backup`]).
     pub fn restore_under_way(self) -> bool {
         *self.restore_under_way.peek()
     }
 
-    /// The restore under way is over, what became of it told: the next one
-    /// asked for meanwhile is made now.
+    /// The restore under way, or the Undo of one, is over, what became of
+    /// it told: the next restore asked for meanwhile is made now.
     fn restore_over(self) {
         let mut under_way = self.restore_under_way;
         under_way.set(false);
@@ -1524,7 +1535,8 @@ impl AppCtx {
     }
 
     /// What a restore comes to, once the store has said what became of it
-    /// ([`Self::restore_backup`]).
+    /// ([`Self::restore_backup`]): its Undo offered, unless another restore
+    /// was asked for while it was under way.
     fn restored(self, saved: HistorySaved, restoring: Restoring) {
         let Restoring {
             added,
@@ -1644,13 +1656,19 @@ impl AppCtx {
         if let Some(problem) = saved.problem() {
             text = format!("{text} {problem}");
         }
-        let mut before_restore = self.before_restore;
-        before_restore.set(Some(Restored {
-            added,
-            filled,
-            settings: before,
-        }));
-        self.toasts.show_with(text, ToastAction::UndoRestore);
+        // A restore asked for while this one was under way, and waiting
+        // for it, is the last one asked for: this one is undone no more.
+        if self.restores_waiting.peek().is_empty() {
+            let mut before_restore = self.before_restore;
+            before_restore.set(Some(Restored {
+                added,
+                filled,
+                settings: before,
+            }));
+            self.toasts.show_with(text, ToastAction::UndoRestore);
+        } else {
+            self.toasts.show(text);
+        }
     }
 
     /// Put the history and settings back as they were before the last
@@ -1658,11 +1676,23 @@ impl AppCtx {
     /// under the record it had. Whatever else the history took up since,
     /// here or in another copy of the app, stays: only what the restore
     /// changed, and is here still, is undone.
+    ///
+    /// Only until another restore is asked for ([`Self::restore_backup`]):
+    /// from then on there is nothing to undo, and an Undo clicked while
+    /// that one is under way, its message still up, does nothing. The
+    /// restore asked for is merged with a history that holds what this
+    /// would take back, and takes it for sessions already here: undone
+    /// beneath it, or once it is made, they would be lost, though the
+    /// backup it restores holds them. And an Undo is under way as a
+    /// restore is, until the store has said what became of it: a restore
+    /// asked for meanwhile waits for it.
     pub fn undo_restore(self) {
         let mut before_restore = self.before_restore;
         let Some(restored) = before_restore.write().take() else {
             return;
         };
+        let mut under_way = self.restore_under_way;
+        under_way.set(true);
         let at = now_ms();
         let mut change = HistoryChange::default();
         let (mut gone, mut back) = (Vec::new(), Vec::new());
@@ -1694,8 +1724,13 @@ impl AppCtx {
         let (mut sessions, toasts) = (self.sessions, self.toasts);
         self.change_history(change, move |saved| {
             if let Some(why) = why_not_stored(&saved) {
-                before_restore.set(Some(restored));
+                // Still to undo, unless another restore was asked for
+                // meanwhile.
+                if self.restores_waiting.peek().is_empty() {
+                    before_restore.set(Some(restored));
+                }
                 toasts.show(format!("The restore could not be undone: {why}."));
+                self.restore_over();
                 return;
             }
             {
@@ -1714,6 +1749,7 @@ impl AppCtx {
                 let mut settings = self.settings;
                 settings.set(before);
             }
+            self.restore_over();
         });
     }
 
@@ -2569,6 +2605,94 @@ mod tests {
         a.act(AppCtx::undo_restore);
         assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
         assert_eq!(a.shown(), [1, 2, 5]);
+    }
+
+    /// A restore asked for while the Undo of the one before it is under
+    /// way, as a browser's database makes the Undo a moment after it is
+    /// asked for, waits for it, and is merged with the history the Undo
+    /// left: what both hold is restored. Merged with a history that still
+    /// held it, it took those sessions for ones already here, and the Undo
+    /// deleted them: lost, though the backup restored holds them.
+    #[test]
+    fn a_restore_asked_for_while_an_undo_is_under_way_waits_for_it() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        restore(&a, [1, 2]);
+        store.deferred.set(true);
+        a.act(AppCtx::undo_restore);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(store.waiting(), 1, "the restore waits for the Undo");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [5], "undone");
+        assert_eq!(store.waiting(), 1, "then the restore is made");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 5]);
+        assert_eq!(a.shown(), [1, 2, 3, 5]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 3 sessions and your settings."
+        );
+    }
+
+    /// The Undo of a restore, its message still up, undoes nothing once
+    /// another restore is asked for: that one is merged with a history
+    /// that holds what the Undo would take back, and takes those sessions
+    /// for ones already here. Undone beneath it, they were deleted, lost
+    /// though the backup under way holds them. Its own Undo takes back
+    /// what it brought, and no more.
+    #[test]
+    fn an_undo_clicked_while_another_restore_is_under_way_does_nothing() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        restore(&a, [1, 2]);
+        store.deferred.set(true);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(store.waiting(), 1, "the second under way");
+        a.act(AppCtx::undo_restore);
+        assert_eq!(store.waiting(), 1, "nothing undone");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 5]);
+        assert_eq!(a.shown(), [1, 2, 3, 5]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        store.deferred.set(false);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
+        assert_eq!(a.shown(), [1, 2, 5]);
+    }
+
+    /// A restore made while another, asked for after it, waits its turn
+    /// offers no Undo: the one waiting is the last restore asked for, and
+    /// is made at once, merged with what this one brought back. An Undo of
+    /// this one beneath it deleted what both hold.
+    #[test]
+    fn a_restore_made_while_another_waits_offers_no_undo() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        store.deferred.set(true);
+        restore(&a, [1, 2]);
+        restore(&a, [1, 2]);
+        store.settle();
+        a.pump();
+        assert_eq!(store.waiting(), 1, "the second under way");
+        let told = a.toast().expect("told");
+        assert_eq!(told.text, "Restored 2 sessions and your settings.");
+        assert_eq!(told.action, None);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(store.waiting(), 1, "nothing undone");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
+        assert_eq!(a.shown(), [1, 2, 5]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored your settings. Every session in it was already here."
+        );
     }
 
     /// A restore takes the backup's settings whole, over what another tab

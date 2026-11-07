@@ -582,6 +582,44 @@ fn a_backup_chosen_while_another_is_restored_waits_for_it() {
     });
 }
 
+/// A backup chosen while the Undo of a restore is under way, as a
+/// browser's database makes it a moment after it is asked for, is restored
+/// once the Undo is over, merged with the history it left: what both hold
+/// is restored. Merged with a history that still held it, it was taken for
+/// sessions already here, and the Undo deleted them.
+#[test]
+fn a_backup_chosen_while_a_restore_is_undone_waits_for_it() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[4..]);
+        let first = write_backup(&test_settings(), &all[..2], 0);
+        let second = write_backup(&test_settings(), &all[..3], 0);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(20).await;
+        assert_eq!(stored_dates(&ui).len(), 3);
+        ui.store.deferred.set(true);
+        ui.click("toast-undo");
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.advance(100).await;
+        assert_eq!(ui.store.waiting(), 1, "the second waits for the Undo");
+        assert!(ui.has("Reading second.json…"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-05"]
+        );
+    });
+}
+
 /// A file whose read never ends, as a browser's of a file moved after it
 /// was chosen never does, leaves the next one chosen to be restored: the
 /// card says at once that the newer is being read, and what it holds is
