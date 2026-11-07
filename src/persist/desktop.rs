@@ -502,9 +502,35 @@ pub(super) fn free_name(folder: &Path, name: &str) -> String {
 }
 
 /// Make a rename in `dir` as durable as the data it names.
+///
+/// A filesystem that flushes no folder at all, as a virtual machine's
+/// shared folder or some network mounts flush none, says so (`EINVAL`,
+/// `ENOTSUP`): the rename is then as durable as it can be made there, and
+/// the write stands, as SQLite and PostgreSQL take it. Any other failure is
+/// one.
 #[cfg(unix)]
 pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
-    fs::File::open(dir)?.sync_all()
+    match fs::File::open(dir)?.sync_all() {
+        Err(err) if flushes_no_folder(&err) => Ok(()),
+        synced => synced,
+    }
+}
+
+/// Whether `err`, from flushing a folder, says its filesystem flushes no
+/// folder at all: `EINVAL`, or `ENOTSUP` (with `EOPNOTSUPP`, where that is
+/// another number), which std gives no kind of its own.
+#[cfg(unix)]
+fn flushes_no_folder(err: &io::Error) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const NOT_SUPPORTED: &[i32] = &[95];
+    #[cfg(target_vendor = "apple")]
+    const NOT_SUPPORTED: &[i32] = &[45, 102];
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    const NOT_SUPPORTED: &[i32] = &[];
+    err.kind() == io::ErrorKind::InvalidInput
+        || err
+            .raw_os_error()
+            .is_some_and(|code| NOT_SUPPORTED.contains(&code))
 }
 
 /// Windows cannot open a directory to flush it; its renames are journalled.
@@ -1483,6 +1509,31 @@ pub(super) mod tests {
         assert_eq!(held["laterKey"], "kept");
         assert_eq!(stored(&store).len(), 2);
         assert_eq!(fs::read_to_string(dir.0.join(SESSIONS)).unwrap(), whole);
+    }
+
+    /// A folder on a filesystem that flushes no folder at all, as a virtual
+    /// machine's shared folder (vboxsf) or some network mounts flush none,
+    /// is as durable as it can be made once what was renamed in it is: no
+    /// failed write. Every session written to such a folder was told of as
+    /// not saved, and tried again for as long as the app ran, and the move
+    /// to records was put off at every launch. `/proc` says what such a
+    /// filesystem says, `EINVAL`. A folder that cannot be flushed for any
+    /// other reason still fails the write.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_its_filesystem_cannot_flush_fails_no_write() {
+        let Ok(proc) = fs::File::open("/proc") else {
+            eprintln!("skipped: there is no /proc to flush");
+            return;
+        };
+        assert_eq!(
+            proc.sync_all().map_err(|err| err.kind()),
+            Err(io::ErrorKind::InvalidInput),
+            "flushed by nothing"
+        );
+        assert!(sync_dir(Path::new("/proc")).is_ok());
+        let dir = TempDir::new("flush-none");
+        assert!(sync_dir(&dir.0.join("not there")).is_err());
     }
 
     #[test]
