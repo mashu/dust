@@ -231,3 +231,23 @@ fn when_it_synced_is_said_plainly() {
         "{long_ago}"
     );
 }
+
+/// A sync made on a day later than the one the screen keeps is said to be
+/// made today: when this device last synced is read off its own clock, and
+/// the day the screen keeps can lag behind that clock a while, as on a
+/// computer woken from sleep past midnight, whose timers do not count the
+/// time asleep ([`crate::ui::today::DAY_LOOK_MS`]). Such a sync was told
+/// by its full date, as one made long ago is.
+#[test]
+fn a_sync_made_on_a_day_the_screen_has_yet_to_read_is_said_to_be_today() {
+    let now = crate::time::now_ms();
+    let today = day_of(now).expect("a day");
+    let today = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").expect("a day");
+    for lag in [1, 2] {
+        let kept = (today - chrono::Days::new(lag))
+            .format("%Y-%m-%d")
+            .to_string();
+        let said = synced_when(Some(now), &kept);
+        assert!(said.starts_with("Synced today at "), "{kept}: {said}");
+    }
+}

@@ -56,6 +56,11 @@ pub struct SyncView {
 }
 
 /// When this device last synced, as the card's head says it on `today`.
+/// A sync on a day later than `today` was made today: when it was made is
+/// read off this device's own clock, and the day the screen keeps can lag
+/// behind that clock a while, as on a computer woken from sleep past
+/// midnight, whose timers do not count the time asleep
+/// ([`crate::ui::today::DAY_LOOK_MS`]).
 fn synced_when(last: Option<u64>, today: &str) -> String {
     let Some(last) = last else {
         return "Not synced yet".into();
@@ -63,7 +68,8 @@ fn synced_when(last: Option<u64>, today: &str) -> String {
     let (Some(day), Some(time)) = (day_of(last), clock(last)) else {
         return "Synced".into();
     };
-    match ago(&day, today) {
+    let when = ago(&day, today).or_else(|| ago(today, &day).map(|_| "today".to_string()));
+    match when {
         Some(when) if when == "today" || when == "yesterday" => format!("Synced {when} at {time}"),
         _ => format!("Synced {} at {time}", short_date(&day)),
     }
