@@ -267,10 +267,13 @@ fn use_band_follow(ctx: AppCtx) {
         let previewing = ctx.preview.read().is_band();
         // Read to follow every move; the follow takes them as they stand.
         let settings = ctx.settings.read();
-        let turn = waiting.get().turn.wrapping_add(1);
+        let held = waiting.get();
         if !previewing {
             // A stopped preview has no band to follow the settings with.
-            waiting.set(Waiting { since: None, turn });
+            waiting.set(Waiting {
+                since: None,
+                ..held
+            });
             followed.borrow_mut().take();
             return;
         }
@@ -285,21 +288,35 @@ fn use_band_follow(ctx: AppCtx) {
             *followed.borrow_mut() = Some(clamped);
             return;
         }
+        // Each move puts the follow off, to the longest after the first.
         let now = mono_ms();
-        let since = waiting.get().since.unwrap_or(now);
+        let since = held.since.unwrap_or(now);
         waiting.set(Waiting {
             since: Some(since),
-            turn,
+            due: (now + BAND_SETTLE_MS).min(since + BAND_FOLLOW_MAX_MS),
+            waits: true,
         });
-        let due = (now + BAND_SETTLE_MS).min(since + BAND_FOLLOW_MAX_MS);
+        if held.waits {
+            return;
+        }
         let (waiting, followed) = (waiting.clone(), followed.clone());
+        #[cfg(test)]
+        crate::testing::rendered("band wait");
         spawn(async move {
-            sleep_ms(due.saturating_sub(now).try_into().unwrap_or(u32::MAX)).await;
-            // A newer move has a follow of its own coming, due no later.
-            if waiting.get().turn != turn || !ctx.preview.peek().is_band() {
+            // Until the follow is due, however far the moves meanwhile put
+            // it off.
+            loop {
+                let (due, now) = (waiting.get().due, mono_ms());
+                if now >= due {
+                    break;
+                }
+                sleep_ms((due - now).try_into().unwrap_or(u32::MAX)).await;
+            }
+            let held = waiting.replace(Waiting::default());
+            // Stopped meanwhile, the preview has no band to follow.
+            if held.since.is_none() || !ctx.preview.peek().is_band() {
                 return;
             }
-            waiting.set(Waiting { since: None, turn });
             let settings = ctx.settings.peek().clone().clamp();
             ctx.app().player.follow_band(&settings);
             *followed.borrow_mut() = Some(settings);
@@ -316,12 +333,14 @@ fn only_gains_moved(last: &TrainingSettings, now: &TrainingSettings) -> bool {
     gains_put_back == *last && now != last
 }
 
-/// The settings moves the band has still to follow: since when, and which
-/// was the newest, so only the follow for it brings the band in line.
+/// The settings moves the band has still to follow: since when, and when it
+/// follows them, with whether a wait for that is under way: one wait for
+/// every move until the band follows, each move putting it off.
 #[derive(Clone, Copy, Default)]
 struct Waiting {
     since: Option<u64>,
-    turn: u64,
+    due: u64,
+    waits: bool,
 }
 
 #[component]
