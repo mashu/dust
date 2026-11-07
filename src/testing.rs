@@ -705,6 +705,9 @@ pub struct PageKey {
     pub shift_key: bool,
     pub repeat: bool,
     pub is_composing: bool,
+    /// The key code, as browsers told a key by before `code`: 229 for a key
+    /// the input method took, and 0 here for any other.
+    pub key_code: u32,
 }
 
 impl PageKey {
@@ -766,6 +769,17 @@ impl PageKey {
     pub fn composing(self) -> Self {
         Self {
             is_composing: true,
+            ..self
+        }
+    }
+
+    /// The key that ends an input method's composition, as WebKit hands it
+    /// over: once the composition is over, so not as composing, but with
+    /// the key code of a key the input method took.
+    pub fn ending_composition(self) -> Self {
+        Self {
+            is_composing: false,
+            key_code: 229,
             ..self
         }
     }

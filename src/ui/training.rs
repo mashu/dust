@@ -274,8 +274,10 @@ const COMPOSITION_END_MS: u64 = 100;
 /// Safari and in every browser on an iPhone, hands over the Enter or the
 /// Space that ends a composition once it is over, not as composing, but
 /// with this code; Chrome on Android hands over the Enter that both ends a
-/// word and confirms it with Enter's own.
-const INPUT_METHOD_KEY_CODE: u32 = 229;
+/// word and confirms it with Enter's own. A script on the page reads it in
+/// every build, the run's keys among them
+/// ([`crate::ui::contest_keys`]).
+pub(crate) const INPUT_METHOD_KEY_CODE: u32 = 229;
 
 /// Whether `key`, at `code`, can end a composition: Enter, which takes what
 /// was composed, and Space, which chooses a candidate or finishes a
