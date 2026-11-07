@@ -135,8 +135,9 @@ pub fn open_pack(keys: &Keys, name: &str, sealed: &[u8]) -> Result<Pack, Unopene
 }
 
 /// What one sync sends, in as many packs as it takes to keep each to its
-/// size ([`PACK_BYTES`]): the deletions and sessions put back go in the
-/// first, being small. None where there is nothing to send.
+/// size ([`PACK_BYTES`]): the deletions go in the first, being small, and
+/// the sessions put back and the records fill it and those after it. None
+/// where there is nothing to send.
 pub fn packs_of(
     device: &str,
     at: u64,
@@ -150,16 +151,26 @@ pub fn packs_of(
         at,
         ..Pack::default()
     };
-    let mut packs = Vec::new();
-    let mut pack = Pack {
-        forget,
-        revive,
-        ..fresh()
+    // A pack holding a session already is full where `size` more would
+    // take it past its size: one larger than a pack still goes, alone.
+    let full = |pack: &Pack, bytes: usize, size: usize| {
+        !(pack.put.is_empty() && pack.revive.is_empty()) && bytes + size > PACK_BYTES
     };
-    let mut bytes: usize = pack.revive.iter().map(|revive| revive.s.len()).sum();
+    let mut packs = Vec::new();
+    let mut pack = Pack { forget, ..fresh() };
+    let mut bytes: usize = 0;
+    for one in revive {
+        let size = one.id.len() + one.s.len();
+        if full(&pack, bytes, size) {
+            packs.push(std::mem::replace(&mut pack, fresh()));
+            bytes = 0;
+        }
+        bytes += size;
+        pack.revive.push(one);
+    }
     for one in put {
         let size = one.id.len() + one.s.len();
-        if !pack.put.is_empty() && bytes + size > PACK_BYTES {
+        if full(&pack, bytes, size) {
             packs.push(std::mem::replace(&mut pack, fresh()));
             bytes = 0;
         }
@@ -303,6 +314,42 @@ mod tests {
         assert_eq!(packs.len(), 2);
         // Deletions alone are a pack.
         assert_eq!(packs_of("d", 1, Vec::new(), forget, Vec::new()).len(), 1);
+    }
+
+    /// Sessions put back go in packs of no more than their size too, every
+    /// one once, in order: a long history deleted and put back by Undo is
+    /// sent, and not in one pack past what Drive takes.
+    #[test]
+    fn sessions_put_back_go_in_packs_of_their_size() {
+        let revive: Vec<Revive> = (0..25)
+            .map(|n| {
+                let one = put(n, 400_000);
+                Revive {
+                    id: one.id,
+                    at: 9,
+                    s: one.s,
+                }
+            })
+            .collect();
+        let forget = vec![Forget {
+            id: put(99, 0).id,
+            at: 3,
+        }];
+        let packs = packs_of("d", 1, vec![put(50, 10)], forget.clone(), revive.clone());
+        assert!(packs.len() >= 3, "{}", packs.len());
+        assert_eq!(packs[0].forget, forget);
+        for pack in &packs {
+            let bytes: usize = pack
+                .put
+                .iter()
+                .map(|p| p.id.len() + p.s.len())
+                .chain(pack.revive.iter().map(|r| r.id.len() + r.s.len()))
+                .sum();
+            assert!(bytes <= PACK_BYTES, "{bytes}");
+        }
+        let all: Vec<Revive> = packs.iter().flat_map(|pack| pack.revive.clone()).collect();
+        assert_eq!(all, revive);
+        assert_eq!(packs.iter().map(|pack| pack.put.len()).sum::<usize>(), 1);
     }
 
     /// A sealed pack is a fraction of what it holds: sessions are JSON, and
