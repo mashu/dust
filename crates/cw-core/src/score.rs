@@ -91,9 +91,11 @@ pub fn speed_factor(wpm: f64) -> f64 {
     (wpm / REFERENCE_WPM).powi(2)
 }
 
-/// What is left after `errors`: a quarter for one, a ninth for two.
+/// What is left after `errors`: a quarter for one, a ninth for two. A count
+/// is not trusted to be small: at the most there can be, what is left is
+/// next to nothing, and stays so.
 pub fn error_factor(errors: u32) -> f64 {
-    1.0 / f64::from(errors + 1).powi(2)
+    1.0 / f64::from(errors.saturating_add(1)).powi(2)
 }
 
 /// What is left, on average, of a group of `chars` characters each missed
@@ -384,6 +386,21 @@ mod tests {
             let left = repeat_factor(sends);
             assert!((0.0..1e-18).contains(&left), "{sends}: {left}");
         }
+    }
+
+    /// Nor is a count of errors, a group's copy being a public value: one of
+    /// `u32::MAX` overflowed working out the cut, a panic where overflow is
+    /// checked and, where it is not, a cut to nothing that multiplied the
+    /// points up to infinity. It leaves next to nothing.
+    #[test]
+    fn an_error_count_past_all_reason_still_leaves_next_to_nothing() {
+        let left = error_factor(u32::MAX);
+        assert!((0.0..1e-18).contains(&left), "{left}");
+        let wild = GroupCopy {
+            errors: u32::MAX,
+            ..clean(5, 20.0)
+        };
+        assert!((0.0..1e-15).contains(&group_points(&wild)));
     }
 
     /// A score has to be a number to be written and read back: a session
