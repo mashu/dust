@@ -8,6 +8,7 @@ use super::pileup::Interferer;
 use super::pileup::Transmission;
 use super::station::StationVoice;
 use super::{clamp_extra_spacing, dot_seconds, spacing_unit_sec};
+use crate::band::finite_or;
 use crate::morse::morse_for;
 use crate::settings::TrainingSettings;
 
@@ -229,12 +230,14 @@ impl PlaybackPlan {
 }
 
 /// Plan a send from one station. Every repeat of a group uses the same voice.
+/// A voice is taken as it is given, and what of it is no number is planned
+/// as a keyer's at full strength would be.
 pub fn plan_morse_playback_for(
     text: &str,
     settings: &TrainingSettings,
     voice: &StationVoice,
 ) -> PlaybackPlan {
-    let target_gain = DEFAULT_TARGET_GAIN * voice.volume.clamp(0.0, 1.0);
+    let target_gain = DEFAULT_TARGET_GAIN * finite_or(voice.volume, 1.0).clamp(0.0, 1.0);
     plan_morse_playback_at(text, settings, voice, target_gain)
 }
 
@@ -258,12 +261,12 @@ pub(crate) fn plan_morse_playback_at(
     // takes the difference back, so a heavy fist crowds its spaces rather
     // than simply sending slower — which is what weight actually is, and
     // why it does not quietly change the speed.
-    let weight = voice.weight.clamp(0.7, 1.3);
+    let weight = finite_or(voice.weight, 1.0).clamp(0.7, 1.3);
     // Its dahs run long or short against its dits, which alone would send
     // it slower or faster than its speed. So its letters are keyed on a
     // dit that keys PARIS's letters in the time the book's ratio does, and
     // a word goes at the speed the station is credited with.
-    let dash_ratio = voice.dash_ratio.clamp(2.0, 4.5);
+    let dash_ratio = finite_or(voice.dash_ratio, 3.0).clamp(2.0, 4.5);
     let dot_char = dot_seconds(resolved_char_wpm) * PARIS_IN_LETTERS
         / (PARIS_IN_LETTERS + PARIS_DAHS * (dash_ratio - 3.0));
     let dot_duration = dot_char * weight;
@@ -749,6 +752,46 @@ mod tests {
             assert!((a.start_sec - b.start_sec).abs() < 1e-12);
             assert!((a.duration_sec - b.duration_sec).abs() < 1e-12);
         }
+    }
+
+    /// A voice is a public value, planned from as it is given. One whose
+    /// volume, weight or dash ratio is no number, which a voice drawn from
+    /// clamped settings never has, was planned as no number, every tone's
+    /// length and gain NaN; it is planned as a keyer's at full strength.
+    #[test]
+    fn a_voice_of_no_numbers_is_planned_as_a_keyer_at_full_strength() {
+        let s = fixed_speed(20.0);
+        let keyer = StationVoice {
+            tone_hz: 600.0,
+            char_wpm: 20.0,
+            effective_wpm: 20.0,
+            volume: 1.0,
+            weight: 1.0,
+            dash_ratio: 3.0,
+        };
+        let nonsense = StationVoice {
+            volume: f64::NAN,
+            weight: f64::NAN,
+            dash_ratio: f64::NAN,
+            ..keyer
+        };
+        let tones = |voice: &StationVoice| {
+            let plan = plan_morse_playback_for("PARIS", &s, voice);
+            let tones: Vec<_> = plan
+                .events
+                .iter()
+                .map(|e| {
+                    (
+                        e.start_sec,
+                        e.duration_sec,
+                        e.target_gain,
+                        e.envelope.to_vec(),
+                    )
+                })
+                .collect();
+            (plan.duration_sec, tones)
+        };
+        assert_eq!(tones(&nonsense), tones(&keyer));
     }
 
     /// Weight is how the time inside a character is divided, not how much of
