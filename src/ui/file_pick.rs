@@ -240,10 +240,10 @@ async fn read_chosen(file: FileData, max_bytes: u64, by_mark: bool) -> ChosenFil
 }
 
 /// What `file` holds, as text: none where it cannot be read as text, or
-/// cannot be read at all. A computer reads it on a thread of its own, by
-/// its byte order mark where `by_mark` says ([`text_in`]), and a browser a
-/// slice at a time where it is large, every file by its mark where it is
-/// read whole ([`text_of`]).
+/// cannot be read at all. A computer reads it by its byte order mark where
+/// `by_mark` says ([`text_in`]), on a thread of its own where one starts,
+/// and a browser a slice at a time where it is large, every file by its
+/// mark where it is read whole ([`text_of`]).
 async fn read_text(file: &FileData, by_mark: bool) -> Option<String> {
     #[cfg(test)]
     crate::testing::reading_a_file(&file.name()).await;
@@ -269,12 +269,14 @@ async fn read_text(file: &FileData, by_mark: bool) -> Option<String> {
             .ok()?;
         return Some(text_of(&js_sys::Uint8Array::new(&read).to_vec()));
     }
-    // A test's file is read as a computer reads one.
-    #[cfg(test)]
+    // A computer's file that could not be read on a thread of its own is
+    // read here as one is there, by its mark where `by_mark` says; and so
+    // is a test's.
+    #[cfg(any(feature = "desktop", test))]
     {
         text_in(file.read_bytes().await.ok()?.to_vec(), by_mark)
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(feature = "desktop", test)))]
     {
         file.read_string().await.ok()
     }
