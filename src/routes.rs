@@ -424,6 +424,9 @@ fn TrainingRoute() -> Element {
 #[component]
 fn ResultsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
+    // Where the session stands on the board reads the history, every run's
+    // log for a run: worked out once for it, not on every redraw.
+    let history = use_history(ctx);
     let on_again = use_callback(move |()| start_session(ctx));
     let on_home = use_callback(move |()| ctx.go_to(Screen::Home));
     // Stored at once, as a setting changed off the settings screen is.
@@ -436,7 +439,9 @@ fn ResultsRoute() -> Element {
         Some(Finished::NothingKept) => return rsx! { NothingKept { on_again, on_home } },
         None => return rsx! { p { class: "muted", "No result." } },
     };
-    let place = cw_core::board_place(&ctx.sessions.read(), result.timestamp);
+    let place = *history().figure("board place", result.timestamp, |sessions| {
+        cw_core::board_place(sessions, result.timestamp)
+    });
     rsx! {
         ResultsView {
             result,
@@ -504,6 +509,43 @@ mod tests {
                 },
             );
             assert!(ui.has("No result."));
+        });
+    }
+
+    /// The results of a session just finished work out where it stands on
+    /// the board once for the history: drawn again for a setting moved, or
+    /// for the store saying it took the session, they find it worked out;
+    /// another session kept is another history, and it is worked out again.
+    #[test]
+    fn a_sessions_results_work_out_their_place_once() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
+            ui.advance(200).await;
+            assert!(ui.take_worked_out("board place") >= 1);
+            ui.with_app(|ctx| {
+                let mut settings = ctx.settings;
+                settings.write().band.master_volume = 0.5;
+            });
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let first = sessions.peek().id_at(0).expect("the session kept");
+                sessions.write().mark_saved(first);
+            });
+            assert_eq!(ui.screen(), "results");
+            assert_eq!(ui.take_worked_out("board place"), 0);
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let another = crate::testing::stored_session("2026-10-01", &[("KM", "KM")]);
+                sessions.write().push(another);
+            });
+            assert_eq!(ui.take_worked_out("board place"), 1);
         });
     }
 

@@ -221,7 +221,7 @@ pub fn HistoryTab(
     let mut shown = use_signal(|| HISTORY_PAGE);
     // The run whose results are open, read again from its row.
     let opened = use_opened_run();
-    if let Some(results) = sessions.with(|all| opened_results(all, opened, "History")) {
+    if let Some(results) = opened_results(&sessions, opened, "History") {
         return results;
     }
 

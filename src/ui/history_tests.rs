@@ -415,6 +415,33 @@ fn a_contest_row_opens_the_runs_results() {
     });
 }
 
+/// A run's results opened from History work out where it stands on the
+/// board once for the history: the tab drawn again for a setting moved or a
+/// backup saved, as for each step of a sync, finds it worked out, rather
+/// than read every run's log of its contest again.
+#[test]
+fn a_runs_results_work_out_their_place_once() {
+    run(|| async {
+        let koch = stored_session("2026-10-01", &[("KM", "KM")]);
+        let contest = stored_run("2026-10-20", &[("K5XYZ", "214", "K5XYZ", "214")]);
+        let (mut ui, _recorder) = open_history(&[koch, contest]);
+        ui.take_all_worked_out();
+        ui.click("history-open-1");
+        assert!(ui.has("Run complete"));
+        assert_eq!(ui.take_worked_out("board place"), 1);
+        ui.with_app(|ctx| {
+            let mut last_backup = ctx.last_backup;
+            last_backup.set(Some(1));
+        });
+        ui.with_app(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().band.master_volume = 0.5;
+        });
+        assert!(ui.has("Run complete"));
+        assert_eq!(ui.take_worked_out("board place"), 0);
+    });
+}
+
 /// A long history makes the rows of the sessions it shows, and no others:
 /// a row reads its run's log, and a page more makes the rows of that page.
 #[test]

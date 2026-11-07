@@ -332,7 +332,7 @@ pub fn ScoresTab(#[props(into)] sessions: History) -> Element {
         }
         _ => (Ranking::PerGroup, Vec::new()),
     };
-    if let Some(results) = sessions.with(|all| opened_results(all, opened, "Scores")) {
+    if let Some(results) = opened_results(&sessions, opened, "Scores") {
         return results;
     }
     let board = sessions.figure("score board", (of, ranking), |sessions| {
