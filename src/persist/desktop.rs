@@ -184,48 +184,39 @@ impl DesktopStore {
     /// Every counter stored that can be read, by what it counts.
     fn load_all_counters(&self) -> Counters {
         fs::read(self.root.join(COUNTERS))
-            .map(|raw| read_counters(&raw).0)
+            .map(|raw| read_counters(&raw))
             .unwrap_or_default()
     }
 
-    /// Change the stored counters, read afresh just before they are
-    /// written, so that what another copy of the app stored meanwhile is
-    /// kept. Counters that cannot be read are set aside beside the file
-    /// first rather than written over; a file there that cannot be read at
-    /// all, or set aside, is left as it is.
-    fn update_counters(&self, change: impl FnOnce(&mut Counters)) {
-        let (mut all, mut stored) = match fs::read(self.root.join(COUNTERS)) {
-            Ok(raw) => {
-                let (all, whole) = read_counters(&raw);
-                if !whole && let Err(err) = self.write(&aside_name(&self.root, "auto_adjust"), &raw)
-                {
-                    eprintln!(
-                        "could not set aside auto-level counters that could not be read: {err}"
-                    );
-                    return;
+    /// Change the stored counters, each as it is stored, read afresh just
+    /// before they are written, so that what another copy of the app stored
+    /// meanwhile is kept, and so is a counter this build cannot read, one a
+    /// later build wrote in a shape of its own, until it is cleared. A file
+    /// that holds no counters at all is set aside beside it first rather
+    /// than written over; one that cannot be read, or set aside, is left as
+    /// it is.
+    fn update_counters(&self, change: impl FnOnce(&mut StoredCounters)) {
+        let mut stored = match fs::read(self.root.join(COUNTERS)) {
+            Ok(raw) => match stored_counters(&raw) {
+                Some(stored) => stored,
+                None => {
+                    if let Err(err) = self.write(&aside_name(&self.root, "auto_adjust"), &raw) {
+                        eprintln!(
+                            "could not set aside auto-level counters that could not be read: {err}"
+                        );
+                        return;
+                    }
+                    StoredCounters::new()
                 }
-                let stored: serde_json::Map<String, serde_json::Value> =
-                    serde_json::from_slice(&raw).unwrap_or_default();
-                (all, stored)
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                (Counters::new(), serde_json::Map::new())
-            }
+            },
+            Err(err) if err.kind() == io::ErrorKind::NotFound => StoredCounters::new(),
             Err(err) => {
                 eprintln!("could not read the auto-level counters: {err}");
                 return;
             }
         };
-        change(&mut all);
-        // Each over what it held, so what a later build added to it stays.
-        let written: serde_json::Map<String, serde_json::Value> = all
-            .into_iter()
-            .filter_map(|(key, counters)| {
-                let value = over_stored(serde_json::to_value(counters).ok()?, stored.remove(&key));
-                Some((key, value))
-            })
-            .collect();
-        if let Ok(raw) = serde_json::to_vec_pretty(&written) {
+        change(&mut stored);
+        if let Ok(raw) = serde_json::to_vec_pretty(&stored) {
             let _ = self.write(COUNTERS, &raw);
         }
     }
@@ -357,19 +348,27 @@ fn aside_name(dir: &Path, stem: &str) -> String {
 /// The auto-level counters, by what each counts ([`CountersKey`]).
 type Counters = std::collections::BTreeMap<String, AutoLevelCounters>;
 
-/// Stored counters, each that can still be read, and whether every one
-/// could: one bad entry costs that one alone.
-fn read_counters(raw: &[u8]) -> (Counters, bool) {
-    let Ok(serde_json::Value::Object(stored)) = serde_json::from_slice(raw) else {
-        return (Counters::new(), false);
-    };
-    let count = stored.len();
-    let read: Counters = stored
+/// The auto-level counters as they are stored, by what each counts, each
+/// as it was written.
+type StoredCounters = serde_json::Map<String, serde_json::Value>;
+
+/// The counters `raw` holds, each as it was written: none where it holds
+/// no counters at all.
+fn stored_counters(raw: &[u8]) -> Option<StoredCounters> {
+    match serde_json::from_slice(raw) {
+        Ok(serde_json::Value::Object(stored)) => Some(stored),
+        _ => None,
+    }
+}
+
+/// Stored counters, each that can still be read: one bad entry costs that
+/// one alone.
+fn read_counters(raw: &[u8]) -> Counters {
+    stored_counters(raw)
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
-        .collect();
-    let whole = read.len() == count;
-    (read, whole)
+        .collect()
 }
 
 /// Write `name` in `dir` whole or not at all.
@@ -622,15 +621,20 @@ impl Store for DesktopStore {
     }
 
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters) {
-        self.update_counters(|all| {
-            all.insert(key.as_str().to_string(), counters);
+        let Ok(written) = serde_json::to_value(counters) else {
+            return;
+        };
+        self.update_counters(|stored| {
+            // Over what it held, so what a later build added to it stays.
+            let held = stored.remove(key.as_str());
+            stored.insert(key.as_str().to_string(), over_stored(written, held));
         });
     }
 
     fn clear_auto_counters(&self, keys: &[CountersKey]) {
-        self.update_counters(|all| {
+        self.update_counters(|stored| {
             for key in keys {
-                all.remove(key.as_str());
+                stored.remove(key.as_str());
             }
         });
     }
@@ -1411,7 +1415,8 @@ pub(super) mod tests {
 
     /// A counters file that cannot be read is set aside before the next
     /// count is written, not written over by a file holding that count
-    /// alone; one unreadable entry costs that one alone.
+    /// alone; one unreadable entry costs that one alone, and stays in the
+    /// file as it was, with nothing to set aside.
     #[test]
     fn unreadable_counters_are_set_aside_rather_than_written_over() {
         let (dir, store) = store("counters-unreadable");
@@ -1435,9 +1440,48 @@ pub(super) mod tests {
             store.load_auto_counters(&counted[0].0),
             AutoLevelCounters::default()
         );
-        let mut kept = counters_set_aside(&dir);
-        kept.sort();
-        assert_eq!(kept, ["{ not json".to_string(), damaged]);
+        let held: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.0.join(COUNTERS)).unwrap()).unwrap();
+        assert_eq!(held[counted[0].0.as_str()], "nonsense", "as it was");
+        assert_eq!(counters_set_aside(&dir), ["{ not json"]);
+    }
+
+    /// Counters a later build wrote in a shape of its own, which this build
+    /// cannot read, stay in the file as they were while this build counts
+    /// and clears others, and go only when they are cleared themselves.
+    /// Each write kept only the counters this build could read, and the
+    /// later build's were gone from the file it reads.
+    #[test]
+    fn counters_this_build_cannot_read_stay_through_a_write() {
+        let (dir, store) = store("counters-later-shape");
+        fs::create_dir_all(&dir.0).unwrap();
+        let counted = counted_at([3, 4, 5]);
+        let later = serde_json::json!({ "runs": [[1, 0], [0, 1]], "v": 2 });
+        let held = serde_json::json!({ counted[0].0.as_str(): later });
+        fs::write(dir.0.join(COUNTERS), serde_json::to_vec(&held).unwrap()).unwrap();
+        let stored = || -> serde_json::Value {
+            serde_json::from_slice(&fs::read(dir.0.join(COUNTERS)).unwrap()).unwrap()
+        };
+        store.save_auto_counters(&counted[1].0, counted[1].1);
+        store.clear_auto_counters(std::slice::from_ref(&counted[2].0));
+        assert_eq!(stored()[counted[0].0.as_str()], later, "as it was written");
+        assert_eq!(store.load_auto_counters(&counted[1].0), counted[1].1);
+        assert_eq!(
+            store.load_auto_counters(&counted[0].0),
+            AutoLevelCounters::default(),
+            "not read here"
+        );
+        assert!(
+            counters_set_aside(&dir).is_empty(),
+            "nothing lost to set aside"
+        );
+        store.clear_auto_counters(std::slice::from_ref(&counted[0].0));
+        assert_eq!(
+            stored().get(counted[0].0.as_str()),
+            None,
+            "cleared, it goes"
+        );
+        assert_eq!(store.load_auto_counters(&counted[1].0), counted[1].1);
     }
 
     /// Two copies of the app counting at once each keep the other's
