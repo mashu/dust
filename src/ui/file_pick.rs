@@ -218,14 +218,17 @@ async fn read_apart(path: std::path::PathBuf) -> Option<Option<String>> {
 }
 
 /// What `file` holds, as text, read a slice at a time: as one string, a
-/// browser may not read a file of hundreds of megabytes at all. What is no
-/// UTF-8 reads as the mark of a character that could not be read, as a
-/// browser reads text.
+/// browser may not read a file of hundreds of megabytes at all. A file that
+/// is no UTF-8 is no text, as a computer reads it: none, found at the slice
+/// that shows it, the first of a photo or a film, rather than once the whole
+/// of it is held, and held again as text. So is a file there is no room for:
+/// a browser's memory has an end, and running out of it would end the app.
 #[cfg(all(feature = "web", not(test)))]
 async fn read_in_slices(file: &web_sys::File) -> Option<String> {
     let size = file.size();
-    let mut bytes = Vec::with_capacity(size as usize);
-    let mut at = 0.0;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(size as usize).ok()?;
+    let (mut at, mut text_up_to) = (0.0, 0);
     while at < size {
         let end = (at + SLICE_BYTES as f64).min(size);
         let slice = file.slice_with_f64_and_f64(at, end).ok()?;
@@ -233,15 +236,27 @@ async fn read_in_slices(file: &web_sys::File) -> Option<String> {
             .await
             .ok()?;
         let read = js_sys::Uint8Array::new(&read);
-        let from = bytes.len();
-        bytes.resize(from + read.length() as usize, 0);
+        let (from, length) = (bytes.len(), read.length() as usize);
+        bytes.try_reserve(length).ok()?;
+        bytes.resize(from + length, 0);
         read.copy_to(&mut bytes[from..]);
+        text_up_to = utf8_up_to(&bytes, text_up_to)?;
         at = end;
     }
-    Some(
-        String::from_utf8(bytes)
-            .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned()),
-    )
+    String::from_utf8(bytes).ok()
+}
+
+/// How far `bytes`, read a slice at a time, read as UTF-8, looked at from
+/// `from`, as far as they did before: to their end, or to a character the
+/// end of the slice cut in two, which the next slice finishes. None where
+/// they are no UTF-8, and so no text.
+#[cfg(any(feature = "web", test))]
+fn utf8_up_to(bytes: &[u8], from: usize) -> Option<usize> {
+    match std::str::from_utf8(&bytes[from..]) {
+        Ok(_) => Some(bytes.len()),
+        Err(cut) if cut.error_len().is_none() => Some(from + cut.valid_up_to()),
+        Err(_) => None,
+    }
 }
 
 /// The script that has the element `id` open the webview's own file picker
@@ -387,7 +402,7 @@ pub fn FileButton(
 mod tests {
     use super::{
         ChosenFile, Piece, Pieces, SLICE_BYTES, data_dirs, on_path, picker_script,
-        portal_chooses_files,
+        portal_chooses_files, utf8_up_to,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -497,6 +512,25 @@ mod tests {
         let takeover = script.find("pickers[id]();").expect("takes over");
         let made = script.find("document.createElement").expect("makes one");
         assert!(takeover < made, "{script}");
+    }
+
+    /// A file read a slice at a time in a browser is text as far as it reads
+    /// as UTF-8: a character cut in two by a slice's end waits for the next
+    /// slice, and a byte that is no UTF-8 makes it no text at the slice that
+    /// holds it, the first of a photo or a film. Such a file read as text
+    /// was held whole, then again with a mark for every byte not read, three
+    /// times its size or more, which a browser could not find room for.
+    #[test]
+    fn a_large_file_is_text_only_while_it_reads_as_utf8() {
+        let text = "dust é".as_bytes();
+        let cut = text.len() - 1;
+        assert_eq!(utf8_up_to(&text[..cut], 0), Some(cut - 1), "é cut in two");
+        assert_eq!(utf8_up_to(text, cut - 1), Some(text.len()), "and whole");
+        assert_eq!(utf8_up_to(text, 0), Some(text.len()));
+        let mut film = b"\x00\x00\x00 ftypisom".to_vec();
+        film.extend([0x93, 0xff, 0x00]);
+        assert_eq!(utf8_up_to(&film, 0), None);
+        assert_eq!(utf8_up_to(&film, 4), None, "past the slices before");
     }
 
     /// A file handed over a slice at a time is put together whole, and
