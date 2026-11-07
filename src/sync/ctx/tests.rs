@@ -1,7 +1,7 @@
 //! Sync in the app: the card's moves, and the syncs the app makes by
 //! itself, against a folder and a sign-in of a test's own.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use super::*;
@@ -67,6 +67,70 @@ impl Auth for Finishing {
                 sleep_ms(POLL_MS).await;
             }
             auth.sign_in().await
+        })
+    }
+
+    fn kept(&self) -> Option<String> {
+        self.auth.kept()
+    }
+
+    fn keep(&self, kept: Option<String>) {
+        self.auth.keep(kept);
+    }
+
+    fn forget(&self) {
+        self.auth.forget();
+    }
+}
+
+/// A sign-in each asking of which waits for the test to answer it, as one
+/// waiting on the user does, in whatever order the test answers them: one
+/// answered as signed in then signs in as `auth` does.
+struct Answered {
+    auth: Rc<FakeAuth>,
+    askings: RefCell<Vec<Answer>>,
+}
+
+/// What an asking for a sign-in comes to, once the test answers it.
+type Answer = Rc<Cell<Option<Result<(), AuthError>>>>;
+
+impl Answered {
+    fn of(auth: &Rc<FakeAuth>) -> Rc<Self> {
+        Rc::new(Self {
+            auth: Rc::clone(auth),
+            askings: RefCell::new(Vec::new()),
+        })
+    }
+
+    /// How many times a sign-in was asked for: the number the next asking
+    /// is answered by.
+    fn asked(&self) -> usize {
+        self.askings.borrow().len()
+    }
+
+    /// Answer the asking `nth`, counted from nought.
+    fn answer(&self, nth: usize, answer: Result<(), AuthError>) {
+        self.askings.borrow()[nth].set(Some(answer));
+    }
+}
+
+impl Auth for Answered {
+    fn token(&self, fresh: bool) -> Pending<Result<String, AuthError>> {
+        self.auth.token(fresh)
+    }
+
+    fn sign_in(&self) -> Pending<Result<(), AuthError>> {
+        let answer = Rc::new(Cell::new(None));
+        self.askings.borrow_mut().push(Rc::clone(&answer));
+        let auth = Rc::clone(&self.auth);
+        Box::pin(async move {
+            loop {
+                match answer.take() {
+                    Some(Ok(())) => return auth.sign_in().await,
+                    Some(Err(err)) => return Err(err),
+                    None => sleep_ms(POLL_MS).await,
+                }
+            }
         })
     }
 
@@ -551,6 +615,181 @@ fn a_sign_in_under_way_as_sync_is_turned_off_keeps_nothing() {
         harness.advance(100).await;
         assert_eq!(status(&harness), SyncStatus::Off { problem: None });
         assert!(!auth.signed_in.get(), "forgotten as it finished");
+    });
+}
+
+/// Asked for again while the first waits on the user, by a second tap on
+/// "Sign in to sync" or on the corner's cloud, a sign-in Android answers at
+/// once, as one waits already, leaves the first to go on: once the user
+/// signs in there, the card asks for no sign-in and tells of no trouble,
+/// and sync goes on. The first used to be given up as the second was asked
+/// for, the user's sign-in with it: the card asked for a sign-in still,
+/// told of the second's failing, and nothing synced.
+#[test]
+fn a_sign_in_asked_for_again_while_the_first_waits_on_the_user_goes_on() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let answered = Answered::of(&auth);
+        let ctx = turned_on_answering(&mut harness, &remote, &answered).await;
+        remote.signed_out.set(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(matches!(
+            status(&harness),
+            SyncStatus::On {
+                needs_sign_in: true,
+                ..
+            }
+        ));
+        remote.signed_out.set(false);
+
+        let (first, lists) = (answered.asked(), remote.lists.get());
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.in_app(|| ctx.sync_sign_in());
+        answered.answer(first + 1, Err(AuthError::Failed("busy".into())));
+        harness.advance(50).await;
+        answered.answer(first, Ok(()));
+        harness.advance(100).await;
+        assert!(
+            matches!(
+                status(&harness),
+                SyncStatus::On {
+                    syncing: false,
+                    problem: None,
+                    needs_sign_in: false,
+                    ..
+                }
+            ),
+            "{:?}",
+            status(&harness)
+        );
+        assert_eq!(remote.lists.get(), lists + 1, "synced");
+    });
+}
+
+/// A sign-in that fails once another has signed in since it was asked for
+/// says nothing of it: the card tells of no trouble while sync is on, and
+/// still asks for the passphrase as sync is turned on.
+#[test]
+fn a_sign_in_failing_after_another_signed_in_says_nothing() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let answered = Answered::of(&auth);
+        let ctx = turned_on_answering(&mut harness, &remote, &answered).await;
+        remote.signed_out.set(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        remote.signed_out.set(false);
+        let first = answered.asked();
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.in_app(|| ctx.sync_sign_in());
+        answered.answer(first, Ok(()));
+        harness.advance(100).await;
+        answered.answer(first + 1, Err(AuthError::Failed("busy".into())));
+        harness.advance(100).await;
+        assert!(
+            matches!(
+                status(&harness),
+                SyncStatus::On {
+                    problem: None,
+                    needs_sign_in: false,
+                    ..
+                }
+            ),
+            "{:?}",
+            status(&harness)
+        );
+
+        harness.in_app(|| ctx.sync_turn_off(false));
+        let first = answered.asked();
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.in_app(|| ctx.sync_sign_in());
+        answered.answer(first, Ok(()));
+        harness.advance(100).await;
+        answered.answer(first + 1, Err(AuthError::Failed("busy".into())));
+        harness.advance(100).await;
+        assert_eq!(
+            status(&harness),
+            SyncStatus::Passphrase {
+                new: false,
+                problem: None
+            }
+        );
+    });
+}
+
+/// A sign-in asked for again stops the one before it, in a browser and on
+/// a computer: the card waits on the second, and tells nothing of the
+/// first's stopping, whether sync is being turned on or is on, signed out.
+#[test]
+fn a_sign_in_stopped_by_another_asked_for_says_nothing() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let answered = Answered::of(&auth);
+        let ctx = linked_through(
+            &mut harness,
+            Rc::clone(&remote) as Rc<dyn Remote>,
+            Rc::clone(&answered) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.in_app(|| ctx.sync_sign_in());
+        answered.answer(0, Err(AuthError::Cancelled));
+        harness.advance(100).await;
+        assert_eq!(status(&harness), SyncStatus::SigningIn, "the second's");
+        answered.answer(1, Ok(()));
+        harness.advance(100).await;
+        assert_eq!(
+            status(&harness),
+            SyncStatus::Passphrase {
+                new: true,
+                problem: None
+            }
+        );
+        let passphrase = || "a long passphrase".to_string();
+        harness.in_app(|| ctx.sync_passphrase(passphrase(), Some(passphrase())));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+
+        remote.signed_out.set(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        remote.signed_out.set(false);
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.in_app(|| ctx.sync_sign_in());
+        answered.answer(2, Err(AuthError::Failed("stopped".into())));
+        harness.advance(100).await;
+        assert!(
+            matches!(
+                status(&harness),
+                SyncStatus::On {
+                    problem: None,
+                    needs_sign_in: true,
+                    ..
+                }
+            ),
+            "{:?}",
+            status(&harness)
+        );
+        answered.answer(3, Ok(()));
+        harness.advance(100).await;
+        assert!(
+            matches!(
+                status(&harness),
+                SyncStatus::On {
+                    problem: None,
+                    needs_sign_in: false,
+                    ..
+                }
+            ),
+            "{:?}",
+            status(&harness)
+        );
     });
 }
 
@@ -1422,6 +1661,29 @@ async fn turned_on_held(
     let held = Held::of(remote);
     let ctx = turned_on_through(harness, Rc::clone(&held) as Rc<dyn Remote>, auth).await;
     (ctx, held)
+}
+
+/// Turn sync on here as the first device, signed in through `answered`,
+/// its asking answered at once.
+async fn turned_on_answering(
+    harness: &mut Harness,
+    remote: &Rc<MemoryRemote>,
+    answered: &Rc<Answered>,
+) -> AppCtx {
+    let ctx = linked_through(
+        harness,
+        Rc::clone(remote) as Rc<dyn Remote>,
+        Rc::clone(answered) as Rc<dyn Auth>,
+    );
+    let first = answered.asked();
+    harness.in_app(|| ctx.sync_sign_in());
+    answered.answer(first, Ok(()));
+    harness.advance(100).await;
+    let passphrase = || "a long passphrase".to_string();
+    harness.in_app(|| ctx.sync_passphrase(passphrase(), Some(passphrase())));
+    harness.advance(100).await;
+    assert!(status(harness).is_on(), "{:?}", status(harness));
+    ctx
 }
 
 /// Turn sync on here as the first device, through `remote`.

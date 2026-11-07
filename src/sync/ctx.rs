@@ -115,9 +115,15 @@ pub struct SyncCtx {
     /// What the sign-in found in the drive, for the passphrase to open.
     found: CopyValue<Option<Found>>,
     /// Which asking for a sign-in is the latest: moved on as each is asked
-    /// for, and as one is cancelled, so that one finishing after either
-    /// goes no further.
+    /// for, and as one signs in, so that one under way from before either
+    /// says nothing of failing, the later asking or the sign-in made having
+    /// the say. Signed in, it goes on all the same: on Android the user
+    /// answers the first asked, and a later one is told at once that it
+    /// waits.
     attempt: CopyValue<u64>,
+    /// The latest asking for a sign-in given up, by Cancel or as sync is
+    /// turned off: none asked for by then goes any further as it finishes.
+    given_up: CopyValue<u64>,
     /// A sync is under way, and another is asked for after it.
     running: CopyValue<bool>,
     again: CopyValue<bool>,
@@ -167,6 +173,7 @@ impl SyncCtx {
             epoch: CopyValue::new(0),
             found: CopyValue::new(None),
             attempt: CopyValue::new(0),
+            given_up: CopyValue::new(0),
             running: CopyValue::new(false),
             again: CopyValue::new(false),
             soon: CopyValue::new(false),
@@ -257,6 +264,8 @@ impl AppCtx {
     /// Ask the user to sign in to Google: to turn sync on, or to sync again
     /// once a browser's sign-in has run out. Called from the press of the
     /// card's button, as a browser lets only that open Google's window.
+    /// Asked for again meanwhile, a sign-in under way goes on should it
+    /// sign in, but says nothing should it fail ([`SyncCtx::attempt`]).
     pub fn sync_sign_in(self) {
         let Some(link) = self.sync_link() else {
             return;
@@ -271,6 +280,12 @@ impl AppCtx {
             let signed_in = signing_in.await;
             if self.sign_in_given_up(attempt, &link) {
                 return;
+            }
+            // Failing, it says so only where none was asked for since, nor
+            // signed in: the later one, or the sign-in made, has the say.
+            let latest = *self.sync.attempt.peek() == attempt;
+            if signed_in.is_ok() {
+                self.next_sign_in();
             }
             if was_on {
                 match signed_in {
@@ -287,15 +302,18 @@ impl AppCtx {
                         });
                         self.sync_now();
                     }
-                    Err(err) => {
+                    Err(err) if latest => {
                         self.change_on_status(|_, _, problem, _| *problem = Some(err.told()))
                     }
+                    Err(_) => {}
                 }
                 return;
             }
             if let Err(err) = signed_in {
-                let problem = (err != AuthError::Cancelled).then(|| err.told());
-                self.set_sync_status(SyncStatus::Off { problem });
+                if latest {
+                    let problem = (err != AuthError::Cancelled).then(|| err.told());
+                    self.set_sync_status(SyncStatus::Off { problem });
+                }
                 return;
             }
             let found = look(&*link.remote).await;
@@ -380,12 +398,12 @@ impl AppCtx {
         });
     }
 
-    /// Whether the sign-in `attempt` was cancelled, or another asked for,
-    /// since it was asked for: then it goes no further. What it signed in
-    /// as it finished is forgotten, as Cancel forgot what it had before,
-    /// where sync is off and no other sign-in is under way.
+    /// Whether the sign-in `attempt` was given up since it was asked for,
+    /// by Cancel or as sync was turned off: then it goes no further. What
+    /// it signed in as it finished is forgotten, as Cancel forgot what it
+    /// had before, where sync is off and no other sign-in is under way.
     fn sign_in_given_up(self, attempt: u64, link: &Link) -> bool {
-        if *self.sync.attempt.peek() == attempt {
+        if attempt > *self.sync.given_up.peek() {
             return false;
         }
         if self.sync.state.peek().is_none()
@@ -404,10 +422,15 @@ impl AppCtx {
         next
     }
 
+    /// Give up every sign-in asked for so far ([`SyncCtx::given_up`]).
+    fn give_up_sign_ins(self) {
+        put(self.sync.given_up, *self.sync.attempt.peek());
+    }
+
     /// Stop turning sync on: the sign-in waiting, or the passphrase asked
     /// for. A sign-in finishing as it is cancelled goes no further.
     pub fn sync_cancel(self) {
-        self.next_sign_in();
+        self.give_up_sign_ins();
         if let Some(link) = self.sync_link() {
             link.auth.cancel();
             if self.sync.state.peek().is_none() {
@@ -697,7 +720,7 @@ impl AppCtx {
         }
         // A sign-in still under way is given up too: finishing after this,
         // it keeps nothing.
-        self.next_sign_in();
+        self.give_up_sign_ins();
         self.next_sync_epoch();
         put(self.sync.state, None);
         put(self.sync.stored, false);
