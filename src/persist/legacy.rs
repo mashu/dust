@@ -52,6 +52,7 @@ pub(super) const HISTORY_BUDGET: usize = 3_000_000;
 /// settle a session stamped ahead of the clock for themselves
 /// ([`crate::time::as_shown`]).
 pub(super) fn read_history(raw: &str) -> Option<ReadHistory> {
+    let raw = super::unmarked(raw);
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
     let (sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {

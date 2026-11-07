@@ -633,11 +633,19 @@ pub fn settings_from(raw: &str) -> Option<TrainingSettings> {
 /// Stored settings, as the app may use them, when what is stored is
 /// settings at all: a JSON object, however much of it still reads.
 fn read_settings_from(raw: &str) -> Option<TrainingSettings> {
+    let raw = unmarked(raw);
     matches!(
         serde_json::from_str::<serde_json::Value>(raw),
         Ok(serde_json::Value::Object(_))
     )
     .then(|| load_settings_from(raw))
+}
+
+/// What a file holds, `raw`, without the mark of its encoding that an
+/// editor saving it may put first, a byte order mark: no part of what it
+/// holds, and no JSON either.
+fn unmarked(raw: &str) -> &str {
+    raw.strip_prefix('\u{feff}').unwrap_or(raw)
 }
 
 /// `theirs`, the settings stored now, with every setting `ours` changed

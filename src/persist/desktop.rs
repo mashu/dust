@@ -15,7 +15,7 @@ use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
-    over_stored, read_settings_from,
+    over_stored, read_settings_from, unmarked,
 };
 
 const THEME: &str = "theme.txt";
@@ -355,7 +355,8 @@ type StoredCounters = serde_json::Map<String, serde_json::Value>;
 /// The counters `raw` holds, each as it was written: none where it holds
 /// no counters at all.
 fn stored_counters(raw: &[u8]) -> Option<StoredCounters> {
-    match serde_json::from_slice(raw) {
+    let raw = unmarked(std::str::from_utf8(raw).ok()?);
+    match serde_json::from_str(raw) {
         Ok(serde_json::Value::Object(stored)) => Some(stored),
         _ => None,
     }
@@ -1578,6 +1579,53 @@ pub(super) mod tests {
         assert!(sync_dir(Path::new("/proc")).is_ok());
         let dir = TempDir::new("flush-none");
         assert!(sync_dir(&dir.0.join("not there")).is_err());
+    }
+
+    /// A file an editor saved with a byte order mark first, as some editors
+    /// save every file, reads as the same file without one: the settings,
+    /// the history an older build keeps whole, and the counters. Each was
+    /// taken for a file that does not read and set aside: the settings
+    /// went back to their defaults, the history was moved with none of its
+    /// sessions, and the counters began again.
+    #[test]
+    fn a_file_saved_with_a_byte_order_mark_reads_as_one_without() {
+        let (dir, store) = store("byte-order-mark");
+        fs::create_dir_all(&dir.0).unwrap();
+        let marked = |raw: Vec<u8>| [b"\xef\xbb\xbf".to_vec(), raw].concat();
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.num_groups = 9;
+        let settings = settings.clamp();
+        let pretty = serde_json::to_vec_pretty(&settings).unwrap();
+        fs::write(dir.0.join(SETTINGS), marked(pretty)).unwrap();
+        let whole = [
+            session("2026-09-01"),
+            SessionResult {
+                timestamp: 2,
+                ..session("2026-09-02")
+            },
+        ];
+        let kept = serde_json::to_vec(&whole).unwrap();
+        fs::write(dir.0.join(SESSIONS), marked(kept)).unwrap();
+        let counted = counted_at([3]);
+        let counters = serde_json::json!({ counted[0].0.as_str(): counted[0].1 });
+        let counters = serde_json::to_vec(&counters).unwrap();
+        fs::write(dir.0.join(COUNTERS), marked(counters)).unwrap();
+        assert_eq!(store.load_settings(), settings);
+        let dates: Vec<String> = stored(&store)
+            .into_iter()
+            .map(|session| session.date)
+            .collect();
+        assert_eq!(dates, ["2026-09-01", "2026-09-02"]);
+        assert_eq!(store.load_auto_counters(&counted[0].0), counted[0].1);
+        let more = counted_at([4]);
+        store.save_auto_counters(&more[0].0, more[0].1);
+        assert_eq!(store.load_auto_counters(&counted[0].0), counted[0].1);
+        assert!(store.take_set_aside().is_empty());
+        let aside: Vec<String> = files(&dir)
+            .into_iter()
+            .filter(|name| name.contains(".unreadable-"))
+            .collect();
+        assert!(aside.is_empty(), "{aside:?}");
     }
 
     #[test]
