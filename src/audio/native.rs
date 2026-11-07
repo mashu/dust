@@ -527,6 +527,7 @@ impl MorseBackend for MorsePlayer {
             late,
             failed,
             heartbeat,
+            clock_sec(),
             // Its samples go to the output once the receiver has looked
             // ahead at them.
             SendTiming {
@@ -1010,6 +1011,52 @@ mod device_tests {
         player.sleep();
         assert!(player.stream.is_none(), "asleep, it is closed");
         assert!(!healthy.load(Ordering::Acquire), "closed, not retired");
+    }
+
+    /// A stream its device has yet to call is let go of as one that plays
+    /// is, closed as cpal closes it, while it is just opened; and, as one
+    /// that stopped is, without its worker being waited for where that wait
+    /// may never end, once it has gone uncalled for longer than a stream is
+    /// given to be called the first time.
+    #[test]
+    fn a_stream_never_called_is_retired_only_once_its_time_to_start_has_run_out() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        player.sleep();
+        let (device, supported) = default_output().expect("the output");
+        // A stream opened at `opened_sec` and never called, let go of now:
+        // whether it was retired.
+        let mut let_go = |opened_sec: f64| {
+            let stream = device
+                .build_output_stream_raw(
+                    &supported.config(),
+                    supported.sample_format(),
+                    |_: &mut cpal::Data, _: &cpal::OutputCallbackInfo| {},
+                    |_| {},
+                    None,
+                )
+                .expect("a stream");
+            stream.play().expect("it plays");
+            let retired = Arc::new(AtomicBool::new(false));
+            player.stream = Some(OpenStream {
+                stream: Some(stream),
+                device: None,
+                failed: Arc::new(AtomicBool::new(false)),
+                heartbeat: Arc::new(Heartbeat::new(opened_sec)),
+                erring: Arc::new(AtomicBool::new(false)),
+                retired: Arc::clone(&retired),
+            });
+            player.sleep();
+            assert!(player.stream.is_none(), "asleep, it is closed");
+            retired.load(Ordering::Acquire)
+        };
+        assert!(!let_go(clock_sec()), "just opened, it is closed");
+        assert_eq!(
+            let_go(clock_sec() - state::FIRST_CALL_SEC - 1.0),
+            DROP_WAITS_ON_WORKER,
+            "never called in its time, it is retired where its worker is not waited for"
+        );
     }
 
     /// A stream whose worker died without a word is let go of without its

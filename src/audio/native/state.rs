@@ -12,6 +12,7 @@ use cw_core::band::{BandChange, BandKey};
 
 use crate::audio::epoch::{Epoch, Ticket};
 use crate::audio::mixer::clock_sec;
+use crate::audio::wait::LATE_MS;
 use crate::audio::{PlaybackSignal, SendTiming, WaitFlags};
 
 pub struct PlayerState {
@@ -104,12 +105,17 @@ impl Heartbeat {
         f64::from_bits(self.last.load(Ordering::Relaxed))
     }
 
+    /// Whether the callback has run at all since the stream opened.
+    pub fn called(&self) -> bool {
+        self.called.load(Ordering::Acquire)
+    }
+
     /// Whether, at `now_sec`, the callback has gone uncalled for longer than
     /// it is given, however long since anything last looked: longer than
     /// [`SILENT_AFTER_SEC`] since it was last called, or, never called,
     /// than [`FIRST_CALL_SEC`] since the stream opened.
     pub fn went_silent(&self, now_sec: f64) -> bool {
-        let given = if self.called.load(Ordering::Acquire) {
+        let given = if self.called() {
             SILENT_AFTER_SEC
         } else {
             FIRST_CALL_SEC
@@ -141,6 +147,9 @@ pub struct ToneSignal {
     /// stopped, not at the end of the stall the send is allowed.
     heartbeat: Arc<Heartbeat>,
     silent_since: Cell<Option<f64>>,
+    /// When the send was handed to the stream, on [`clock_sec`]'s clock: a
+    /// stream not yet called the first time holds it up from then.
+    started_sec: f64,
     /// How long it waits to be rendered, its first sample going to the
     /// output, and how far behind the stream's callback the speaker was as
     /// it started.
@@ -154,6 +163,7 @@ impl ToneSignal {
         late: Arc<AtomicBool>,
         stream_failed: Arc<AtomicBool>,
         heartbeat: Arc<Heartbeat>,
+        started_sec: f64,
         timing: SendTiming,
     ) -> Self {
         Self {
@@ -163,6 +173,7 @@ impl ToneSignal {
             stream_failed,
             heartbeat,
             silent_since: Cell::new(None),
+            started_sec,
             timing,
         }
     }
@@ -186,23 +197,33 @@ impl ToneSignal {
         }
         broke
     }
-}
 
-impl PlaybackSignal for ToneSignal {
-    fn timing(&self) -> SendTiming {
-        self.timing
+    /// Whether, at `now_sec`, the send has waited on a stream not yet
+    /// called the first time for longer than a send may fall behind and
+    /// still be timed ([`LATE_MS`]): held up while its device starts.
+    fn held_by_start_at(&self, now_sec: f64) -> bool {
+        !self.heartbeat.called() && now_sec - self.started_sec > LATE_MS as f64 / 1_000.0
     }
 
-    fn poll(&self) -> WaitFlags {
+    /// What the stream tells the waiter at `now_sec`, on [`clock_sec`]'s
+    /// clock.
+    fn poll_at(&self, now_sec: f64) -> WaitFlags {
         WaitFlags {
             cancelled: self.ticket.is_cancelled(),
             finished: self.finished.load(Ordering::Acquire),
             // A broken stream never calls back again, so the send would never
             // finish; saying so lets the session rebuild the player.
-            failed: self.stream_broke_at(clock_sec()),
-            // The stream either calls back or it does not; there is nothing
-            // here that parks it the way a browser parks a hidden tab.
-            suspended: false,
+            failed: self.stream_broke_at(now_sec),
+            // A stream not yet called the first time is starting, not
+            // stalled, as a Bluetooth headset or a USB sound card woken from
+            // saving power takes seconds to: the send waits for it as long
+            // as its heartbeat gives it ([`FIRST_CALL_SEC`]), which says when
+            // it broke instead, and none of that wait counts against the
+            // stall the send is allowed. Parked only once the wait has made
+            // it late: a stream called a moment after the send was handed to
+            // it has held nothing up. Nothing else parks a stream the way a
+            // browser parks a hidden tab: it calls back or it does not.
+            suspended: self.held_by_start_at(now_sec),
             // cpal gives no clock of its own: the send having been heard to
             // its end is the only word on when it is over, and the send says
             // itself whether it played late.
@@ -215,9 +236,26 @@ impl PlaybackSignal for ToneSignal {
     }
 }
 
+impl PlaybackSignal for ToneSignal {
+    fn timing(&self) -> SendTiming {
+        self.timing
+    }
+
+    fn poll(&self) -> WaitFlags {
+        self.poll_at(clock_sec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
+
+    use cw_core::{MonoMs, PlannedTransmission};
+
+    use crate::audio::wait::Waited;
+    use crate::audio::{PlaybackOutcome, PlaybackWait};
+    use crate::time::{mono_ms, sleep_ms};
 
     #[test]
     fn a_stream_moves_only_when_the_default_does() {
@@ -268,6 +306,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::clone(heartbeat),
+            0.0,
             SendTiming::default(),
         )
     }
@@ -291,6 +330,130 @@ mod tests {
         thawed.heartbeat.beat(2.1);
         assert!(!thawed.stream_broke_at(2.1 + SILENT_CONFIRM_SEC));
         assert!(!thawed.stream_broke_at(3.0));
+    }
+
+    /// The test's clock, which its timers run on, in seconds: read in place
+    /// of [`clock_sec`]'s by a signal polled through [`OnTestClock`] and by
+    /// the stream it waits on.
+    fn test_sec() -> f64 {
+        mono_ms() as f64 / 1_000.0
+    }
+
+    /// A signal polled on the test's clock, so that its wait, the stall the
+    /// send is allowed and its stream's heartbeat all go by the one clock.
+    struct OnTestClock(ToneSignal);
+
+    impl PlaybackSignal for OnTestClock {
+        fn poll(&self) -> WaitFlags {
+            self.0.poll_at(test_sec())
+        }
+
+        fn timing(&self) -> SendTiming {
+            self.0.timing()
+        }
+    }
+
+    /// A send `duration_sec` long on `heartbeat`'s stream, handed to it now
+    /// on the test's clock, and its word that it has been heard out.
+    fn send_on(heartbeat: &Arc<Heartbeat>, duration_sec: f64) -> (PlaybackWait, Arc<AtomicBool>) {
+        let finished = Arc::new(AtomicBool::new(false));
+        let signal = ToneSignal::new(
+            Epoch::default().arm(),
+            Arc::clone(&finished),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(heartbeat),
+            test_sec(),
+            SendTiming::default(),
+        );
+        let plan = PlannedTransmission {
+            wanted: cw_core::PlaybackPlan {
+                events: Vec::new(),
+                chars: Vec::new(),
+                duration_sec,
+                resolved_char_wpm: 20.0,
+                resolved_effective_wpm: 18.0,
+                fade_from_sec: 0.0,
+            },
+            others: Vec::new(),
+            dry_wanted: false,
+            muted_until: None,
+        };
+        let signal = Rc::new(OnTestClock(signal));
+        (
+            PlaybackWait::new(&plan, signal, MonoMs(mono_ms())),
+            finished,
+        )
+    }
+
+    /// `heartbeat`'s stream, called the first time `after_ms` from now on
+    /// the test's clock and on from then until it has played `play_sec`,
+    /// when the send on it, `finished`, has been heard out.
+    async fn called_after(
+        heartbeat: &Heartbeat,
+        after_ms: u32,
+        play_sec: f64,
+        finished: &AtomicBool,
+    ) {
+        sleep_ms(after_ms).await;
+        let first = test_sec();
+        while test_sec() - first < play_sec {
+            heartbeat.beat(test_sec());
+            sleep_ms(5).await;
+        }
+        heartbeat.beat(test_sec());
+        finished.store(true, Ordering::Release);
+    }
+
+    /// A send on a stream its device is slow to call the first time, as a
+    /// Bluetooth headset or a USB sound card woken from saving power is,
+    /// waits for it as long as the stream is given to start: a second's
+    /// send on a stream first called three seconds on is heard out, held up
+    /// on its way, and one on a stream called a moment on is not held up at
+    /// all. One on a stream never called fails as its heartbeat gives the
+    /// stream up, and not before. That wait used to count against the
+    /// stall a send is allowed, and every try failed two seconds past the
+    /// send's length, the stream opened for each as slow to start.
+    #[test]
+    fn a_send_waits_for_a_stream_slow_to_start_as_long_as_the_stream_is_given() {
+        crate::testing::run(|| async {
+            let slow = Arc::new(Heartbeat::new(test_sec()));
+            let (wait, finished) = send_on(&slow, 1.0);
+            let (waited, ()) =
+                tokio::join!(wait.wait(), called_after(&slow, 3_000, 1.0, &finished));
+            assert_eq!(
+                waited,
+                Waited {
+                    outcome: PlaybackOutcome::Completed,
+                    held_up: true,
+                },
+                "a stream first called three seconds on"
+            );
+
+            let prompt = Arc::new(Heartbeat::new(test_sec()));
+            let (wait, finished) = send_on(&prompt, 1.0);
+            let (waited, ()) = tokio::join!(wait.wait(), called_after(&prompt, 20, 1.0, &finished));
+            assert_eq!(
+                waited,
+                Waited {
+                    outcome: PlaybackOutcome::Completed,
+                    held_up: false,
+                },
+                "a stream called a moment on"
+            );
+
+            let never = Arc::new(Heartbeat::new(test_sec()));
+            let (wait, _) = send_on(&never, 0.0);
+            let began = test_sec();
+            let waited = wait.wait().await;
+            let took = test_sec() - began;
+            assert_eq!(waited.outcome, PlaybackOutcome::Failed);
+            let given = FIRST_CALL_SEC + SILENT_CONFIRM_SEC;
+            assert!(
+                (given..given + 0.05).contains(&took),
+                "a stream never called failed {took} s in"
+            );
+        });
     }
 
     #[test]
@@ -340,12 +503,16 @@ mod tests {
             lead_sec: 0.0,
             latency_sec: 0.04,
         };
+        // A stream that plays.
+        let heartbeat = Arc::new(Heartbeat::new(clock_sec()));
+        heartbeat.beat(clock_sec());
         let signal = ToneSignal::new(
             armed,
             Arc::clone(&finished),
             Arc::clone(&late),
             Arc::clone(&broken),
-            Arc::new(Heartbeat::new(clock_sec())),
+            heartbeat,
+            clock_sec(),
             timing,
         );
         assert_eq!(signal.timing().heard_after_sec(), 0.04);

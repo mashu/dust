@@ -55,9 +55,11 @@ pub struct WaitFlags {
     pub finished: bool,
     /// The backend says the stream is broken.
     pub failed: bool,
-    /// The audio clock is parked on purpose rather than broken: a hidden tab,
-    /// a context the browser suspended, a phone that locked. Nothing is being
-    /// missed, so none of this time counts against the stall budget.
+    /// The audio clock is parked rather than broken: on purpose, by a hidden
+    /// tab, a context the browser suspended, a phone that locked; or until a
+    /// sound device slow to start plays, for as long as the backend gives
+    /// it. Nothing is being missed, so none of this time counts against the
+    /// stall budget.
     pub suspended: bool,
     /// Audio-clock progress, for backends that have one. `None` means the
     /// backend can only report `finished`.
