@@ -415,6 +415,11 @@ impl AppCtx {
     /// store has looked: at once on a computer or a phone, a moment later
     /// in a browser. What each had done by then is kept, as Exit would have
     /// kept it, and what each carried that the store had yet to take.
+    ///
+    /// What the store holds is taken up first: a copy that stored what its
+    /// mark carries, and stopped before its mark went, kept it already,
+    /// though a copy open all along may not have taken it up yet. Told of
+    /// as kept, it is not stored a second time.
     pub fn tell_of_cut_off(self) {
         // This copy's own mark, which it holds still, is no other copy's
         // cut off, whatever a store says of it.
@@ -426,18 +431,23 @@ impl AppCtx {
         dioxus::core::spawn_forever(async move {
             let mut cut = looking.await;
             cut.retain(|cut| !matches!(cut, CutOff::Marked(open) if Some(open.started_at) == own));
-            let told = {
-                let history = self.sessions.peek();
-                CutOff::newest(
-                    cut.iter()
-                        .filter(|cut| !kept_already(cut, &history))
-                        .cloned(),
-                )
-            };
-            if let Some(newest) = told {
-                notices.write().push(Notice::CutOff(newest));
+            if cut.is_empty() {
+                return;
             }
-            keep_cut_off(self, cut).await;
+            self.sync_with_store(move || {
+                let told = {
+                    let history = self.sessions.peek();
+                    CutOff::newest(
+                        cut.iter()
+                            .filter(|cut| !kept_already(cut, &history))
+                            .cloned(),
+                    )
+                };
+                if let Some(newest) = told {
+                    notices.write().push(Notice::CutOff(newest));
+                }
+                spawn_forever(keep_cut_off(self, cut));
+            });
         });
     }
 
@@ -2806,6 +2816,37 @@ mod tests {
             "told of as kept: {:?}",
             next.notices()
         );
+    }
+
+    /// A session another copy of the app kept, which the store took before
+    /// that copy stopped, its mark left behind, is stored once: a copy open
+    /// all along, that has yet to take it up, takes it up as it finds the
+    /// mark, and tells of nothing cut off. It used to look only at what it
+    /// held itself, store the session again under a record of its own, and
+    /// show it twice.
+    #[test]
+    fn a_session_another_copy_stored_as_it_stopped_is_stored_once() {
+        let store = Rc::new(MemoryStore::default());
+        let (a, mut b) = (Tab::on(&store), Tab::on(&store));
+        let open = a.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(1),
+            settings: None,
+        };
+        a.act(|ctx| ctx.mark_so_far(&open, so_far));
+        // The store takes it, and the copy stops before it hears so.
+        store.deferred.set(true);
+        a.finish(day(1));
+        store.settle();
+        drop(a);
+        store.deferred.set(false);
+        assert_eq!(days(&store.load_sessions()), [1]);
+
+        b.act(|ctx| ctx.mark_running(false));
+        b.pump();
+        assert_eq!(days(&store.load_sessions()), [1], "stored once");
+        assert_eq!(b.shown(), [1]);
+        assert_eq!(b.notices(), [], "kept, not cut off");
     }
 
     /// The one backup file saved in `folder`, read.
