@@ -9,7 +9,7 @@
 //! holds it. What keeps the code to this copy alone is the PKCE verifier,
 //! made afresh for each sign-in and never sent until the trade.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
@@ -61,6 +61,11 @@ struct Inner {
     refresh: RefCell<Option<String>>,
     /// What stops the sign-in waiting on the browser.
     waiting: RefCell<Option<Arc<AtomicBool>>>,
+    /// Which sign-in what is held is of: moved on as it is forgotten, and
+    /// as another sign-in begins, so that a trade under way across either
+    /// keeps nothing of what it is answered, which may be of another
+    /// account than the one signed in since.
+    epoch: Cell<u64>,
 }
 
 impl LoopbackAuth {
@@ -89,6 +94,7 @@ impl LoopbackAuth {
             held: RefCell::new(None),
             refresh: RefCell::new(None),
             waiting: RefCell::new(None),
+            epoch: Cell::new(0),
         }))
     }
 }
@@ -200,12 +206,17 @@ fn answer_browser(mut stream: TcpStream, state: &str) -> Option<Brought> {
 
 impl Inner {
     /// Trade `form` at Google's token endpoint for a token, kept as held:
-    /// and its refresh token, where it gives one.
-    async fn trade(&self, form: &[(&str, &str)]) -> Result<String, AuthError> {
+    /// and its refresh token, where it gives one. Answered once the
+    /// sign-in of `epoch` is forgotten, or another has begun, it keeps
+    /// nothing, and comes to nothing, as a sign-in given up does.
+    async fn trade(&self, epoch: u64, form: &[(&str, &str)]) -> Result<String, AuthError> {
         let request = Request::new("POST", TOKEN_AT)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(query(form).into_bytes());
         let answer = self.http.send(request).await.map_err(AuthError::Failed)?;
+        if self.epoch.get() != epoch {
+            return Err(AuthError::Cancelled);
+        }
         if !(200..300).contains(&answer.status) {
             let refused: Option<Refused> = serde_json::from_slice(&answer.body).ok();
             return Err(match refused.map(|refused| refused.error).as_deref() {
@@ -250,13 +261,17 @@ impl Auth for LoopbackAuth {
             return Box::pin(std::future::ready(Err(AuthError::NeedsUser)));
         };
         let this = Rc::clone(&self.0);
+        let epoch = this.epoch.get();
         Box::pin(async move {
-            this.trade(&[
-                ("client_id", &this.client.id),
-                ("client_secret", &this.client.secret),
-                ("refresh_token", &refresh),
-                ("grant_type", "refresh_token"),
-            ])
+            this.trade(
+                epoch,
+                &[
+                    ("client_id", &this.client.id),
+                    ("client_secret", &this.client.secret),
+                    ("refresh_token", &refresh),
+                    ("grant_type", "refresh_token"),
+                ],
+            )
             .await
         })
     }
@@ -303,10 +318,14 @@ impl Auth for LoopbackAuth {
         if let Err(why) = (this.open)(&url) {
             return fail(why);
         }
+        // What is under way from before stops: a sign-in waiting on the
+        // browser, and a trade, which keeps nothing of its answer.
         let stop = Arc::new(AtomicBool::new(false));
         if let Some(earlier) = this.waiting.replace(Some(Arc::clone(&stop))) {
             earlier.store(true, Ordering::Relaxed);
         }
+        let epoch = this.epoch.get() + 1;
+        this.epoch.set(epoch);
         let (answer, answered) = tokio::sync::oneshot::channel();
         let waiting_state = state;
         let spawned = std::thread::Builder::new()
@@ -323,14 +342,17 @@ impl Auth for LoopbackAuth {
             let Brought::Code(code) = brought else {
                 return Err(AuthError::Cancelled);
             };
-            this.trade(&[
-                ("client_id", &this.client.id),
-                ("client_secret", &this.client.secret),
-                ("code", &code),
-                ("code_verifier", &verifier),
-                ("grant_type", "authorization_code"),
-                ("redirect_uri", &redirect),
-            ])
+            this.trade(
+                epoch,
+                &[
+                    ("client_id", &this.client.id),
+                    ("client_secret", &this.client.secret),
+                    ("code", &code),
+                    ("code_verifier", &verifier),
+                    ("grant_type", "authorization_code"),
+                    ("redirect_uri", &redirect),
+                ],
+            )
             .await?;
             Ok(())
         })
@@ -352,6 +374,7 @@ impl Auth for LoopbackAuth {
 
     fn forget(&self) {
         self.cancel();
+        self.0.epoch.set(self.0.epoch.get() + 1);
         *self.0.held.borrow_mut() = None;
         *self.0.refresh.borrow_mut() = None;
     }

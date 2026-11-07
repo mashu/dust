@@ -1,7 +1,7 @@
 //! The computer's sign-in against a browser of a test's own, which goes
 //! where Google would send it, and a token endpoint of its own.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -11,11 +11,14 @@ use super::*;
 use crate::persist::record::done;
 use crate::sync::http::Response;
 
-/// Google's token endpoint, answering each trade as a test says.
+/// Google's token endpoint, answering each trade as a test says: at once,
+/// or, the next once `hold` is set, as the test answers it through `held`.
 #[derive(Default)]
 struct Endpoint {
     answers: RefCell<Vec<Response>>,
     asked: RefCell<Vec<BTreeMap<String, String>>>,
+    hold: Cell<bool>,
+    held: RefCell<Option<tokio::sync::oneshot::Sender<Response>>>,
 }
 
 impl Http for Rc<Endpoint> {
@@ -25,6 +28,11 @@ impl Http for Rc<Endpoint> {
         self.asked
             .borrow_mut()
             .push(parse_query(&form).into_iter().collect());
+        if self.hold.replace(false) {
+            let (answering, answered) = tokio::sync::oneshot::channel();
+            *self.held.borrow_mut() = Some(answering);
+            return Box::pin(async move { answered.await.map_err(|_| "never answered".into()) });
+        }
         let answer = self.answers.borrow_mut().remove(0);
         done(Ok(answer))
     }
@@ -93,6 +101,14 @@ fn block_on<T>(pending: Pending<T>) -> T {
         .build()
         .expect("a runtime")
         .block_on(pending)
+}
+
+/// `pending`, polled once: under way, as far as it goes without waiting.
+fn poll_once<T>(pending: &mut Pending<T>) -> std::task::Poll<T> {
+    let waker = std::task::Waker::noop();
+    pending
+        .as_mut()
+        .poll(&mut std::task::Context::from_waker(waker))
 }
 
 /// Signed in through the browser, the code is traded with its verifier
@@ -192,4 +208,52 @@ fn access_without_the_folder_is_no_sign_in() {
     let failed = block_on(auth.sign_in()).expect_err("no folder");
     assert!(failed.told().contains("tick it"), "{failed:?}");
     assert_eq!(auth.kept(), None);
+}
+
+/// A trade still under way as the sign-in is forgotten, as sync is turned
+/// off, or as another sign-in begins, keeps nothing of what it is answered,
+/// and hands nothing on: the account signed in since keeps its own token
+/// and refresh token. It used to hold the token it was answered, the first
+/// account's, for the next request to take to the first account's drive,
+/// or, refused, to clear the refresh token of the account signed in since.
+#[test]
+fn a_trade_answered_after_another_sign_in_keeps_nothing() {
+    for forgotten in [true, false] {
+        for refused in [false, true] {
+            let endpoint = Rc::new(Endpoint::default());
+            let auth = LoopbackAuth::with(Rc::new(Rc::clone(&endpoint)), client(), browser("yes"));
+            auth.keep(Some("first refresh".into()));
+            endpoint.hold.set(true);
+            let mut trading = auth.token(false);
+            assert!(poll_once(&mut trading).is_pending(), "under way");
+            if forgotten {
+                auth.forget();
+            }
+            endpoint.answers.borrow_mut().push(answer(
+                200,
+                serde_json::json!({ "access_token": "second", "expires_in": 3599, "refresh_token": "second refresh", "scope": SCOPE }),
+            ));
+            block_on(auth.sign_in()).expect("signed in");
+
+            let first = if refused {
+                answer(400, serde_json::json!({ "error": "invalid_grant" }))
+            } else {
+                answer(
+                    200,
+                    serde_json::json!({ "access_token": "first", "expires_in": 3599 }),
+                )
+            };
+            let held = endpoint.held.borrow_mut().take().expect("held");
+            held.send(first).expect("answered");
+            let traded = block_on(trading);
+            let case = format!("forgotten {forgotten}, refused {refused}");
+            assert_eq!(auth.kept().as_deref(), Some("second refresh"), "{case}");
+            assert_eq!(
+                block_on(auth.token(false)).as_deref(),
+                Ok("second"),
+                "{case}"
+            );
+            assert_eq!(traded, Err(AuthError::Cancelled), "{case}");
+        }
+    }
 }
