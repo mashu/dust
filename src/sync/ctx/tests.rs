@@ -1020,6 +1020,27 @@ fn sync_turned_off_in_another_copy_of_the_app_stays_off() {
     });
 }
 
+/// What a sync took from the drive and stored before a later request
+/// failed, the drive full as it sent what this device kept, is shown: the
+/// store has it, and the history here takes it up. It used to stay hidden
+/// until the app opened again, as a store counts its own change as seen.
+#[test]
+fn what_a_sync_took_before_it_failed_is_shown() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let _ = another_device(&remote, "a long passphrase", &[1, 2]);
+        keep(&harness, &[3]);
+        remote.full.set(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        assert_eq!(stamps(&harness), [1, 2, 3]);
+    });
+}
+
 /// What sync keeps, there but unreadable for a moment, as a file another
 /// program holds open is, is no sync turned off in another copy: sync
 /// stays on, and what it keeps stays where it is. A read that failed used

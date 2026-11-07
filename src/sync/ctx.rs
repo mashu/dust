@@ -469,6 +469,11 @@ impl AppCtx {
                 self.sync_over();
                 return;
             }
+            // What it stored before it failed, if it did, is in the store:
+            // taken up, as the store counts its own change as seen.
+            if synced.is_err() {
+                self.take_up_store();
+            }
             // Put back by hand meanwhile: noted with the rest.
             state.revived.extend(take(self.sync.revived));
             // The sign-in is no sync's to keep: one made meanwhile stays.
