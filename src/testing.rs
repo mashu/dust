@@ -1519,6 +1519,15 @@ impl Ui {
         self.fire("keydown", id, Box::new(pressed))
     }
 
+    /// An input method ends a composition in the element `id`, as the
+    /// Enter that ends it does: in WebKit, before the page hears that Enter,
+    /// which it then hears as not composing.
+    pub fn end_composition(&mut self, id: &str) {
+        let ended: dioxus::html::SerializedCompositionData =
+            serde_json::from_value(serde_json::json!({ "data": "" })).expect("a composition's end");
+        self.fire("compositionend", id, Box::new(ended));
+    }
+
     fn key_down(
         &mut self,
         id: &str,

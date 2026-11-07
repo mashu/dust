@@ -25,7 +25,7 @@ use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
 use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow, TOUCH_BUILD};
+use crate::ui::training::{ANSWER_INPUT_MODE, InputMethod, Keypad, PadKey, PadRow, TOUCH_BUILD};
 use crate::ui::widgets::{
     Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool, keep_focus,
 };
@@ -490,6 +490,7 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
     let entry = ctx.entry;
     let shown = entry.shown(field);
     let (id, _) = field_name(field);
+    let input_method = InputMethod::use_field();
     rsx! {
         input {
             id,
@@ -522,11 +523,12 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
                 }
                 entry.set_focus(field);
             },
+            oncompositionend: move |_| input_method.ended(),
             onkeydown: move |e| {
                 // An input method composing a character has its own Enter,
                 // which ends the composition, and its own Space: the run's
                 // keys pass them by as well.
-                if e.is_composing() {
+                if input_method.has(&e) {
                     return;
                 }
                 // Enter, or Enter with the Command key, which the run's keys
@@ -2156,6 +2158,29 @@ mod tests {
             assert!(left, "the input method's Space");
             assert!(ui.take_focused().is_empty());
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
+            ui.press_enter("field-call");
+            assert_eq!(
+                recorder.starts().len(),
+                starts + 1,
+                "your call and exchange"
+            );
+        });
+    }
+
+    /// Where the webview hands over the Enter that ends a composition once
+    /// the composition is over, not as composing, as WebKit's does on a Mac
+    /// and an iPhone, an Enter at the moment one ends in a field is the
+    /// input method's all the same, and keys nothing; the next sends. It
+    /// keyed your call and exchange on the air.
+    #[test]
+    fn the_enter_that_ends_a_composition_in_a_field_sends_nothing() {
+        run(|| async {
+            let (mut ui, recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            let starts = recorder.starts().len();
+            ui.end_composition("field-call");
+            ui.press_enter("field-call");
+            assert_eq!(recorder.starts().len(), starts, "nothing sent");
             ui.press_enter("field-call");
             assert_eq!(
                 recorder.starts().len(),

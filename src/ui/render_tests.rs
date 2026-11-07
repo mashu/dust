@@ -5504,6 +5504,33 @@ mod interactions {
         });
     }
 
+    /// Where the webview hands over the Enter that ends a composition once
+    /// the composition is over, not as composing, as WebKit's does on a Mac
+    /// and an iPhone, an Enter at the moment one ends in the box is the
+    /// input method's all the same, and confirms nothing. The next confirms,
+    /// as does one pressed after another key, or well after a composition
+    /// a click ended. It confirmed the group with the word unfinished.
+    #[test]
+    fn the_enter_that_ends_a_composition_is_the_input_methods() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            ui.click("key-k");
+            ui.end_composition("group-input-0");
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:0"), "{}", ui.html());
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:1"), "{}", ui.html());
+            ui.end_composition("group-input-0");
+            ui.press_key("group-input-0", Key::Character("1".into()), Code::Digit1);
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:2"), "{}", ui.html());
+            ui.end_composition("group-input-0");
+            ui.advance(500).await;
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:3"), "{}", ui.html());
+        });
+    }
+
     /// The box takes no more than an answer to the longest group could
     /// want: it says so to the page, and a page pasted in all the same is cut
     /// there, drawn as it is kept, and handed on so. It was held whole, a key

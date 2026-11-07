@@ -259,6 +259,49 @@ impl AnswerDraft {
 /// types into the box: `none` asks only that no keyboard be drawn on screen.
 pub(crate) const ANSWER_INPUT_MODE: &str = "none";
 
+/// Whether this build's webview hands over the Enter that ends an input
+/// method's composition once the composition is over, not as composing, as
+/// WebKit's does on a Mac and an iPhone: there only its moment tells it from
+/// an Enter of the field's own ([`InputMethod`]). The tests take it so too.
+const ENTER_AFTER_COMPOSITION: bool = cfg!(any(target_os = "macos", target_os = "ios", test));
+
+/// How soon after a composition ends an Enter is still the one that ended
+/// it: the two come together, far sooner than a key pressed after.
+const COMPOSITION_ENTER_MS: u64 = 100;
+
+/// What a field typed in knows of the input method: when its composition
+/// last ended, until the next key is pressed in it, which may be the Enter
+/// that ended it ([`ENTER_AFTER_COMPOSITION`]).
+#[derive(Clone, Copy)]
+pub(crate) struct InputMethod(CopyValue<Option<u64>>);
+
+impl InputMethod {
+    pub(crate) fn use_field() -> Self {
+        Self(use_hook(|| CopyValue::new(None)))
+    }
+
+    /// A composition in the field has ended.
+    pub(crate) fn ended(mut self) {
+        if ENTER_AFTER_COMPOSITION {
+            self.0.set(Some(mono_ms()));
+        }
+    }
+
+    /// Whether `pressed`, a key pressed in the field, is the input
+    /// method's: any key while it composes, Enter and Space among them, and
+    /// the Enter that ended a composition, come as it ended.
+    pub(crate) fn has(mut self, pressed: &KeyboardData) -> bool {
+        if pressed.is_composing() {
+            return true;
+        }
+        let Some(ended) = *self.0.peek() else {
+            return false;
+        };
+        self.0.set(None);
+        pressed.key() == Key::Enter && mono_ms().saturating_sub(ended) <= COMPOSITION_ENTER_MS
+    }
+}
+
 /// Put the cursor in group `idx`'s box, so a keyboard types straight into
 /// it.
 fn focus_box(idx: usize) {
@@ -367,6 +410,7 @@ fn AnswerBox(
 ) -> Element {
     let shown = draft.read_for(idx).unwrap_or_default();
     let skipped_in = sent.clone();
+    let input_method = InputMethod::use_field();
     rsx! {
         input {
             id: "group-input-{idx}",
@@ -391,6 +435,7 @@ fn AnswerBox(
                     draft.redraw();
                 }
             },
+            oncompositionend: move |_| input_method.ended(),
             // `[` and `]` are paddles: the app's root keys them and keeps
             // them out of the box.
             onkeydown: move |e| {
@@ -400,7 +445,7 @@ fn AnswerBox(
                 }
                 // An input method composing a character has its own Enter,
                 // which ends the composition, and its own Space.
-                if e.is_composing() {
+                if input_method.has(&e) {
                     return;
                 }
                 // What is typed reaches the session ahead of the confirm. A
