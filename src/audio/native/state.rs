@@ -60,6 +60,12 @@ impl PlayerState {
 /// second or so, with room for a busy machine.
 pub const SILENT_AFTER_SEC: f64 = 1.5;
 
+/// How long a stream just opened may go before it is called the first
+/// time: a Bluetooth headset, or a USB sound card woken from saving power,
+/// takes seconds to start playing, and a stream taken for broken meanwhile
+/// is only opened again on a device as slow to start.
+pub const FIRST_CALL_SEC: f64 = 5.0;
+
 /// How long a send waiting on a stream sees it uncalled before it says the
 /// stream broke: a process the system froze and has just let go is called
 /// again within a buffer or two, and a stream that stopped stays stopped.
@@ -67,30 +73,48 @@ const SILENT_CONFIRM_SEC: f64 = 0.25;
 
 /// When a stream's callback last ran, in seconds on [`clock_sec`]'s clock:
 /// what tells a stream stopped without a word, as an iOS interruption stops
-/// one, from one that plays. Opened, it counts as called, so one never
-/// called at all is given as long as one that stopped.
-pub struct Heartbeat(AtomicU64);
+/// one, from one that plays. Opened, it is given [`FIRST_CALL_SEC`] to be
+/// called the first time, and [`SILENT_AFTER_SEC`] each time after.
+pub struct Heartbeat {
+    /// When the callback last ran, or, till it has, the stream opened.
+    last: AtomicU64,
+    /// Whether the callback has run at all.
+    called: AtomicBool,
+}
 
 impl Heartbeat {
     pub fn new(now_sec: f64) -> Self {
-        Self(AtomicU64::new(now_sec.to_bits()))
+        Self {
+            last: AtomicU64::new(now_sec.to_bits()),
+            called: AtomicBool::new(false),
+        }
     }
 
     /// The callback ran at `now_sec`.
     pub fn beat(&self, now_sec: f64) {
-        self.0.store(now_sec.to_bits(), Ordering::Relaxed);
+        self.last.store(now_sec.to_bits(), Ordering::Relaxed);
+        if !self.called.load(Ordering::Relaxed) {
+            self.called.store(true, Ordering::Release);
+        }
     }
 
-    /// When the callback last ran.
+    /// When the callback last ran, or the stream opened.
     #[cfg(test)]
     pub fn last(&self) -> f64 {
-        f64::from_bits(self.0.load(Ordering::Relaxed))
+        f64::from_bits(self.last.load(Ordering::Relaxed))
     }
 
     /// Whether, at `now_sec`, the callback has gone uncalled for longer than
-    /// [`SILENT_AFTER_SEC`], however long since anything last looked.
+    /// it is given, however long since anything last looked: longer than
+    /// [`SILENT_AFTER_SEC`] since it was last called, or, never called,
+    /// than [`FIRST_CALL_SEC`] since the stream opened.
     pub fn went_silent(&self, now_sec: f64) -> bool {
-        now_sec - f64::from_bits(self.0.load(Ordering::Relaxed)) > SILENT_AFTER_SEC
+        let given = if self.called.load(Ordering::Acquire) {
+            SILENT_AFTER_SEC
+        } else {
+            FIRST_CALL_SEC
+        };
+        now_sec - f64::from_bits(self.last.load(Ordering::Relaxed)) > given
     }
 }
 
@@ -210,14 +234,31 @@ mod tests {
     #[test]
     fn a_stream_left_uncalled_has_gone_silent() {
         let heartbeat = Heartbeat::new(10.0);
+        heartbeat.beat(10.0);
         assert!(!heartbeat.went_silent(11.0));
-        assert!(heartbeat.went_silent(11.6), "never called since it opened");
+        assert!(heartbeat.went_silent(11.6), "not called since it opened");
         heartbeat.beat(11.7);
         assert!(!heartbeat.went_silent(13.0));
         assert!(heartbeat.went_silent(13.3));
         assert!(heartbeat.went_silent(300.0), "stopped long ago");
         heartbeat.beat(299.99);
         assert!(!heartbeat.went_silent(300.0), "called all along");
+    }
+
+    /// A stream just opened is given longer to be called the first time
+    /// than one called since is given to be called again: a Bluetooth
+    /// headset, or a USB sound card woken from saving power, takes seconds
+    /// to start, and each stream opened to try again on it takes as long.
+    /// Taken for broken in a second and a half, every try of a send failed.
+    #[test]
+    fn a_stream_opened_is_given_longer_to_start_than_to_go_on() {
+        let heartbeat = Heartbeat::new(10.0);
+        assert!(!heartbeat.went_silent(13.0), "a device waking");
+        assert!(!heartbeat.went_silent(10.0 + FIRST_CALL_SEC));
+        assert!(heartbeat.went_silent(10.1 + FIRST_CALL_SEC), "never called");
+        heartbeat.beat(13.0);
+        assert!(!heartbeat.went_silent(14.0));
+        assert!(heartbeat.went_silent(14.6), "called, then stopped");
     }
 
     fn waiter(heartbeat: &Arc<Heartbeat>) -> ToneSignal {
@@ -238,12 +279,14 @@ mod tests {
     #[test]
     fn a_waiter_is_told_of_a_stream_stopped_without_a_word() {
         let heartbeat = Arc::new(Heartbeat::new(0.0));
+        heartbeat.beat(0.0);
         let send = waiter(&heartbeat);
         assert!(!send.stream_broke_at(1.0));
         assert!(!send.stream_broke_at(1.6), "seen silent, not yet confirmed");
         assert!(send.stream_broke_at(1.6 + SILENT_CONFIRM_SEC));
         assert!(send.stream_failed.load(Ordering::Acquire), "and said so");
         let thawed = waiter(&Arc::new(Heartbeat::new(0.0)));
+        thawed.heartbeat.beat(0.0);
         assert!(!thawed.stream_broke_at(2.0));
         thawed.heartbeat.beat(2.1);
         assert!(!thawed.stream_broke_at(2.1 + SILENT_CONFIRM_SEC));
