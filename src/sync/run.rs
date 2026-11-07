@@ -322,6 +322,9 @@ pub async fn sync_once(
         planned = self::planned(store, &drive, &listed, state).await;
     }
 
+    // The deletions made here by hand to send, the twins' below left out.
+    let by_hand: BTreeSet<RecordId> = planned.send_deleted.iter().copied().collect();
+
     // One session under two names, here and in the drive, as a backup
     // restored on one device names its sessions anew: the smaller name is
     // kept on every device alike, and the other let go everywhere, but only
@@ -390,11 +393,13 @@ pub async fn sync_once(
         synced.took = change.put.len();
         synced.let_go = change.forget.len();
     }
-    // A deletion taken from the drive is the last word here only while the
+    // A deletion the drive holds is the last word here only while the
     // session stays gone: one listed here again, put back by hand say, and
     // deleted after, was deleted by hand, which the drive is to hear of.
+    // Noted: those let go here, and those deleted here by hand that the
+    // drive deleted as well.
     state.applied.retain(|id, _| !listed.contains(id));
-    for &(id, at) in &planned.let_go {
+    for &(id, at) in planned.let_go.iter().chain(&planned.deleted_too) {
         state.applied.insert(id, at);
     }
     for id in &change.unforget {
@@ -447,6 +452,18 @@ pub async fn sync_once(
                 state.revived.remove(&id);
             }
         }
+        // A deletion by hand, once the drive holds it, is the drive's,
+        // noted as one taken from it: a putting back the drive holds after
+        // it brings the session back here, as on every other device, rather
+        // than this device sending it again. A twin's is not: its session
+        // is kept under the other name.
+        for forget in &pack.forget {
+            if let Some(id) = forget.record_id()
+                && by_hand.contains(&id)
+            {
+                state.applied.insert(id, forget.at);
+            }
+        }
     }
 
     sync_settings(store, remote, &keys, &files, state, here, now, &mut synced).await?;
@@ -455,16 +472,22 @@ pub async fn sync_once(
 }
 
 /// The plan for this sync, the store asked which of what the drive holds
-/// and it does not list it deleted by hand.
+/// and it does not list it deleted by hand: of what the drive holds alive,
+/// and of what it deleted since the last sync that this device has no note
+/// of, as a session deleted on two devices before either synced.
 async fn planned(
     store: &dyn Store,
     drive: &DriveState,
     listed: &BTreeSet<RecordId>,
     state: &SyncState,
 ) -> Plan {
+    let deleted_since = drive.tombs.keys().copied().filter(|&id| {
+        drive.deleted(id) && !state.drive.deleted(id) && !state.applied.contains_key(&id)
+    });
     let missing: Vec<RecordId> = drive
         .alive_ids()
         .into_iter()
+        .chain(deleted_since)
         .filter(|id| !listed.contains(id))
         .collect();
     let forgotten: BTreeSet<RecordId> = if missing.is_empty() {
