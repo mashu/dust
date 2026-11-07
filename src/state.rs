@@ -320,14 +320,18 @@ impl AppCtx {
     }
 
     /// The session or run that had the app is over, and kept as its mark
-    /// holds it: the mark stays as it is until the store has taken it
+    /// holds it: the mark stays, over, until the store has taken it
     /// ([`Self::settle_mark`]). Should the app stop first, or the store have
-    /// no room for it, the next launch keeps it from the mark.
+    /// no room for it, the next launch keeps it from the mark, and knows it
+    /// was ended and kept rather than cut off. Over only here, a page
+    /// closed under a browser's database, which answers only later, left a
+    /// mark that said its session still ran.
     pub fn mark_kept(self) {
-        let mut mark = self.mark;
-        if let Some(open) = mark.write().as_mut() {
-            open.over = true;
-        }
+        let Some(mut open) = self.mark.peek().clone() else {
+            return;
+        };
+        open.over = true;
+        self.write_mark(open);
     }
 
     /// Write this copy's mark as `open` says, carrying every session the
@@ -422,7 +426,15 @@ impl AppCtx {
         dioxus::core::spawn_forever(async move {
             let mut cut = looking.await;
             cut.retain(|cut| !matches!(cut, CutOff::Marked(open) if Some(open.started_at) == own));
-            if let Some(newest) = CutOff::newest(cut.iter().cloned()) {
+            let told = {
+                let history = self.sessions.peek();
+                CutOff::newest(
+                    cut.iter()
+                        .filter(|cut| !kept_already(cut, &history))
+                        .cloned(),
+                )
+            };
+            if let Some(newest) = told {
                 notices.write().push(Notice::CutOff(newest));
             }
             keep_cut_off(self, cut).await;
@@ -1551,6 +1563,23 @@ fn covers_up_to(backup: &[SessionResult], here: &[SessionResult], saved_at: u64)
 
 /// Why a change to the history was not stored at all, in words that fit
 /// after "Nothing was deleted:". `None` when it was stored.
+/// Whether `cut` is a mark of a session or run ended and kept, every
+/// session it carries held by `history` already: left behind only for want
+/// of the store's word that it had taken them, as a page closed under a
+/// browser's database leaves it. Nothing of it was cut off, nor lost.
+fn kept_already(cut: &CutOff, history: &StoredHistory) -> bool {
+    let CutOff::Marked(open) = cut else {
+        return false;
+    };
+    open.over
+        && open
+            .so_far
+            .iter()
+            .map(|so_far| &so_far.result)
+            .chain(&open.unstored)
+            .all(|session| history.has_key(&SessionKey::of(session)))
+}
+
 fn why_not_stored(saved: &HistorySaved) -> Option<String> {
     match saved {
         HistorySaved::Stored { .. } | HistorySaved::Squeezed { .. } => None,
@@ -2726,6 +2755,57 @@ mod tests {
         let toast = tab.toast().expect("told");
         assert_eq!(toast.text, "1 session deleted");
         assert_eq!(Tab::on_store(crate::persist::files_at(&dir.0)).shown(), [2]);
+    }
+
+    /// A session kept as the app stops, which the store took before the app
+    /// heard that it had, as a page closed under a browser's database leaves
+    /// it: the next launch finds its mark over and its session stored, and
+    /// tells of nothing cut off. Its mark used to say it still ran, so the
+    /// next launch told of a session cut off, Dust closed while it ran. One
+    /// the store had not taken is kept from its mark, and told of as kept.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_session_kept_as_the_app_stopped_is_not_told_of_as_cut_off() {
+        let dir = TempDir::new("kept-as-it-stopped");
+        let tab = Tab::on_store(crate::persist::files_on_worker_at(&dir.0));
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(1),
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.finish(day(1));
+        // The store has it, and the app stops before it hears so.
+        tab.act(|ctx| ctx.app().store.flush_history());
+        drop(tab);
+
+        let mut next = Tab::on_store(crate::persist::files_at(&dir.0));
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert_eq!(next.shown(), [1]);
+        assert_eq!(next.notices(), [], "nothing was cut off");
+
+        // Stopped before the store had it: kept from its mark, and told of.
+        let lost = TempDir::new("kept-from-its-mark");
+        let store = crate::persist::files_at(&lost.0);
+        let tab = Tab::on_store(store);
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(2),
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.act(AppCtx::mark_kept);
+        drop(tab);
+        let mut next = Tab::on_store(crate::persist::files_at(&lost.0));
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert_eq!(next.shown(), [2], "kept from its mark");
+        assert!(
+            matches!(&next.notices()[..], [Notice::CutOff(CutOff::Marked(open))] if open.over),
+            "told of as kept: {:?}",
+            next.notices()
+        );
     }
 
     /// The one backup file saved in `folder`, read.
