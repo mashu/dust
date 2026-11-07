@@ -327,6 +327,10 @@ fn StatsRoute() -> Element {
     // the app stored or deleted since taken up as it opens.
     use_hook(move || ctx.take_up_changes());
     let history = use_history(ctx);
+    // Made once, as the sync card's are: the History tab, handed the same
+    // ones, is drawn again only for what it shows.
+    let on_save = use_callback(move |()| ctx.save_backup());
+    let sync = use_sync_view(ctx);
     rsx! {
         StatsView {
             settings: ctx.settings.read().clone(),
@@ -338,29 +342,35 @@ fn StatsRoute() -> Element {
                 confirmed: ctx.app().store.confirms_backups(),
                 inside_app: ctx.app().store.backups_inside_app(),
                 outgrows_device_backup: ctx.app().store.outgrows_device_backup(),
-                on_save: EventHandler::new(move |()| ctx.save_backup()),
+                on_save,
             },
-            sync: sync_view(ctx),
+            sync,
         }
     }
 }
 
 /// What the History tab's sync card shows and does: no card where this
-/// build cannot sync at all.
-fn sync_view(ctx: AppCtx) -> Option<SyncView> {
+/// build cannot sync at all. What it does is made once, for as long as the
+/// screen is up.
+fn use_sync_view(ctx: AppCtx) -> Option<SyncView> {
+    let on_sign_in = use_callback(move |()| ctx.sync_sign_in());
+    let on_passphrase = use_callback(move |(passphrase, repeated)| {
+        ctx.sync_passphrase(passphrase, repeated);
+    });
+    let on_cancel = use_callback(move |()| ctx.sync_cancel());
+    let on_sync_now = use_callback(move |()| ctx.sync_now());
+    let on_turn_off = use_callback(move |and_copy| ctx.sync_turn_off(and_copy));
     let status = ctx.sync.status.read().clone();
     if status == SyncStatus::Unavailable(None) {
         return None;
     }
     Some(SyncView {
         status,
-        on_sign_in: EventHandler::new(move |()| ctx.sync_sign_in()),
-        on_passphrase: EventHandler::new(move |(passphrase, repeated)| {
-            ctx.sync_passphrase(passphrase, repeated);
-        }),
-        on_cancel: EventHandler::new(move |()| ctx.sync_cancel()),
-        on_sync_now: EventHandler::new(move |()| ctx.sync_now()),
-        on_turn_off: EventHandler::new(move |and_copy| ctx.sync_turn_off(and_copy)),
+        on_sign_in,
+        on_passphrase,
+        on_cancel,
+        on_sync_now,
+        on_turn_off,
     })
 }
 

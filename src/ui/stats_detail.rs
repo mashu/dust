@@ -215,6 +215,8 @@ pub fn HistoryTab(
     backups: Option<Backups>,
     sync: Option<SyncView>,
 ) -> Element {
+    #[cfg(test)]
+    crate::testing::rendered("HistoryTab");
     let mut selecting = use_signal(|| false);
     let mut chosen = use_signal(BTreeSet::<RecordId>::new);
     let mut confirming = use_signal(|| false);

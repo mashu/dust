@@ -505,6 +505,23 @@ fn a_long_history_makes_only_the_rows_it_shows() {
     });
 }
 
+/// A setting changed while the History tab is open is nothing the tab
+/// shows: the handlers its cards are given are made once, so the tab, given
+/// all it was given before, is not drawn again. Each was made anew with
+/// every draw of the screen, and the tab drawn again with them.
+#[test]
+fn a_setting_changed_leaves_the_history_tab_as_it_was() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        ui.take_renders("HistoryTab");
+        ui.with_app(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().band.master_volume = 0.5;
+        });
+        assert_eq!(ui.take_renders("HistoryTab"), 0);
+    });
+}
+
 #[component]
 fn ReadOnlyStats() -> Element {
     rsx! {
