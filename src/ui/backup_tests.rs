@@ -515,6 +515,73 @@ fn a_backup_chosen_over_another_is_the_only_one_read_as_a_backup() {
     });
 }
 
+/// The card says a backup is under way until the store has said what
+/// became of it, as a browser's database takes a moment to: a file chosen
+/// meanwhile is not restored over it. The card stopped saying so as the
+/// store was asked, with nothing restored yet.
+#[test]
+fn the_card_says_a_backup_is_under_way_until_it_is_restored() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.store.deferred.set(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(100).await;
+        assert_eq!(stored_dates(&ui).len(), 2, "not stored yet");
+        assert!(ui.has("Reading dust-backup.json…"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 5);
+    });
+}
+
+/// A backup chosen while another is being restored is restored once that
+/// is over, merged with the history it restored: its message says what it
+/// brought itself, and its Undo takes back that alone. Merged with a
+/// history short of the first's sessions, it took them for its own, said
+/// so, and its Undo deleted them too.
+#[test]
+fn a_backup_chosen_while_another_is_restored_waits_for_it() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[4..]);
+        let first = write_backup(&test_settings(), &all[..2], 0);
+        let second = write_backup(&test_settings(), &all[..3], 0);
+        ui.store.deferred.set(true);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(100).await;
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.advance(100).await;
+        assert_eq!(ui.store.waiting(), 1, "the second waits for the first");
+        assert!(ui.has("Reading second.json…"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 1 session and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 4);
+        ui.store.deferred.set(false);
+        ui.click("toast-undo");
+        ui.advance(20).await;
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-09-01", "2026-09-02", "2026-09-05"]
+        );
+    });
+}
+
 /// A file whose read never ends, as a browser's of a file moved after it
 /// was chosen never does, leaves the next one chosen to be restored: the
 /// card says at once that the newer is being read, and what it holds is

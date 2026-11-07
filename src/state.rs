@@ -2,7 +2,7 @@
 //! shares.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -208,6 +208,12 @@ pub struct AppCtx {
     /// refused for already: one still unread at a later restore is taken
     /// as one that cannot be read at all ([`Self::restore_backup`]).
     restore_refused_for: CopyValue<BTreeSet<RecordId>>,
+    /// A restore is under way: from its being asked for until what became
+    /// of it has been told ([`Self::restore_backup`]).
+    restore_under_way: CopyValue<bool>,
+    /// The restores asked for while another was under way, each made in
+    /// turn once the one before it is over.
+    restores_waiting: CopyValue<VecDeque<Backup>>,
     /// Sync with the user's own Google Drive, where it is on
     /// ([`crate::sync::ctx`]).
     pub sync: SyncCtx,
@@ -274,6 +280,8 @@ impl AppCtx {
                 retrying: CopyValue::new(false),
                 settings_unsaved: CopyValue::new(false),
                 restore_refused_for: CopyValue::new(BTreeSet::new()),
+                restore_under_way: CopyValue::new(false),
+                restores_waiting: CopyValue::new(VecDeque::new()),
                 sync,
                 app: CopyValue::new(app),
             };
@@ -1269,7 +1277,20 @@ impl AppCtx {
     /// ([`RecordId::placed`]), so two copies restoring one backup store it
     /// once; one it fills in is a record in its place
     /// ([`RecordId::beside`]), the one it fills in deleted.
+    ///
+    /// One at a time: a restore asked for while another is under way, as a
+    /// store that takes a moment to list or change the history leaves one,
+    /// is made once that is over, merged with the history it restored.
+    /// Merged with a history short of what the other brings back, it would
+    /// take that for its own, and its Undo take it back as well.
     pub fn restore_backup(self, backup: Backup) {
+        let mut under_way = self.restore_under_way;
+        if *under_way.peek() {
+            let mut waiting = self.restores_waiting;
+            waiting.write().push_back(backup);
+            return;
+        }
+        under_way.set(true);
         self.sync_with_store(move |unread| {
             let mut refused_for = self.restore_refused_for;
             let ready = unread.is_some_and(|unread| {
@@ -1283,10 +1304,30 @@ impl AppCtx {
             });
             if ready {
                 self.restore_now(backup);
-            } else if let Some(why) = why_not_stored(&HistorySaved::Held) {
+                return;
+            }
+            if let Some(why) = why_not_stored(&HistorySaved::Held) {
                 self.toasts.show(format!("Nothing was restored: {why}."));
             }
+            self.restore_over();
         });
+    }
+
+    /// Whether a restore is under way ([`Self::restore_backup`]).
+    pub fn restore_under_way(self) -> bool {
+        *self.restore_under_way.peek()
+    }
+
+    /// The restore under way is over, what became of it told: the next one
+    /// asked for meanwhile is made now.
+    fn restore_over(self) {
+        let mut under_way = self.restore_under_way;
+        under_way.set(false);
+        let mut waiting = self.restores_waiting;
+        let next = waiting.write().pop_front();
+        if let Some(next) = next {
+            self.restore_backup(next);
+        }
     }
 
     fn restore_now(self, backup: Backup) {
@@ -1364,6 +1405,7 @@ impl AppCtx {
                     settings: restored_settings,
                 },
             );
+            self.restore_over();
         });
     }
 
@@ -2309,6 +2351,36 @@ mod tests {
         b.sync();
         assert_eq!(a.shown(), [1, 2, 3]);
         assert_eq!(b.shown(), [1, 2, 3]);
+    }
+
+    /// A restore asked for while another is under way, as a browser's
+    /// database makes the first a moment after it is asked for, waits for
+    /// it, and is merged with the history it restored: it says what it
+    /// brought itself, and its Undo takes back that alone. Merged with a
+    /// history short of the first's sessions, it took them for its own,
+    /// said it restored them, and its Undo deleted them as well.
+    #[test]
+    fn a_restore_asked_for_while_another_is_under_way_waits_for_it() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        store.deferred.set(true);
+        restore(&a, [1, 2]);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(store.waiting(), 1, "the second waits for the first");
+        store.settle();
+        a.pump();
+        assert_eq!(store.waiting(), 1, "then it is made");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 5]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        store.deferred.set(false);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
+        assert_eq!(a.shown(), [1, 2, 5]);
     }
 
     /// A restore takes the backup's settings whole, over what another tab

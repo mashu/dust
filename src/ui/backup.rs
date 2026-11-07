@@ -190,10 +190,11 @@ impl Restoring {
     }
 
     /// Read `file` as a backup and restore what it holds, in a task of the
-    /// app's own, once no session or run is under way: the card says it is
-    /// being read at once, and why not, if it could not be restored; with no
-    /// card drawn by then, a message does. Unless another file is chosen
-    /// before it is restored: then that one is, and nothing of this is said.
+    /// app's own, once no session or run, nor another restore, is under
+    /// way: the card says it is being read at once, and until it has been
+    /// restored, and why not, if it could not be; with no card drawn by
+    /// then, a message does. Unless another file is chosen before it is
+    /// restored: then that one is, and nothing of this is said.
     fn start(self, ctx: AppCtx, file: PickedFile) {
         let Self {
             mut under_way,
@@ -232,19 +233,41 @@ impl Restoring {
                 Err(why) => Err(why),
             };
             // Restored between sessions, as a sync is, never under one: a
-            // restore takes its settings, the level among them.
-            while ctx.session_running() {
-                crate::time::sleep_ms(SESSION_WAIT_MS).await;
+            // restore takes its settings, the level among them. And after
+            // any restore still under way, to be merged with the history
+            // that one restored.
+            while ctx.session_running() || ctx.restore_under_way() {
+                let wait = if ctx.session_running() {
+                    SESSION_WAIT_MS
+                } else {
+                    crate::time::POLL_MS
+                };
+                crate::time::sleep_ms(wait).await;
             }
             // Another file chosen meanwhile is restored in its place.
             if !chosen_last() {
                 return;
             }
-            under_way.set(None);
-            match read {
-                Ok(backup) => ctx.restore_backup(backup),
-                Err(why) if *cards.peek() > 0 => problem.set(Some(why)),
-                Err(why) => ctx.toasts.show(why),
+            let backup = match read {
+                Ok(backup) => backup,
+                Err(why) => {
+                    under_way.set(None);
+                    if *cards.peek() > 0 {
+                        problem.set(Some(why));
+                    } else {
+                        ctx.toasts.show(why);
+                    }
+                    return;
+                }
+            };
+            // Said on the card until the store has said what became of it,
+            // as a browser's database takes a moment to.
+            ctx.restore_backup(backup);
+            while ctx.restore_under_way() {
+                crate::time::sleep_ms(crate::time::POLL_MS).await;
+            }
+            if chosen_last() {
+                under_way.set(None);
             }
         });
     }
