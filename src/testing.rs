@@ -1467,16 +1467,17 @@ impl Ui {
         FILES_NEVER_READ.with_borrow_mut(|never| never.push(name.to_string()));
     }
 
-    /// Choose a file called `name` in the file input with this id, the way
-    /// the platform's picker hands one over. `size` is what the file says it
-    /// is, which a test can make larger than what it holds.
-    pub fn choose_file(&mut self, id: &str, name: &str, contents: &str, size: u64) {
+    /// Choose a file called `name`, holding `contents`, text or any other
+    /// bytes, in the file input with this id, the way the platform's picker
+    /// hands one over. `size` is what the file says it is, which a test can
+    /// make larger than what it holds.
+    pub fn choose_file(&mut self, id: &str, name: &str, contents: impl AsRef<[u8]>, size: u64) {
         let file = dioxus::html::SerializedFileData {
             path: std::path::PathBuf::from(name),
             size,
             last_modified: 0,
             content_type: Some("text/plain".to_string()),
-            contents: Some(contents.as_bytes().to_vec().into()),
+            contents: Some(contents.as_ref().to_vec().into()),
         };
         let form = dioxus::html::SerializedFormData::new(
             String::new(),

@@ -1617,6 +1617,8 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
                 id: control_id("file", "word list"),
                 accept: ".txt,text/plain",
                 max_bytes: WORD_FILE_MAX_BYTES,
+                // A list saved as "Unicode" text is UTF-16.
+                by_mark: true,
                 icon: IconName::Upload,
                 label: "Load a text file",
                 on_choose: move |file| {

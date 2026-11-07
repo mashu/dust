@@ -123,6 +123,8 @@ pub struct ChosenFile {
 pub struct PickedFile {
     pub name: String,
     pub size: u64,
+    /// Whether it is read by its byte order mark, as its button reads one.
+    by_mark: bool,
     file: Picked,
 }
 
@@ -140,7 +142,7 @@ impl PickedFile {
     /// reads a file it hands to `on_choose`.
     pub async fn read(self, max_bytes: u64) -> ChosenFile {
         match self.file {
-            Picked::Unread(file) => read_chosen(file, max_bytes).await,
+            Picked::Unread(file) => read_chosen(file, max_bytes, self.by_mark).await,
             Picked::Read(text) => ChosenFile {
                 name: self.name,
                 size: self.size,
@@ -225,25 +227,30 @@ impl Pieces {
     }
 }
 
-/// Read a file a file input chose, up to `max_bytes`.
-async fn read_chosen(file: FileData, max_bytes: u64) -> ChosenFile {
+/// Read a file a file input chose, up to `max_bytes`, by its byte order
+/// mark where `by_mark` says.
+async fn read_chosen(file: FileData, max_bytes: u64, by_mark: bool) -> ChosenFile {
     let (name, size) = (file.name(), file.size());
     let text = if size > max_bytes {
         None
     } else {
-        read_text(&file).await
+        read_text(&file, by_mark).await
     };
     ChosenFile { name, size, text }
 }
 
 /// What `file` holds, as text: none where it cannot be read as text, or
-/// cannot be read at all. A computer reads it on a thread of its own, and a
-/// browser a slice at a time where it is large.
-async fn read_text(file: &FileData) -> Option<String> {
+/// cannot be read at all. A computer reads it on a thread of its own, by
+/// its byte order mark where `by_mark` says ([`text_in`]), and a browser a
+/// slice at a time where it is large, every file by its mark where it is
+/// read whole ([`text_of`]).
+async fn read_text(file: &FileData, by_mark: bool) -> Option<String> {
     #[cfg(test)]
     crate::testing::reading_a_file(&file.name()).await;
+    #[cfg(not(any(feature = "desktop", test)))]
+    let _ = by_mark;
     #[cfg(all(feature = "desktop", not(test)))]
-    if let Some(text) = read_apart(file.path()).await {
+    if let Some(text) = read_apart(file.path(), by_mark).await {
         return text;
     }
     #[cfg(all(feature = "web", not(test)))]
@@ -262,7 +269,15 @@ async fn read_text(file: &FileData) -> Option<String> {
             .ok()?;
         return Some(text_of(&js_sys::Uint8Array::new(&read).to_vec()));
     }
-    file.read_string().await.ok()
+    // A test's file is read as a computer reads one.
+    #[cfg(test)]
+    {
+        text_in(file.read_bytes().await.ok()?.to_vec(), by_mark)
+    }
+    #[cfg(not(test))]
+    {
+        file.read_string().await.ok()
+    }
 }
 
 /// Whether this browser reads a file through a promise of its own
@@ -280,7 +295,7 @@ fn reads_by_promise(file: &web_sys::File) -> bool {
 /// big, where they start with its mark, as Windows' Notepad and Excel save
 /// "Unicode" text; else UTF-8, its own mark left out. A byte, or a pair,
 /// that is no character is read as a mark for one, as the reader reads it.
-#[cfg(any(feature = "web", test))]
+#[cfg(any(feature = "web", feature = "desktop", test))]
 fn text_of(bytes: &[u8]) -> String {
     let utf16 = |bytes: &[u8], unit: fn([u8; 2]) -> u16| {
         let (pairs, cut) = bytes.as_chunks::<2>();
@@ -300,10 +315,25 @@ fn text_of(bytes: &[u8]) -> String {
     }
 }
 
-/// What the file at `path` holds, as text, read on a thread of its own:
-/// none where no thread would start, for it to be read otherwise.
+/// What `bytes`, a whole file, hold as text, as a computer reads them:
+/// UTF-8, or no text. Read `by_mark`, as a word list is, they may be UTF-16
+/// as well, little-endian or big, where they start with its byte order
+/// mark, as Windows' Notepad and Excel save "Unicode" text, and are decoded
+/// then as a browser decodes them ([`text_of`]). A backup is UTF-8 or
+/// nothing.
+#[cfg(any(feature = "desktop", test))]
+fn text_in(bytes: Vec<u8>, by_mark: bool) -> Option<String> {
+    match bytes.as_slice() {
+        [0xff, 0xfe, ..] | [0xfe, 0xff, ..] if by_mark => Some(text_of(&bytes)),
+        _ => String::from_utf8(bytes).ok(),
+    }
+}
+
+/// What the file at `path` holds, as text, read on a thread of its own, by
+/// its byte order mark where `by_mark` says ([`text_in`]): none where no
+/// thread would start, for it to be read otherwise.
 #[cfg(all(feature = "desktop", not(test)))]
-async fn read_apart(path: std::path::PathBuf) -> Option<Option<String>> {
+async fn read_apart(path: std::path::PathBuf, by_mark: bool) -> Option<Option<String>> {
     if path.as_os_str().is_empty() {
         return None;
     }
@@ -311,7 +341,10 @@ async fn read_apart(path: std::path::PathBuf) -> Option<Option<String>> {
     std::thread::Builder::new()
         .name("dust-file-read".into())
         .spawn(move || {
-            let _ = answer.send(std::fs::read_to_string(&path).ok());
+            let text = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| text_in(bytes, by_mark));
+            let _ = answer.send(text);
         })
         .ok()?;
     Some(answered.await.ok().flatten())
@@ -369,12 +402,14 @@ fn utf8_up_to(bytes: &[u8], from: usize) -> Option<usize> {
 /// for `accept`, and sends back each file chosen as [`Piece`]s, its text a
 /// slice of [`SLICE_BYTES`] at a time, as the webview may not hand over
 /// hundreds of megabytes at once: text while it reads as UTF-8, and from
-/// the slice that does not, none, the rest left unread. The file input
+/// the slice that does not, none, the rest left unread. Read `by_mark`, as
+/// a word list is, a file that starts with UTF-16's byte order mark is
+/// UTF-16, decoded as a computer decodes it ([`text_in`]). The file input
 /// it opens is the document body's own, outside the page the renderer
 /// draws, so the renderer leaves its clicks alone. A picker made before for
 /// the same id, by a button drawn before, gives way to this one.
 #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
-fn picker_script(id: &str, accept: &str, max_bytes: u64) -> String {
+fn picker_script(id: &str, accept: &str, max_bytes: u64, by_mark: bool) -> String {
     format!(
         r##"const id = {id:?};
 const pickers = window.__dustPickers || (window.__dustPickers = {{}});
@@ -419,9 +454,18 @@ input.addEventListener("change", () => {{
     // A slice at a time, each decoded as it comes, as UTF-8 or not at all,
     // as a computer reads a file: a character cut in two by a slice's end
     // is decoded whole with the next, and a slice that is no UTF-8, the
-    // first of a photo or a film, ends the file there, unread.
-    const decoder = new TextDecoder("utf-8", {{ fatal: true }});
+    // first of a photo or a film, ends the file there, unread. A file read
+    // by its byte order mark whose first slice starts with UTF-16's is
+    // UTF-16, a pair that is no character read as a mark for one.
+    const byMark = {by_mark};
+    let decoder = null;
     const decode = (bytes) => {{
+        if (decoder === null) {{
+            const utf16 = byMark && bytes && bytes.length >= 2
+                && ((bytes[0] === 0xff && bytes[1] === 0xfe && "utf-16le")
+                    || (bytes[0] === 0xfe && bytes[1] === 0xff && "utf-16be"));
+            decoder = utf16 ? new TextDecoder(utf16) : new TextDecoder("utf-8", {{ fatal: true }});
+        }}
         try {{
             return bytes ? decoder.decode(bytes, {{ stream: true }}) : decoder.decode();
         }} catch (notText) {{
@@ -476,12 +520,19 @@ pub fn FileButton(
     label: &'static str,
     #[props(default)] on_choose: EventHandler<ChosenFile>,
     #[props(default)] on_pick: Option<EventHandler<PickedFile>>,
+    /// Whether a computer and a phone read a file by its byte order mark,
+    /// UTF-16 as well as UTF-8, as a browser reads every file it reads
+    /// whole: a word list, which Windows' Notepad and Excel save as UTF-16
+    /// for "Unicode" text. Else they read it as UTF-8 or not at all, as a
+    /// backup.
+    #[props(default)]
+    by_mark: bool,
 ) -> Element {
     // Moved on by every file chosen, to draw a fresh file input: the same
     // file chosen again in the old one would change nothing, and not load.
     let mut picked = use_signal(|| 0u64);
     if WEBVIEW_PICKER {
-        let script = picker_script(&id, accept, max_bytes);
+        let script = picker_script(&id, accept, max_bytes, by_mark);
         use_hook(move || {
             spawn(async move {
                 let mut picker = document::eval(&script);
@@ -494,6 +545,7 @@ pub fn FileButton(
                         Some(on_pick) => on_pick.call(PickedFile {
                             name: file.name,
                             size: file.size,
+                            by_mark,
                             file: Picked::Read(file.text),
                         }),
                         None => on_choose.call(file),
@@ -524,6 +576,7 @@ pub fn FileButton(
                                 on_pick.call(PickedFile {
                                     name: file.name(),
                                     size: file.size(),
+                                    by_mark,
                                     file: Picked::Unread(file),
                                 });
                                 return;
@@ -533,7 +586,7 @@ pub fn FileButton(
                             // read sooner or later.
                             let pick = *picked.peek();
                             spawn(async move {
-                                let file = read_chosen(file, max_bytes).await;
+                                let file = read_chosen(file, max_bytes, by_mark).await;
                                 if *picked.peek() == pick {
                                     on_choose.call(file);
                                 }
@@ -556,7 +609,7 @@ pub fn FileButton(
 mod tests {
     use super::{
         ChosenFile, Piece, Pieces, SLICE_BYTES, data_dirs, on_path, picker_script,
-        portal_chooses_files, text_of, utf8_up_to,
+        portal_chooses_files, text_in, text_of, utf8_up_to,
     };
     use crate::testing::{PageStep, on_fake_page};
     use serde_json::Value;
@@ -564,15 +617,16 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    /// What the phone's own picker sends the app, run in Node on a page made
-    /// up for it (`src/fake_page.mjs`), as `choose` has it choose files
-    /// there (`picker.choose(file)`), with what `choose` sends itself among
-    /// it. The webview's file input and reader are made up beside it: the
-    /// reader counts the reads it is asked for in `read`, and does each
-    /// once `await settled()` lets the reads waiting be done, and those
-    /// they ask for, or `await settled(count)` only the first `count`. None
-    /// on a machine with no Node.
-    fn picked_on_page(choose: &str) -> Option<Vec<Value>> {
+    /// What the phone's own picker sends the app, reading files by their
+    /// byte order mark where `by_mark` says ([`picker_script`]), run in Node
+    /// on a page made up for it (`src/fake_page.mjs`), as `choose` has it
+    /// choose files there (`picker.choose(file)`), with what `choose` sends
+    /// itself among it. The webview's file input and reader are made up
+    /// beside it: the reader counts the reads it is asked for in `read`, and
+    /// does each once `await settled()` lets the reads waiting be done, and
+    /// those they ask for, or `await settled(count)` only the first `count`.
+    /// None on a machine with no Node.
+    fn picked_on_page(by_mark: bool, choose: &str) -> Option<Vec<Value>> {
         let page = r#"globalThis.read = 0;
 const waiting = [];
 globalThis.FileReader = class {
@@ -615,7 +669,7 @@ document.body.appendChild = (input) => {
 };"#;
         let heard = on_fake_page(&[
             PageStep::run(page),
-            PageStep::run(picker_script("file-backup", "", 1 << 30)),
+            PageStep::run(picker_script("file-backup", "", 1 << 30, by_mark)),
             PageStep::wait(choose),
         ])?;
         Some(heard.into_iter().last()?.sent)
@@ -718,7 +772,7 @@ document.body.appendChild = (input) => {
     /// that pressed it, and a file too large is handed back unread.
     #[test]
     fn the_phone_picker_opens_from_its_button_and_reads_the_file() {
-        let script = picker_script("file-backup", ".json", 500);
+        let script = picker_script("file-backup", ".json", 500, false);
         assert!(script.contains(r#"const id = "file-backup";"#), "{script}");
         assert!(script.contains(r#"input.accept = ".json";"#), "{script}");
         assert!(script.contains("document.body.appendChild(input);"));
@@ -784,6 +838,30 @@ document.body.appendChild = (input) => {
         assert_eq!(text_of(&[0xff, 0xfe, b'C', 0, b'Q']), "C\u{fffd}");
     }
 
+    /// A computer reads a word list by its byte order mark, UTF-16 as well
+    /// as UTF-8, as a browser reads one; a backup, read otherwise, is UTF-8
+    /// or nothing, whatever its mark. Read as UTF-8 whatever its mark, a
+    /// word list saved as UTF-16 could not be read as text.
+    #[test]
+    fn a_computer_reads_a_word_list_by_its_byte_order_mark_and_a_backup_as_utf8() {
+        let words = "CQ\r\nDE é\r\n";
+        let utf16 = |mark: [u8; 2], unit: fn(u16) -> [u8; 2]| -> Vec<u8> {
+            mark.into_iter()
+                .chain(words.encode_utf16().flat_map(unit))
+                .collect()
+        };
+        let little = utf16([0xff, 0xfe], u16::to_le_bytes);
+        let big = utf16([0xfe, 0xff], u16::to_be_bytes);
+        assert_eq!(text_in(little.clone(), true).as_deref(), Some(words));
+        assert_eq!(text_in(big.clone(), true).as_deref(), Some(words));
+        assert_eq!(text_in(little, false), None);
+        assert_eq!(text_in(big, false), None);
+        for by_mark in [true, false] {
+            assert_eq!(text_in(words.into(), by_mark).as_deref(), Some(words));
+            assert_eq!(text_in(vec![b'C', 0xff, b'Q'], by_mark), None);
+        }
+    }
+
     /// The phone's picker reads a file as UTF-8 or not at all, as a computer
     /// reads one: its text whole, a character cut in two by the end of a
     /// slice decoded with the next; a file that is no text handed back
@@ -795,8 +873,10 @@ document.body.appendChild = (input) => {
     #[test]
     fn the_phone_picker_reads_a_file_as_utf8_or_not_at_all() {
         let slice = SLICE_BYTES;
-        let Some(sent) = picked_on_page(&format!(
-            r#"const big = new Uint8Array({slice} + 1).fill(0x61);
+        let Some(sent) = picked_on_page(
+            false,
+            &format!(
+                r#"const big = new Uint8Array({slice} + 1).fill(0x61);
 big.set([0xc3, 0xa9], {slice} - 1);
 picker.choose(new File([big], "big.json"));
 await settled();
@@ -810,7 +890,8 @@ await settled();
 dioxus.send({{ read }});
 picker.choose(new File([new Uint8Array([0x61, 0xc3])], "cut.txt"));
 await settled();"#
-        )) else {
+            ),
+        ) else {
             return;
         };
         let files = files_in(&sent);
@@ -897,13 +978,16 @@ await settled();"#
     #[test]
     fn the_phone_picker_reads_a_file_chosen_over_another_alone() {
         let slice = SLICE_BYTES;
-        let Some(sent) = picked_on_page(&format!(
-            r#"picker.choose(new File([new Uint8Array(3 * {slice}).fill(0x61)], "big.json"));
+        let Some(sent) = picked_on_page(
+            false,
+            &format!(
+                r#"picker.choose(new File([new Uint8Array(3 * {slice}).fill(0x61)], "big.json"));
 await settled(1);
 picker.choose(new File(["[]"], "b.json"));
 await settled();
 dioxus.send({{ read }});"#
-        )) else {
+            ),
+        ) else {
             return;
         };
         let files = files_in(&sent);
@@ -920,5 +1004,34 @@ dioxus.send({{ read }});"#
             .filter_map(|said| said.get("read")?.as_u64())
             .collect();
         assert_eq!(read, [3], "two slices of the first, none after");
+    }
+
+    /// The phone's picker reads a word list by its byte order mark: UTF-16,
+    /// little-endian or big, as well as UTF-8, its mark left out, as a
+    /// computer and a browser read one. A backup is UTF-8 or nothing still.
+    /// The picker read every file as UTF-8, and a word list saved as
+    /// UTF-16, as Windows' Notepad and Excel save "Unicode" text, as no
+    /// text at all.
+    #[test]
+    fn the_phone_picker_reads_a_word_list_by_its_byte_order_mark() {
+        let choose = r#"for (const [name, bytes] of [
+    ["little.txt", [0xff, 0xfe, 0x43, 0, 0x51, 0, 0xe9, 0]],
+    ["big.txt", [0xfe, 0xff, 0, 0x43, 0, 0x51, 0, 0xe9]],
+    ["marked.txt", [0xef, 0xbb, 0xbf, 0x43, 0x51, 0xc3, 0xa9]],
+]) {
+    picker.choose(new File([new Uint8Array(bytes)], name));
+    await settled();
+}"#;
+        let texts = |by_mark| -> Option<Vec<Option<String>>> {
+            let sent = picked_on_page(by_mark, choose)?;
+            Some(files_in(&sent).into_iter().map(|file| file.text).collect())
+        };
+        let Some(word_lists) = texts(true) else {
+            return;
+        };
+        let read = Some("CQé".to_string());
+        assert_eq!(word_lists, [read.clone(), read.clone(), read.clone()]);
+        let backups = texts(false).expect("Node, as before");
+        assert_eq!(backups, [None, None, read], "UTF-8 or nothing");
     }
 }
