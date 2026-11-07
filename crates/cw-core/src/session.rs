@@ -1231,6 +1231,9 @@ struct StoredSession {
     tally: CopyTally,
     avg_response_ms: f64,
     total_chars: u32,
+    /// Worked out again as a session is read ([`SessionResult::points`]),
+    /// so a save with none to read is no session lost ([`lenient_score`]).
+    #[serde(default, deserialize_with = "lenient_score")]
     score: f64,
     /// Saves from the first versions called it the Koch level.
     #[serde(alias = "kochLevel", default = "session_level_default")]
@@ -1253,6 +1256,13 @@ struct StoredSession {
     typing_locked: bool,
     #[serde(flatten)]
     unread: Map<String, Value>,
+}
+
+/// A session's score as a save holds it, read so that one that is no
+/// number reads as none: as JSON writes a score that came to no number,
+/// `null`, which older builds wrote for a save past all reason.
+fn lenient_score<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// A part of a session as it is read, and what it holds that this build
@@ -1614,7 +1624,7 @@ mod tests {
     /// Every stored session is scored again as it is read, and a save is
     /// not trusted to hold sane counts and speeds. A count of sends of 2³¹
     /// panicked there, and one just past it, or a speed past all reason,
-    /// made the score infinite: written as null, which no save reads back,
+    /// made the score infinite: written as null, which no save read back,
     /// so the session dropped out of the history.
     #[test]
     fn a_stored_session_past_all_reason_scores_and_reads_back() {
@@ -1634,6 +1644,24 @@ mod tests {
             let again: SessionResult = serde_json::from_str(&written).expect(&case);
             assert_eq!(again.score, read.score, "{case}");
         }
+    }
+
+    /// A save an older build wrote with a score past all reason holds it as
+    /// null, as JSON writes a number it cannot, and it never read back, so
+    /// the session stayed out of the history however often it was read
+    /// again. Its score is worked out again as it is read, so a save with
+    /// no score to read, null or left out, reads as any other.
+    #[test]
+    fn a_session_stored_with_no_score_reads_back() {
+        let today = copied_at(30.0, 1);
+        let mut json = serde_json::to_value(&today).expect("serializes");
+        json["score"] = serde_json::Value::Null;
+        let read: SessionResult = serde_json::from_value(json.clone()).expect("a null score reads");
+        assert_eq!(read.groups, today.groups);
+        assert_eq!(read.points(), today.score);
+        json.as_object_mut().expect("a session").remove("score");
+        let read: SessionResult = serde_json::from_value(json).expect("no score reads");
+        assert_eq!(read.points(), today.score);
     }
 
     #[test]

@@ -514,6 +514,25 @@ mod tests {
         assert_eq!(read_record("[]"), None);
     }
 
+    /// A record an older build stored with a score past all reason holds it
+    /// as null, and read as no session, it was left out of the history at
+    /// every read: it reads back now, scored as sessions score today.
+    #[test]
+    fn a_record_stored_with_a_null_score_reads_back_scored_as_today() {
+        let mut stored = session("2026-01-01");
+        stored.groups = vec![cw_core::GroupResult {
+            sent: "KMURE".into(),
+            received: "KMURE".into(),
+            correct: true,
+        }];
+        stored.group_timings = vec![cw_core::SessionTiming::default()];
+        let stored = scored(stored);
+        assert!(stored.score > 0.0);
+        let mut raw = serde_json::to_value(&stored).expect("a session writes");
+        raw["score"] = serde_json::Value::Null;
+        assert_eq!(read_record(&raw.to_string()), Some(stored));
+    }
+
     /// Each notice says what happened and what to do, in plain words.
     #[test]
     fn what_became_of_the_history_is_said_plainly() {
