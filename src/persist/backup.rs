@@ -669,7 +669,9 @@ pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -
 
 /// `kept` filled in from `restored`, the same session, where `restored`
 /// holds what an older version dropped of it: none, where it holds nothing
-/// `kept` has not.
+/// `kept` has not. Times of a group `kept` holds in a shape this version
+/// cannot read, a later version's, give way to those it takes, which it
+/// can: only those are stored ([`cw_core::UnreadKeys`]).
 fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionResult> {
     if kept.contest.is_none() && restored.contest.is_some() {
         return Some(restored);
@@ -678,10 +680,18 @@ fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionR
         return None;
     }
     let mut now = kept.clone();
-    for (timing, restored) in now.group_timings.iter_mut().zip(restored.group_timings) {
-        if timing.char_times.is_none() {
+    let unread = &mut now.unread.timings;
+    let timings = now.group_timings.iter_mut().zip(restored.group_timings);
+    for (at, (timing, restored)) in timings.enumerate() {
+        if timing.char_times.is_none() && restored.char_times.is_some() {
             timing.char_times = restored.char_times;
+            if let Some(unread) = unread.get_mut(at) {
+                unread.remove("charTimes");
+            }
         }
+    }
+    if unread.iter().all(serde_json::Map::is_empty) {
+        unread.clear();
     }
     Some(now)
 }
@@ -725,7 +735,7 @@ pub fn sessions_since(sessions: &[SessionResult], last: Option<u64>) -> usize {
 mod tests {
     use super::*;
     use crate::history::StoredHistory;
-    use crate::persist::record::records_for_blob;
+    use crate::persist::record::{read_record, records_for_blob};
     use crate::persist::tests::session;
 
     fn at(timestamp: u64, date: &str) -> SessionResult {
@@ -941,6 +951,43 @@ mod tests {
         assert_eq!(merged[0].group_timings[1].char_times, Some(times(700)));
         let again = merge_sessions(&merged, vec![session(Some(900))]);
         assert!(again.filled.is_empty(), "its own kept");
+    }
+
+    /// A session whose times a later version wrote in a shape this one
+    /// cannot read takes the times a backup holds of it that it can, and is
+    /// stored as it is held: with those times, the others let go of. Both
+    /// used to be written under one key, and the session filled in, stored
+    /// in place of the one it fills in, read as no session at all, in any
+    /// version.
+    #[test]
+    fn a_session_filled_in_over_times_it_could_not_read_reads_back() {
+        let times = |key: u32| cw_core::CharTimes {
+            ends: vec![300],
+            keys: vec![Some(key)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        };
+        let session = |kept: Option<u32>| {
+            let mut session =
+                crate::testing::stored_session("2026-10-10", &[("K", "K"), ("M", "M")]);
+            session.timestamp = 10;
+            session.group_timings[1].char_times = kept.map(times);
+            session
+        };
+        let mut later = serde_json::to_value(session(None)).expect("writes");
+        later["groupTimings"][1]["charTimes"] = serde_json::json!({ "at": [1, 2] });
+        let here = [read_record(&later.to_string()).expect("a later version's reads")];
+        assert_eq!(here[0].group_timings[1].char_times, None);
+        let merged = merge_sessions(&here, vec![session(Some(700))]);
+        let [fill] = &merged.filled[..] else {
+            panic!("filled in once: {merged:?}");
+        };
+        let was = RecordId::placed(10, "");
+        let record = Record::of(&fill.now, |json| RecordId::beside(was, json)).expect("writes");
+        let stored = read_record(&record.json).expect("reads back");
+        assert_eq!(stored.group_timings[1].char_times, Some(times(700)));
+        assert_eq!(stored, fill.now, "as it is held");
     }
 
     /// A session and itself filled in are one session, whichever of them is
