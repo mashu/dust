@@ -1278,9 +1278,11 @@ fn a_setting_changed_while_it_syncs_stays_and_goes_next() {
 
 /// Sync turned off here in another copy of the app on the same store, a
 /// tab or a window, is off in this one as well as it next syncs, or would
-/// keep what sync keeps: it syncs nothing more and keeps nothing, so sync
-/// stays off for every copy. Each copy used to write back the whole of what
-/// it read of sync as it opened, turning sync back on in the store.
+/// keep what sync keeps, and the card says why: it syncs nothing more and
+/// keeps nothing, so sync stays off for every copy. Each copy used to write
+/// back the whole of what it read of sync as it opened, turning sync back
+/// on in the store; and taking up sync turned off, the card said nothing
+/// of why it was off.
 #[test]
 fn sync_turned_off_in_another_copy_of_the_app_stays_off() {
     run(|| async {
@@ -1296,7 +1298,8 @@ fn sync_turned_off_in_another_copy_of_the_app_stays_off() {
         harness.in_app(|| window.sync_turn_off(false));
         held.hold(false);
         harness.advance(100).await;
-        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        let off_elsewhere = |status: SyncStatus| matches!(status, SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust.");
+        assert!(off_elsewhere(status(&harness)), "{:?}", status(&harness));
         assert_eq!(*harness.store.sync.borrow(), None, "kept off");
 
         // On again here, then off in another window: the sync due here next
@@ -1312,8 +1315,100 @@ fn sync_turned_off_in_another_copy_of_the_app_stays_off() {
         keep(&harness, &[5]);
         harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
         assert_eq!(remote.lists.get(), lists, "nothing synced");
-        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        assert!(off_elsewhere(status(&harness)), "{:?}", status(&harness));
         assert_eq!(*harness.store.sync.borrow(), None);
+    });
+}
+
+/// Sync turned off in another copy of the app, and turned on anew there
+/// just as this copy looks whether the store still holds what sync keeps,
+/// is on as that copy kept it: this copy turns sync off here, and clears
+/// nothing from the store, which held nothing as it looked. It used to
+/// clear the store as it turned sync off, the other copy's new sync with
+/// it.
+#[test]
+fn sync_taken_up_as_off_clears_nothing_another_copy_keeps() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_turn_off(false));
+        let anew = SyncState::new("anew".into(), "00".repeat(32), "keyring".into(), None)
+            .written()
+            .expect("written");
+        *harness.store.sync_kept_after_look.borrow_mut() = Some(anew.clone());
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(
+            matches!(status(&harness), SyncStatus::Off { .. }),
+            "{:?}",
+            status(&harness)
+        );
+        assert_eq!(
+            harness.store.sync.borrow().as_deref(),
+            Some(anew.as_str()),
+            "the other copy's, kept"
+        );
+    });
+}
+
+/// Sync turned off in another copy of the app and turned on anew there, as
+/// with another account or passphrase, is the sync the store keeps: this
+/// copy, still on the sync it found, takes it as changed there, turns sync
+/// off here saying why, and writes nothing of its own over it; the app
+/// opens again on the sync turned on there. This copy used to write what it
+/// kept over it as it next synced, and the sync turned on there was gone at
+/// the next launch.
+#[test]
+fn sync_turned_on_anew_in_another_copy_of_the_app_is_the_sync_kept() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_turn_off(false));
+        harness.in_app(|| window.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| window.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(harness.in_app(|| window.sync.status.peek().is_on()));
+        let device =
+            |kept: Option<String>| SyncState::read(&kept.expect("kept")).expect("reads").device;
+        let theirs = device(harness.store.sync.borrow().clone());
+
+        let lists = remote.lists.get();
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(100).await;
+        assert_eq!(remote.lists.get(), lists, "nothing synced");
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned on anew in another tab or window of Dust. Open Dust again here to sync."),
+            "{:?}",
+            status(&harness)
+        );
+        assert_eq!(
+            device(harness.store.sync.borrow().clone()),
+            theirs,
+            "the other copy's"
+        );
+        let again = harness
+            .in_app(|| AppCtx::new(harness.app.clone(), Default::default(), Default::default()));
+        let link = Link {
+            auth: Rc::clone(&auth) as Rc<dyn Auth>,
+            remote: Rc::clone(&remote) as Rc<dyn Remote>,
+        };
+        let again = harness.in_app(|| again.link_sync(link));
+        let opened = harness.in_app(|| {
+            again
+                .sync
+                .state
+                .peek()
+                .as_ref()
+                .map(|state| state.device.clone())
+        });
+        assert_eq!(opened, Some(theirs), "opened on the sync turned on there");
     });
 }
 

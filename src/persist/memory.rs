@@ -135,6 +135,10 @@ pub struct MemoryStore {
     /// What sync keeps cannot be read just now, as a file another program
     /// holds open cannot, though it is there.
     pub sync_unreadable: Cell<bool>,
+    /// What another copy of the app keeps for sync just as this one has
+    /// looked whether the store holds nothing for it, as a copy turning
+    /// sync on anew at that moment would: kept once, after that look.
+    pub sync_kept_after_look: RefCell<Option<String>>,
 }
 
 /// How many changes other copies have told of, and what waits on the next.
@@ -557,7 +561,11 @@ impl Store for MemoryStore {
     }
 
     fn sync_cleared(&self) -> bool {
-        self.sync.borrow().is_none()
+        let cleared = self.sync.borrow().is_none();
+        if let Some(kept) = self.sync_kept_after_look.borrow_mut().take() {
+            *self.sync.borrow_mut() = Some(kept);
+        }
+        cleared
     }
 
     fn save_sync(&self, state: Option<&str>) -> Result<(), String> {

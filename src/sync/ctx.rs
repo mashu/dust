@@ -227,8 +227,8 @@ impl AppCtx {
     }
 
     /// Keep what sync keeps, as it is now: told of where it cannot be.
-    /// Where another copy of the app turned sync off since, nothing is
-    /// kept, and sync is off here too ([`Self::take_up_sync_off`]).
+    /// Where another copy of the app turned sync off since, or on anew,
+    /// nothing is kept, and sync is off here ([`Self::take_up_sync_off`]).
     fn keep_sync_state(self) {
         if self.take_up_sync_off() {
             return;
@@ -245,20 +245,43 @@ impl AppCtx {
         }
     }
 
-    /// Turn sync off here, where another copy of the app on the same store,
-    /// a tab or a window, has turned it off since this one found or last
-    /// kept what sync keeps there; and say whether it was. Each copy keeps
-    /// the whole of what sync keeps, so one keeping it again would turn
-    /// sync back on in the store, for every copy.
+    /// Turn sync off here, saying why, where another copy of the app on the
+    /// same store, a tab or a window, has turned it off since this one
+    /// found or last kept what sync keeps there, or turned it on anew and
+    /// kept its own; and say whether it was. Each copy keeps the whole of
+    /// what sync keeps, so one keeping it again would turn sync back on in
+    /// the store for every copy, or undo the sync turned on anew. What the
+    /// store holds is left as it is: nothing, or the other copy's.
     fn take_up_sync_off(self) -> bool {
-        let off = *self.sync.stored.peek()
-            && self.sync.state.peek().is_some()
-            && self.app().store.sync_cleared();
-        if off {
-            self.sync_forget();
-            self.set_sync_status(SyncStatus::Off { problem: None });
+        let why = match self.sync.state.peek().as_ref() {
+            Some(here) if *self.sync.stored.peek() => self.sync_changed_elsewhere(here),
+            _ => None,
+        };
+        let Some(why) = why else {
+            return false;
+        };
+        self.forget_sync_here();
+        self.set_sync_status(SyncStatus::Off {
+            problem: Some(why.into()),
+        });
+        true
+    }
+
+    /// Why sync is no longer as `here` keeps it, where another copy of the
+    /// app has changed it in the store: turned off, or turned on anew,
+    /// which keeps another device and keyring. A store that could not be
+    /// read is no word of either.
+    fn sync_changed_elsewhere(self, here: &SyncState) -> Option<&'static str> {
+        let store = self.app().store;
+        if store.sync_cleared() {
+            return Some("Sync was turned off in another tab or window of Dust.");
         }
-        off
+        let kept = store.load_sync()?;
+        let same = SyncState::read(&kept)
+            .is_some_and(|kept| kept.device == here.device && kept.keyring == here.keyring);
+        (!same).then_some(
+            "Sync was turned on anew in another tab or window of Dust. Open Dust again here to sync.",
+        )
     }
 
     /// Ask the user to sign in to Google: to turn sync on, or to sync again
@@ -713,8 +736,20 @@ impl AppCtx {
         });
     }
 
-    /// Forget everything sync keeps here.
+    /// Forget everything sync keeps here, and in the store.
     fn sync_forget(self) {
+        self.forget_sync_here();
+        if let Err(why) = self.app().store.save_sync(None) {
+            self.toasts.show(format!(
+                "What sync kept could not be cleared: {}.",
+                why.trim_end_matches('.')
+            ));
+        }
+    }
+
+    /// Forget everything sync keeps in this copy of the app, and nothing in
+    /// the store, which other copies share.
+    fn forget_sync_here(self) {
         if let Some(link) = self.sync_link() {
             link.auth.forget();
         }
@@ -726,12 +761,6 @@ impl AppCtx {
         put(self.sync.stored, false);
         put(self.sync.found, None);
         put(self.sync.revived, BTreeMap::new());
-        if let Err(why) = self.app().store.save_sync(None) {
-            self.toasts.show(format!(
-                "What sync kept could not be cleared: {}.",
-                why.trim_end_matches('.')
-            ));
-        }
     }
 
     /// Move on to the next turning on of sync: a sync under way keeps

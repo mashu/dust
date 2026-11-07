@@ -184,9 +184,13 @@ session or a run, and takes no tap but that one.
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that
 device, which keeps what sync keeps in the same place, finds it gone as it
-next syncs, and turns sync off too. Turning it off with the copy deletes every
-file of Dust's from the folder, the keyring first, and every other device
-then finds it gone, says so, and turns sync off too.
+next syncs, or keeps what it keeps, and turns sync off too, saying so. One
+that finds there instead what another tab or window kept as it turned sync
+on anew turns off as well, saying so, rather than write its own over it:
+opened again, it syncs as that one does. Neither clears anything from the
+store. Turning it off with the copy deletes every file of Dust's from the
+folder, the keyring first, and every other device then finds it gone, says
+so, and turns sync off too.
 
 ## Setting up
 
