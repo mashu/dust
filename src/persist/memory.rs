@@ -80,6 +80,12 @@ pub struct MemoryStore {
     pub deferred: Cell<bool>,
     /// The changes asked for and not yet made, in order.
     waiting: RefCell<VecDeque<(HistoryChange, Rc<RefCell<Answer>>)>>,
+    /// Which records were deleted by hand is answered only when the test
+    /// says ([`Self::answer_forgotten`]), the way a store on a thread of
+    /// its own answers a moment after it is asked.
+    pub forgotten_later: Cell<bool>,
+    /// What was asked of which records were deleted, and not yet answered.
+    asked_forgotten: RefCell<Vec<Rc<RefCell<Forgotten>>>>,
     /// How many records and tombstones have been written.
     pub record_writes: Cell<usize>,
     pub tombstone_writes: Cell<usize>,
@@ -257,6 +263,14 @@ impl Held {
 #[derive(Default)]
 struct Answer {
     saved: Option<HistorySaved>,
+    waker: Option<Waker>,
+}
+
+/// What was asked of which records were deleted by hand, answered later
+/// ([`MemoryStore::forgotten_later`]), and what waits on the answer.
+struct Forgotten {
+    ids: Vec<RecordId>,
+    gone: Option<Vec<RecordId>>,
     waker: Option<Waker>,
 }
 
@@ -509,12 +523,25 @@ impl Store for MemoryStore {
         if let Some(page) = &self.page {
             return done(page.forgotten(&ids));
         }
-        let tombstones = self.tombstones.borrow();
-        done(
-            ids.into_iter()
-                .filter(|id| tombstones.contains_key(id))
-                .collect(),
-        )
+        if !self.forgotten_later.get() {
+            return done(self.tombstoned(ids));
+        }
+        let answer = Rc::new(RefCell::new(Forgotten {
+            ids,
+            gone: None,
+            waker: None,
+        }));
+        self.asked_forgotten.borrow_mut().push(answer.clone());
+        Box::pin(std::future::poll_fn(move |asked| {
+            let mut answer = answer.borrow_mut();
+            match answer.gone.take() {
+                Some(gone) => Poll::Ready(gone),
+                None => {
+                    answer.waker = Some(asked.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }))
     }
 
     fn load_sync(&self) -> Option<String> {
@@ -647,6 +674,29 @@ impl MemoryStore {
     /// How many changes are waiting to be made.
     pub fn waiting(&self) -> usize {
         self.waiting.borrow().len()
+    }
+
+    /// Of `ids`, those deleted by hand.
+    fn tombstoned(&self, ids: Vec<RecordId>) -> Vec<RecordId> {
+        let tombstones = self.tombstones.borrow();
+        ids.into_iter()
+            .filter(|id| tombstones.contains_key(id))
+            .collect()
+    }
+
+    /// Answer every ask of which records were deleted by hand
+    /// ([`Self::forgotten_later`]), as the store holds them now, and wake
+    /// what waits on each.
+    pub fn answer_forgotten(&self) {
+        let asked = std::mem::take(&mut *self.asked_forgotten.borrow_mut());
+        for answer in asked {
+            let mut answer = answer.borrow_mut();
+            let ids = std::mem::take(&mut answer.ids);
+            answer.gone = Some(self.tombstoned(ids));
+            if let Some(waker) = answer.waker.take() {
+                waker.wake();
+            }
+        }
     }
 
     /// Lose the record `id` from under the app, the way another copy

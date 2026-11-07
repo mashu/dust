@@ -937,6 +937,24 @@ impl AppCtx {
         held
     }
 
+    /// Let go of `gone`, sessions held from elsewhere
+    /// ([`Self::hold_from_elsewhere`]) that the store says were deleted by
+    /// hand under the records they would be stored as: out of the history,
+    /// and out of this copy's mark.
+    pub fn let_go_of_held(self, gone: &HashSet<RecordId>) {
+        if gone.is_empty() {
+            return;
+        }
+        let mut sessions = self.sessions;
+        {
+            let mut history = sessions.write();
+            for id in gone {
+                history.remove(*id);
+            }
+        }
+        self.settle_mark();
+    }
+
     /// Store `held`, sessions held here until the store takes them
     /// ([`Self::hold_from_elsewhere`]), then do `then` with what became of
     /// them.
@@ -2913,6 +2931,69 @@ mod tests {
             "told of as kept: {:?}",
             next.notices()
         );
+    }
+
+    /// Leave in `store` the mark of a copy of the app that kept `session`
+    /// as it stopped, before the store had it.
+    fn cut_off_keeping(store: &Rc<MemoryStore>, session: SessionResult) {
+        let tab = Tab::on(store);
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: session,
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.act(AppCtx::mark_kept);
+    }
+
+    /// A session cut off is held by this copy's mark as soon as it is
+    /// kept, before the store has said whether it was deleted by hand: its
+    /// own mark was taken from the store as it was told of, so the app
+    /// stopping while the store answered lost it for good. One the store
+    /// says was deleted goes again, from the history and from the mark.
+    #[test]
+    fn a_session_cut_off_is_held_while_the_store_looks_for_its_deletion() {
+        let store = Rc::new(MemoryStore::default());
+        cut_off_keeping(&store, day(2));
+        store.forgotten_later.set(true);
+        let mut next = Tab::on(&store);
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        let held = |store: &MemoryStore| {
+            store
+                .open()
+                .map(|open| days(&open.unstored))
+                .unwrap_or_default()
+        };
+        assert_eq!(held(&store), [2], "held by this copy's mark");
+        assert_eq!(next.shown(), [2]);
+        store.answer_forgotten();
+        next.pump();
+        assert_eq!(days(&store.load_sessions()), [2]);
+        assert_eq!(store.open(), None, "stored, so no longer marked");
+
+        // Deleted by hand under the record it would be stored as.
+        let mut gone = day(3);
+        gone.score = gone.points();
+        let record =
+            Record::of(&gone, |json| RecordId::placed(gone.timestamp, json)).expect("a record");
+        let forget = HistoryChange {
+            forget: vec![(record.id, Deleted::of(&gone, 7))],
+            ..HistoryChange::default()
+        };
+        let mut pending = Store::change_history(&*store, forget);
+        let mut asked = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut asked).is_ready());
+        cut_off_keeping(&store, day(3));
+        let mut next = Tab::on(&store);
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert_eq!(held(&store), [3], "held while the store looks");
+        store.answer_forgotten();
+        next.pump();
+        assert_eq!(next.shown(), [2], "deleted by hand, it goes");
+        assert_eq!(days(&store.load_sessions()), [2]);
+        assert_eq!(store.open(), None, "nor held");
     }
 
     /// A session another copy of the app kept, which the store took before

@@ -824,29 +824,39 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
     if kept.is_empty() {
         return;
     }
-    let ids = kept.iter().map(|(record, ..)| record.id).collect();
-    let gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
-    kept.retain(|(record, ..)| !gone.contains(&record.id));
-    if kept.is_empty() {
-        return;
-    }
-    // In the history, and held with this copy's mark, before any level is
-    // moved by them, and the levels moved before they are stored: the app
-    // stopping from here on keeps each once, its level counted once.
-    let mut judged = Vec::new();
-    let mut put = Vec::new();
-    for (record, result, settings) in kept {
-        if let Some(settings) = settings {
-            judged.push((record.id, result.clone(), settings));
-        }
-        put.push((record, result));
-    }
+    // In the history, and held with this copy's mark, before the store is
+    // asked anything: the marks they came from were taken from it as they
+    // were told of, and until this copy's mark holds them, the app
+    // stopping keeps none of them.
+    let put = kept
+        .iter()
+        .map(|(record, result, _)| (record.clone(), result.clone()))
+        .collect();
     let held = ctx.hold_from_elsewhere(put);
     if held.is_empty() {
         return;
     }
-    for (id, result, settings) in judged {
-        if held.iter().all(|record| record.id != id) {
+    // One deleted by hand under the record it would be stored as is let
+    // go again, and so is one deleted here meanwhile.
+    let ids = held.iter().map(|record| record.id).collect();
+    let gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
+    ctx.let_go_of_held(&gone);
+    let held: Vec<Record> = {
+        let history = ctx.sessions.peek();
+        held.into_iter()
+            .filter(|record| !gone.contains(&record.id) && history.index_of(record.id).is_some())
+            .collect()
+    };
+    if held.is_empty() {
+        return;
+    }
+    // The levels moved by them before they are stored: the app stopping
+    // from here on keeps each once, its level counted once.
+    for (record, result, settings) in kept {
+        let Some(settings) = settings else {
+            continue;
+        };
+        if held.iter().all(|held| held.id != record.id) {
             continue;
         }
         let run = store.load_auto_counters(&CountersKey::of(&settings));
