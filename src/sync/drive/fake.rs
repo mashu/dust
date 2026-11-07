@@ -227,7 +227,8 @@ pub struct FakeAuth {
     pub asked: Cell<usize>,
     /// The user turns the sign-in down.
     pub refuses: Cell<bool>,
-    /// What it keeps to sign in again, and was given to keep.
+    /// What it keeps to sign in again, and was given to keep: another
+    /// each time the user signs in, `kept` the first.
     pub kept: RefCell<Option<String>>,
 }
 
@@ -263,7 +264,10 @@ impl Auth for FakeAuth {
             return done(Err(AuthError::Cancelled));
         }
         self.signed_in.set(true);
-        *self.kept.borrow_mut() = Some("kept".into());
+        *self.kept.borrow_mut() = Some(match self.asked.get() {
+            1 => "kept".into(),
+            asked => format!("kept {asked}"),
+        });
         done(Ok(()))
     }
 

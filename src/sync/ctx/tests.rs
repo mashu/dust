@@ -1,27 +1,93 @@
 //! Sync in the app: the card's moves, and the syncs the app makes by
 //! itself, against a folder and a sign-in of a test's own.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use super::*;
 use crate::persist::memory::MemoryStore;
-use crate::persist::record::{HistoryChange, Record, RecordId};
+use crate::persist::record::{HistoryChange, Pending, Record, RecordId};
 use crate::persist::tests::at;
 use crate::sync::drive::fake::FakeAuth;
-use crate::sync::remote::MemoryRemote;
+use crate::sync::remote::{MemoryRemote, RemoteFile};
 use crate::sync::run::{join, look, sync_once};
 use crate::sync::seal::Stretch;
 use crate::testing::{Harness, run};
 
 /// The app, linked to `remote` through `auth`.
 fn linked(harness: &mut Harness, remote: &Rc<MemoryRemote>, auth: &Rc<FakeAuth>) -> AppCtx {
+    linked_to(harness, Rc::clone(remote) as Rc<dyn Remote>, auth)
+}
+
+/// The app, linked to `remote`, whatever folder it is, through `auth`.
+fn linked_to(harness: &mut Harness, remote: Rc<dyn Remote>, auth: &Rc<FakeAuth>) -> AppCtx {
     let link = Link {
         auth: Rc::clone(auth) as Rc<dyn Auth>,
-        remote: Rc::clone(remote) as Rc<dyn Remote>,
+        remote,
     };
     let ctx = harness.in_app(|| harness.ctx.link_sync(link));
     harness.ctx = ctx;
     ctx
+}
+
+/// A folder that answers nothing while a test holds it, and then answers
+/// as `remote` does: a sync under way, for as long as the test likes.
+struct Held {
+    remote: Rc<MemoryRemote>,
+    held: Rc<Cell<bool>>,
+}
+
+impl Held {
+    fn of(remote: &Rc<MemoryRemote>) -> Rc<Self> {
+        Rc::new(Self {
+            remote: Rc::clone(remote),
+            held: Rc::new(Cell::new(false)),
+        })
+    }
+
+    fn hold(&self, held: bool) {
+        self.held.set(held);
+    }
+
+    /// What `asked` of the folder comes to, asked once the test lets go.
+    fn once_let_go<T: 'static>(
+        &self,
+        asked: impl FnOnce(&MemoryRemote) -> Pending<T> + 'static,
+    ) -> Pending<T> {
+        let (remote, held) = (Rc::clone(&self.remote), Rc::clone(&self.held));
+        Box::pin(async move {
+            while held.get() {
+                sleep_ms(POLL_MS).await;
+            }
+            asked(&remote).await
+        })
+    }
+}
+
+impl Remote for Held {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        self.once_let_go(|remote| remote.list())
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        let id = id.to_string();
+        self.once_let_go(move |remote| remote.get(&id))
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        let name = name.to_string();
+        self.once_let_go(move |remote| remote.create(&name, bytes))
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        let id = id.to_string();
+        self.once_let_go(move |remote| remote.update(&id, bytes))
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        let id = id.to_string();
+        self.once_let_go(move |remote| remote.delete(&id))
+    }
 }
 
 fn status(harness: &Harness) -> SyncStatus {
@@ -384,6 +450,94 @@ fn sync_turned_off_forgets_what_it_kept() {
     });
 }
 
+/// Turned off here while a sync is under way, sync stays off: the sync, as
+/// it ends, keeps nothing of what sync kept, nor syncs again; turning sync
+/// on asks for the passphrase again; and the app opens with it off.
+#[test]
+fn sync_turned_off_while_it_syncs_stays_off() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(matches!(
+            status(&harness),
+            SyncStatus::On { syncing: true, .. }
+        ));
+        // Another asked for after it, then sync turned off.
+        harness.in_app(|| ctx.sync_now());
+        harness.in_app(|| ctx.sync_turn_off(false));
+        assert_eq!(*harness.store.sync.borrow(), None);
+        let lists = remote.lists.get();
+        held.hold(false);
+        harness.advance(100).await;
+        assert_eq!(remote.lists.get(), lists + 1, "the one under way alone");
+        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+        assert_eq!(*harness.store.sync.borrow(), None, "nothing kept again");
+
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        assert_eq!(
+            status(&harness),
+            SyncStatus::Passphrase {
+                new: false,
+                problem: None
+            }
+        );
+        harness.in_app(|| ctx.sync_cancel());
+        let again = harness
+            .in_app(|| AppCtx::new(harness.app.clone(), Default::default(), Default::default()));
+        let link = Link {
+            auth: Rc::clone(&auth) as Rc<dyn Auth>,
+            remote: Rc::clone(&held) as Rc<dyn Remote>,
+        };
+        let again = harness.in_app(|| again.link_sync(link));
+        assert_eq!(
+            harness.in_app(|| again.sync.status.peek().clone()),
+            SyncStatus::Off { problem: None }
+        );
+    });
+}
+
+/// Signed in again while a sync is under way, the new sign-in is the one
+/// kept: the sync, as it ends, does not put back the one it began with.
+#[test]
+fn a_sign_in_made_while_it_syncs_is_the_one_kept() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        held.hold(false);
+        harness.advance(100).await;
+        assert!(
+            matches!(
+                status(&harness),
+                SyncStatus::On {
+                    last: Some(_),
+                    syncing: false,
+                    problem: None,
+                    needs_sign_in: false
+                }
+            ),
+            "{:?}",
+            status(&harness)
+        );
+        let kept = harness.store.sync.borrow().clone().expect("kept");
+        let state = SyncState::read(&kept).expect("reads");
+        assert_eq!(state.sign_in.as_deref(), Some("kept 2"));
+    });
+}
+
 /// A session deleted and put back by Undo after the deletion was synced
 /// stays, here and on every device.
 #[test]
@@ -432,7 +586,28 @@ async fn turned_on(
     remote: &Rc<MemoryRemote>,
     auth: &Rc<FakeAuth>,
 ) -> AppCtx {
-    let ctx = linked(harness, remote, auth);
+    turned_on_through(harness, Rc::clone(remote) as Rc<dyn Remote>, auth).await
+}
+
+/// Turn sync on here as the first device, through a folder the test can
+/// hold ([`Held`]).
+async fn turned_on_held(
+    harness: &mut Harness,
+    remote: &Rc<MemoryRemote>,
+    auth: &Rc<FakeAuth>,
+) -> (AppCtx, Rc<Held>) {
+    let held = Held::of(remote);
+    let ctx = turned_on_through(harness, Rc::clone(&held) as Rc<dyn Remote>, auth).await;
+    (ctx, held)
+}
+
+/// Turn sync on here as the first device, through `remote`.
+async fn turned_on_through(
+    harness: &mut Harness,
+    remote: Rc<dyn Remote>,
+    auth: &Rc<FakeAuth>,
+) -> AppCtx {
+    let ctx = linked_to(harness, remote, auth);
     harness.in_app(|| ctx.sync_sign_in());
     harness.pump();
     let new = matches!(status(harness), SyncStatus::Passphrase { new: true, .. });

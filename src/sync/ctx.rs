@@ -13,7 +13,7 @@ use dioxus::prelude::*;
 
 use super::auth::{Auth, AuthError};
 use super::remote::{Remote, RemoteError};
-use super::run::{Found, SyncFailed, delete_copy, join, look, sync_once};
+use super::run::{Found, SyncFailed, Synced, delete_copy, join, look, sync_once};
 use super::seal::{MIN_PASSPHRASE, Stretch};
 use super::settings::{as_keys, settings_keys};
 use super::state::SyncState;
@@ -104,6 +104,10 @@ pub struct SyncCtx {
     link: CopyValue<Option<Link>>,
     /// What sync keeps, while it is on.
     state: CopyValue<Option<SyncState>>,
+    /// Which turning on of sync `state` is of: moved on as sync is turned
+    /// off here, and as it is turned on, so that a sync under way across
+    /// either keeps nothing of what it did.
+    epoch: CopyValue<u64>,
     /// What the sign-in found in the drive, for the passphrase to open.
     found: CopyValue<Option<Found>>,
     /// A sync is under way, and another is asked for after it.
@@ -150,6 +154,7 @@ impl SyncCtx {
             theme: Signal::new(None),
             link: CopyValue::new(link),
             state: CopyValue::new(state),
+            epoch: CopyValue::new(0),
             found: CopyValue::new(None),
             running: CopyValue::new(false),
             again: CopyValue::new(false),
@@ -307,6 +312,7 @@ impl AppCtx {
                         return;
                     };
                     put(self.sync.found, None);
+                    self.next_sync_epoch();
                     put(
                         self.sync.state,
                         Some(SyncState::new(
@@ -366,6 +372,7 @@ impl AppCtx {
         put(self.sync.running, true);
         self.change_on_status(|_, syncing, _, _| *syncing = true);
         spawn_forever(async move {
+            let epoch = *self.sync.epoch.peek();
             let mut state = self.sync.state.peek().clone().expect("sync is on");
             state.revived.extend(take(self.sync.revived));
             let here = self.settings.peek().clone().clamp();
@@ -373,6 +380,23 @@ impl AppCtx {
             let synced = sync_once(&*store, &*link.remote, &mut state, &here, now_ms()).await;
             // Put back by hand meanwhile: noted with the rest.
             state.revived.extend(take(self.sync.revived));
+            if *self.sync.epoch.peek() != epoch {
+                // Sync was turned off meanwhile, or turned on anew: what
+                // this sync stored is taken up, and none of what it would
+                // keep is kept.
+                if let Ok(synced) = &synced {
+                    self.take_up_synced(synced);
+                }
+                self.sync_over();
+                return;
+            }
+            // The sign-in is no sync's to keep: one made meanwhile stays.
+            state.sign_in = self
+                .sync
+                .state
+                .peek()
+                .as_ref()
+                .and_then(|kept| kept.sign_in.clone());
             match synced {
                 Err(failed) if failed.ends_sync() => {
                     self.sync_forget();
@@ -394,17 +418,11 @@ impl AppCtx {
                     let last = state.last;
                     put(self.sync.state, Some(state));
                     self.keep_sync_state();
-                    if synced.changed_history() {
-                        self.take_up_store();
-                    }
+                    self.take_up_synced(&synced);
                     if let Some(settings) = synced.settings {
                         let mut shown = self.settings;
                         shown.set(settings);
                         self.store_settings();
-                    }
-                    if let Some(theme) = synced.theme {
-                        let mut shown = self.sync.theme;
-                        shown.set(Some(theme));
                     }
                     let unreadable = (synced.unreadable > 0).then(|| {
                         format!(
@@ -421,11 +439,28 @@ impl AppCtx {
                     });
                 }
             }
-            put(self.sync.running, false);
-            if take(self.sync.again) {
-                self.sync_now();
-            }
+            self.sync_over();
         });
+    }
+
+    /// Take up what a sync stored here: the history it changed, and the
+    /// theme it took, for the app's shell to show.
+    fn take_up_synced(self, synced: &Synced) {
+        if synced.changed_history() {
+            self.take_up_store();
+        }
+        if let Some(theme) = &synced.theme {
+            let mut shown = self.sync.theme;
+            shown.set(Some(theme.clone()));
+        }
+    }
+
+    /// A sync is over: another starts, where one was asked for meanwhile.
+    fn sync_over(self) {
+        put(self.sync.running, false);
+        if take(self.sync.again) {
+            self.sync_now();
+        }
     }
 
     /// Sync a moment from now, as the app does after a change here: once,
@@ -538,6 +573,7 @@ impl AppCtx {
         if let Some(link) = self.sync_link() {
             link.auth.forget();
         }
+        self.next_sync_epoch();
         put(self.sync.state, None);
         put(self.sync.found, None);
         if let Err(why) = self.app().store.save_sync(None) {
@@ -546,6 +582,13 @@ impl AppCtx {
                 why.trim_end_matches('.')
             ));
         }
+    }
+
+    /// Move on to the next turning on of sync: a sync under way keeps
+    /// nothing of what it did ([`SyncCtx::epoch`]).
+    fn next_sync_epoch(self) {
+        let mut epoch = self.sync.epoch;
+        *epoch.write() += 1;
     }
 
     /// Sync as the app opens, where it is on.
