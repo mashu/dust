@@ -107,6 +107,11 @@ pub(super) struct HistoryFiles {
     /// every change since: what the app asks, on its own thread, of how
     /// large the history has grown ([`Self::size`]).
     size: Arc<AtomicU64>,
+    /// What another copy of the app does while this one lists the history,
+    /// for a test to set: done each time a folder of it has been read
+    /// ([`Self::meanwhile()`]).
+    #[cfg(test)]
+    elsewhere: RefCell<Option<Box<dyn FnMut() + Send>>>,
 }
 
 /// Whether the history changed since this copy last looked, here or in the
@@ -188,6 +193,8 @@ impl HistoryFiles {
             keys: RefCell::new(HashMap::new()),
             on_worker: false,
             size: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            elsewhere: RefCell::new(None),
         }
     }
 
@@ -271,11 +278,14 @@ impl HistoryFiles {
             self.clear_temporaries();
             load.notices.extend(self.journals_cut_short());
         }
+        // As the folders were before they were read: whatever another copy
+        // changes from here on is taken up at the next look. Where they
+        // cannot be read, nothing was seen, and the next look reads them.
+        let before = self.watch.stamps();
         let listing = match self.listing_now() {
             Ok(listing) => listing,
             Err(err) => {
                 eprintln!("could not list the history: {err}");
-                self.restamp();
                 return load;
             }
         };
@@ -319,7 +329,7 @@ impl HistoryFiles {
             }
         }
         load.complete = layout.is_some();
-        self.restamp();
+        self.watch.looked(before);
         load
     }
 
@@ -354,13 +364,14 @@ impl HistoryFiles {
         } else {
             None
         };
+        let before = self.watch.stamps();
         let made = self.make(change);
         // Made or not, the change is over, and what became of it is said
         // now: a journal left behind says only that Dust stopped first.
         if let Some(journal) = journal {
             end_journal(journal, &self.dir);
         }
-        self.restamp();
+        self.watch.made(before);
         saved_or_not(made.map(|()| change.put.len()))
     }
 
@@ -484,6 +495,10 @@ impl HistoryFiles {
     /// be listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
         self.on_its_thread();
+        // As the folders were before they were looked at, the history kept
+        // whole among them: whatever another copy changes from here on is
+        // taken up at the next look.
+        let before = self.watch.stamps();
         if let Ok(Gate::Open(layout)) = self.gate()
             && self.legacy_changed(&layout)
             && let Some(live) = self.live_keys()
@@ -491,7 +506,7 @@ impl HistoryFiles {
             self.import(&layout, &live);
         }
         let listing = self.listing_now().ok()?;
-        self.restamp();
+        self.watch.looked(before);
         Some(listing.records.difference(&listing.gone).copied().collect())
     }
 
@@ -550,12 +565,6 @@ impl HistoryFiles {
             .collect()
     }
 
-    /// Note the folders as they are now: what this copy did is no change
-    /// for it to take up.
-    fn restamp(&self) {
-        self.watch.restamp();
-    }
-
     /// The gate `layout.json` sets. One that does not read is set aside
     /// and the move made again; one that cannot be set aside holds every
     /// write back.
@@ -576,13 +585,26 @@ impl HistoryFiles {
     /// Every record and tombstone there is.
     fn listing_now(&self) -> io::Result<Listing> {
         let packed = self.packed()?;
+        self.meanwhile();
         let mut records = ids_in(&self.records())?;
+        self.meanwhile();
         records.extend(packed.keys().copied());
+        let gone = ids_in(&self.tombstones())?;
+        self.meanwhile();
         Ok(Listing {
             records,
-            gone: ids_in(&self.tombstones())?,
+            gone,
             packed,
         })
+    }
+
+    /// Let another copy do what a test has it do while this one lists the
+    /// history, as a folder of it has been read: nothing, outside a test.
+    fn meanwhile(&self) {
+        #[cfg(test)]
+        if let Some(elsewhere) = self.elsewhere.borrow_mut().as_mut() {
+            elsewhere();
+        }
     }
 
     /// What is stored for `id`, loose, or else in a pack: none where it
@@ -972,11 +994,23 @@ impl Watch {
         self.seen().replace(now) != Some(now)
     }
 
-    /// Note the folders as they are now: what this copy did is no change
-    /// for it to take up.
-    fn restamp(&self) {
-        let now = self.stamps();
-        *self.seen() = Some(now);
+    /// Note the folders as `before` found them, just before this copy
+    /// looked at what they hold: whatever changed after, as another copy
+    /// stored while this one read, is still to be taken up.
+    fn looked(&self, before: Stamps) {
+        *self.seen() = Some(before);
+    }
+
+    /// Note the folders as this copy's own change left them, `before` being
+    /// how they were just before it was made: what it did is no change for
+    /// it to take up. Where they had changed since it last looked, as
+    /// another copy changed them, nothing is noted, and what the other did
+    /// is taken up at the next look, with this change beside it.
+    fn made(&self, before: Stamps) {
+        let mut seen = self.seen();
+        if *seen == Some(before) {
+            *seen = Some(self.stamps());
+        }
     }
 
     fn seen(&self) -> std::sync::MutexGuard<'_, Option<Stamps>> {
@@ -1253,6 +1287,17 @@ mod tests {
 
         fn bytes(&self) -> u64 {
             self.0.bytes()
+        }
+
+        /// Have `elsewhere` done each time a folder of the history has been
+        /// read, from the next listing on, as another copy of the app would
+        /// do it meanwhile ([`HistoryFiles::meanwhile()`]).
+        fn meanwhile(&self, elsewhere: impl FnMut() + Send + 'static) {
+            let elsewhere: Box<dyn FnMut() + Send> = Box::new(elsewhere);
+            wait(
+                self.0
+                    .ask(move |files| *files.elsewhere.borrow_mut() = Some(elsewhere)),
+            );
         }
     }
 
@@ -1795,6 +1840,71 @@ mod tests {
         assert!(here.changed());
         assert_eq!(here.listing(), Some(Vec::new()));
         assert_eq!(here.forgotten(&[one.id]), [one.id]);
+    }
+
+    /// What another copy stored or deleted since this one last looked is
+    /// taken up after this one makes a change of its own: its own change
+    /// is none for it to take up, the other's is. Noting the folders as its
+    /// own change left them noted the other's as seen too, and the session
+    /// it stored, or deleted, was never taken up until the app was opened
+    /// again.
+    #[test]
+    fn a_change_another_copy_made_first_is_taken_up_after_ones_own() {
+        let dir = TempDir::new("theirs-first");
+        let (here, there) = (Files::at(&dir.0), Files::at(&dir.0));
+        here.load();
+        there.load();
+        let (first, second, third) = (finished(1_000), finished(2_000), finished(3_000));
+        let (theirs, ours, more) = (record(&first), record(&second), record(&third));
+        there.apply(&put(std::slice::from_ref(&theirs)));
+        here.apply(&put(std::slice::from_ref(&ours)));
+        assert!(here.changed(), "theirs, to take up");
+        assert_eq!(here.listing(), Some(vec![theirs.id, ours.id]));
+        assert!(!here.changed(), "taken up");
+        there.apply(&forget(&[(&theirs, &first)]));
+        here.apply(&put(std::slice::from_ref(&more)));
+        assert!(here.changed(), "their deletion, to take up");
+        assert_eq!(here.listing(), Some(vec![ours.id, more.id]));
+        assert_eq!(here.forgotten(&[theirs.id]), [theirs.id]);
+        assert!(!here.changed());
+    }
+
+    /// Have another copy of the app store each of `theirs`, one each time
+    /// a folder of the history in `root` has been read, from the next
+    /// listing of `files` on, as it would while they read.
+    fn stored_meanwhile(files: &Files, root: &Path, theirs: Vec<Record>) {
+        let root = root.to_path_buf();
+        let mut theirs = theirs.into_iter();
+        files.meanwhile(move || {
+            if let Some(record) = theirs.next() {
+                HistoryFiles::at(&root).apply(&put(std::slice::from_ref(&record)));
+            }
+        });
+    }
+
+    /// What another copy stores while this one reads the history whole, or
+    /// lists it, is taken up at the next look, wherever in the reading it
+    /// was stored. Each noted the folders as they were once it was done,
+    /// what the other stored meanwhile among them, and what the reading had
+    /// not seen was never taken up.
+    #[test]
+    fn what_another_copy_stores_while_the_history_is_read_is_taken_up() {
+        let theirs: Vec<Record> = (1..=3).map(|n| record(&finished(n * 1_000))).collect();
+        let named: Vec<RecordId> = theirs.iter().map(|record| record.id).collect();
+        let (dir, files) = history("stored-as-read");
+        stored_meanwhile(&files, &dir.0, theirs.clone());
+        files.load();
+        assert!(files.changed(), "what was stored as it read, to take up");
+        assert_eq!(files.listing(), Some(named.clone()));
+        assert!(!files.changed(), "taken up");
+
+        let (dir, files) = history("stored-as-listed");
+        files.load();
+        stored_meanwhile(&files, &dir.0, theirs);
+        files.listing();
+        assert!(files.changed(), "what was stored as it listed, to take up");
+        assert_eq!(files.listing(), Some(named));
+        assert!(!files.changed(), "taken up");
     }
 
     /// A restore of many sessions at once that stops before it is done is
@@ -2443,6 +2553,8 @@ mod tests {
         a_session_put_back_whose_record_stayed_is_one_record,
         the_history_knows_how_large_it_has_grown,
         two_copies_on_one_folder_take_up_each_others_changes,
+        a_change_another_copy_made_first_is_taken_up_after_ones_own,
+        what_another_copy_stores_while_the_history_is_read_is_taken_up,
         a_restore_that_fails_is_not_told_of_as_cut_short,
         a_store_from_a_newer_incompatible_layout_is_only_read,
         a_later_compatible_layout_keeps_what_it_added,
