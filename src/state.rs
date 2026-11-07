@@ -1945,8 +1945,6 @@ fn covers_up_to(backup: &[SessionResult], here: &[SessionResult], saved_at: u64)
         .all(|session| held.contains(&SessionKey::of(session)))
 }
 
-/// Why a change to the history was not stored at all, in words that fit
-/// after "Nothing was deleted:". `None` when it was stored.
 /// Whether `cut` is a mark of a session or run ended and kept, every
 /// session it carries held by `history` already: left behind only for want
 /// of the store's word that it had taken them, as a page closed under a
@@ -1964,6 +1962,8 @@ fn kept_already(cut: &CutOff, history: &StoredHistory) -> bool {
             .all(|session| history.has_key(&SessionKey::of(session)))
 }
 
+/// Why a change to the history was not stored at all, in words that fit
+/// after "Nothing was deleted:". `None` when it was stored.
 fn why_not_stored(saved: &HistorySaved) -> Option<String> {
     match saved {
         HistorySaved::Stored { .. } | HistorySaved::Squeezed { .. } => None,
