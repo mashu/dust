@@ -1,8 +1,9 @@
 //! Hears the app go for good, where the platform says so first: the
-//! desktop window closed, the browser page left, closed or reloaded. A
-//! session or run going on is ended there and then as Exit ends it, kept
-//! as Exit keeps it, rather than left for the next launch to find cut off,
-//! and the settings are stored with it, a level it earned included.
+//! desktop window closed, a Mac's Quit, the browser page left, closed or
+//! reloaded. A session or run going on is ended there and then as Exit
+//! ends it, kept as Exit keeps it, rather than left for the next launch to
+//! find cut off, and the settings are stored with it, a level it earned
+//! included.
 //! A phone takes an app back with no word, and a crash says none: then the
 //! next launch keeps what the session's mark held
 //! ([`crate::state::AppCtx::tell_of_cut_off`]).
@@ -34,19 +35,38 @@ pub fn use_end_on_close(ctx: AppCtx) {
 }
 
 /// The desktop window's close button, or the system closing it: heard
-/// before the window goes, and the store written to at once.
+/// before the window goes, and the store written to at once. A Mac's
+/// Quit closes no window first: heard as the event loop ends, the window
+/// and the app in it still up.
 #[cfg(all(feature = "desktop", not(test)))]
 fn listen_closed(on_closed: Callback<()>) {
+    let mut heard = false;
     dioxus::desktop::use_wry_event_handler(move |event, _| {
-        use dioxus::desktop::tao::event::{Event, WindowEvent};
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
+        if heard_going(event, &mut heard) {
             on_closed.call(());
         }
     });
+}
+
+/// Whether `event` tells of the app going, and is the first word of it
+/// since `heard` was last false: its window asked to close, or its event
+/// loop ending. A Mac's Quit, from its menu, Cmd+Q, the Dock or a log-out,
+/// asks no window to close: tao hears it only as the loop ends. A window
+/// closed ends the loop too, after it, so whichever comes first is the
+/// one heard.
+#[cfg(feature = "desktop")]
+fn heard_going<T>(event: &dioxus::desktop::tao::event::Event<'_, T>, heard: &mut bool) -> bool {
+    use dioxus::desktop::tao::event::{Event, WindowEvent};
+    let going = matches!(
+        event,
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } | Event::LoopDestroyed
+    );
+    let first = going && !*heard;
+    *heard |= going;
+    first
 }
 
 /// The page going, left, closed or reloaded: `pagehide` is what every
@@ -104,5 +124,27 @@ pub fn close_app() {
     let listeners = LISTENERS.with(|all| all.borrow().clone());
     for on_closed in listeners {
         on_closed.call(());
+    }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod tests {
+    use super::*;
+    use dioxus::desktop::tao::event::Event;
+
+    /// A Mac's Quit, from its menu, Cmd+Q, the Dock or a log-out, ends the
+    /// event loop with no window asked to close: that is heard as the app
+    /// going, as the close button is, and only the first word of it is,
+    /// however many follow. The loop going round is no word of it.
+    #[test]
+    fn the_event_loop_ending_is_heard_as_the_app_going_once() {
+        let mut heard = false;
+        assert!(!heard_going(&Event::<()>::MainEventsCleared, &mut heard));
+        assert!(!heard, "nothing heard yet");
+        assert!(heard_going(&Event::<()>::LoopDestroyed, &mut heard));
+        assert!(
+            !heard_going(&Event::<()>::LoopDestroyed, &mut heard),
+            "once"
+        );
     }
 }
