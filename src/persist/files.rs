@@ -113,9 +113,9 @@ pub(super) struct HistoryFiles {
     /// every change since: what the app asks, on its own thread, of how
     /// large the history has grown ([`Self::size`]).
     size: Arc<AtomicU64>,
-    /// What another copy of the app does while this one lists the history,
-    /// for a test to set: done each time a folder of it has been read
-    /// ([`Self::meanwhile()`]).
+    /// What another copy of the app does while this one lists or reads the
+    /// history, for a test to set: done each time a folder of it has been
+    /// read ([`Self::meanwhile()`]).
     #[cfg(test)]
     elsewhere: RefCell<Option<Box<dyn FnMut() + Send>>>,
 }
@@ -151,6 +151,19 @@ struct Listing {
     gone: BTreeSet<RecordId>,
     /// What each packed record holds, as it was written.
     packed: BTreeMap<RecordId, String>,
+    /// Whether a pack could not be opened: what it holds is in none of
+    /// the above.
+    skipped: bool,
+}
+
+/// What the packs a later build wrote hold, as they were read
+/// ([`HistoryFiles::packed`]).
+#[derive(Default)]
+struct Packs {
+    /// What each packed record holds, as it was written.
+    records: BTreeMap<RecordId, String>,
+    /// Whether a pack could not be opened, and gave up none of its records.
+    skipped: bool,
 }
 
 /// A record as a pack holds it: one line.
@@ -307,18 +320,30 @@ impl HistoryFiles {
             }
             live.push(id);
         }
-        let read = read_each(&self.records(), &live, &listing.packed);
-        let size = read.iter().map(|(_, bytes)| *bytes).sum();
+        let records = self.records();
+        let mut read = read_each(&records, &live, &listing.packed);
+        // One a later build packed once the packs were read, and took the
+        // loose copy of before it was read, is in neither place: it is
+        // looked for again, once, in the packs as they are by now.
+        if read.iter().any(Option::is_none) {
+            let packed = self.packed().unwrap_or_default().records;
+            for (read, id) in read.iter_mut().zip(&live) {
+                if read.is_none() {
+                    *read = read_one(&records, *id, &packed);
+                }
+            }
+        }
+        let size = read.iter().flatten().map(|(_, bytes)| *bytes).sum();
         self.size.store(size, Ordering::Relaxed);
         let mut keys = self.keys.borrow_mut();
         load.sessions.reserve(live.len());
-        for (id, (session, _)) in live.into_iter().zip(read) {
-            match session {
-                Some(session) => {
+        for (id, read) in live.into_iter().zip(read) {
+            match read {
+                Some((Some(session), _)) => {
                     keys.insert(id, SessionKey::of(&session));
                     load.sessions.push((id, session));
                 }
-                None => load.unread.push(id),
+                _ => load.unread.push(id),
             }
         }
         drop(keys);
@@ -500,12 +525,24 @@ impl HistoryFiles {
 
     /// The records `ids`, as they are stored, each that can be read: one
     /// that cannot comes back as its id.
+    ///
+    /// One a later build packed once the packs were read, and took the
+    /// loose copy of before it was read, is in neither place: it is looked
+    /// for again in the packs as they are by now, read again once for all
+    /// of `ids`.
     pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
         self.on_its_thread();
-        let packed = self.packed().unwrap_or_default();
+        let packed = self.packed().unwrap_or_default().records;
+        self.meanwhile();
+        let mut again: Option<BTreeMap<RecordId, String>> = None;
         ids.iter()
             .map(|&id| {
                 self.raw_record(id, &packed)
+                    .or_else(|| {
+                        let packed =
+                            again.get_or_insert_with(|| self.packed().unwrap_or_default().records);
+                        self.raw_record(id, packed)
+                    })
                     .map(|json| Record { id, json })
                     .ok_or(id)
             })
@@ -520,7 +557,9 @@ impl HistoryFiles {
     ///
     /// A history that cannot be listed, or a record in it that cannot be
     /// read, is no reason to fail: the backup is wanted again holding what
-    /// the app does ([`NotSaved::Unread`]), and then holds that.
+    /// the app does ([`NotSaved::Unread`]), and then holds that. So is a
+    /// pack that cannot be opened: what it holds is listed nowhere, and a
+    /// backup of the rest would leave it out without a word.
     pub(super) fn stream_backup(
         &self,
         backup: &BackupFile,
@@ -528,7 +567,11 @@ impl HistoryFiles {
     ) -> Result<BackedUp, NotSaved> {
         self.on_its_thread();
         let listing = match self.listing_now() {
-            Ok(listing) => listing,
+            Ok(listing) if !listing.skipped => listing,
+            Ok(_) => {
+                eprintln!("a pack of the history could not be read to back it up");
+                return backup.write_unlisted(out);
+            }
             Err(err) => {
                 eprintln!("could not list the history to back it up: {err}");
                 return backup.write_unlisted(out);
@@ -577,20 +620,22 @@ impl HistoryFiles {
     fn listing_now(&self) -> io::Result<Listing> {
         let mut records = ids_in(&self.records())?;
         self.meanwhile();
-        let packed = self.packed()?;
+        let packs = self.packed()?;
         self.meanwhile();
-        records.extend(packed.keys().copied());
+        records.extend(packs.records.keys().copied());
         let gone = ids_in(&self.tombstones())?;
         self.meanwhile();
         Ok(Listing {
             records,
             gone,
-            packed,
+            packed: packs.records,
+            skipped: packs.skipped,
         })
     }
 
-    /// Let another copy do what a test has it do while this one lists the
-    /// history, as a folder of it has been read: nothing, outside a test.
+    /// Let another copy do what a test has it do while this one lists or
+    /// reads the history, as a folder of it has been read: nothing, outside
+    /// a test.
     fn meanwhile(&self) {
         #[cfg(test)]
         if let Some(elsewhere) = self.elsewhere.borrow_mut().as_mut() {
@@ -607,15 +652,16 @@ impl HistoryFiles {
     /// Every record a later build packed together, and what each holds,
     /// as it was written. A line that does not read, or a pack cut short,
     /// gives up what it can, and a pack that cannot be opened, gone since
-    /// its folder was read, say, gives up nothing: the rest are read all
-    /// the same, and every pack is left as it is.
-    fn packed(&self) -> io::Result<BTreeMap<RecordId, String>> {
+    /// its folder was read, say, gives up nothing, and is said to have been
+    /// skipped: the rest are read all the same, and every pack is left as
+    /// it is.
+    fn packed(&self) -> io::Result<Packs> {
         let entries = match fs::read_dir(self.dir.join(PACKS)) {
             Ok(entries) => entries,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Packs::default()),
             Err(err) => return Err(err),
         };
-        let mut packed = BTreeMap::new();
+        let mut packs = Packs::default();
         for entry in entries {
             let entry = entry?;
             if !entry
@@ -632,6 +678,7 @@ impl HistoryFiles {
                         "could not read {} of the history: {err}",
                         entry.file_name().to_string_lossy()
                     );
+                    packs.skipped = true;
                     continue;
                 }
             };
@@ -641,11 +688,11 @@ impl HistoryFiles {
                     continue;
                 };
                 if let Some(id) = RecordId::parse(&line.id) {
-                    packed.entry(id).or_insert(line.s);
+                    packs.records.entry(id).or_insert(line.s);
                 }
             }
         }
-        Ok(packed)
+        Ok(packs)
     }
 
     /// Every record there is by its session's key: those read before as
@@ -1041,20 +1088,27 @@ fn raw_at(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> 
     }
 }
 
-/// Each of `ids`, read from `records` or else from `packed`, and scored as
-/// it reads ([`read_record`]), in their order, beside how many bytes are
-/// stored of it: none for one that cannot be read. A long history is read
-/// on as many as [`READERS`] threads at once, a part each, as it is read
-/// whole at every launch.
+/// Record `id`, read from `records` or else from `packed`, and scored as it
+/// reads ([`read_record`]), beside how many bytes are stored of it: none
+/// where it is in neither place, and no session where it does not read.
+fn read_one(
+    records: &Path,
+    id: RecordId,
+    packed: &BTreeMap<RecordId, String>,
+) -> Option<(Option<SessionResult>, u64)> {
+    let raw = raw_at(records, id, packed)?;
+    Some((read_record(&raw), raw.len() as u64))
+}
+
+/// Each of `ids`, read as [`read_one`] reads it, in their order. A long
+/// history is read on as many as [`READERS`] threads at once, a part each,
+/// as it is read whole at every launch.
 fn read_each(
     records: &Path,
     ids: &[RecordId],
     packed: &BTreeMap<RecordId, String>,
-) -> Vec<(Option<SessionResult>, u64)> {
-    let one = |id: &RecordId| match raw_at(records, *id, packed) {
-        Some(raw) => (read_record(&raw), raw.len() as u64),
-        None => (None, 0),
-    };
+) -> Vec<Option<(Option<SessionResult>, u64)>> {
+    let one = |id: &RecordId| read_one(records, *id, packed);
     let threads = thread::available_parallelism()
         .map_or(1, NonZeroUsize::get)
         .min(READERS);
@@ -1355,8 +1409,8 @@ mod tests {
         }
 
         /// Have `elsewhere` done each time a folder of the history has been
-        /// read, from the next listing on, as another copy of the app would
-        /// do it meanwhile ([`HistoryFiles::meanwhile()`]).
+        /// read, from the next look on, as another copy of the app would do
+        /// it meanwhile ([`HistoryFiles::meanwhile()`]).
         fn meanwhile(&self, elsewhere: impl FnMut() + Send + 'static) {
             let elsewhere: Box<dyn FnMut() + Send> = Box::new(elsewhere);
             wait(
@@ -2626,6 +2680,49 @@ mod tests {
         assert_eq!(files.read(&[one.id]), [Ok(one)]);
     }
 
+    /// Have another copy pack `record` into the history in `root` the
+    /// `nth` time a folder of it has been read, from the next look of
+    /// `files` on: its pack written, then its loose copy taken away.
+    fn packed_meanwhile(files: &Files, root: &Path, record: &Record, nth: usize) {
+        let (root, record) = (root.to_path_buf(), record.clone());
+        let mut looked = 0;
+        files.meanwhile(move || {
+            looked += 1;
+            if looked == nth {
+                pack(&root, "packed.jsonl.gz", &[&record], &[]);
+                let loose = root.join(HISTORY).join(RECORDS).join(file_name(record.id));
+                fs::remove_file(loose).unwrap();
+            }
+        });
+    }
+
+    /// A record a later build packs once the packs were read, and before
+    /// this build reads the record itself, is read all the same, from its
+    /// pack: as the history is read whole, and as a record is read on its
+    /// own. It was in neither place, and told of as one this build cannot
+    /// read, which it then never took up for as long as it ran.
+    #[test]
+    fn a_record_packed_while_the_history_is_read_is_read_all_the_same() {
+        let (dir, files) = history("packed-as-read");
+        files.load();
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        // Once the packs and the tombstones have been listed.
+        packed_meanwhile(&files, &dir.0, &one, 3);
+        let read = files.load();
+        assert_eq!(read.sessions, [(one.id, first), (two.id, second)]);
+        assert!(read.unread.is_empty(), "{:?}", read.unread);
+        assert!(read.notices.is_empty(), "{:?}", read.notices);
+
+        let (dir, files) = history("packed-as-read-alone");
+        files.load();
+        files.apply(&put(&[one.clone(), two.clone()]));
+        // Once the packs have been read, before the record is.
+        packed_meanwhile(&files, &dir.0, &one, 1);
+        assert_eq!(files.read(&[one.id, two.id]), [Ok(one), Ok(two)]);
+    }
+
     /// A pack that cannot be opened, gone between the look at its folder
     /// and the read, say, costs only the records it holds: the rest of the
     /// history is read and listed. It used to leave the whole history
@@ -2647,6 +2744,45 @@ mod tests {
             [(one.id, first), (two.id, second)]
         );
         assert_eq!(files.listing(), Some(vec![one.id, two.id]));
+    }
+
+    /// A pack that cannot be opened leaves a backup to what the app holds:
+    /// the rest of what is stored is not all there is. Written from the
+    /// rest, the backup left out the sessions of that pack, and said
+    /// nothing of them.
+    #[cfg(unix)]
+    #[test]
+    fn a_pack_that_cannot_be_opened_leaves_a_backup_to_the_app() {
+        use crate::persist::backup::write_backup;
+        let (dir, files) = raw_history("pack-unopened-backup");
+        files.load();
+        let history = [finished(1_000), finished(2_000)];
+        let records: Vec<Record> = history.iter().map(record).collect();
+        // The first was packed, in a pack that will not open now.
+        files.apply(&put(&records[1..]));
+        fs::create_dir_all(dir.0.join(HISTORY).join(PACKS)).unwrap();
+        let gone = dir.0.join(HISTORY).join(PACKS).join("gone.jsonl.gz");
+        std::os::unix::fs::symlink(dir.0.join("nowhere"), gone).unwrap();
+        let settings = cw_core::TrainingSettings::default();
+        let mut out = Vec::new();
+        assert_eq!(
+            files.stream_backup(&BackupFile::new(&settings, 7, Vec::new()), &mut out),
+            Err(NotSaved::Unread)
+        );
+        let every = BackupFile::new(&settings, 7, records).holding_every_session();
+        let mut out = Vec::new();
+        let backed = files.stream_backup(&every, &mut out).expect("written");
+        assert_eq!(
+            backed,
+            BackedUp {
+                sessions: 2,
+                left_out: 0
+            }
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            write_backup(&settings, &history, 7)
+        );
     }
 
     /// Each test of the files that reaches them as the app does, made
@@ -2701,6 +2837,7 @@ mod tests {
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
         a_pack_and_a_loose_copy_of_one_record_read_as_one,
         a_record_packed_while_the_history_is_listed_is_listed_all_the_same,
+        a_record_packed_while_the_history_is_read_is_read_all_the_same,
         #[cfg(unix)]
         a_pack_that_cannot_be_opened_costs_only_its_own_records,
     }
