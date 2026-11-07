@@ -93,6 +93,11 @@ const READERS: usize = 4;
 /// disk on its own.
 const WRITERS: usize = 8;
 
+/// How many records a backup reads at a time, each part read whole before
+/// any of it is written ([`HistoryFiles::stream_backup`]): some two
+/// megabytes, at some seven kilobytes a session, however long the history.
+const BACKUP_PART: usize = 256;
+
 /// The history as files under one folder.
 pub(super) struct HistoryFiles {
     /// The store's folder, where an older build keeps the history whole.
@@ -527,33 +532,27 @@ impl HistoryFiles {
     /// that cannot comes back as its id.
     ///
     /// One a later build packed once the packs were read, and took the
-    /// loose copy of before it was read, is in neither place: it is looked
-    /// for again in the packs as they are by now, read again once for all
-    /// of `ids`.
+    /// loose copy of before it was read, is in neither place: every one of
+    /// `ids` is read first, and the packs again only then, for all those in
+    /// neither place ([`Self::raw_each`]).
     pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
         self.on_its_thread();
-        let packed = self.packed().unwrap_or_default().records;
-        self.meanwhile();
-        let mut again: Option<BTreeMap<RecordId, String>> = None;
-        ids.iter()
-            .map(|&id| {
-                self.raw_record(id, &packed)
-                    .or_else(|| {
-                        let packed =
-                            again.get_or_insert_with(|| self.packed().unwrap_or_default().records);
-                        self.raw_record(id, packed)
-                    })
-                    .map(|json| Record { id, json })
-                    .ok_or(id)
-            })
+        let mut packed = self.packed().unwrap_or_default().records;
+        self.raw_each(ids, &mut packed)
+            .into_iter()
+            .zip(ids)
+            .map(|(json, &id)| json.map(|json| Record { id, json }).ok_or(id))
             .collect()
     }
 
     /// Write a backup to `out`: `backup`, with every record stored here,
-    /// deleted ones left out, each as it is stored and read from its file
-    /// as it is written, in the order of the history
-    /// ([`BackupFile::write`]). However long the history, no more of it is
-    /// held than a record at a time.
+    /// deleted ones left out, each as it is stored, in the order of the
+    /// history ([`BackupFile::write`]). However long the history, no more
+    /// of it is held than a part at a time ([`BACKUP_PART`]), beside what
+    /// the packs hold: every record of a part is read, then the packs
+    /// again for those in neither place, packed by a later build as the
+    /// backup was written ([`Self::raw_each`]), and only then is the part
+    /// written.
     ///
     /// A history that cannot be listed, or a record in it that cannot be
     /// read, is no reason to fail: the backup is wanted again holding what
@@ -577,13 +576,48 @@ impl HistoryFiles {
                 return backup.write_unlisted(out);
             }
         };
-        let records = self.records();
-        let stored = listing.records.difference(&listing.gone).map(|&id| {
-            raw_at(&records, id, &listing.packed)
-                .map(|json| Record { id, json })
-                .ok_or(id)
+        let ids: Vec<RecordId> = listing.records.difference(&listing.gone).copied().collect();
+        let mut packed = listing.packed;
+        let stored = ids.chunks(BACKUP_PART).flat_map(|part| {
+            let read = self.raw_each(part, &mut packed);
+            part.iter()
+                .zip(read)
+                .map(|(&id, json)| json.map(|json| Record { id, json }).ok_or(id))
+                .collect::<Vec<_>>()
         });
         backup.write(out, stored, |id| listing.gone.contains(&id))
+    }
+
+    /// What is stored for each of `ids`, in their order, loose or else in
+    /// `packed`, the packs as last read: none for one that cannot be read.
+    ///
+    /// A later build packs records by writing the pack before it takes
+    /// their loose copies away, so one packed once `packed` was read, and
+    /// whose loose copy went before it was read itself, is in neither
+    /// place, but in the packs as they are after that. So every one of
+    /// `ids` is read first, and only then the packs again, once, for all
+    /// those in neither place, which are looked for again: one packed while
+    /// they were read, in however many passes, is found. `packed` takes in
+    /// what the packs hold by then.
+    fn raw_each(
+        &self,
+        ids: &[RecordId],
+        packed: &mut BTreeMap<RecordId, String>,
+    ) -> Vec<Option<String>> {
+        let records = self.records();
+        let mut read: Vec<Option<String>> =
+            ids.iter().map(|&id| raw_at(&records, id, packed)).collect();
+        if read.iter().any(Option::is_none) {
+            if let Ok(now) = self.packed() {
+                packed.extend(now.records);
+            }
+            for (read, &id) in read.iter_mut().zip(ids) {
+                if read.is_none() {
+                    *read = raw_at(&records, id, packed);
+                }
+            }
+        }
+        read
     }
 
     /// Which of `ids` were deleted by hand. One whose tombstone cannot be
@@ -621,7 +655,6 @@ impl HistoryFiles {
         let mut records = ids_in(&self.records())?;
         self.meanwhile();
         let packs = self.packed()?;
-        self.meanwhile();
         records.extend(packs.records.keys().copied());
         let gone = ids_in(&self.tombstones())?;
         self.meanwhile();
@@ -654,8 +687,16 @@ impl HistoryFiles {
     /// gives up what it can, and a pack that cannot be opened, gone since
     /// its folder was read, say, gives up nothing, and is said to have been
     /// skipped: the rest are read all the same, and every pack is left as
-    /// it is.
+    /// it is. A test's other copy acts once they are read, whatever they
+    /// are read for ([`Self::meanwhile()`]).
     fn packed(&self) -> io::Result<Packs> {
+        let packs = self.read_packs();
+        self.meanwhile();
+        packs
+    }
+
+    /// What [`Self::packed`] hands back, read.
+    fn read_packs(&self) -> io::Result<Packs> {
         let entries = match fs::read_dir(self.dir.join(PACKS)) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Packs::default()),
@@ -2730,11 +2771,20 @@ mod tests {
         files.meanwhile(move || {
             looked += 1;
             if looked == nth {
-                pack(&root, "packed.jsonl.gz", &[&record], &[]);
-                let loose = root.join(HISTORY).join(RECORDS).join(file_name(record.id));
-                fs::remove_file(loose).unwrap();
+                pack_away(&root, "packed.jsonl.gz", &[&record]);
             }
         });
+    }
+
+    /// Pack `records` into the history in `root` as a later build packs
+    /// them, in a pack called `name`: the pack written, then their loose
+    /// copies taken away.
+    fn pack_away(root: &Path, name: &str, records: &[&Record]) {
+        pack(root, name, records, &[]);
+        for record in records {
+            let loose = root.join(HISTORY).join(RECORDS).join(file_name(record.id));
+            fs::remove_file(loose).unwrap();
+        }
     }
 
     /// A record a later build packs once the packs were read, and before
@@ -2762,6 +2812,86 @@ mod tests {
         // Once the packs have been read, before the record is.
         packed_meanwhile(&files, &dir.0, &one, 1);
         assert_eq!(files.read(&[one.id, two.id]), [Ok(one), Ok(two)]);
+    }
+
+    /// Records a later build packs in two passes while this one reads
+    /// them, each pass once the packs have been read, are read all the
+    /// same: every one is read where it lies first, and only then the
+    /// packs again, for all those in neither place. The packs were read
+    /// again at the first such record, and one packed after that came back
+    /// as one that cannot be read, and was not taken up until the next
+    /// look.
+    #[test]
+    fn records_packed_in_two_passes_as_they_are_read_are_read_all_the_same() {
+        let (dir, files) = history("packed-twice-as-read");
+        files.load();
+        let (one, two) = (record(&finished(1_000)), record(&finished(2_000)));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        let (root, passes) = (dir.0.clone(), [one.clone(), two.clone()]);
+        let mut looked = 0;
+        files.meanwhile(move || {
+            if let Some(record) = passes.get(looked) {
+                pack_away(&root, &format!("pass-{looked}{PACK_EXTENSION}"), &[record]);
+            }
+            looked += 1;
+        });
+        assert_eq!(files.read(&[one.id, two.id]), [Ok(one), Ok(two)]);
+    }
+
+    /// A record a later build packs while a backup is written, once the
+    /// history has been listed and before the record is read, goes in the
+    /// backup all the same, from its pack: one this build reads, and one
+    /// it cannot, which only the store holds. Each was in neither place:
+    /// the backup was saved again from what the app holds, or went without
+    /// the one this build cannot read, said to be one that could not be
+    /// read.
+    #[test]
+    fn a_record_packed_while_a_backup_is_written_goes_in_it() {
+        let (dir, files) = raw_history("packed-as-backed-up");
+        files.load();
+        let history = [finished(1_000), finished(2_000)];
+        let records: Vec<Record> = history.iter().map(record).collect();
+        files.apply(&put(&records));
+        // Stored by a later build, as this one cannot read it.
+        let later = Record {
+            id: RecordId {
+                order: 3_000_000,
+                nonce: 9,
+            },
+            json: r#"{"date":"later"}"#.into(),
+        };
+        place_whole(
+            &files.records(),
+            &file_name(later.id),
+            later.json.as_bytes(),
+        )
+        .unwrap();
+        let (root, packing) = (dir.0.clone(), [records[0].clone(), later.clone()]);
+        let mut looked = 0;
+        *files.elsewhere.borrow_mut() = Some(Box::new(move || {
+            looked += 1;
+            // Once its records, its packs and its tombstones are listed.
+            if looked == 3 {
+                pack_away(&root, "packed.jsonl.gz", &[&packing[0], &packing[1]]);
+            }
+        }));
+        let settings = cw_core::TrainingSettings::default();
+        let backup = BackupFile::new(&settings, 7, Vec::new())
+            .beside_unread([later.id].into_iter().collect());
+        let mut out = Vec::new();
+        let backed = files.stream_backup(&backup, &mut out).expect("written");
+        assert_eq!(
+            backed,
+            BackedUp {
+                sessions: 3,
+                left_out: 0
+            }
+        );
+        let written = String::from_utf8(out).unwrap();
+        assert!(written.contains(&later.json), "{written}");
+        let read = crate::persist::backup::read_backup(&written).expect("a backup");
+        assert_eq!(read.sessions, history);
+        assert_eq!(read.left_out, 1, "the one this build cannot read");
     }
 
     /// A pack that cannot be opened, gone between the look at its folder
@@ -2880,6 +3010,7 @@ mod tests {
         a_pack_and_a_loose_copy_of_one_record_read_as_one,
         a_record_packed_while_the_history_is_listed_is_listed_all_the_same,
         a_record_packed_while_the_history_is_read_is_read_all_the_same,
+        records_packed_in_two_passes_as_they_are_read_are_read_all_the_same,
         #[cfg(unix)]
         a_pack_that_cannot_be_opened_costs_only_its_own_records,
     }
