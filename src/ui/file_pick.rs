@@ -164,16 +164,26 @@ struct Piece {
     text: Option<String>,
     #[serde(default)]
     more: bool,
+    /// Which file chosen it is of, counted from the first.
+    #[serde(default)]
+    pick: u64,
 }
 
 /// The pieces of files the phone's picker hands over, put together: each
-/// file whole once its last piece comes, then handed on.
+/// file whole once its last piece comes, then handed on. A file chosen
+/// while another is still handed over takes its place: what there is of
+/// the other goes, and a piece of it that comes after is left out.
 #[derive(Default)]
 #[cfg_attr(
     not(any(target_os = "android", target_os = "ios", test)),
     allow(dead_code)
 )]
-struct Pieces(Option<String>);
+struct Pieces {
+    /// Which file chosen the pieces are of.
+    pick: u64,
+    /// Its text so far.
+    text: Option<String>,
+}
 
 #[cfg_attr(
     not(any(target_os = "android", target_os = "ios", test)),
@@ -188,14 +198,22 @@ impl Pieces {
             size,
             text,
             more,
+            pick,
         } = piece;
+        if pick < self.pick {
+            return None;
+        }
+        if pick > self.pick {
+            self.pick = pick;
+            self.text = None;
+        }
         if more {
             if let Some(text) = text {
-                self.0.get_or_insert_with(String::new).push_str(&text);
+                self.text.get_or_insert_with(String::new).push_str(&text);
             }
             return None;
         }
-        let text = match (self.0.take(), text) {
+        let text = match (self.text.take(), text) {
             (Some(mut whole), Some(last)) => {
                 whole.push_str(&last);
                 Some(whole)
@@ -334,12 +352,22 @@ const open = (event) => {{
     input.click();
 }};
 document.addEventListener("click", open, true);
+// Each file chosen is counted, and its pieces say which they are of: one
+// chosen while another is still read takes its place, the other read no
+// further and nothing more of it sent.
+let picks = 0;
 input.addEventListener("change", () => {{
     const file = input.files && input.files[0];
     if (!file) {{
         return;
     }}
-    const send = (text, more) => dioxus.send({{ name: file.name, size: file.size, text, more }});
+    picks += 1;
+    const pick = picks;
+    const send = (text, more) => {{
+        if (pick === picks) {{
+            dioxus.send({{ name: file.name, size: file.size, text, more, pick }});
+        }}
+    }};
     if (file.size > {max_bytes}) {{
         send(null, false);
         return;
@@ -358,6 +386,9 @@ input.addEventListener("change", () => {{
     }};
     let at = 0;
     const next = () => {{
+        if (pick !== picks) {{
+            return;
+        }}
         if (at >= file.size) {{
             send(decode(), false);
             return;
@@ -483,13 +514,15 @@ mod tests {
 
     /// What the phone's own picker sends the app, run in Node on a page made
     /// up for it (`src/fake_page.mjs`), as `choose` has it choose files
-    /// there (`picker.choose(file)`, then `await settled()`), with what
-    /// `choose` sends itself among it. The webview's file input and reader
-    /// are made up beside it, the reader counting the reads it makes in
-    /// `read`. None on a machine with no Node.
+    /// there (`picker.choose(file)`), with what `choose` sends itself among
+    /// it. The webview's file input and reader are made up beside it: the
+    /// reader counts the reads it is asked for in `read`, and does each
+    /// once `await settled()` lets the reads waiting be done, and those
+    /// they ask for, or `await settled(count)` only the first `count`. None
+    /// on a machine with no Node.
     fn picked_on_page(choose: &str) -> Option<Vec<Value>> {
-        let page = r#"globalThis.reading = 0;
-globalThis.read = 0;
+        let page = r#"globalThis.read = 0;
+const waiting = [];
 globalThis.FileReader = class {
   readAsArrayBuffer(blob) {
     this.take(blob.arrayBuffer());
@@ -498,13 +531,16 @@ globalThis.FileReader = class {
     this.take(blob.text());
   }
   take(reading) {
-    globalThis.reading += 1;
     globalThis.read += 1;
-    reading.then((result) => {
-      globalThis.reading -= 1;
-      this.result = result;
+    waiting.push(async () => {
+      this.result = await reading;
       this.onload();
     });
+  }
+};
+globalThis.settled = async (count = Infinity) => {
+  for (let done = 0; done < count && waiting.length > 0; done += 1) {
+    await waiting.shift()();
   }
 };
 document.createElement = () => {
@@ -525,14 +561,6 @@ document.createElement = () => {
 document.body.appendChild = (input) => {
   globalThis.picker = input;
 };"#;
-        let choose = format!(
-            r#"const settled = async () => {{
-  do {{
-    await new Promise((done) => setTimeout(done, 1));
-  }} while (reading > 0);
-}};
-{choose}"#
-        );
         let heard = on_fake_page(&[
             PageStep::run(page),
             PageStep::run(picker_script("file-backup", "", 1 << 30)),
@@ -732,6 +760,7 @@ await settled();"#
             size: 9,
             text: text.map(str::to_string),
             more,
+            pick: 1,
         };
         let chosen = |text: Option<&str>| ChosenFile {
             name: "b.json".into(),
@@ -752,5 +781,64 @@ await settled();"#
         assert_eq!(pieces.take(piece(Some("[1,"), true)), None);
         assert_eq!(pieces.take(piece(None, false)), Some(chosen(None)));
         assert_eq!(pieces.take(piece(None, false)), Some(chosen(None)));
+    }
+
+    /// A file chosen while another is still handed over takes its place:
+    /// what was put together of the other goes, and a piece of it that
+    /// comes after is left out. The two were put together as one, under
+    /// the second's name.
+    #[test]
+    fn a_file_chosen_while_another_is_handed_over_takes_its_place() {
+        let piece = |pick, name: &str, text: &str, more| Piece {
+            name: name.into(),
+            size: 9,
+            text: Some(text.into()),
+            more,
+            pick,
+        };
+        let mut pieces = Pieces::default();
+        assert_eq!(pieces.take(piece(1, "a.json", "{\"a", true)), None);
+        assert_eq!(pieces.take(piece(2, "b.json", "[", true)), None);
+        assert_eq!(pieces.take(piece(1, "a.json", "\":1}", false)), None);
+        assert_eq!(
+            pieces.take(piece(2, "b.json", "]", false)),
+            Some(ChosenFile {
+                name: "b.json".into(),
+                size: 9,
+                text: Some("[]".into()),
+            })
+        );
+    }
+
+    /// On the page, a file chosen while another is still read takes its
+    /// place: the other is read no further, and nothing more of it is sent,
+    /// so the app is handed the newer alone, whole. The two were read side
+    /// by side, and their slices spliced into one file.
+    #[test]
+    fn the_phone_picker_reads_a_file_chosen_over_another_alone() {
+        let slice = SLICE_BYTES;
+        let Some(sent) = picked_on_page(&format!(
+            r#"picker.choose(new File([new Uint8Array(3 * {slice}).fill(0x61)], "big.json"));
+await settled(1);
+picker.choose(new File(["[]"], "b.json"));
+await settled();
+dioxus.send({{ read }});"#
+        )) else {
+            return;
+        };
+        let files = files_in(&sent);
+        assert_eq!(
+            files,
+            [ChosenFile {
+                name: "b.json".into(),
+                size: 2,
+                text: Some("[]".into()),
+            }]
+        );
+        let read: Vec<u64> = sent
+            .iter()
+            .filter_map(|said| said.get("read")?.as_u64())
+            .collect();
+        assert_eq!(read, [3], "two slices of the first, none after");
     }
 }
