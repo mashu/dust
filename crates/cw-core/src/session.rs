@@ -1106,6 +1106,14 @@ pub struct SessionResult {
 /// build carries the new one along: the new name is to be read as the old
 /// one's successor, not as an alias of it, which serde refuses to read
 /// twice.
+///
+/// Only keys of the session itself, of a group or of a group's timing are
+/// kept. A key a later build adds inside a value this build reads whole,
+/// such as a timing's `"charTimes"` or an entry of `"letterAccuracy"`, is
+/// dropped the first time this build writes the session back. So what a
+/// later build adds about a group's times goes beside `"charTimes"`, as a
+/// key of the timing, never inside it. Keeping keys inside those values
+/// too would cost every read of the history a second look at each of them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UnreadKeys {
     /// The session's own.
