@@ -426,8 +426,17 @@ pub fn evaluate_auto_level(
     })
 }
 
-/// Put a change into the settings.
+/// Put a change into the settings, where the level it moves is still where
+/// the session left it ([`AutoLevelChange::from`]): the change was earned
+/// there, and the runs it clears are that level's. A level moved since, by
+/// hand, in another window or by sync, as a session the app stopped under
+/// is settled only at the next launch, is left where it is now, as is one
+/// a longer alphabet has reached since; so is Mixed's turn.
 pub fn apply_auto_level(settings: &mut TrainingSettings, change: &AutoLevelChange) {
+    let now = settings.level(change.axis);
+    if now != change.from || settings.stored_level(change.axis) > now {
+        return;
+    }
     settings.set_level(change.axis, change.to);
     if let Some(axis) = change.next_mixed_axis {
         settings.auto_level.mixed_auto_level_next_axis = axis;
@@ -1371,6 +1380,51 @@ mod tests {
         assert_eq!(
             done.counters,
             CountersUpdate::Clear([CountersKey::of(&settings), CountersKey::of(&after)])
+        );
+    }
+
+    /// A change is put onto the settings as they are when it is settled,
+    /// which for a session the app stopped under is at the next launch, on
+    /// settings that may have moved since: by hand, in another window, or
+    /// by sync. Its level was written whatever the level was by then, so a
+    /// rise from 5 to 6 earned before the level went to 8 lowered it to 6.
+    #[test]
+    fn a_change_moves_a_level_only_from_where_the_session_left_it() {
+        let change = complete_result(after(1.0), &koch(5), AutoLevelCounters::default())
+            .change
+            .expect("a rise");
+        assert_eq!((change.from, change.to), (5, 6));
+        let mut moved = koch(8);
+        apply_auto_level(&mut moved, &change);
+        assert_eq!(moved.curriculum.level, 8);
+        let mut left = koch(5);
+        apply_auto_level(&mut left, &change);
+        assert_eq!(left.curriculum.level, 6);
+
+        // A fall earned at the top of a short alphabet, put onto the same
+        // alphabet whose stored level a longer one has raised since.
+        let mut own = koch(4);
+        own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        let change = complete_result(after(0.5), &own, AutoLevelCounters::default())
+            .change
+            .expect("a fall");
+        assert_eq!((change.from, change.to), (4, 3));
+        own.curriculum.level = 20;
+        apply_auto_level(&mut own, &change);
+        assert_eq!(own.curriculum.level, 20);
+
+        // In Mixed the turn passes only with a move.
+        let change = complete_result(after(1.0), &mixed(50), AutoLevelCounters::default())
+            .change
+            .expect("letters rise");
+        assert_eq!(change.next_mixed_axis, Some(MixedAutoLevelAxis::Digits));
+        let mut moved = mixed(50);
+        moved.curriculum.level = 7;
+        apply_auto_level(&mut moved, &change);
+        assert_eq!(moved.curriculum.level, 7);
+        assert_eq!(
+            moved.auto_level.mixed_auto_level_next_axis,
+            MixedAutoLevelAxis::Letters
         );
     }
 }
