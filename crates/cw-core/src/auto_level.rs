@@ -376,18 +376,7 @@ pub fn evaluate_auto_level(
     let delta = if raise { 1 } else { -1 };
     let moved = candidate_axes(&verdict.tally, settings, raise, threshold_pct)
         .into_iter()
-        .find_map(|axis| {
-            let from = settings.level(axis);
-            // A level a longer alphabet reached, read at the top of the one
-            // chosen now, has nowhere to go: there is no higher, and a fall
-            // would write this alphabet's top less one over it, which the
-            // longer alphabet would come back to.
-            if settings.stored_level(axis) > from {
-                return None;
-            }
-            let to = step_level(from, delta, axis.min_level(), settings.max_level(axis));
-            (to != from).then_some((axis, from, to))
-        });
+        .find_map(|axis| step_axis(settings, axis, delta).map(|(from, to)| (axis, from, to)));
     let Some((axis, from, to)) = moved else {
         // Nowhere to go: the run is spent rather than kept pressing.
         if raise {
@@ -458,7 +447,11 @@ pub struct AutoLevelProgress {
     pub below_count: u32,
     pub above_target: u32,
     pub below_target: u32,
+    /// No session can raise the level: Sessions above is at zero.
     pub above_disabled: bool,
+    /// No session can lower it: Sessions below is at zero, or a fall has
+    /// nowhere to go, every level it could move being at its bottom or
+    /// kept above the top of the alphabet chosen now.
     pub below_disabled: bool,
     pub alternating_mixed: bool,
     pub next_mixed_axis: Option<MixedAutoLevelAxis>,
@@ -492,17 +485,24 @@ pub fn auto_level_progress(
     });
     let above_target = settings.auto_level.auto_adjust_above_threshold_count;
     let below_target = settings.auto_level.auto_adjust_below_threshold_count;
+    let threshold = settings
+        .auto_level
+        .auto_adjust_threshold
+        .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT);
+    // With no session yet to say which axis fell short, every one being
+    // practised is in the running ([`candidate_axes`]); a fall none of them
+    // can make never comes.
+    let falls = candidate_axes(&CopyTally::default(), settings, false, threshold)
+        .into_iter()
+        .any(|axis| step_axis(settings, axis, -1).is_some());
     Some(AutoLevelProgress {
-        threshold: settings
-            .auto_level
-            .auto_adjust_threshold
-            .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT),
+        threshold,
         above_count: counters.above,
         below_count: counters.below,
         above_target,
         below_target,
         above_disabled: above_target == 0,
-        below_disabled: below_target == 0,
+        below_disabled: below_target == 0 || !falls,
         alternating_mixed: mixed,
         next_mixed_axis,
         judged_at: adaptive_speed_path(settings).map(|path| path.ends()),
@@ -584,6 +584,20 @@ pub fn complete_result(
         settings: next,
         counters,
     }
+}
+
+/// Where a step of `delta` moves `axis` from, and to, if it moves it at all:
+/// not past either end of its alphabet. A level a longer alphabet reached,
+/// read at the top of the one chosen now, has nowhere to go: there is no
+/// higher, and a fall would write this alphabet's top less one over it,
+/// which the longer alphabet would come back to.
+fn step_axis(settings: &TrainingSettings, axis: LevelAxis, delta: i32) -> Option<(u32, u32)> {
+    let from = settings.level(axis);
+    if settings.stored_level(axis) > from {
+        return None;
+    }
+    let to = step_level(from, delta, axis.min_level(), settings.max_level(axis));
+    (to != from).then_some((from, to))
 }
 
 /// Move a level by `delta`, staying within `min..=max`. In unsigned
@@ -1035,6 +1049,44 @@ mod tests {
         let progress = auto_level_progress(&koch(1), AutoLevelCounters::default()).expect("p");
         assert!(!progress.alternating_mixed);
         assert_eq!(progress.next_mixed_axis, None);
+    }
+
+    /// A fall with nowhere to go never comes: a letter level kept above the
+    /// top of the alphabet chosen now, as Koch's past 30 is in Mixed, or one
+    /// at its bottom, with no other axis in the running. Home counted down
+    /// to such a fall all the same, and at the end of the count its run was
+    /// spent with nothing moved. It says none is coming, as it does with
+    /// Sessions below at zero, wherever a session short of the threshold
+    /// would move nothing.
+    #[test]
+    fn progress_says_no_fall_is_coming_where_one_has_nowhere_to_go() {
+        let falls = |settings: &TrainingSettings| {
+            let progress = auto_level_progress(settings, AutoLevelCounters::default());
+            !progress.expect("progress").below_disabled
+        };
+        let mut letters = koch(35);
+        letters.curriculum.char_set_mode = CharSetMode::Mixed;
+        letters.curriculum.mixed_letters_percent = 100;
+        let mut beside_digits = letters.clone();
+        beside_digits.curriculum.mixed_letters_percent = 50;
+        beside_digits.curriculum.digits_level = 5;
+        let mut digits_at_the_bottom = beside_digits.clone();
+        digits_at_the_bottom.curriculum.digits_level = 1;
+        let mut own = koch(20);
+        own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        let cases = [
+            ("Koch at 5", koch(5), true),
+            ("Koch at 1", koch(1), false),
+            ("Mixed's letters alone", letters, false),
+            ("Mixed's digits beside them", beside_digits, true),
+            ("Mixed's digits at 1", digits_at_the_bottom, false),
+            ("an order of five", own, false),
+        ];
+        for (case, settings, coming) in cases {
+            assert_eq!(falls(&settings), coming, "{case}");
+            let change = evaluate_auto_level(&after(0.0), &settings, &mut Default::default());
+            assert_eq!(change.is_some(), coming, "{case}: a session short of it");
+        }
     }
 
     /// The keys are where counters already sit in people's saves, so their
