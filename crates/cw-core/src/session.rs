@@ -16,7 +16,7 @@ use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
 use crate::sampling::length_floor;
 use crate::score::{
     GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
-    compute_average_response_ms, copied_whole, copy_speed, session_points,
+    copied_whole, copy_speed, session_points,
 };
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
 
@@ -1001,6 +1001,27 @@ impl SessionTiming {
     /// older builds show as the average time.
     pub fn ms_per_char(&self, sent: &str) -> f64 {
         self.time_to_complete_ms / sent.chars().count().max(1) as f64
+    }
+}
+
+/// The average answer of a session with none to average: a second a
+/// character.
+const NO_ANSWERS_MS: f64 = 1_000.0;
+
+/// The average of a session's answer times a character, its `groups` timed
+/// as `timings` say, as older builds show it
+/// ([`crate::SessionResult::avg_response_ms`]).
+pub fn compute_average_response_ms(groups: &[GroupResult], timings: &[SessionTiming]) -> f64 {
+    let (sum, count) = groups
+        .iter()
+        .zip(timings)
+        .map(|(group, timing)| timing.ms_per_char(&group.sent))
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .fold((0.0, 0u32), |(sum, count), v| (sum + v, count + 1));
+    if count == 0 {
+        NO_ANSWERS_MS
+    } else {
+        sum / f64::from(count)
     }
 }
 

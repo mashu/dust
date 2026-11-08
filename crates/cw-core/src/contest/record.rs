@@ -16,8 +16,8 @@ use super::rules::{ContestRules, Side};
 use super::score::{ContestScore, MyStation, Placed, Rates, ScoredQso, contest_score};
 use super::{ContestKind, RunStyle};
 use crate::alignment::CopyTally;
-use crate::score::{calculate_total_chars, compute_average_response_ms};
-use crate::session::{GroupResult, SessionResult, SessionTiming};
+use crate::score::calculate_total_chars;
+use crate::session::{GroupResult, SessionResult, SessionTiming, compute_average_response_ms};
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
 
 /// What a run's alphabet fingerprint starts with: `contest:wpx`. A build
