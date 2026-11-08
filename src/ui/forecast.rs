@@ -17,10 +17,10 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::ui::figures::{History, without_band};
+use crate::ui::figures::{History, span_history_of, speed_history_of, without_band};
 use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds, span_history_of, speed_history_of};
+use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds};
 use crate::ui::widgets::{CardHead, IconName, control_id};
 
 /// How far either side of the best guess the likely range runs, in its

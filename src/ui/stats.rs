@@ -1,10 +1,7 @@
-use std::rc::Rc;
-
 use cw_core::{
     AccuracyPoint, CharSetMode, EstimatePoint, EstimateReading, PER_SESSION_UP_TO,
     TrainingSettings, accuracy_buckets, accuracy_chart, adaptive_speed_on, adapts_group_size,
-    adapts_speed, best_accuracy, level_up_line, mastered_count, overall_accuracy, practised_modes,
-    span_history, speed_history,
+    adapts_speed, best_accuracy, level_up_line, mastered_count, overall_accuracy,
 };
 use dioxus::prelude::*;
 
@@ -12,7 +9,7 @@ use crate::persist::record::RecordId;
 use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
-use crate::ui::figures::History;
+use crate::ui::figures::{History, practised, shown_mode, span_history_of, speed_history_of};
 use crate::ui::format::counted;
 use crate::ui::help;
 use crate::ui::letters::LettersTab;
@@ -59,12 +56,6 @@ struct Overview {
     average: Option<f64>,
     best: Option<f64>,
     mastered: usize,
-}
-
-/// The character sets `sessions` hold any practice in ([`practised_modes`]),
-/// as every card that offers them reads them.
-pub(crate) fn practised(sessions: &History) -> Rc<Vec<CharSetMode>> {
-    sessions.figure("practised modes", (), practised_modes)
 }
 
 /// Accuracy clusters near the top, so the axis starts below the worst session
@@ -145,21 +136,6 @@ fn reading_words(point: &EstimatePoint, unit: &str, decimals: usize) -> String {
         EstimateReading::Over(most) => format!("over {most:.0} {unit}"),
         EstimateReading::Under(least) => format!("under {least:.0} {unit}"),
     }
-}
-
-/// The character set a trend card shows: the one chosen, while it has
-/// history; else the one practised now, if it has any; else the first that
-/// does. Nothing when none has: a set chosen in the settings never hides
-/// another's history.
-pub(crate) fn shown_mode(
-    chosen: Option<CharSetMode>,
-    modes: &[CharSetMode],
-    current: CharSetMode,
-) -> Option<CharSetMode> {
-    chosen
-        .filter(|mode| modes.contains(mode))
-        .or_else(|| modes.contains(&current).then_some(current))
-        .or_else(|| modes.first().copied())
 }
 
 /// An estimate over the last sessions, with its uncertainty, and whether the
@@ -293,33 +269,6 @@ pub(crate) fn contest_speeds(settings: &TrainingSettings) -> String {
 /// The newest of `points`, as many as a trend card draws.
 fn newest(points: &[EstimatePoint]) -> Vec<EstimatePoint> {
     points[points.len().saturating_sub(TREND_SESSIONS_SHOWN)..].to_vec()
-}
-
-/// Your copy span after each session of the character set `settings`
-/// train ([`span_history`]), as the Overview and the Sampling tab read it:
-/// it reads the set, and the group lengths when the set's first session
-/// sent none.
-pub(crate) fn span_history_of(
-    sessions: &History,
-    settings: &TrainingSettings,
-) -> Rc<Vec<EstimatePoint>> {
-    let curriculum = settings.curriculum.clone();
-    sessions.figure("span history", curriculum, |sessions| {
-        span_history(settings, sessions)
-    })
-}
-
-/// Your copy speed after each session of the character set `settings`
-/// train ([`speed_history`]), as the Overview and the Sampling tab read it:
-/// it reads the curriculum alone, the set, the aim and the group lengths.
-pub(crate) fn speed_history_of(
-    sessions: &History,
-    settings: &TrainingSettings,
-) -> Rc<Vec<EstimatePoint>> {
-    let curriculum = settings.curriculum.clone();
-    sessions.figure("speed history", curriculum, |sessions| {
-        speed_history(settings, sessions)
-    })
 }
 
 /// The copy span: how long a group you copy whole, and how that has moved,

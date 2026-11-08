@@ -13,11 +13,10 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::ui::figures::History;
+use crate::ui::figures::{History, practised, shown_mode};
 use crate::ui::format::counted;
 use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::stats::{practised, shown_mode};
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 
 /// The tallest a bar stands, as a share of the chart: room above it for
