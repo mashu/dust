@@ -10,6 +10,7 @@ use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
 use crate::ui::figures::{History, practised, shown_mode, span_history_of, speed_history_of};
+use crate::ui::forecast::contest_speeds;
 use crate::ui::format::counted;
 use crate::ui::help;
 use crate::ui::letters::LettersTab;
@@ -246,25 +247,6 @@ fn TrendCard(
 
 /// What the chip says of a character set that is not the one practised now.
 const NOT_NOW: &str = "Not the set practised now";
-
-/// What the run screen's keys do to the speeds, however the callers' speeds
-/// come.
-pub(crate) const YOUR_SPEED_KEYS: &str = "The run screen's − and + move only your own speed.";
-
-/// How a contest's callers' speeds come under `settings`: from your copy
-/// speed in contests while their switch is on; every one at the one speed
-/// set while it is on with no room to adapt; and evenly from your range
-/// while it is off. Then what − and + do, the same either way.
-pub(crate) fn contest_speeds(settings: &TrainingSettings) -> String {
-    let callers = if adapts_speed(settings) {
-        "Each new caller's speed is drawn from your copy speed, within your range: faster as you copy calls and numbers clean, slower as you miss them."
-    } else if adaptive_speed_on(settings) {
-        "One speed is set, so every caller comes at it."
-    } else {
-        "Callers' speeds are drawn evenly from your range."
-    };
-    format!("{callers} {YOUR_SPEED_KEYS}")
-}
 
 /// The newest of `points`, as many as a trend card draws.
 fn newest(points: &[EstimatePoint]) -> Vec<EstimatePoint> {
