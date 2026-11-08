@@ -37,9 +37,9 @@ pub(crate) fn draw_section(call: &str, rng: &mut impl Rng) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contest::Field;
-    use crate::contest::data::places::places_for;
     use crate::rng::SplitMix64;
+    use crate::rulebook::Field;
+    use crate::rulebook::data::places::places_for;
 
     /// The counted class shares: one transmitter at home four times in ten,
     /// the classes the design names at their shares, the rest about 4%

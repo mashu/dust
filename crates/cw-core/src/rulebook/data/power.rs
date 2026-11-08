@@ -17,8 +17,8 @@ pub(crate) fn draw_power(rng: &mut impl Rng) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contest::Field;
     use crate::rng::SplitMix64;
+    use crate::rulebook::Field;
 
     /// The counted shares: a hundred watts a third of the time, a kilowatt
     /// written two ways a third more, and the others a few percent between

@@ -2468,7 +2468,8 @@ mod tests {
                 let qso = rules.example_qso(side, &k1abc);
                 assert_eq!(qso[0].1, rules.cq_text(&k1abc), "{:?}", rules.kind);
                 assert_eq!(qso[4].0, you, "{:?}", rules.kind);
-                // What they send reads as what you copy.
+                // What they send reads as what you copy. The parser is
+                // contest's: rulebook's one use of contest, in a test.
                 let reading = crate::contest::parse_exchange(rules, side, &qso[3].1);
                 let copied: Vec<Field> = reading.fields.iter().map(|read| read.field).collect();
                 assert_eq!(copied, rules.copied(side), "{:?}", rules.kind);
@@ -2699,9 +2700,9 @@ mod tests {
     /// callers send.
     #[test]
     fn real_habits_are_said_by_the_numbers_you_copy() {
-        use crate::contest::CallerHabits::Real;
-        use crate::contest::exchange::{send_power, send_report, send_serial, send_zone};
         use crate::rng::SplitMix64;
+        use crate::rulebook::CallerHabits::Real;
+        use crate::rulebook::exchange::{send_power, send_report, send_serial, send_zone};
         let said = |kind: ContestKind, side| kind.rules().real_numbers(side);
         assert_eq!(
             said(ContestKind::Wpx, Side::Dx).as_deref(),

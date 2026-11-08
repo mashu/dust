@@ -96,8 +96,8 @@ pub fn section_name(code: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contest::data::counted::PLACE_SECTIONS;
-    use crate::contest::data::places::place_code;
+    use crate::rulebook::data::counted::PLACE_SECTIONS;
+    use crate::rulebook::data::places::place_code;
 
     /// The 85 sections, each once, by call area as the design lists them.
     #[test]
