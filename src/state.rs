@@ -2,11 +2,13 @@
 //! shares.
 
 pub mod answer;
+pub mod entry;
 mod keep;
 pub mod preview;
 pub mod sync;
 
 pub use answer::{AnswerOutbox, TypedAnswer};
+pub use entry::{ContestEntry, typed_len_max};
 pub use keep::{keep_and_show, keep_cut_off, settle_level};
 pub use preview::{Dialogue, DialogueLine, HeardGroup, Preview};
 pub use sync::SyncStatus;
@@ -25,7 +27,6 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use self::sync::SyncCtx;
-use crate::contest_runtime::ContestEntry;
 use crate::format::{counted, day_of, short_date};
 use crate::history::{StoredHistory, settle_or_spawn};
 use crate::persist::backup::{
