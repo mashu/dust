@@ -51,9 +51,8 @@ use cw_core::SessionResult;
 use flate2::read::GzDecoder;
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::desktop::{
-    DELETED, SESSIONS, copy_aside, move_aside, place_whole, shown, sync_dir, write_whole,
-};
+use super::desktop::{DELETED, SESSIONS, copy_aside};
+use super::disk::{move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, read_record};
 use super::{Deleted, HistorySaved, SessionKey, SetAside};

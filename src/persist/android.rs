@@ -115,7 +115,7 @@ pub fn backups_inside_app() -> bool {
 }
 
 use super::backup::{BackedUp, NotSaved};
-use super::desktop::save_streamed;
+use super::disk::save_streamed;
 
 /// `Build.VERSION_CODES.Q`, Android 10: the first that adds to Downloads
 /// through the media store.

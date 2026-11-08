@@ -14,6 +14,8 @@ pub mod backup;
 #[cfg(feature = "native-runtime")]
 mod desktop;
 #[cfg(feature = "native-runtime")]
+mod disk;
+#[cfg(feature = "native-runtime")]
 mod files;
 #[cfg(any(feature = "web", test))]
 mod idb;
