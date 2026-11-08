@@ -1484,7 +1484,7 @@ impl SessionResult {
     /// speed counted can be scored the same way as one finished today.
     ///
     /// Each group is scored at its own copy speed, worked out apart from
-    /// [`Self::group_speed`], which the speed belief and auto level read,
+    /// `Self::group_speed`, which the speed belief and auto level read,
     /// because the two differ for older saves and one rule for both would
     /// change them: what they score, or how they move the speed belief and
     /// auto level. A group timed without its own effective speed is spaced
