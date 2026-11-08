@@ -55,7 +55,7 @@ impl TrainingSettings {
     /// shows it: before, or after, as a switch put back on can bring the
     /// aim onto the card.
     fn put_section(&mut self, which: SettingsSection, from: &Self) {
-        let shown = crate::sampling::aim_section(self) == which;
+        let shown = super::aim_section(self) == which;
         match which {
             SettingsSection::SessionShape => {
                 let (c, p) = (&from.curriculum, &from.playback);
@@ -187,7 +187,7 @@ impl TrainingSettings {
             }
         }
         *self = std::mem::take(self).clamp();
-        if shown || crate::sampling::aim_section(self) == which {
+        if shown || super::aim_section(self) == which {
             self.curriculum.aim = from.curriculum.aim;
         }
     }

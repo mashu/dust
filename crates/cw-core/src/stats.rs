@@ -15,14 +15,15 @@ use crate::recognition::{
 };
 use crate::sampling::{
     CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
-    adaptive_bounds, adapts_speed, belief_for, beta_posterior_mean_error,
-    compute_raw_sampling_weights, config_from_settings, draw_chances, generate_callsign_group,
-    generate_contest_call, generate_word_group, group_size_bounds,
+    belief_for, beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,
+    draw_chances, generate_callsign_group, generate_contest_call, generate_word_group,
 };
 use crate::session::{SessionResult, Untimed};
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{
+    CharSetMode, SpeedPath, TrainingSettings, adaptive_bounds, adapts_speed, group_size_bounds,
+};
 use crate::span::{LengthForecast, SpanBelief};
-use crate::speed::{SpeedBelief, SpeedForecast, SpeedPath, forecast_speeds, station_shares};
+use crate::speed::{SpeedBelief, SpeedForecast, forecast_speeds, station_shares};
 
 pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;

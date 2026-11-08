@@ -35,12 +35,11 @@
 use std::borrow::Cow;
 
 use crate::alignment::{CopyTally, judged_copy};
-use crate::sampling::{adaptive_bounds, adaptive_speed_path, length_floor};
 use crate::score::copy_speed;
 use crate::session::{GroupResult, GroupSession, SessionResult};
 use crate::settings::{
     ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, CharSetMode, LevelAxis, MixedAutoLevelAxis,
-    TrainingSettings,
+    TrainingSettings, adaptive_bounds, adaptive_speed_path, length_floor,
 };
 
 /// How near an end of the speed range, in log speed, a group is sent for it

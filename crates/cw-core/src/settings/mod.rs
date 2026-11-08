@@ -728,6 +728,7 @@ pub struct TrainingSettings {
     pub unread: serde_json::Map<String, serde_json::Value>,
 }
 
+mod adapt;
 mod clamp;
 mod contest;
 mod contest_preset;
@@ -737,6 +738,8 @@ mod ranges;
 mod reset;
 mod save;
 
+pub use adapt::{SpeedPath, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section};
+pub(crate) use adapt::{adaptive_bounds, adaptive_speed_path, group_size_bounds, length_floor};
 pub use contest::{
     CONTEST_MINUTES_MAX, ContestSettings, HUNTER_DX_PERCENT, MY_CALL_MAX, MY_NAME_MAX,
     MY_POWER_MAX, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN, MY_ZONE_MAX,
@@ -1593,10 +1596,10 @@ mod tests {
         s.set_range_min(RangeSetting::EffectiveWpm, 25.0);
         s.set_range_max(RangeSetting::EffectiveWpm, 35.0);
         assert_eq!(s.effective_wpm_held(), Some((20.0, 20.0)));
-        assert!(!crate::speed::SpeedPath::of(&s).has_room());
+        assert!(!SpeedPath::of(&s).has_room());
         s.set_range_min(RangeSetting::EffectiveWpm, 12.0);
         assert_eq!(s.effective_wpm_held(), Some((12.0, 20.0)));
-        assert!(crate::speed::SpeedPath::of(&s).has_room());
+        assert!(SpeedPath::of(&s).has_room());
         s.set_range_max(RangeSetting::EffectiveWpm, 20.0);
         assert_eq!(s.effective_wpm_held(), None);
     }
@@ -2292,7 +2295,7 @@ mod tests {
         let mut speed = contest;
         speed.reset_section(SettingsSection::Speed);
         assert!(speed.contest.contest_adapt_speed);
-        assert_eq!(crate::sampling::aim_section(&speed), SettingsSection::Speed);
+        assert_eq!(aim_section(&speed), SettingsSection::Speed);
         assert_eq!(speed.curriculum.aim, Aim::Balanced, "the Speed card's");
     }
 

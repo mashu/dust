@@ -52,7 +52,7 @@ use crate::contest::tells_speed;
 use crate::rng::Rng;
 use crate::score::copy_speed;
 use crate::session::SessionResult;
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{CharSetMode, SpeedPath, TrainingSettings};
 use crate::timing::station_speed_grid;
 
 /// The chance of fumbling a character however slowly it was sent.
@@ -225,107 +225,6 @@ fn speed_groups(session: &SessionResult) -> Vec<bool> {
     }
 }
 
-/// The speed settings, seen as one line from the slowest corner to the
-/// fastest: the character speed and the spacing's pace each move across
-/// their range together, on a log scale, the spacing kept within its own
-/// range wherever the characters are fast enough to allow it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpeedPath {
-    char_wpm: (f64, f64),
-    effective_wpm: (f64, f64),
-    /// The spacing's range as set. The slowest corner may sit below it, as
-    /// the spacing is never faster than the characters; the line comes up
-    /// to it as soon as they allow, as a station drawn from the ranges
-    /// does.
-    spacing: (f64, f64),
-}
-
-/// How many times [`SpeedPath::voice_at`] halves the line to find a speed:
-/// to well under a millionth of it.
-const VOICE_HALVINGS: usize = 48;
-
-impl SpeedPath {
-    /// The line `settings` allow. The spacing is never faster than the
-    /// characters, and tied to them it is the characters' own speed.
-    pub fn of(settings: &TrainingSettings) -> Self {
-        let p = &settings.playback;
-        let char_wpm = (
-            p.char_wpm_min.max(1.0),
-            p.char_wpm_max.max(p.char_wpm_min).max(1.0),
-        );
-        let spacing = if p.link_char_to_effective {
-            char_wpm
-        } else {
-            (
-                p.effective_wpm_min.max(1.0),
-                p.effective_wpm_max.max(p.effective_wpm_min).max(1.0),
-            )
-        };
-        Self {
-            char_wpm,
-            effective_wpm: (spacing.0.min(char_wpm.0), spacing.1.min(char_wpm.1)),
-            spacing,
-        }
-    }
-
-    /// The slowest and fastest copy speed along it.
-    pub fn bounds(&self) -> (f64, f64) {
-        (
-            copy_speed(self.char_wpm.0, self.effective_wpm.0),
-            copy_speed(self.char_wpm.1, self.effective_wpm.1),
-        )
-    }
-
-    /// The character speed and the spacing's pace at its slowest corner and
-    /// at its fastest, in WPM: its ends as the speed settings put them.
-    pub fn ends(&self) -> ((f64, f64), (f64, f64)) {
-        (
-            (self.char_wpm.0, self.effective_wpm.0),
-            (self.char_wpm.1, self.effective_wpm.1),
-        )
-    }
-
-    /// Whether there is more than one speed on it.
-    pub fn has_room(&self) -> bool {
-        let (low, high) = self.bounds();
-        high > low * (1.0 + 1e-6)
-    }
-
-    /// The character speed and the spacing's pace that send at `copy`,
-    /// kept on the line.
-    pub fn voice_at(&self, copy: f64) -> (f64, f64) {
-        if !self.has_room() || !copy.is_finite() {
-            return self.voice_along(0.0);
-        }
-        // The copy speed only rises along the line, so halving it finds
-        // where it sends at `copy`, or the end nearer it.
-        let (mut slower, mut faster) = (0.0, 1.0);
-        for _ in 0..VOICE_HALVINGS {
-            let middle = 0.5 * (slower + faster);
-            let (char_wpm, effective_wpm) = self.voice_along(middle);
-            if copy_speed(char_wpm, effective_wpm) < copy {
-                slower = middle;
-            } else {
-                faster = middle;
-            }
-        }
-        self.voice_along(0.5 * (slower + faster))
-    }
-
-    /// The character speed and the spacing's pace `along` the line, from
-    /// the slowest corner at 0 to the fastest at 1: the spacing within its
-    /// range wherever the characters are as fast as its slowest, and never
-    /// faster than they are.
-    fn voice_along(&self, along: f64) -> (f64, f64) {
-        let between = |(from, to): (f64, f64)| (from.ln() + along * (to.ln() - from.ln())).exp();
-        let char_wpm = between(self.char_wpm);
-        let (slowest, fastest) = self.spacing;
-        let effective_wpm =
-            between(self.effective_wpm).clamp(slowest.min(char_wpm), fastest.min(char_wpm));
-        (char_wpm, effective_wpm)
-    }
-}
-
 /// One speed the next group can be sent at, as it sees it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpeedForecast {
@@ -447,7 +346,7 @@ impl SpeedBelief {
         newest: usize,
         mut after: impl FnMut(&SessionResult, &Self, Option<(f64, f64)>),
     ) -> Self {
-        let floor = crate::sampling::adaptive_bounds(settings).map(|(shortest, _)| shortest);
+        let floor = crate::settings::adaptive_bounds(settings).map(|(shortest, _)| shortest);
         let sessions: Vec<_> =
             sessions_in_order(history, settings.curriculum.char_set_mode, newest)
                 .into_iter()

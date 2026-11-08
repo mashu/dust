@@ -21,10 +21,10 @@ use crate::auto_level::{AutoLevelCounters, CountersKey, apply_auto_level, evalua
 use crate::machine::GroupSource;
 use crate::morse::LCWO_SEQUENCE;
 use crate::rng::{Rng, SplitMix64};
-use crate::sampling::{Sampler, length_floor};
+use crate::sampling::Sampler;
 use crate::score::copy_speed;
 use crate::session::{Answered, GroupResult, SessionResult, SessionTiming};
-use crate::settings::{Aim, CharSetMode, TrainingSettings};
+use crate::settings::{Aim, CharSetMode, TrainingSettings, length_floor};
 
 /// The chance of fumbling a character however slowly it was sent.
 const LAPSE: f64 = 0.02;

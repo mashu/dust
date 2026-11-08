@@ -11,12 +11,11 @@ use serde_json::{Map, Value};
 use crate::alignment::{CopyTally, LetterAccuracy, SKIPPED, judged_copy};
 use crate::level::LEVEL_MIN;
 use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
-use crate::sampling::length_floor;
 use crate::score::{
     GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
     copied_whole, copy_speed, session_points,
 };
-use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
+use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, length_floor, mode_on_disk};
 
 pub use crate::mono::MonoMs;
 
