@@ -6,7 +6,7 @@
 use dioxus::prelude::*;
 
 use crate::format::{ago, clock, day_of, short_date};
-use crate::sync::ctx::SyncStatus;
+use crate::state::SyncStatus;
 use crate::sync::seal::MIN_PASSPHRASE;
 use crate::ui::widgets::{CardHead, IconName, control_id, html_bool};
 

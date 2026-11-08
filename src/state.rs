@@ -1,6 +1,10 @@
 //! What the app is: its state, reactive and not, and the moves every screen
 //! shares.
 
+pub mod sync;
+
+pub use sync::SyncStatus;
+
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -14,6 +18,7 @@ use cw_core::{
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
+use self::sync::SyncCtx;
 use crate::contest_runtime::ContestEntry;
 use crate::format::{counted, day_of, short_date};
 use crate::history::{StoredHistory, settle_or_spawn};
@@ -27,7 +32,6 @@ use crate::persist::{
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live, keep_cut_off};
-use crate::sync::ctx::SyncCtx;
 use crate::time::{POLL_MS, now_ms, sleep_ms};
 
 /// How long after the store last refused what the app has yet to store it
@@ -216,7 +220,7 @@ pub struct AppCtx {
     /// each made in turn once the one before it is over.
     restores_waiting: CopyValue<VecDeque<Backup>>,
     /// Sync with the user's own Google Drive, where it is on
-    /// ([`crate::sync::ctx`]).
+    /// ([`self::sync`]).
     pub sync: SyncCtx,
     app: CopyValue<AppState>,
 }
@@ -861,7 +865,7 @@ impl AppCtx {
     }
 
     /// Take up what the store holds now, whatever it says of having
-    /// changed: as sync has just changed it ([`crate::sync::ctx`]).
+    /// changed: as sync has just changed it ([`self::sync`]).
     pub(crate) fn take_up_store(self) {
         self.sync_with_store(|_| {});
     }
