@@ -349,7 +349,7 @@ pub(crate) fn call_section(call: &str) -> Option<&'static str> {
 
 /// Where a station is, as far as its call says.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::contest) enum Whereabouts {
+pub(super) enum Whereabouts {
     /// A state, province or territory.
     Place(&'static str),
     /// One of a US call district's states, each with its people.
@@ -362,7 +362,7 @@ pub(in crate::contest) enum Whereabouts {
 /// (`VE3ABC/0`) leaves the station where its own call is. Labrador is LB
 /// where `labrador` counts it apart, and NL otherwise. None for a call
 /// outside the US and Canada.
-pub(in crate::contest) fn whereabouts(call: &str, labrador: bool) -> Option<Whereabouts> {
+pub(super) fn whereabouts(call: &str, labrador: bool) -> Option<Whereabouts> {
     let area = call_area(call)?;
     let home = home(call, &area)?;
     if let Some(marker) = area.marker
@@ -376,11 +376,7 @@ pub(in crate::contest) fn whereabouts(call: &str, labrador: bool) -> Option<Wher
 /// The state, province or territory a station signing `call` is in, by
 /// [`whereabouts`], the US state drawn from `rng` among its district's by
 /// their people. None for a call outside the US and Canada.
-pub(in crate::contest) fn draw_place(
-    call: &str,
-    labrador: bool,
-    rng: &mut impl Rng,
-) -> Option<&'static str> {
+pub(crate) fn draw_place(call: &str, labrador: bool, rng: &mut impl Rng) -> Option<&'static str> {
     match whereabouts(call, labrador)? {
         Whereabouts::Place(place) => Some(place),
         Whereabouts::District(states) => pick_weighted(states, rng).copied(),

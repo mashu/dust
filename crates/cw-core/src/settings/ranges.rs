@@ -6,7 +6,7 @@ use super::{
     SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
     TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
-use crate::band::{db_to_gain, full_volume_gain, gain_to_db};
+use crate::numeric::{db_to_gain, gain_to_db};
 
 /// How far apart the side tone bounds are pushed when a fixed pitch is opened
 /// back up into a range.
@@ -301,16 +301,6 @@ impl TrainingSettings {
         )
     }
 
-    /// The receiver's AF gain: what the output stage multiplies the band and
-    /// the stations by before the limiter, that share of the gain full
-    /// volume is for this receiver ([`full_volume_gain`]), at full RF gain.
-    /// Your own messages and the paddle's sidetone are monitored, not
-    /// received, and are set at the level they are heard at, turned down by
-    /// the volume alone.
-    pub fn af_gain(&self) -> f64 {
-        self.master_volume() * full_volume_gain(self)
-    }
-
     /// The receiver's RF gain, as a gain: what everything reaching the AGC
     /// is multiplied by, one at full, inside the control's range whatever
     /// is set and full for anything that is not a number. Full volume does
@@ -338,7 +328,7 @@ impl TrainingSettings {
     pub fn sidetone_rise_sec(&self) -> f64 {
         let rise = finite_within(self.band.steepness, STEEPNESS_MIN_MS, STEEPNESS_MAX_MS);
         let wpm = finite_within(self.playback.keyer_wpm, WPM_MIN, WPM_MAX);
-        let quarter_dit = crate::timing::dot_seconds(wpm) / 4.0;
+        let quarter_dit = crate::morse::dot_seconds(wpm) / 4.0;
         (rise / 1_000.0)
             .min(quarter_dit)
             .max(STEEPNESS_MIN_MS / 1_000.0)

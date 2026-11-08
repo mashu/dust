@@ -42,17 +42,17 @@
 use std::sync::OnceLock;
 
 use crate::aim::{self, Leaning, Spread};
-use crate::alignment::{CopyTally, align_group, align_holding};
+use crate::alignment::{align_group, speed_tally};
 use crate::belief::{
     Estimate, EstimatePoint, FADE_HORIZON, FirstGuess, GridBelief, Tally, joined, pick_index,
     range_of, sessions_in_order,
 };
 use crate::callsign::parse_callsign;
-use crate::contest::{Field, GroupCopy};
+use crate::contest::tells_speed;
 use crate::rng::Rng;
 use crate::score::copy_speed;
 use crate::session::SessionResult;
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{CharSetMode, SpeedPath, TrainingSettings};
 use crate::timing::station_speed_grid;
 
 /// The chance of fumbling a character however slowly it was sent.
@@ -151,73 +151,6 @@ fn log_chance_table() -> &'static [[f64; 2]] {
     })
 }
 
-/// The characters of a group a faster or slower send could have changed,
-/// each copied right or not, and those typed that were never sent: what a
-/// group says about speed, and what auto level judges while group size
-/// adapts.
-///
-/// Everything up to the last character typed counts, misheard, dropped or
-/// added. A group can also end early, with characters lost off its end, and
-/// that happens two ways: the group was longer than you could hold, or copy
-/// broke off at a character you did not recognise and the rest went by while
-/// you looked for it. One group cannot tell which. The rest of a lost end is
-/// a consequence either way, and is the length's alone. The character copy
-/// broke off at, the first one lost, counts as a miss unless adaptive group
-/// size can still answer for it: `length_floor` is the shortest group it
-/// draws while it adapts, and a group longer than that can be sent shorter.
-/// A group already as short as the range allows, or one whose length does
-/// not adapt, has nothing else to answer for its break. Left out, a learner
-/// who stops typing at the first miss only ever showed the speed characters
-/// copied right, and drove it to the top of the range while copying almost
-/// nothing.
-///
-/// A group with nothing typed speaks of no character: neither what was
-/// recognised nor where copy broke. While group size adapts it is the
-/// length's alone, at the shortest length too: there a blank is as often a
-/// slip as a send too fast, and a send too fast shows in what does get
-/// typed, now that the character copy broke off at counts. Where the length
-/// does not adapt, nothing else learns from it, and it counts as its first
-/// character missed.
-///
-/// Nothing sent, or a blank the length answers for: nothing to count.
-pub(crate) fn speed_tally(
-    sent: &str,
-    received: &str,
-    length_floor: Option<usize>,
-) -> Option<CopyTally> {
-    let sent_chars: Vec<char> = sent.chars().map(|c| c.to_ascii_uppercase()).collect();
-    if sent_chars.is_empty() {
-        return None;
-    }
-    let length_answers = length_floor.is_some_and(|floor| sent_chars.len() > floor);
-    let mut tally = CopyTally::default();
-    let lost = if received.trim().is_empty() {
-        if length_floor.is_some() {
-            return None;
-        }
-        sent_chars.len()
-    } else {
-        let (held, lost) = align_holding(sent, received);
-        for pair in held {
-            match (pair.sent_char, pair.received_char) {
-                (Some(ch), _) => {
-                    let entry = tally.sent.entry(ch).or_default();
-                    entry.total += 1;
-                    entry.correct += u32::from(pair.matched);
-                }
-                (None, Some(ch)) => *tally.inserted.entry(ch).or_default() += 1,
-                (None, None) => {}
-            }
-        }
-        lost
-    };
-    if lost > 0 && !length_answers {
-        let broke_at = sent_chars[sent_chars.len() - lost];
-        tally.sent.entry(broke_at).or_default().total += 1;
-    }
-    (!tally.sent.is_empty() || !tally.inserted.is_empty()).then_some(tally)
-}
-
 /// What a group says about speed ([`speed_tally`]): of the characters a
 /// faster or slower send could have changed, how many were copied right,
 /// and how many count.
@@ -273,15 +206,6 @@ fn as_whole((right, counted): (u32, u32)) -> (f64, f64) {
     (share, 1.0 - share)
 }
 
-/// Whether a contest run's group says how fast you copy: a call or a number
-/// (NR, ZN) does, a field from a short list does not, being half guessed.
-pub(crate) fn tells_speed(copy: GroupCopy) -> bool {
-    matches!(
-        copy,
-        GroupCopy::Call | GroupCopy::Field(Field::Nr | Field::Zn)
-    )
-}
-
 /// Which of `session`'s groups say how fast you copy: every one of a group
 /// session; of a contest run, the calls and the numbers ([`tells_speed`]),
 /// as its log lays its groups out, each of them whole ([`whole_evidence`]).
@@ -298,107 +222,6 @@ fn speed_groups(session: &SessionResult) -> Vec<bool> {
             .iter()
             .map(|group| parse_callsign(&group.sent).is_some())
             .collect(),
-    }
-}
-
-/// The speed settings, seen as one line from the slowest corner to the
-/// fastest: the character speed and the spacing's pace each move across
-/// their range together, on a log scale, the spacing kept within its own
-/// range wherever the characters are fast enough to allow it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpeedPath {
-    char_wpm: (f64, f64),
-    effective_wpm: (f64, f64),
-    /// The spacing's range as set. The slowest corner may sit below it, as
-    /// the spacing is never faster than the characters; the line comes up
-    /// to it as soon as they allow, as a station drawn from the ranges
-    /// does.
-    spacing: (f64, f64),
-}
-
-/// How many times [`SpeedPath::voice_at`] halves the line to find a speed:
-/// to well under a millionth of it.
-const VOICE_HALVINGS: usize = 48;
-
-impl SpeedPath {
-    /// The line `settings` allow. The spacing is never faster than the
-    /// characters, and tied to them it is the characters' own speed.
-    pub fn of(settings: &TrainingSettings) -> Self {
-        let p = &settings.playback;
-        let char_wpm = (
-            p.char_wpm_min.max(1.0),
-            p.char_wpm_max.max(p.char_wpm_min).max(1.0),
-        );
-        let spacing = if p.link_char_to_effective {
-            char_wpm
-        } else {
-            (
-                p.effective_wpm_min.max(1.0),
-                p.effective_wpm_max.max(p.effective_wpm_min).max(1.0),
-            )
-        };
-        Self {
-            char_wpm,
-            effective_wpm: (spacing.0.min(char_wpm.0), spacing.1.min(char_wpm.1)),
-            spacing,
-        }
-    }
-
-    /// The slowest and fastest copy speed along it.
-    pub fn bounds(&self) -> (f64, f64) {
-        (
-            copy_speed(self.char_wpm.0, self.effective_wpm.0),
-            copy_speed(self.char_wpm.1, self.effective_wpm.1),
-        )
-    }
-
-    /// The character speed and the spacing's pace at its slowest corner and
-    /// at its fastest, in WPM: its ends as the speed settings put them.
-    pub fn ends(&self) -> ((f64, f64), (f64, f64)) {
-        (
-            (self.char_wpm.0, self.effective_wpm.0),
-            (self.char_wpm.1, self.effective_wpm.1),
-        )
-    }
-
-    /// Whether there is more than one speed on it.
-    pub fn has_room(&self) -> bool {
-        let (low, high) = self.bounds();
-        high > low * (1.0 + 1e-6)
-    }
-
-    /// The character speed and the spacing's pace that send at `copy`,
-    /// kept on the line.
-    pub fn voice_at(&self, copy: f64) -> (f64, f64) {
-        if !self.has_room() || !copy.is_finite() {
-            return self.voice_along(0.0);
-        }
-        // The copy speed only rises along the line, so halving it finds
-        // where it sends at `copy`, or the end nearer it.
-        let (mut slower, mut faster) = (0.0, 1.0);
-        for _ in 0..VOICE_HALVINGS {
-            let middle = 0.5 * (slower + faster);
-            let (char_wpm, effective_wpm) = self.voice_along(middle);
-            if copy_speed(char_wpm, effective_wpm) < copy {
-                slower = middle;
-            } else {
-                faster = middle;
-            }
-        }
-        self.voice_along(0.5 * (slower + faster))
-    }
-
-    /// The character speed and the spacing's pace `along` the line, from
-    /// the slowest corner at 0 to the fastest at 1: the spacing within its
-    /// range wherever the characters are as fast as its slowest, and never
-    /// faster than they are.
-    fn voice_along(&self, along: f64) -> (f64, f64) {
-        let between = |(from, to): (f64, f64)| (from.ln() + along * (to.ln() - from.ln())).exp();
-        let char_wpm = between(self.char_wpm);
-        let (slowest, fastest) = self.spacing;
-        let effective_wpm =
-            between(self.effective_wpm).clamp(slowest.min(char_wpm), fastest.min(char_wpm));
-        (char_wpm, effective_wpm)
     }
 }
 
@@ -523,7 +346,7 @@ impl SpeedBelief {
         newest: usize,
         mut after: impl FnMut(&SessionResult, &Self, Option<(f64, f64)>),
     ) -> Self {
-        let floor = crate::sampling::adaptive_bounds(settings).map(|(shortest, _)| shortest);
+        let floor = crate::settings::adaptive_bounds(settings).map(|(shortest, _)| shortest);
         let sessions: Vec<_> =
             sessions_in_order(history, settings.curriculum.char_set_mode, newest)
                 .into_iter()

@@ -49,7 +49,6 @@ mod prefixes;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::contest::data::counted::FIELD_DAY_DX;
 use crate::rng::{Rng, SplitMix64};
 use prefixes::{CONTINENT_PREFIXES, COUNTRIES, PREFIXES, ZONE_PREFIXES};
 
@@ -78,7 +77,7 @@ const ABROAD_SHARE: f64 = 0.12;
 /// The same two shares in a contest. The tiers send portables and stations
 /// abroad often, because they are what is being practised there; a contest's
 /// callers are mostly at home, as on a real band: until a run sets them
-/// ([`crate::contest::CallerOdds`]).
+/// ([`crate::rulebook::CallerOdds`]).
 pub(crate) const CONTEST_PORTABLE_SHARE: f64 = 0.04;
 pub(crate) const CONTEST_ABROAD_SHARE: f64 = 0.03;
 
@@ -203,30 +202,6 @@ pub struct CallSpec {
 }
 
 impl CallSpec {
-    /// A contest's callers, from `countries`.
-    pub const fn contest(countries: Countries) -> Self {
-        Self {
-            countries,
-            contest: true,
-            dx_percent: crate::settings::HUNTER_DX_PERCENT,
-            field_day_dx: FIELD_DAY_DX / 100.0,
-            portable: CONTEST_PORTABLE_SHARE,
-            abroad: CONTEST_ABROAD_SHARE,
-            country_balance: 0.0,
-        }
-    }
-
-    /// The same, with its shares as `odds` sets them: Field Day's DX, and
-    /// the callers signing portable and abroad.
-    pub const fn with_odds(self, odds: &crate::contest::CallerOdds) -> Self {
-        Self {
-            field_day_dx: odds.field_day_dx,
-            portable: odds.portable,
-            abroad: odds.abroad,
-            ..self
-        }
-    }
-
     /// The same, with `dx_percent` callers in a hundred DX, where the
     /// countries draw some apart.
     pub const fn with_dx(self, dx_percent: u32) -> Self {

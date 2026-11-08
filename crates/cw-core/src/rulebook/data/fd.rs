@@ -15,14 +15,14 @@ use crate::callsign::pick_weighted;
 use crate::rng::Rng;
 
 /// The class a caller sends, from `rng`.
-pub(in crate::contest) fn draw_class(rng: &mut impl Rng) -> &'static str {
+pub(crate) fn draw_class(rng: &mut impl Rng) -> &'static str {
     pick_weighted(CLASSES, rng).copied().unwrap_or("1D")
 }
 
 /// The section a caller signing `call` sends, from `rng`: the one its call
 /// gives by itself, or else one of the sections of the place drawn for it,
 /// or DX for a station Dust cannot place.
-pub(in crate::contest) fn draw_section(call: &str, rng: &mut impl Rng) -> &'static str {
+pub(crate) fn draw_section(call: &str, rng: &mut impl Rng) -> &'static str {
     if let Some(section) = call_section(call) {
         return section;
     }
@@ -37,9 +37,9 @@ pub(in crate::contest) fn draw_section(call: &str, rng: &mut impl Rng) -> &'stat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contest::Field;
-    use crate::contest::data::places::places_for;
     use crate::rng::SplitMix64;
+    use crate::rulebook::Field;
+    use crate::rulebook::data::places::places_for;
 
     /// The counted class shares: one transmitter at home four times in ten,
     /// the classes the design names at their shares, the rest about 4%

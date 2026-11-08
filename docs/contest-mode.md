@@ -498,7 +498,7 @@ later contests, is the world-wide one.
   stations send `LB`, a multiplier of its own. Alaska and Hawaii are DX.
 - **Your fields.** State or province (with LB), or power.
 - **As built (3a).** Your side is read where your call puts you
-  (`w_ve`, `contest/data/places.rs`): W/VE by every prefix the 48 states,
+  (`w_ve`, `rulebook/data/places.rs`): W/VE by every prefix the 48 states,
   DC and Canada issue, the table's or not, and DX anywhere else, a call
   Dust cannot place among it. The card's line under "You send" says it,
   from the row's `works`: "You are DX: you work US and Canada only", or
@@ -1658,7 +1658,7 @@ spacing and no fist variation.
 
 - **Slice 1a** played it as `wanted` through the receiver at `VOLUME_MAX`.
   At the hardest noise it was only a few dB over the floor (2 dB SNR at
-  full level, `NOISE_SNR_LOUD_DB`, `band/calibration.rs`), and the AGC
+  full level, `NOISE_SNR_LOUD_DB`, `settings/mod.rs`), and the AGC
   ducked a weak
   reply's first 0.3 s: an interim.
 - **Slice 1b**, as built, plays it dry, as a rig's sidetone is played.
@@ -1815,7 +1815,7 @@ send still carries no QSB.
 ### 5.4 Pile-ups against the filter
 
 `resolve_pileup` keeps one wanted station loudest and nearest the centre
-(`timing/pileup.rs`, and its test
+(`band/pileup.rs`, and its test
 `the_station_you_want_is_always_the_strongest`). A contest has no wanted
 station, so phase 2 adds `place_contest_caller`:
 
@@ -1999,7 +1999,7 @@ out by itself.
 ### 6.3 The clock
 
 `RunClock` (`contest/clock.rs`) holds `started`, `paused_ms` and
-`paused_since` in `MonoMs` (`session.rs`), never wall time, and the latest
+`paused_since` in `MonoMs` (`mono.rs`), never wall time, and the latest
 time it was
 read, paused or resumed at. A pause stamped in the past (the heartbeat's)
 begins no earlier than that, so it never counts a stretch of time twice nor
@@ -2774,7 +2774,7 @@ the preset.
   US and Canada sends `DX` (`ContestSettings::state_sent`), so a run needs
   no state from it; a call whose prefix Dust cannot place may be in them,
   and is asked for its state. As built, where a call is at home is read in
-  `contest/data/places.rs` (`in_us_or_canada`), from every prefix the US
+  `rulebook/data/places.rs` (`in_us_or_canada`), from every prefix the US
   gives Alaska and Hawaii and every prefix Canada issues, as the call table
   holds only some of them: Alaska and Hawaii count as in the US, as their
   stations send AK and HI in the Sprint, and Hawaii's prefixes with a digit
@@ -3313,7 +3313,7 @@ files written by scripts, each naming its source and year.
   the table holds VE, VA, VO, VC, VY, CK and VB, `PREFIXES` in
   `callsign/prefixes.rs`): 1 NS, 2 QC, 3 ON, 4 MB, 5 SK, 6 AB, 7 BC, 8 NT,
   9 NB. VO1 NL; VO2 LB in ARRL DX, NL elsewhere; VY0 NU, VY1 YT, VY2 PE.
-- **As built (2b),** `contest/data/places.rs` holds the codes and names,
+- **As built (2b),** `rulebook/data/places.rs` holds the codes and names,
   and draws a caller's place from its call once, when its exchange is
   first fixed, so a dupe sends the same: the call area is a call-area
   digit after the slash where there is one (`W1AW/4` is in the fourth
@@ -3400,7 +3400,7 @@ TC1 and YM1 are in Europe, though Turkey is in Asia, and African Italy's
 IG9 and IH9 in Africa, zone 33; so a TA1 caller is a point from Germany,
 not three. The script writes the cty.dat version into the header. The US
 and Canada are left out of the zone overrides:
-`contest/data/zones.rs` holds every state, DC, province and
+`rulebook/data/zones.rs` holds every state, DC, province and
 territory, with Labrador, and the two split places with the share of
 their stations in the other zone (QC 2 at 1%, NU 1 at 10%); VK6 and VK8 are
 29 there. A caller's zone is drawn: its state among its district's by
@@ -3436,7 +3436,7 @@ PR and VI callers come from KL, KH and KP at their counted shares.
 `mySection` defaults from your call: KL → AK; KH6/7 and KH0/2/8 → PAC;
 KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
 
-As built (3b), `contest/data/sections.rs` holds the list by call area,
+As built (3b), `rulebook/data/sections.rs` holds the list by call area,
 each section named (as its place is, where the code is a place's, else in
 the file: "Eastern Massachusetts"), and reads a section's code
 (`listed_section`); YT reads as itself and an ARRL contest counts it as TER
@@ -3459,7 +3459,7 @@ NS; and every other call outside the US's districts and Canada DX, KH's
 other digits, Navassa's KP1,
 Desecheo's KP5 and Guantanamo Bay's KG4 with two letters among it, as no
 section lists them. A call in the districts or Canada, or one Dust cannot
-place, tells none. A caller (`contest/data/fd.rs`) sends the section its
+place, tells none. A caller (`rulebook/data/fd.rs`) sends the section its
 call tells, or else one of the sections of the place `draw_place` draws
 for it, as often as that place's entries are in each; so AK, PAC, PR and
 VI callers come as often as the call table draws KL, KH6, KP4 and KP2
@@ -3474,7 +3474,7 @@ digit above.
   for Dust elsewhere. A name is kept per caller, never tied to a call. The
   16 names the band's traffic sent from `band/activity.rs` moved here, and
   the band draws its names from here too (`draw_name`). As built
-  (`contest/data/names.rs`), the network refused the SSA download, so the
+  (`rulebook/data/names.rs`), the network refused the SSA download, so the
   North American list is written by hand from common short given names of
   those years, each weighted by Dust's estimate of the births that go by
   it, and its header says so; a script counting the SSA's files can replace
@@ -3487,7 +3487,7 @@ digit above.
   1B 13.1%, 2A 6.7%, 3A 6.7%, 4A 3.5%, 1A 2.9%, 5A 1.8%; 1C, 2D, 2F, 2B, 2E
   about 1% each; the rest 4%. As built (3b), `scripts/contest-data.py`
   counts them, from the 13,708 rows left once the one row whose section is
-  no section (`MD`) is dropped, into `contest/data/counted.rs`: the shares
+  no section (`MD`) is dropped, into `rulebook/data/counted.rs`: the shares
   above, then each class that rounds to at least 0.1% (3F, 6A, 1F, 4F, 7A,
   3E, 3D, 8A, 5F, 9A, 2C, 4D, 6F, 4E). DX rows are 0.9% of them, the share
   of Field Day callers that are DX, through the sampler too (§11.1). Each
@@ -3495,7 +3495,7 @@ digit above.
   remainder, so each place's add up to exactly 100%.
 - **Power,** from 3,779 DX rows of `ARRLDXCW_USDX.txt`: 100 34.7%, KW 25.0%,
   500 12.8%, K 10.9%, 400 4.6%, 200 3.0%, 5 2.4%, others 6.6%. As built
-  (`contest/data/power.rs`), the others are the next counted values at
+  (`rulebook/data/power.rs`), the others are the next counted values at
   their shares (300 and 50 at 1.2%, 700 at 1.0%, then 99, 600, 750, 150,
   1K, 800, 80 and a tail at 0.1% each), each sent as written. As built
   (3b), `scripts/contest-data.py` counts them too, leaving out what is no
@@ -3681,7 +3681,7 @@ The repository is GPL-3.0-or-later (the `license` in `Cargo.toml`).
 The counted shares are written by `scripts/contest-data.py`, whose inputs
 are used where the table is made and never committed, so no test can run
 it: `scripts/contest-data.py --check FDGOTA.txt ARRLDXCW_USDX.txt` says
-whether the committed `contest/data/counted.rs` is what the files give,
+whether the committed `rulebook/data/counted.rs` is what the files give,
 and fails if it is not (as built, 3b, it is).
 
 Dust is its own work: its sampling, noise model, signal processing,
@@ -3776,17 +3776,30 @@ paddles' word. `app.session` holds `Live::{Groups, Contest}`, each boxed;
 
 | File | Holds |
 |---|---|
-| `mod.rs` | `ContestKind`, `RunStyle`, `CallerHabits`, `TuCall` (forgiving serde; `TuCall` from the operator feedback), `CallSource` |
-| `rules.rs`, `esm.rs`, `clock.rs` | the `ContestRules` table, `tu_adds_call` (operator feedback); `esm()`, `Fields::edit`, `space_to_call` (operator feedback); `RunClock` |
+| `mod.rs` | the module list and re-exports, `rulebook`'s among them |
+| `source.rs` | `CallSource` |
+| `esm.rs`, `message.rs`, `clock.rs` | `esm()`, `Fields::edit`, `space_to_call` (operator feedback); `MessagePart`; `RunClock` |
 | `machine.rs` | `ContestMachine`, events, effects, `ContestView` |
 | `caller.rs` | caller states, patience, matching, replies, collisions, QRS |
 | `turn.rs` | `Turn`, segments, continuations, `plan_turn`, `MONITOR_LEVEL` (your sending's loudest, operator feedback), per-caller fades and flutter, the receiver muted while you send (`Turn::muted_until`, `Turn::muted`, 5a) |
 | `place.rs` | `place_contest_caller`, `filter_capacity` (phase 2); `place_qrm` (4a) |
 | `qrm.rs` | the QRM of rough habits: when a station starts up, what it sends and where in a turn (as built, 4a) |
-| `exchange.rs`, `parse.rs` | canonical forms, cut numbers, keyed tokens; `parse_exchange` |
-| `serial.rs`, `check.rs`, `score.rs` | serials; `QsoCheck`; `contest_score`, rates |
-| `record.rs` | `ContestLog`, `ContestRun`, `QsoRecord`, `result()` |
+| `parse.rs` | `parse_exchange` |
+| `check.rs`, `score.rs` | `QsoCheck`; `contest_score`, rates |
+| `record.rs` | `ContestRun`, `QsoRecord`, `result()`, `ContestLog::run` and `From<&ContestRun>` (the `ContestLog` struct is in `session.rs`), `tells_speed` |
 | `bot.rs` | operators that hear the turns; Hear a QSO uses the perfect one (as built, 2c: shipped, `hear_qsos` and `HeardQsos`; the test operators, scripted calls and run settings kept to tests in `bot/script.rs`) |
+
+**New in cw-core, `crates/cw-core/src/rulebook/`** (what a contest is, apart
+from any run of it; moved from `contest/` by the module split):
+
+| File | Holds |
+|---|---|
+| `mod.rs` | the module list and re-exports |
+| `kind.rs` | `ContestKind`, `RunStyle`, `CallerHabits`, `TuCall` (forgiving serde; `TuCall` from the operator feedback), `MS_PER_MINUTE`, `MS_PER_HOUR` |
+| `rules.rs` | the `ContestRules` table, `tu_adds_call` (operator feedback), `ContestKind::rules` and `scored` |
+| `exchange.rs` | canonical forms, cut numbers, keyed tokens |
+| `odds.rs` | the caller odds (`CallerOdds`, `Odd`, `OddsCard`), and the call mix they set (`CallSpec::contest`, `with_odds`) |
+| `serial.rs` | serials |
 | `data/` | `names`, `reports` (1c); `places` (2b, the ARRL DX side and Labrador 3a), `zones` and `power` (3a); `sections`, `fd`, and `counted`, the shares `scripts/contest-data.py` writes (3b) |
 
 **Changed in cw-core:** `Cargo.toml` (`serde_json`); `settings/mod.rs`,
@@ -3795,14 +3808,15 @@ paddles' word. `app.session` holds `Live::{Groups, Contest}`, each boxed;
 `draws_characters`, `sends_callsigns`, `ContestSettings`, `contestActive` on
 disk, `mode_on_disk`, `Station`, `wild`); `settings/curriculum.rs` (Contest
 → `LevelAxis::Callsign`); `session.rs` (`StoredSession`, `recorded_mode`,
-`contest`, a test constructor, `MonoMs::plus_sec`); `callsign.rs` (`generate_call`, `CallSpec`, public
-`parse_callsign`, `wpx_prefix`, `country_of`); `sampling.rs`, `pool.rs`,
+`contest`, a test constructor); `mono.rs` (`MonoMs::plus_sec`);
+`callsign.rs` (`generate_call`, `CallSpec`, public `parse_callsign`,
+`wpx_prefix`, `country_of`); `sampling.rs`, `settings/pool.rs`,
 `auto_level.rs` (Contest arms; `impl CallSource for Sampler`, and, as built
 with adaptive callers' speed, its callers' speeds from the copy-speed
-belief, `adaptive_speed_on` reading the callers' switch in Contest);
-`stats.rs`, `board.rs`, `speed.rs` (history rows, kinds, assisted runs,
-contest speed evidence, `tells_speed`, `whole_evidence`);
-`timing/pileup.rs` (reach helpers `pub(crate)`); `timing/plan.rs`
+belief); `settings/adapt.rs` (`adaptive_speed_on` reading the callers'
+switch in Contest); `stats.rs`, `board.rs`, `speed.rs` (history rows, kinds,
+assisted runs, contest speed evidence, `whole_evidence`);
+`band/pileup.rs` (reach helpers `pub(crate)`); `timing/plan.rs`
 (`dry_wanted`, `plan_morse_playback_at`, 1b; `muted_until`, and
 `SEND_RELEASE_SEC` moved here from the app, 5a); `band/qsb.rs`
 (`Qsb::flutter`, 5a); `keyer/clock.rs` (the word gap the paddles' field

@@ -20,7 +20,6 @@
 
 use crate::alignment::align_group;
 use crate::morse::is_scored_char;
-use crate::session::{GroupResult, SessionTiming};
 
 const MAX_EFFECTIVE_ALPHABET: f64 = 48.0;
 
@@ -47,10 +46,6 @@ const RESENT_KEEPS: f64 = 0.5;
 /// ([`crate::GROUP_SIZE_MAX`]), and few enough that the ways its misses
 /// could fall stay a number.
 const MOST_CHARS_COUNTED: u32 = 64;
-
-/// The average answer of a session with none to average: a second a
-/// character.
-const NO_ANSWERS_MS: f64 = 1_000.0;
 
 /// How one group was copied: everything its points are worked out from.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -243,23 +238,6 @@ pub fn calculate_effective_alphabet_size(sent_groups: &[impl AsRef<str>]) -> f64
     }
     h += f64::from((k.saturating_sub(1)) as u32) / (2.0 * f64::from(total));
     h.exp().clamp(1.0, MAX_EFFECTIVE_ALPHABET)
-}
-
-/// The average of a session's answer times a character, its `groups` timed
-/// as `timings` say, as older builds show it
-/// ([`crate::SessionResult::avg_response_ms`]).
-pub fn compute_average_response_ms(groups: &[GroupResult], timings: &[SessionTiming]) -> f64 {
-    let (sum, count) = groups
-        .iter()
-        .zip(timings)
-        .map(|(group, timing)| timing.ms_per_char(&group.sent))
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .fold((0.0, 0u32), |(sum, count), v| (sum + v, count + 1));
-    if count == 0 {
-        NO_ANSWERS_MS
-    } else {
-        sum / f64::from(count)
-    }
 }
 
 #[cfg(test)]

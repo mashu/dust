@@ -21,7 +21,7 @@
 //! later adds the QSOs it logged meanwhile, `Poisson(final · Δt / L)`,
 //! the same process.
 
-use super::MS_PER_MINUTE;
+use super::kind::MS_PER_MINUTE;
 use crate::rng::Rng;
 
 /// The shape of a contest's logs: how many QSOs its stations have logged by

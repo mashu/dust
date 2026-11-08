@@ -6,23 +6,25 @@
 //! of a few states; what it sends next follows from the state. Which
 //! of your calls it takes for its own is [`match_call`].
 
-use super::data::fd::{draw_class, draw_section};
-use super::data::names::draw_name;
-use super::data::places::{DX, draw_place};
-use super::data::power::draw_power;
-use super::data::reports::draw_report;
-use super::data::zones::draw_zone;
-use super::esm::MessagePart;
-use super::exchange::{Field, Habits, send_5nn, send_power, send_report, send_serial, send_zone};
-use super::odds::CallerOdds;
+use super::message::MessagePart;
 use super::place::Placement;
-use super::rules::{ContestRules, STYLE_EVEN, Side};
-use super::serial::SerialModel;
-use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
 use crate::band::{FADE_OFFSET_MAX_SEC, Qsb};
 use crate::callsign::{GeneratedCall, parse_callsign};
 use crate::rng::{Rng, SplitMix64};
+use crate::rulebook::data::fd::{draw_class, draw_section};
+use crate::rulebook::data::names::draw_name;
+use crate::rulebook::data::places::{DX, draw_place};
+use crate::rulebook::data::power::draw_power;
+use crate::rulebook::data::reports::draw_report;
+use crate::rulebook::data::zones::draw_zone;
+use crate::rulebook::exchange::{
+    Field, Habits, send_5nn, send_power, send_report, send_serial, send_zone,
+};
+use crate::rulebook::odds::CallerOdds;
+use crate::rulebook::rules::{ContestRules, STYLE_EVEN, Side};
+use crate::rulebook::serial::{SerialModel, WPX_SERIALS};
+use crate::rulebook::{CallerHabits, RunStyle};
 use crate::settings::{TrainingSettings, WPM_MIN};
 use crate::timing::{StationVoice, resolve_station};
 
@@ -433,7 +435,7 @@ impl Caller {
         let skill = rng.usize_in(1, 3) as u32;
         let patience = draw_patience(&mut rng);
         // A contest whose callers send no serial never reads this one.
-        let fit = rules.serials.unwrap_or(super::WPX_SERIALS);
+        let fit = rules.serials.unwrap_or(WPX_SERIALS);
         let serial = SerialModel::draw(fit, run_minutes, &mut rng);
         let pileup = style == RunStyle::Pileup;
         let twice = pileup && rng.f64() < odds.calls_twice;
@@ -1332,7 +1334,7 @@ mod tests {
     use super::*;
     use crate::callsign::{CallSpec, generate_call};
     use crate::contest::ContestKind;
-    use crate::contest::exchange::read_number;
+    use crate::rulebook::exchange::read_number;
     use MessagePart::{Again, Cq, Exchange, HisCall, Tu};
 
     fn rules() -> &'static ContestRules {

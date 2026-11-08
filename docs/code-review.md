@@ -184,7 +184,7 @@ What was checked and found **sound**:
 | C-2 | **UI freeze** | `cw-core/src/contest/bot.rs`, `caller.rs` | "Miss your exchange" at 100 %: Hear a QSO simulated an hour of failed turns synchronously on the UI thread | a caller misses at most once per QSO; the simulation is bounded per QSO (`fbeeac6`, `98f9a22`) |
 | P-2 | **UI freeze** | `src/persist/files.rs` | the first launch over an older `sessions.json` fsynced once per session while the first window waited with no deadline: seconds for 3,000 sessions, most of a minute on a slow disk | the move stores records on up to eight threads at once (3,000 sessions: 2.1 s before, 0.4 s after, here) (`e64dce2`) |
 | P-9 | **boot screen forever** (web) | `src/persist/web.rs`, `src/persist/idb.rs` | an IndexedDB transaction that never settled | the preload gives up once the database has kept it waiting 20 s; that visit keeps the history in page storage, and says so (`211c61f`) |
-| CS-2 | UI stall | `cw-core/src/callsign.rs`, `words.rs` (the sampler in `stats.rs`) | Stats → Sampling rebuilt the prefix tables 6,000 times (≈0.65 s debug, ≈0.24 s release per open) | tables weighed once and kept (callsigns ≈15× faster); word scan made linear (words ≈4× faster) (`3f7c0ba`) |
+| CS-2 | UI stall | `cw-core/src/callsign.rs`, `words.rs` (now `settings/words.rs`; the sampler in `stats.rs`) | Stats → Sampling rebuilt the prefix tables 6,000 times (≈0.65 s debug, ≈0.24 s release per open) | tables weighed once and kept (callsigns ≈15× faster); word scan made linear (words ≈4× faster) (`3f7c0ba`) |
 
 ## 4. Defects fixed
 
@@ -451,7 +451,7 @@ These looked risky and were checked in detail. They are recorded so they need no
 - Float sorts use `total_cmp`, but for two in `cw-core/src/stats.rs` that use `partial_cmp(..).unwrap_or(Equal)` on values that cannot be NaN; none uses `partial_cmp().unwrap()`. Every `f64::clamp` has ordered, non-NaN bounds: most are constants, and the runtime ones are guarded (`finite_within`'s `high.max(low)`, `low.min(high)` in `speed.rs`, the minimum clamped before the maximum in `clamp.rs`, and `normal_within` since `78ea397`). `clamp.rs` replaces non-finite settings before range-clamping, and is idempotent.
 - Weighted picks tolerate empty, NaN and infinite weights. Rejection loops end quickly: callsign redraws are capped at 8, and the serial model's uncapped redraw rejects about 2 % of draws (WPX). `usize_in` tolerates reversed ranges.
 
-- Outside `src/persist`, production code has no `unwrap()` and six `expect` calls, each on an invariant: building the GTK menu (`menus.rs`, two), `ui/endurance.rs`, `audio/stream.rs`, keying HMAC (`sync/seal.rs`) and a contest's row of rules (`cw-core/src/contest/mod.rs`).
+- Outside `src/persist`, production code has no `unwrap()` and six `expect` calls, each on an invariant: building the GTK menu (`menus.rs`, two), `ui/endurance.rs`, `audio/stream.rs`, keying HMAC (`sync/seal.rs`) and a contest's row of rules (`cw-core/src/contest/mod.rs`, now `cw-core/src/rulebook/rules.rs`).
 
 **Concurrency and lock-ups**
 - No `RefCell` or generational-box guard is held across an `.await`, and none is held while the same value is written. This was checked by hand for signals, beyond what clippy's `await_holding_refcell_ref` covers.
@@ -477,7 +477,7 @@ These looked risky and were checked in detail. They are recorded so they need no
 
 ## Appendix B: coverage by module
 
-Every module was read by the ten bug-class sweeps (§1, step 3), which ran over the whole code base. Each was also given to one of the ten subsystem reviews, as below. "Fixes" points to §4.
+Every module was read by the ten bug-class sweeps (§1, step 3), which ran over the whole code base. Each was also given to one of the ten subsystem reviews, as below. "Fixes" points to §4. Modules are named as they were at `ef0ab8f`: cw-core's module split has since moved `rules`, `exchange`, `serial`, `odds` and `data` from `contest/` to `rulebook/`, and `words` and `pool` under `settings/`.
 
 | Area | Modules | Subsystem review | Outcome |
 |---|---|---|---|

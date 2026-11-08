@@ -3,9 +3,8 @@
 
 use super::data::places::{DX, fold_labrador, in_us_or_canada, w_ve};
 use super::exchange::{self, Field, cut_power, cut_serial, cut_zone};
+use super::kind::{ContestKind, TuCall};
 use super::serial::{SPRINT_SERIALS, SerialFit, WPX_SERIALS};
-use super::turn::Sender;
-use super::{ContestKind, TuCall};
 use crate::callsign::{CallSpec, Countries};
 
 /// Your side of the ARRL DX contest, from your call: W/VE works only DX, and
@@ -288,7 +287,7 @@ pub struct Fill<'a> {
 }
 
 /// Every contest that can be run. The others join as their phase ships.
-pub(super) const RULES: &[ContestRules] = &[
+pub(crate) const RULES: &[ContestRules] = &[
     // CQ WPX: `CQ DL1ABC TEST` · `K5XYZ` · `K5XYZ 5NN TT7` · `TU 5NN 214` ·
     // `TU`. The real contest scores one to six points by continent and band;
     // MorseRunner scores one a QSO, and so does Dust, so scores compare with
@@ -713,6 +712,23 @@ pub(super) const RULES: &[ContestRules] = &[
     },
 ];
 
+impl ContestKind {
+    /// Its rules: every contest on the card has its row, as a test checks.
+    pub fn rules(self) -> &'static ContestRules {
+        RULES
+            .iter()
+            .find(|rules| rules.kind == self)
+            .expect("every contest has its row of rules")
+    }
+
+    /// Whether a run of it has a contest score, as every contest but Simple
+    /// QSO and POTA does, which are told by their pace and their copy
+    /// instead.
+    pub fn scored(self) -> bool {
+        self.rules().scoring.is_some()
+    }
+}
+
 /// The greeting of the time of day at `hour`, local time, as operators send
 /// one: `GM` in the morning, from 4, `GA` in the afternoon, from noon, and
 /// `GE` from 6 in the evening on through the night.
@@ -928,6 +944,25 @@ pub struct CallerStyles {
 /// `73 44`, as often as you set ([`super::CallerOdds::farewell_44`]).
 pub const FAREWELLS: [&str; 2] = ["73", "73 44"];
 
+/// Who sends a segment of a turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sender {
+    You,
+    /// A caller, by its number in the run.
+    Caller(u32),
+    /// A station on your frequency that is not calling you, heard through
+    /// the receiver as a caller is: the QRM of rough habits (§5.6 of the
+    /// design). It never answers, and is no caller and no part of a QSO.
+    Qrm,
+}
+
+impl Sender {
+    /// Whether it is a caller: a station that may answer you.
+    pub fn is_caller(self) -> bool {
+        matches!(self, Self::Caller(_))
+    }
+}
+
 impl Scoring {
     /// Whether anything multiplies the points, on either side: all but
     /// Field Day's do, whose score is its QSO points.
@@ -1035,7 +1070,7 @@ impl ContestRules {
 
     /// A field as a session's group keeps it ([`exchange::keyed_token`]):
     /// `sent` where what was typed holds the same value in this contest.
-    pub(super) fn keyed_token(&self, field: Field, sent: &str, typed: &str) -> String {
+    pub(crate) fn keyed_token(&self, field: Field, sent: &str, typed: &str) -> String {
         if self.same(field, sent, typed) {
             sent.to_string()
         } else {
@@ -1067,13 +1102,13 @@ impl ContestRules {
 
     /// Whether callers send the report prefilled, never checked: a report
     /// is part of the exchange, and you do not copy it.
-    pub(super) fn prefills_report(&self, side: Side) -> bool {
+    pub(crate) fn prefills_report(&self, side: Side) -> bool {
         self.rst && !self.copied(side).contains(&Field::Rst)
     }
 
     /// A long CQ from `his_call`, a station on your frequency that is not
     /// calling you.
-    pub(super) fn long_cq_text(&self, his_call: &str) -> String {
+    pub(crate) fn long_cq_text(&self, his_call: &str) -> String {
         squeeze(&self.long_cq.replace("{his}", his_call))
     }
 
@@ -1172,7 +1207,7 @@ impl ContestRules {
     /// How a caller signing `his_call` answers your CQ, as `my_call`. One
     /// that calls `twice` sends its call twice where the answer has it
     /// once; an answer that sends it twice already is sent as it is.
-    pub(super) fn answer_text(&self, my_call: &str, his_call: &str, twice: bool) -> String {
+    pub(crate) fn answer_text(&self, my_call: &str, his_call: &str, twice: bool) -> String {
         let his = if twice && self.answer.matches("{his}").count() == 1 {
             format!("{his_call} {his_call}")
         } else {
@@ -1195,7 +1230,7 @@ impl ContestRules {
 
     /// The same, as the `reply`th of its styles sends it where a caller
     /// keeps to one ([`Styles::reply`]).
-    pub(super) fn their_reply_text(
+    pub(crate) fn their_reply_text(
         &self,
         side: Side,
         reply: Option<usize>,
@@ -1239,7 +1274,7 @@ impl ContestRules {
     /// A caller's first exchange to you, `my_call`, `body`, after the word
     /// the contest leads it with, the `lead`th of [`Self::their_lead`];
     /// alone in a contest that leads it with none.
-    pub(super) fn their_first_exchange(&self, lead: usize, my_call: &str, body: &str) -> String {
+    pub(crate) fn their_first_exchange(&self, lead: usize, my_call: &str, body: &str) -> String {
         let lead = self.their_lead.get(lead).map_or("", |(lead, _)| *lead);
         self.their_first_exchange_led(lead, my_call, body)
     }
@@ -1275,12 +1310,12 @@ impl ContestRules {
 
     /// The words a caller keeping to the `reply`th of its styles starts
     /// with ([`Styles::reply`]); none where callers keep to none.
-    pub(super) fn reply_lead(&self, reply: usize) -> Option<&'static str> {
+    pub(crate) fn reply_lead(&self, reply: usize) -> Option<&'static str> {
         self.their_styles?.reply(reply).map(|(lead, _)| lead)
     }
 
     /// The same, led by `lead`, a style's own ([`Self::reply_lead`]).
-    pub(super) fn their_first_exchange_led(&self, lead: &str, my_call: &str, body: &str) -> String {
+    pub(crate) fn their_first_exchange_led(&self, lead: &str, my_call: &str, body: &str) -> String {
         let lead = lead.replace("{my}", my_call);
         squeeze(&format!("{lead} {body}"))
     }
@@ -1288,7 +1323,7 @@ impl ContestRules {
     /// Which of [`Self::their_lead`] a caller leads with, for `draw`, drawn
     /// evenly from nothing up to one: each takes its share of the range, in
     /// order, so the first is the one drawn below its share.
-    pub(super) fn lead_at(&self, draw: f64) -> usize {
+    pub(crate) fn lead_at(&self, draw: f64) -> usize {
         let mut upto = 0.0;
         for (at, (_, share)) in self.their_lead.iter().enumerate() {
             upto += share;
@@ -1331,7 +1366,7 @@ impl ContestRules {
     /// Which of its replies a caller keeps to, the knob standing `at` and
     /// the replies `off` sent by none, for `draw`, drawn evenly from nothing
     /// up to one; none where callers do not vary.
-    pub(super) fn reply_at(&self, draw: f64, at: [f64; 2], off: &[usize]) -> Option<usize> {
+    pub(crate) fn reply_at(&self, draw: f64, at: [f64; 2], off: &[usize]) -> Option<usize> {
         let shares = self.reply_shares(at, off);
         let mut upto = 0.0;
         for (reply, share) in shares.iter().enumerate() {
@@ -2433,7 +2468,8 @@ mod tests {
                 let qso = rules.example_qso(side, &k1abc);
                 assert_eq!(qso[0].1, rules.cq_text(&k1abc), "{:?}", rules.kind);
                 assert_eq!(qso[4].0, you, "{:?}", rules.kind);
-                // What they send reads as what you copy.
+                // What they send reads as what you copy. The parser is
+                // contest's: rulebook's one use of contest, in a test.
                 let reading = crate::contest::parse_exchange(rules, side, &qso[3].1);
                 let copied: Vec<Field> = reading.fields.iter().map(|read| read.field).collect();
                 assert_eq!(copied, rules.copied(side), "{:?}", rules.kind);
@@ -2593,6 +2629,29 @@ mod tests {
         }
     }
 
+    /// Every contest scores but Simple QSO and POTA, which are no contests.
+    #[test]
+    fn every_contest_but_simple_qso_and_pota_is_scored() {
+        for kind in ContestKind::ALL {
+            let unscored = matches!(kind, ContestKind::SimpleQso | ContestKind::Pota);
+            assert_eq!(kind.scored(), !unscored, "{kind:?}");
+        }
+    }
+
+    /// Every contest on the card has its row of rules, and one only.
+    #[test]
+    fn every_contest_has_its_rules() {
+        assert_eq!(RULES.len(), ContestKind::ALL.len());
+        for kind in ContestKind::ALL {
+            assert_eq!(kind.rules().kind, kind);
+            assert!(!kind.label().is_empty());
+        }
+        assert_eq!(ContestKind::default(), ContestKind::Wpx);
+        assert_eq!(ContestKind::Wpx.label(), "CQ WPX");
+        assert_eq!(ContestKind::Pota.label(), "POTA");
+        assert_eq!(ContestKind::from_name("pota"), Some(ContestKind::Pota));
+    }
+
     #[test]
     fn your_side_comes_from_your_call() {
         for (call, side) in [
@@ -2641,9 +2700,9 @@ mod tests {
     /// callers send.
     #[test]
     fn real_habits_are_said_by_the_numbers_you_copy() {
-        use crate::contest::CallerHabits::Real;
-        use crate::contest::exchange::{send_power, send_report, send_serial, send_zone};
         use crate::rng::SplitMix64;
+        use crate::rulebook::CallerHabits::Real;
+        use crate::rulebook::exchange::{send_power, send_report, send_serial, send_zone};
         let said = |kind: ContestKind, side| kind.rules().real_numbers(side);
         assert_eq!(
             said(ContestKind::Wpx, Side::Dx).as_deref(),

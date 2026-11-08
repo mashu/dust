@@ -20,7 +20,7 @@ use super::filter::{FilterDesign, ReceiverFilter};
 use super::knee::agc_knee;
 use super::memo::{Exact, LastAnswer};
 use super::output::SOFT_LIMIT_KNEE;
-use crate::contest::RunStyle;
+use crate::rulebook::RunStyle;
 use crate::settings::{
     AgcDecay, CharSetMode, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, STATIONS_MAX, STATIONS_MIN,
     STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, WPM_MAX, WPM_MIN,
@@ -172,6 +172,18 @@ pub fn full_volume_gain(settings: &TrainingSettings) -> f64 {
     alone / stations_together(settings)
 }
 
+impl TrainingSettings {
+    /// The receiver's AF gain: what the output stage multiplies the band and
+    /// the stations by before the limiter, that share of the gain full
+    /// volume is for this receiver ([`full_volume_gain`]), at full RF gain.
+    /// Your own messages and the paddle's sidetone are monitored, not
+    /// received, and are set at the level they are heard at, turned down by
+    /// the volume alone.
+    pub fn af_gain(&self) -> f64 {
+        self.master_volume() * full_volume_gain(self)
+    }
+}
+
 /// How many times as loud as the loudest station alone the stations that
 /// can call at once come to together, at most: one with the AGC on, whose
 /// ceiling rides their sum down, and one for a station alone. With it off,
@@ -286,8 +298,8 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::band::PILEUP_CALLER_SEPARATION_HZ;
     use crate::settings::FilterShape;
-    use crate::timing::PILEUP_CALLER_SEPARATION_HZ;
 
     fn gain(edit: impl FnOnce(&mut TrainingSettings)) -> f64 {
         let mut settings = TrainingSettings::default();

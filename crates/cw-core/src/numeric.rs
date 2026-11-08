@@ -12,6 +12,21 @@ pub(crate) fn median(values: &[f64]) -> Option<f64> {
     }
 }
 
+/// An amplitude ratio from decibels.
+pub fn db_to_gain(db: f64) -> f64 {
+    10f64.powf(db / 20.0)
+}
+
+/// Decibels from an amplitude ratio.
+pub fn gain_to_db(gain: f64) -> f64 {
+    20.0 * gain.log10()
+}
+
+/// `value`, or `fallback` where it is not a number at all.
+pub fn finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() { value } else { fallback }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

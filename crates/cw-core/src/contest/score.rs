@@ -19,12 +19,12 @@
 use std::collections::BTreeSet;
 
 use super::check::QsoCheck;
-use super::data::places::{DX, fold_labrador, home_country, w_ve_country, w_ve_place};
-use super::data::zones::home_continent;
-use super::exchange::Field;
-use super::rules::{Multiplier, Points, Scoring, Side};
-use super::{MS_PER_HOUR, MS_PER_MINUTE};
 use crate::callsign::wpx_prefix;
+use crate::rulebook::data::places::{DX, fold_labrador, home_country, w_ve_country, w_ve_place};
+use crate::rulebook::data::zones::home_continent;
+use crate::rulebook::exchange::Field;
+use crate::rulebook::rules::{Multiplier, Points, Scoring, Side};
+use crate::rulebook::{MS_PER_HOUR, MS_PER_MINUTE};
 
 /// Where you are, as a contest's score counts it: your side, and your
 /// country and continent, by the call table's keys (`DL`, `EU`), as

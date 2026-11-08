@@ -65,9 +65,9 @@ use super::filter::{FilterDesign, passband_edges};
 use super::qsb::MULTIPATH_RATES;
 use super::random::Draw;
 use crate::callsign::{country_of, generate_callsign};
-use crate::contest::data::names::draw_name;
 use crate::morse::morse_for;
 use crate::rng::Rng;
+use crate::rulebook::data::names::draw_name;
 use crate::settings::{BandSettings, STATIONS_MAX, STATIONS_MIN};
 
 /// Transmitters that can be on the air at once, carriers included: enough

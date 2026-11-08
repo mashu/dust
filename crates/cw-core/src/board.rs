@@ -41,8 +41,9 @@
 //! the board with it. Two equal scores are placed in the order they were set:
 //! the first to reach a score holds the higher place, as on any record list.
 
-use crate::contest::{ContestKind, StoredLog};
+use crate::contest::StoredLog;
 use crate::numeric::median;
+use crate::rulebook::ContestKind;
 use crate::score::{count_errors, count_valid_letters, error_factor, expected_error_factor};
 use crate::session::SessionResult;
 use crate::settings::CharSetMode;

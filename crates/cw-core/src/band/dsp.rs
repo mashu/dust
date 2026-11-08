@@ -3,20 +3,7 @@
 
 use std::f64::consts::PI;
 
-/// An amplitude ratio from decibels.
-pub fn db_to_gain(db: f64) -> f64 {
-    10f64.powf(db / 20.0)
-}
-
-/// Decibels from an amplitude ratio.
-pub fn gain_to_db(gain: f64) -> f64 {
-    20.0 * gain.log10()
-}
-
-/// `value`, or `fallback` where it is not a number at all.
-pub fn finite_or(value: f64, fallback: f64) -> f64 {
-    if value.is_finite() { value } else { fallback }
-}
+pub use crate::numeric::{db_to_gain, finite_or, gain_to_db};
 
 /// One second-order section, (b₀ + b₁z⁻¹ + b₂z⁻²) / (1 + a₁z⁻¹ + a₂z⁻²), run
 /// in transposed direct form II.

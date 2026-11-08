@@ -12,13 +12,14 @@
 //! that beats. How many the filter has room for is its capacity; the rest
 //! wait.
 
-use super::RunStyle;
-use crate::band::FilterDesign;
+use crate::band::{
+    FilterDesign, PILEUP_CALLER_SEPARATION_HZ, PILEUP_SKIRT_DB, free_room, pick_in_room,
+};
 use crate::rng::Rng;
+use crate::rulebook::RunStyle;
 use crate::settings::{
     PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, TrainingSettings,
 };
-use crate::timing::{PILEUP_CALLER_SEPARATION_HZ, PILEUP_SKIRT_DB, free_room, pick_in_room};
 
 /// How far either side of the receiver's centre a single caller sits
 /// (`DxStn.pas:102-105`).

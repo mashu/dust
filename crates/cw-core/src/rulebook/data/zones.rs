@@ -138,7 +138,7 @@ pub(crate) fn zone_of(call: &str, place: Option<&str>) -> Option<u32> {
 /// state's or province's ([`draw_place`]), a split place's zone drawn by
 /// its shares; elsewhere its prefix's or its country's. None for a call
 /// Dust cannot place.
-pub(in crate::contest) fn draw_zone(call: &str, rng: &mut impl Rng) -> Option<u32> {
+pub(crate) fn draw_zone(call: &str, rng: &mut impl Rng) -> Option<u32> {
     match draw_place(call, true, rng) {
         Some(place) => draw_place_zone(place, rng),
         None => country_zone(call),

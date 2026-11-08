@@ -8,15 +8,17 @@
 #![cfg(test)]
 
 use crate::auto_level::apply_auto_level;
+use crate::band::resolve_pileup;
 use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
 use crate::contest::bot::{Copied, copy_of};
 use crate::contest::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
+use crate::mono::whole_ms;
 use crate::recognition::{CharTimes, KeyLog, Keys, copy_times, recognise};
 use crate::score::MIN_RESPONSE_MS_PER_CHAR;
-use crate::session::{SendStart, whole_ms};
-use crate::timing::{SEND_RELEASE_SEC, resolve_pileup};
+use crate::session::SendStart;
+use crate::timing::SEND_RELEASE_SEC;
 use crate::{
     Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CallerHabits, CharSamplingState,
     CharSetMode, ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,

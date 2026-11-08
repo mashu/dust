@@ -9,15 +9,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::rulebook::HUNTER_DX_PERCENT;
+
 use super::{CharSetMode, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
 use crate::callsign::{CallSpec, parse_callsign};
-use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
-use crate::contest::data::sections::{fold_yukon, listed_section};
-use crate::contest::data::zones::zone_of;
-use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{
-    CallerHabits, CallerOdds, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall,
-};
+use crate::rulebook::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
+use crate::rulebook::data::sections::{fold_yukon, listed_section};
+use crate::rulebook::data::zones::zone_of;
+use crate::rulebook::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
+use crate::rulebook::{CallerHabits, CallerOdds, ContestKind, Field, RunStyle, Side, TuCall};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -30,7 +30,7 @@ pub const MY_WPM_MAX: u32 = WPM_MAX as u32;
 
 /// How loud you hear your own messages, in decibels from the loudest, as
 /// MorseRunner's self-monitor level is set (`MonLevel`, -60 to 0 dB): at the
-/// top, [`MONITOR_LEVEL`]; at the bottom, nothing at all.
+/// top, [`crate::MONITOR_LEVEL`]; at the bottom, nothing at all.
 pub const MY_SENDING_MAX_DB: i32 = 0;
 pub const MY_SENDING_OFF_DB: i32 = -60;
 
@@ -123,7 +123,7 @@ pub struct ContestSettings {
     /// the contest card, with the run style.
     pub contest_tu_call: TuCall,
     /// How callers reply in each contest whose callers vary
-    /// ([`crate::contest::ContestRules::varies`]), by the contest's name:
+    /// ([`crate::rulebook::ContestRules::varies`]), by the contest's name:
     /// where you put the knob in its shape of replies and which you turned
     /// off. A contest left out is as heard on the air. Set on the contest
     /// card.
@@ -153,7 +153,7 @@ pub struct ContestSettings {
     #[serde(deserialize_with = "forgiving_wpm")]
     pub my_wpm: u32,
     /// How loud you hear your own messages, in decibels from the loudest,
-    /// [`MONITOR_LEVEL`]; [`MY_SENDING_OFF_DB`] is silent. Set on the Tone
+    /// [`crate::MONITOR_LEVEL`]; [`MY_SENDING_OFF_DB`] is silent. Set on the Tone
     /// and volume card.
     #[serde(deserialize_with = "forgiving_sending")]
     pub my_sending_db: i32,
@@ -319,10 +319,6 @@ fn forgiving_sending<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Resul
     forgiving_number(deserializer, |db| db as i32, MY_SENDING_DEFAULT_DB)
 }
 
-/// How many POTA hunters are DX until you set it, in percent: a choice,
-/// not a count, so that a run of a few minutes has some to copy.
-pub const HUNTER_DX_PERCENT: u32 = 25;
-
 /// Where you put the knob in a contest's shape of caller styles, across
 /// and down from the middle, and the replies, by their corners from the top
 /// right, that you turned off there.
@@ -380,17 +376,6 @@ impl ContestSettings {
         {
             self.caller_styles.remove(kind.name());
         }
-    }
-
-    /// How loud your own messages play, as a peak of full scale: the
-    /// monitor's level, [`MONITOR_LEVEL`], turned down by your sending's
-    /// decibels, and nothing at all at [`MY_SENDING_OFF_DB`].
-    pub fn sending_level(&self) -> f64 {
-        if self.my_sending_db <= MY_SENDING_OFF_DB {
-            return 0.0;
-        }
-        let db = f64::from(self.my_sending_db.min(MY_SENDING_MAX_DB));
-        MONITOR_LEVEL * 10f64.powf(db / 20.0)
     }
 
     /// How long a run lasts at most, in minutes: what it was set to, or the
@@ -818,6 +803,7 @@ pub(super) fn clean_call(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contest::MONITOR_LEVEL;
     use crate::settings::{RangeSetting, SettingsSection};
 
     #[test]

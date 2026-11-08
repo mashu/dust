@@ -1,6 +1,6 @@
 //! The operator at the other end.
 
-use crate::band::finite_or;
+use crate::numeric::finite_or;
 use crate::rng::Rng;
 use crate::settings::TrainingSettings;
 
