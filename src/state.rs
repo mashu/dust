@@ -4,12 +4,14 @@
 pub mod answer;
 pub mod entry;
 mod keep;
+pub mod live;
 pub mod preview;
 pub mod sync;
 
 pub use answer::{AnswerOutbox, TypedAnswer};
 pub use entry::{ContestEntry, typed_len_max};
 pub use keep::{keep_and_show, keep_cut_off, settle_level};
+pub use live::{Live, LiveContest, LiveSession};
 pub use preview::{Dialogue, DialogueLine, HeardGroup, Preview};
 pub use sync::SyncStatus;
 
@@ -37,7 +39,6 @@ use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
 };
 use crate::player::{AudioError, BackendFactory, Player};
-use crate::session_runtime::Live;
 use crate::time::{POLL_MS, now_ms, sleep_ms};
 
 /// How long after the store last refused what the app has yet to store it

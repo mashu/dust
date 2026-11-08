@@ -12,26 +12,18 @@
 //! whichever is live.
 
 use cw_core::{
-    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, Group, MonoMs, Sampler,
+    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, Group, MonoMs,
     SessionEffect, SessionEvent, SessionId, SessionMachine, SplitMix64, Transmission,
     complete_session, generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::contest_runtime::{LiveContest, send_run_event, start_run};
-use crate::persist::{OpenSession, SoFar};
+use crate::contest_runtime::{send_run_event, start_run};
+use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::{AppCtx, Preview, Screen, keep_and_show, settle_level};
+use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, keep_and_show, settle_level};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
-
-/// What has the training screen: a session of groups, or a contest run.
-/// Each is a machine of some size, and only one is ever live, so each is
-/// boxed.
-pub enum Live {
-    Groups(Box<LiveSession>),
-    Contest(Box<LiveContest>),
-}
 
 impl Live {
     /// The session of groups, if that is what is live.
@@ -59,25 +51,6 @@ const HEARTBEAT_MS: u32 = 250;
 /// held every task back. The heartbeat comes every quarter second, and a
 /// busy page delays one by far less.
 const HEARTBEAT_GAP_MS: u64 = 2_000;
-
-/// A session in progress: the machine that decides it, the stations it is
-/// sent by, and its hold on the audio.
-pub struct LiveSession {
-    machine: SessionMachine<Sampler>,
-    /// Where every group's stations are drawn from. Drawn afresh for each
-    /// session, so no two sessions — in one launch or across launches — hear
-    /// the same operators.
-    stations: SplitMix64,
-    lease: Lease,
-    /// When the app was last seen running the session: its last heartbeat,
-    /// or the last news it heard.
-    last_seen: MonoMs,
-    /// The local day it started: the day it counts towards, though it may
-    /// end after midnight.
-    started_on: String,
-    /// How it is marked open, for what it has done to be added to.
-    mark: OpenSession,
-}
 
 impl LiveSession {
     /// How many of its groups are answered.
@@ -613,7 +586,7 @@ fn finish_session(ctx: AppCtx) -> bool {
 mod tests {
     use super::*;
     use crate::audio::fake::{Behaviour, Call};
-    use crate::persist::{CutOff, Store};
+    use crate::persist::{CutOff, OpenSession, Store};
     use crate::state::answer::Entry;
     use crate::state::{Finished, Notice, keep_cut_off};
     use crate::testing::{Harness, run, test_settings};

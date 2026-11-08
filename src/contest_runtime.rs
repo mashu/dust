@@ -11,44 +11,21 @@
 
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, EntryField, MonoMs, OpKey, PauseWhy,
-    Sampler, TrainingSettings, Turn, plan_turn,
+    TrainingSettings, Turn, plan_turn,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::page::control_id;
-use crate::persist::{OpenSession, SoFar};
+use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::session_runtime::Live;
-use crate::state::{AppCtx, Finished, Preview, Said, Screen, keep_and_show};
+use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen, keep_and_show};
 use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
 
 /// A gap this long between two of the run screen's ticks is time the app
 /// was not running: a phone locked, a process put on hold. The ticks come
 /// every quarter second, and a busy page delays one by far less.
 const HEARTBEAT_GAP_MS: u64 = 2_000;
-
-/// A run in progress: the machine that decides it, the settings its turns
-/// are played with, and its hold on the audio.
-pub struct LiveContest {
-    machine: ContestMachine<Sampler>,
-    /// The settings the run started with, fading off. Each caller brings a
-    /// fade of its own, laid into its tones ([`plan_turn`]), so no send has
-    /// fading laid on as it plays, your message least of all; and the band
-    /// has no fading in it, so it plays on, never rebuilt.
-    sound: TrainingSettings,
-    lease: Lease,
-    /// When the run screen's clock last ticked, once it has.
-    last_tick: Option<MonoMs>,
-    /// What the run has to say to a screen reader, held while anything is
-    /// on the air so that speech never covers the Morse.
-    unsaid: Vec<String>,
-    /// The local day it started: the day it counts towards, though it may
-    /// end after midnight.
-    started_on: String,
-    /// How it is marked open, for what it has done to be added to.
-    mark: OpenSession,
-}
 
 /// Start a run of `settings`, clamped already: the training screen comes up
 /// on its countdown, or on its first CQ. A run that cannot start says what
