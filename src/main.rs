@@ -31,7 +31,6 @@ mod playback;
 mod player;
 mod routes;
 mod session_runtime;
-mod stall_log;
 mod state;
 mod sync;
 // A phone's Back and a browser's; tests press it on a page of their own.
@@ -321,7 +320,7 @@ fn main() {
         #[cfg(all(target_os = "android", not(test)))]
         {
             kick_the_event_loop();
-            stall_log::start();
+            time::stall_log::start();
         }
         // The history is read on a thread of its own while the webview
         // starts up. Android hands the app its folder before `main` runs.

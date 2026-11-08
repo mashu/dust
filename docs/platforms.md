@@ -266,7 +266,7 @@ the loop one empty turn. It does not depend on the patch, and can stay
 when the patch goes.
 
 Should the app stand still anyway, with the audio held, it says so in the
-system log ([`src/stall_log.rs`](../src/stall_log.rs)). Every wait the
+system log ([`src/time/stall_log.rs`](../src/time/stall_log.rs)). Every wait the
 app's tasks make goes through `sleep_ms`, which notes when the task is due
 again, and a claim of the audio is due at once. A thread looks every half
 second, and the first time it finds the app more than 1.5 seconds past due
