@@ -2,7 +2,7 @@
 //! the settings screen draws.
 
 use super::dot_seconds;
-use crate::band::finite_or;
+use crate::numeric::finite_or;
 use crate::settings::TrainingSettings;
 
 /// Points per second on a keying envelope's curve. The shortest edge the

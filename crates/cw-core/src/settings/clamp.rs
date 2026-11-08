@@ -100,7 +100,7 @@ impl TrainingSettings {
         b.qsb_depth = b.qsb_depth.clamp(0.0, 1.0);
         b.qsb_rate_hz = b.qsb_rate_hz.clamp(QSB_RATE_MIN_HZ, QSB_RATE_MAX_HZ);
         b.qrn_level = b.qrn_level.clamp(0.0, 1.0);
-        b.noise_level = crate::band::whole_db_noise_level(b.noise_level.clamp(0.0, 1.0));
+        b.noise_level = super::whole_db_noise_level(b.noise_level.clamp(0.0, 1.0));
         b.rf_gain_db = b.rf_gain_db.clamp(RF_GAIN_MIN_DB, RF_GAIN_MAX_DB);
 
         let a = &mut self.auto_level;

@@ -476,6 +476,25 @@ pub const PILEUP_LEVEL_MAX_DB: f64 = 20.0;
 pub const RF_GAIN_MIN_DB: f64 = -30.0;
 pub const RF_GAIN_MAX_DB: f64 = 0.0;
 
+/// Signal-to-noise in the reference bandwidth at each end of the noise
+/// control. Forty decibels is a hiss you hear only between elements; two is
+/// a station barely out of the noise, where copying is genuinely hard but a
+/// trained ear still gets most of it.
+pub(crate) const NOISE_SNR_QUIET_DB: f64 = 40.0;
+pub(crate) const NOISE_SNR_LOUD_DB: f64 = 2.0;
+
+/// How far the noise control moves for one decibel of signal-to-noise. The
+/// control is linear in decibels ([`crate::band::calibration::noise_floor_snr_db`]), so this is the
+/// step it moves in and the levels it is held to: every step of the slider
+/// is one decibel, wherever it stands.
+pub const NOISE_LEVEL_PER_DB: f64 = 1.0 / (NOISE_SNR_QUIET_DB - NOISE_SNR_LOUD_DB);
+
+/// `level` held to the nearest whole decibel of signal-to-noise, as the
+/// control moves it.
+pub fn whole_db_noise_level(level: f64) -> f64 {
+    (level / NOISE_LEVEL_PER_DB).round() * NOISE_LEVEL_PER_DB
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BandSettings {
@@ -586,7 +605,7 @@ impl Default for BandSettings {
             qrn_enabled: true,
             qrn_level: 0.25,
             noise_enabled: true,
-            noise_level: crate::band::NOISE_LEVEL_PER_DB,
+            noise_level: NOISE_LEVEL_PER_DB,
             rf_gain_db: RF_GAIN_MAX_DB,
             agc_enabled: true,
             agc_decay: AgcDecay::Fast,

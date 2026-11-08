@@ -10,8 +10,10 @@
 
 use std::f64::consts::SQRT_2;
 
+pub use crate::settings::{NOISE_LEVEL_PER_DB, whole_db_noise_level};
+
 use super::dsp::db_to_gain;
-use crate::settings::BandSettings;
+use crate::settings::{BandSettings, NOISE_SNR_LOUD_DB, NOISE_SNR_QUIET_DB};
 use crate::timing::DEFAULT_TARGET_GAIN;
 
 /// Key-down RMS of a station at full level: what every signal-to-noise figure
@@ -26,25 +28,6 @@ pub const REFERENCE_BANDWIDTH_HZ: f64 = 500.0;
 /// bandwidth. The static and the stations are set against this floor whether
 /// or not the floor itself is switched on.
 pub const REFERENCE_NOISE_LEVEL: f64 = 0.5;
-
-/// Signal-to-noise in the reference bandwidth at each end of the noise
-/// control. Forty decibels is a hiss you hear only between elements; two is
-/// a station barely out of the noise, where copying is genuinely hard but a
-/// trained ear still gets most of it.
-const NOISE_SNR_QUIET_DB: f64 = 40.0;
-const NOISE_SNR_LOUD_DB: f64 = 2.0;
-
-/// How far the noise control moves for one decibel of signal-to-noise. The
-/// control is linear in decibels ([`noise_floor_snr_db`]), so this is the
-/// step it moves in and the levels it is held to: every step of the slider
-/// is one decibel, wherever it stands.
-pub const NOISE_LEVEL_PER_DB: f64 = 1.0 / (NOISE_SNR_QUIET_DB - NOISE_SNR_LOUD_DB);
-
-/// `level` held to the nearest whole decibel of signal-to-noise, as the
-/// control moves it.
-pub fn whole_db_noise_level(level: f64) -> f64 {
-    (level / NOISE_LEVEL_PER_DB).round() * NOISE_LEVEL_PER_DB
-}
 
 /// How loud the band's noise floor is set, from 0 to 1: nothing when it is
 /// switched off, whatever its level says.

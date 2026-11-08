@@ -172,6 +172,18 @@ pub fn full_volume_gain(settings: &TrainingSettings) -> f64 {
     alone / stations_together(settings)
 }
 
+impl TrainingSettings {
+    /// The receiver's AF gain: what the output stage multiplies the band and
+    /// the stations by before the limiter, that share of the gain full
+    /// volume is for this receiver ([`full_volume_gain`]), at full RF gain.
+    /// Your own messages and the paddle's sidetone are monitored, not
+    /// received, and are set at the level they are heard at, turned down by
+    /// the volume alone.
+    pub fn af_gain(&self) -> f64 {
+        self.master_volume() * full_volume_gain(self)
+    }
+}
+
 /// How many times as loud as the loudest station alone the stations that
 /// can call at once come to together, at most: one with the AGC on, whose
 /// ceiling rides their sum down, and one for a station alone. With it off,

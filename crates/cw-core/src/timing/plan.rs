@@ -8,8 +8,8 @@ use super::pileup::Interferer;
 use super::pileup::Transmission;
 use super::station::StationVoice;
 use super::{clamp_extra_spacing, dot_seconds, spacing_unit_sec};
-use crate::band::finite_or;
 use crate::morse::morse_for;
+use crate::numeric::finite_or;
 use crate::settings::TrainingSettings;
 
 /// The level of a station at full volume, before the receiver.
