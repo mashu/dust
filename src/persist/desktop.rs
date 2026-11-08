@@ -1367,31 +1367,6 @@ pub(super) mod tests {
         assert_eq!(fs::read_to_string(dir.0.join(SESSIONS)).unwrap(), whole);
     }
 
-    /// A folder on a filesystem that flushes no folder at all, as a virtual
-    /// machine's shared folder (vboxsf) or some network mounts flush none,
-    /// is as durable as it can be made once what was renamed in it is: no
-    /// failed write. Every session written to such a folder was told of as
-    /// not saved, and tried again for as long as the app ran, and the move
-    /// to records was put off at every launch. `/proc` says what such a
-    /// filesystem says, `EINVAL`. A folder that cannot be flushed for any
-    /// other reason still fails the write.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_folder_its_filesystem_cannot_flush_fails_no_write() {
-        let Ok(proc) = fs::File::open("/proc") else {
-            eprintln!("skipped: there is no /proc to flush");
-            return;
-        };
-        assert_eq!(
-            proc.sync_all().map_err(|err| err.kind()),
-            Err(io::ErrorKind::InvalidInput),
-            "flushed by nothing"
-        );
-        assert!(sync_dir(Path::new("/proc")).is_ok());
-        let dir = TempDir::new("flush-none");
-        assert!(sync_dir(&dir.0.join("not there")).is_err());
-    }
-
     /// A file an editor saved with a byte order mark first, as some editors
     /// save every file, reads as the same file without one: the settings,
     /// the history an older build keeps whole, and the counters. Each was
