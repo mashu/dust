@@ -484,7 +484,7 @@ pub(crate) const NOISE_SNR_QUIET_DB: f64 = 40.0;
 pub(crate) const NOISE_SNR_LOUD_DB: f64 = 2.0;
 
 /// How far the noise control moves for one decibel of signal-to-noise. The
-/// control is linear in decibels ([`crate::band::calibration::noise_floor_snr_db`]), so this is the
+/// control is linear in decibels ([`crate::band::noise_floor_snr_db`]), so this is the
 /// step it moves in and the levels it is held to: every step of the slider
 /// is one decibel, wherever it stands.
 pub const NOISE_LEVEL_PER_DB: f64 = 1.0 / (NOISE_SNR_QUIET_DB - NOISE_SNR_LOUD_DB);

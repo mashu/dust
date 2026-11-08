@@ -61,6 +61,8 @@ mod source;
 // What the players, the settings screen and the pile-up planner use. The rest
 // is the band's own business.
 pub use agc::{AGC_LOOKAHEAD_SEC, agc_decay_sec, agc_lookahead_samples};
+#[cfg(doc)]
+pub(crate) use calibration::noise_floor_snr_db;
 pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
 pub use dsp::{db_to_gain, gain_to_db};
 pub(crate) use filter::mirror_hz;
