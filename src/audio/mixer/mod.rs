@@ -24,7 +24,7 @@ mod sidetone;
 
 #[cfg(doc)]
 use cw_core::band::AGC_LOOKAHEAD_SEC;
-use cw_core::band::{AudioHighPass, Receiver, agc_lookahead_samples};
+use cw_core::band::{AudioHighPass, DelayLine, Receiver, agc_lookahead_samples};
 
 use crate::audio::shape::{BAND_FADE_SEC, GATE_RAMP_SEC, Gains};
 
@@ -96,10 +96,8 @@ pub struct Mixer {
     /// hears every sample as it comes, through the RF gain as it stands
     /// then, and everything is played that much later at the gain it has by
     /// then, as the band is. Room for the highest rate, made once, of which
-    /// the rate in use takes `late_len`.
-    late: Vec<SendSample>,
-    late_len: usize,
-    late_at: usize,
+    /// the rate in use takes its look-ahead.
+    late: DelayLine<SendSample>,
     /// What the send rode on the band going out, last it was on the air,
     /// while the band coming in has still to come in all the way: the send
     /// eases on from there, not from no band at all.
@@ -145,9 +143,7 @@ impl Mixer {
             gains: Gains::UNITY,
             gains_asked: Gains::UNITY,
             af: Glide::at(1.0),
-            late: vec![SendSample::default(); late_room(sample_rate)],
-            late_len: agc_lookahead_samples(sample_rate),
-            late_at: 0,
+            late: DelayLine::with_room(late_room(sample_rate), agc_lookahead_samples(sample_rate)),
             handed_over: None,
         }
     }
@@ -185,7 +181,7 @@ impl Mixer {
     /// How long after it starts a send goes to the output, in seconds: the
     /// receiver's look-ahead.
     pub fn lookahead_sec(&self) -> f64 {
-        self.late_len as f64 / f64::from(self.sample_rate)
+        self.late.len() as f64 / f64::from(self.sample_rate)
     }
 
     /// How far behind the output the last callback found the speaker, in
@@ -299,8 +295,8 @@ impl Mixer {
                 // Nothing to carry over: the AGC hears what is still to be
                 // played, oldest first, so the send waiting out the
                 // look-ahead is played at the gain it has for it.
-                for k in 0..self.late_len {
-                    new.hear_ahead(self.late[(self.late_at + k) % self.late_len].heard);
+                for waiting in self.late.waiting() {
+                    new.hear_ahead(waiting.heard);
                 }
             }
         }
@@ -369,11 +365,11 @@ impl Mixer {
         self.gains = self.gains_asked;
         self.af = Glide::at(self.gains_asked.af);
         self.audio = AudioHighPass::new(self.sample_rate);
-        self.late_len = agc_lookahead_samples(self.sample_rate);
         // On the UI thread, before the stream at the new rate starts.
-        self.late
-            .resize(late_room(self.sample_rate), SendSample::default());
-        self.late_at = 0;
+        self.late.reset(
+            late_room(self.sample_rate),
+            agc_lookahead_samples(self.sample_rate),
+        );
         self.handed_over = None;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
@@ -387,7 +383,7 @@ impl Mixer {
     pub fn drop_sends(&mut self, swept: &mut Swept) {
         swept.sends.append(&mut self.retiring);
         swept.sends.extend(self.send.take());
-        self.late.fill(SendSample::default());
+        self.late.clear();
     }
 
     /// Pass over `samples` unheard, as a stream fallen far behind its clock
@@ -402,7 +398,7 @@ impl Mixer {
     /// have. The band picks up where it was.
     #[cfg(any(feature = "web", test))]
     pub fn skip(&mut self, samples: u64, swept: &mut Swept) {
-        let worked = samples.min(self.late_len as u64);
+        let worked = samples.min(self.late.len() as u64);
         let passed = samples - worked;
         if passed > 0 {
             if let Some(send) = self.send.take_if(|send| !send.skip_wait(passed)) {
@@ -412,7 +408,7 @@ impl Mixer {
                 .sends
                 .extend(self.retiring.extract_if(.., |send| !send.skip_wait(passed)));
             // Played in what was passed over.
-            self.late.fill(SendSample::default());
+            self.late.clear();
         }
         let mut unheard = vec![0.0; worked as usize];
         self.render(&mut unheard, 0);
@@ -473,8 +469,7 @@ impl Mixer {
                 heard: coming.heard * now.rf,
                 ..coming
             };
-            let send = std::mem::replace(&mut self.late[self.late_at], heard_now);
-            self.late_at = (self.late_at + 1) % self.late_len;
+            let send = self.late.push(heard_now);
             let mut background = 0.0;
             // What the send rides: the AGC's gain at the AF gain of the band
             // riding it.
@@ -549,7 +544,7 @@ impl Mixer {
         // buffer: by the time the callback returns, only what was played a
         // whole buffer before that has been heard.
         for send in self.send.iter().chain(&self.retiring) {
-            send.settle(latency + self.late_len + out.len());
+            send.settle(latency + self.late.len() + out.len());
         }
     }
 }

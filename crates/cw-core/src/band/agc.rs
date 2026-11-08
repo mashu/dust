@@ -33,6 +33,7 @@
 //! leaves the floor sagging for most of a second after every crash. Real
 //! receivers do neither.
 
+use super::delay::DelayLine;
 use super::dsp::db_to_gain;
 use crate::settings::AgcDecay;
 
@@ -256,8 +257,7 @@ pub struct Agc {
     limit_release: f64,
     ceiling_attack: f64,
     /// The band, waiting out the look-ahead.
-    delay: Vec<f64>,
-    delay_at: usize,
+    delay: DelayLine<f64>,
 }
 
 impl Agc {
@@ -296,8 +296,7 @@ impl Agc {
             limit_release: coefficient(AGC_LIMIT_RELEASE_SEC),
             ceiling_attack: coefficient(AGC_CEILING_ATTACK_SEC),
             // Allocated here, once: the audio callback only ever writes into it.
-            delay: vec![0.0; lookahead],
-            delay_at: 0,
+            delay: DelayLine::new(lookahead),
         }
     }
 
@@ -320,8 +319,7 @@ impl Agc {
     /// through at one.
     pub fn process(&mut self, heard: f64, send: f64) -> f64 {
         let gain = self.next_gain(heard + send);
-        let due = std::mem::replace(&mut self.delay[self.delay_at], heard);
-        self.delay_at = (self.delay_at + 1) % self.delay.len();
+        let due = self.delay.push(heard);
         due * gain
     }
 
