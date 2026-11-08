@@ -220,6 +220,33 @@ pub(super) fn key_of(json: &str) -> Option<SessionKey> {
         .map(|key| SessionKey::new(key.timestamp, key.date))
 }
 
+/// The key of the session a tombstone names, `raw` being what it holds as
+/// it is stored ([`Deleted`]). None for one that is empty or does not
+/// read, which deletes its record all the same.
+pub(super) fn tombstone_key(raw: &[u8]) -> Option<SessionKey> {
+    serde_json::from_slice::<Deleted>(raw)
+        .ok()
+        .map(|gone| gone.key())
+}
+
+/// How many of `unread`, the records this build cannot read, are new to
+/// it, `told` being the names of those told of before, as they were noted:
+/// none, once each has been told of. A note that does not read told of
+/// none.
+pub(super) fn not_told(unread: &[RecordId], told: Option<&[u8]>) -> Option<usize> {
+    let told: HashSet<String> = told
+        .and_then(|raw| serde_json::from_slice(raw).ok())
+        .unwrap_or_default();
+    let new = unread
+        .iter()
+        .filter(|id| !told.contains(&id.name()))
+        .count();
+    if new == 0 {
+        return None;
+    }
+    Some(new)
+}
+
 /// Every record of `sessions` by its session's key.
 pub(super) fn keyed<'a>(
     sessions: impl Iterator<Item = (RecordId, &'a SessionResult)>,

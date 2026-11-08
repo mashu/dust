@@ -54,8 +54,8 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::disk::{aside_name, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, key_of, keyed, read_record,
-    taken_up,
+    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, key_of, keyed, not_told,
+    read_record, taken_up, tombstone_key,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -923,22 +923,13 @@ impl HistoryFiles {
                 *elsewhere.entry(json).or_default() += 1;
             }
         }
-        Ok(moved
-            .into_iter()
-            .filter(|record| {
-                if here.contains(&record.id) {
-                    return true;
-                }
-                if gone.contains(&record.id) {
-                    return false;
-                }
-                if let Some(count) = elsewhere.get_mut(&record.json).filter(|count| **count > 0) {
-                    *count -= 1;
-                    return false;
-                }
-                !key_of(&record.json).is_some_and(|key| gone_keys.contains(&key))
-            })
-            .collect())
+        Ok(legacy::not_moved_yet(
+            moved,
+            |id| here.contains(&id),
+            &gone,
+            elsewhere,
+            &gone_keys,
+        ))
     }
 
     /// The key of every session deleted here that its tombstone names.
@@ -949,9 +940,7 @@ impl HistoryFiles {
         gone.into_iter()
             .filter_map(|id| {
                 let raw = fs::read(self.tombstones().join(file_name(id))).ok()?;
-                serde_json::from_slice::<Deleted>(&raw)
-                    .ok()
-                    .map(|gone| gone.key())
+                tombstone_key(&raw)
             })
             .collect()
     }
@@ -961,17 +950,7 @@ impl HistoryFiles {
     /// what was told may be noted, so it is told of once.
     fn tell(&self, unread: &[RecordId], writable: bool) -> Option<usize> {
         let path = self.dir.join(TOLD);
-        let told: HashSet<String> = fs::read(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .unwrap_or_default();
-        let new = unread
-            .iter()
-            .filter(|id| !told.contains(&id.name()))
-            .count();
-        if new == 0 {
-            return None;
-        }
+        let new = not_told(unread, fs::read(&path).ok().as_deref())?;
         if writable {
             let names: Vec<String> = unread.iter().map(|id| id.name()).collect();
             if let Ok(raw) = serde_json::to_vec(&names) {
@@ -1394,10 +1373,7 @@ fn read_with_fingerprint(path: &Path) -> io::Result<Option<(Vec<u8>, Fingerprint
 /// The deletions an older build remembers: none, where they cannot be
 /// read, which costs a session it deleted staying here, never one lost.
 fn legacy_deleted(root: &Path) -> Vec<Deleted> {
-    fs::read(root.join(DELETED))
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
+    legacy::deleted_of(fs::read(root.join(DELETED)).ok().as_deref())
 }
 
 /// Keep `unread`, sessions of the history in `root` that could not be

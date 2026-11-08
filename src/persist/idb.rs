@@ -30,7 +30,7 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
 use super::record::{
     self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, key_of, keyed,
-    read_record, taken_up,
+    not_told, read_record, taken_up, tombstone_key,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -612,16 +612,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// new to it, `told` being those told of before: none, once each has
     /// been. They are noted as told, where this build may write.
     async fn tell(&self, unread: &[RecordId], told: Option<&str>) -> Option<usize> {
-        let told: HashSet<String> = told
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_default();
-        let new = unread
-            .iter()
-            .filter(|id| !told.contains(&id.name()))
-            .count();
-        if new == 0 {
-            return None;
-        }
+        let new = not_told(unread, told.map(str::as_bytes))?;
         let names: Vec<String> = unread.iter().map(|id| id.name()).collect();
         if self.writable.get()
             && let Ok(raw) = serde_json::to_string(&names)
@@ -803,12 +794,8 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// The deletions an older build remembers: none, where they cannot be
     /// read, which costs a session it deleted staying here, never one lost.
     fn legacy_deleted(&self) -> Vec<Deleted> {
-        self.shelf
-            .get(self.keys.deleted)
-            .ok()
-            .flatten()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+        let raw = self.shelf.get(self.keys.deleted).ok().flatten();
+        legacy::deleted_of(raw.as_deref().map(str::as_bytes))
     }
 
     /// Note the keys of what `change`, made, stored and deleted.
@@ -845,8 +832,7 @@ fn layout_text(layout: &Layout) -> Option<String> {
 fn tombstoned_keys(tombstones: &[(String, Option<String>)]) -> HashSet<SessionKey> {
     tombstones
         .iter()
-        .filter_map(|(_, raw)| serde_json::from_str::<Deleted>(raw.as_deref()?).ok())
-        .map(|gone| gone.key())
+        .filter_map(|(_, raw)| tombstone_key(raw.as_deref()?.as_bytes()))
         .collect()
 }
 
@@ -911,25 +897,13 @@ fn not_moved_yet(
             *elsewhere.entry(json.as_str()).or_default() += 1;
         }
     }
-    moved
-        .into_iter()
-        .filter(|record| {
-            if read.raw.contains_key(&record.id) {
-                return true;
-            }
-            if gone.contains(&record.id) {
-                return false;
-            }
-            if let Some(count) = elsewhere
-                .get_mut(record.json.as_str())
-                .filter(|count| **count > 0)
-            {
-                *count -= 1;
-                return false;
-            }
-            !key_of(&record.json).is_some_and(|key| gone_keys.contains(&key))
-        })
-        .collect()
+    legacy::not_moved_yet(
+        moved,
+        |id| read.raw.contains_key(&id),
+        gone,
+        elsewhere,
+        gone_keys,
+    )
 }
 
 #[cfg(feature = "web")]
