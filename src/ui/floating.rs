@@ -32,8 +32,7 @@ use dioxus::desktop::{Config, DesktopService, LogicalSize, WindowBuilder, window
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 
-use crate::playback::HeardGroup;
-use crate::state::{AppCtx, in_root};
+use crate::state::{AppCtx, HeardGroup, in_root};
 use crate::time::sleep_ms;
 
 /// How often the floating window looks for a new group.
@@ -252,7 +251,7 @@ fn floating_config() -> Config {
 fn floating_builder() -> WindowBuilder {
     WindowBuilder::new()
         .with_title("Dust — groups")
-        .with_window_icon(Some(crate::window_icon()))
+        .with_window_icon(Some(crate::webview_assets::window_icon()))
         .with_decorations(false)
         .with_transparent(true)
         .with_resizable(false)
@@ -262,7 +261,7 @@ fn floating_builder() -> WindowBuilder {
 fn floating_head() -> String {
     format!(
         "<script>{}</script><style>{}</style>",
-        crate::KEEP_RUNNING_JS,
+        crate::webview_assets::KEEP_RUNNING_JS,
         FLOATING_CSS
     )
 }

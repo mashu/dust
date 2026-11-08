@@ -15,12 +15,14 @@
 
 use std::collections::VecDeque;
 
-use super::exchange::{CUT_599, ENN};
-use super::machine::{ContestEffect, ContestEvent, ContestMachine, OpKey, PauseWhy};
-use super::turn::{Sender, Turn, plan_turn};
-use super::{CallSource, Field, Fields};
+use super::esm::Fields;
+use super::machine::{ContestEffect, ContestEvent, ContestMachine, OpKey};
+use super::source::CallSource;
+use super::turn::{Turn, plan_turn};
 use crate::callsign::parse_callsign;
-use crate::session::MonoMs;
+use crate::rulebook::exchange::{CUT_599, ENN, Field};
+use crate::rulebook::rules::Sender;
+use crate::session::{MonoMs, PauseWhy};
 use crate::settings::{CharSetMode, TrainingSettings};
 
 #[cfg(test)]
@@ -846,9 +848,9 @@ mod tests {
     /// the places worked, each once.
     #[test]
     fn a_perfect_operator_works_the_sprint_clean() {
-        use super::super::data::places::places_for;
         use super::super::{ContestKind, Field, RunStyle};
         use crate::callsign::Countries;
+        use crate::rulebook::data::places::places_for;
         for (seed, style) in [(31, RunStyle::Single), (32, RunStyle::Pileup)] {
             let (runtime, run, result, yours) =
                 perfect_run(ContestKind::Sprint, style, "K1ABC", ("MA", ""), seed);
@@ -998,9 +1000,9 @@ mod tests {
     /// points by distance times the zones and countries worked, each once.
     #[test]
     fn a_perfect_operator_works_cqww_clean_from_anywhere() {
-        use super::super::data::places::home_country;
-        use super::super::data::zones::{draw_zone, home_continent};
         use super::super::{ContestKind, RunStyle};
+        use crate::rulebook::data::places::home_country;
+        use crate::rulebook::data::zones::{draw_zone, home_continent};
         for (seed, style, call, sent, home) in [
             (41, RunStyle::Single, "DL1ABC", " 5NN A4", ("DL", "EU", 14)),
             (42, RunStyle::Pileup, "DL1ABC", " 5NN A4", ("DL", "EU", 14)),
@@ -1078,9 +1080,9 @@ mod tests {
     /// a QSO times what your side counts, each once.
     #[test]
     fn a_perfect_operator_works_arrl_dx_clean_from_either_side() {
-        use super::super::data::places::{places_for, w_ve_place};
         use super::super::{ContestKind, Field, RunStyle};
         use crate::callsign::Countries;
+        use crate::rulebook::data::places::{places_for, w_ve_place};
         for (seed, style, call, state, side) in [
             (51, RunStyle::Single, "DL1ABC", "", "dx"),
             (52, RunStyle::Pileup, "DL1ABC", "", "dx"),
@@ -1147,8 +1149,8 @@ mod tests {
     /// to multiply them, so the score is the points.
     #[test]
     fn a_perfect_operator_works_field_day_clean() {
-        use super::super::data::fd::draw_section;
         use super::super::{ContestKind, Field, RunStyle};
+        use crate::rulebook::data::fd::draw_section;
         for (seed, style, call, section, ending) in [
             (61, RunStyle::Single, "K1ABC", "EMA", " 1D EMA"),
             (62, RunStyle::Pileup, "K1ABC", "EMA", " 1D EMA"),

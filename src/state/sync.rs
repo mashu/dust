@@ -11,16 +11,16 @@ use std::rc::Rc;
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use super::auth::{Auth, AuthError};
-use super::remote::{Remote, RemoteError, RemoteFile};
-use super::run::{Found, SyncFailed, Synced, delete_copy, join, look, sync_once};
-use super::seal::{MIN_PASSPHRASE, Stretch};
-use super::settings::{as_keys, settings_keys};
-use super::state::SyncState;
-use super::text::random_hex;
+use super::AppCtx;
 use crate::persist::record::{Pending, RecordId, done};
 use crate::persist::{Store, merge_settings};
-use crate::state::AppCtx;
+use crate::sync::auth::{Auth, AuthError};
+use crate::sync::remote::{Remote, RemoteError, RemoteFile};
+use crate::sync::run::{Found, SyncFailed, Synced, delete_copy, join, look, sync_once};
+use crate::sync::seal::{MIN_PASSPHRASE, Stretch};
+use crate::sync::settings::{as_keys, settings_keys};
+use crate::sync::state::SyncState;
+use crate::sync::text::random_hex;
 use crate::time::{POLL_MS, now_ms, sleep_ms};
 
 /// How long after a change here the app syncs it: long enough for the
@@ -85,8 +85,9 @@ impl Link {
         if cfg!(test) {
             return None;
         }
-        let auth = super::auth::Counted::of(super::auth::default_auth()?);
-        let drive = super::drive::Drive::new(super::http::default_http(), Rc::clone(&auth));
+        let auth = crate::sync::auth::Counted::of(crate::sync::auth::default_auth()?);
+        let drive =
+            crate::sync::drive::Drive::new(crate::sync::http::default_http(), Rc::clone(&auth));
         Some(Self {
             auth,
             remote: Rc::new(drive),
@@ -808,7 +809,7 @@ impl AppCtx {
 /// over, if any: those that would not open, damaged perhaps, and those a
 /// later build wrote, which an update here reads.
 fn passed_over(synced: &Synced) -> Option<String> {
-    let files = |count: usize| crate::ui::format::counted(count, "file");
+    let files = |count: usize| crate::format::counted(count, "file");
     let were = |count: usize| if count == 1 { "was" } else { "were" };
     let damaged = (synced.unreadable > 0).then(|| {
         format!(
@@ -837,7 +838,7 @@ fn passed_over(synced: &Synced) -> Option<String> {
 /// account's, whose drive a sync begun before must not write into, sealed
 /// with a key that account's sync does not go by. A request under way by
 /// then goes no further than the sign-in it began with, as the drive sends
-/// it ([`super::drive::Drive`]).
+/// it ([`crate::sync::drive::Drive`]).
 struct WhileCurrent<'a, F> {
     remote: &'a dyn Remote,
     current: F,

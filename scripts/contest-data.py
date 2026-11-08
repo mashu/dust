@@ -13,7 +13,7 @@ and what that station sent. This counts, from them:
   three territories;
 - the power DX stations sent in the ARRL DX contest (`100`, `KW`).
 
-The shares go to crates/cw-core/src/contest/data/counted.rs, rounded to a
+The shares go to crates/cw-core/src/rulebook/data/counted.rs, rounded to a
 tenth of a percent. Only shares survive, never a call or a name, so every
 caller Dust sends is still made up. A class or a power whose share rounds to
 nothing is left out; so is one Dust does not read as one (`5W`), and the
@@ -22,7 +22,7 @@ place's sections are rounded by largest remainder, so they add up to exactly
 a hundred percent.
 
 The sections and the places each covers are listed below by call area, as
-the design lists them (§11.4); `contest/data/sections.rs` lists the same, and
+the design lists them (§11.4); `rulebook/data/sections.rs` lists the same, and
 a test there checks that the counted table and that list agree. Puerto Rico
 and the Virgin Islands are sections a station's call gives (KP4, KP2), not
 places it is drawn in, so no place counts them.
@@ -44,10 +44,10 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "crates" / "cw-core" / "src" / "contest" / "data" / "counted.rs"
+OUTPUT = ROOT / "crates" / "cw-core" / "src" / "rulebook" / "data" / "counted.rs"
 
 # Every ARRL and RAC section, by call area, with the places it covers by the
-# codes `contest/data/places.rs` uses.
+# codes `rulebook/data/places.rs` uses.
 SECTIONS = [
     ("1", [("CT", ["CT"]), ("EMA", ["MA"]), ("ME", ["ME"]), ("NH", ["NH"]),
            ("RI", ["RI"]), ("VT", ["VT"]), ("WMA", ["MA"])]),

@@ -1,6 +1,20 @@
 //! What the app is: its state, reactive and not, and the moves every screen
 //! shares.
 
+pub mod answer;
+pub mod entry;
+mod keep;
+pub mod live;
+pub mod preview;
+pub mod sync;
+
+pub use answer::{AnswerOutbox, TypedAnswer};
+pub use entry::{ContestEntry, typed_len_max};
+pub use keep::{keep_and_show, keep_cut_off, settle_level};
+pub use live::{Live, LiveContest, LiveSession};
+pub use preview::{Dialogue, DialogueLine, HeardGroup, Preview};
+pub use sync::SyncStatus;
+
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -14,21 +28,18 @@ use cw_core::{
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::contest_runtime::ContestEntry;
+use self::sync::SyncCtx;
+use crate::format::{counted, day_of, short_date};
 use crate::history::{StoredHistory, settle_or_spawn};
 use crate::persist::backup::{
     Backup, BackupFile, Filled, NotSaved, backup_name, filled_in, merge_sessions,
 };
-use crate::persist::record::{HistoryChange, HistoryLoad, Record, RecordId, read_record};
+use crate::persist::record::{HistoryChange, HistoryLoad, Record, RecordId, key_of, read_record};
 use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
 };
-use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
-use crate::session_runtime::{AnswerOutbox, Live, keep_cut_off};
-use crate::sync::ctx::SyncCtx;
 use crate::time::{POLL_MS, now_ms, sleep_ms};
-use crate::ui::format::{counted, day_of, short_date};
 
 /// How long after the store last refused what the app has yet to store it
 /// is tried again, while anything waits: the page coming back into sight,
@@ -162,10 +173,10 @@ pub struct AppCtx {
     /// Whatever is playing outside a session.
     pub preview: Signal<Preview>,
     /// The groups the stream has sent, newest last.
-    pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
+    pub stream_heard: Signal<Vec<HeardGroup>>,
     /// What Hear a QSO has played, as far as it has been heard: kept once it
     /// ends, until something else plays or the screen is left.
-    pub dialogue: Signal<Option<crate::playback::Dialogue>>,
+    pub dialogue: Signal<Option<Dialogue>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
     /// The run's Call and Exchange fields, as typed.
@@ -216,7 +227,7 @@ pub struct AppCtx {
     /// each made in turn once the one before it is over.
     restores_waiting: CopyValue<VecDeque<Backup>>,
     /// Sync with the user's own Google Drive, where it is on
-    /// ([`crate::sync::ctx`]).
+    /// ([`self::sync`]).
     pub sync: SyncCtx,
     app: CopyValue<AppState>,
 }
@@ -624,6 +635,17 @@ impl AppCtx {
         merged
     }
 
+    /// Store the settings at once, rather than once an edit on the settings
+    /// screen has been still for a moment, or once the effect that stores them
+    /// next runs: the page has gone out of sight, or the app is closing, and a
+    /// tab closed or an app put away straight after an edit would lose it while
+    /// it waited. Not while a session runs, which stores nothing until it ends.
+    pub fn store_settings_now(self) {
+        if *self.screen.peek() != Screen::Training {
+            self.store_settings();
+        }
+    }
+
     /// A sampler for a session, a run or a stream of `settings`, seeded
     /// with `seed`: what [`Sampler::new`] makes of the history, from the
     /// prior built last while the history and what the prior reads of the
@@ -850,7 +872,7 @@ impl AppCtx {
     }
 
     /// Take up what the store holds now, whatever it says of having
-    /// changed: as sync has just changed it ([`crate::sync::ctx`]).
+    /// changed: as sync has just changed it ([`self::sync`]).
     pub(crate) fn take_up_store(self) {
         self.sync_with_store(|_| {});
     }
@@ -1388,7 +1410,13 @@ impl AppCtx {
             for record in read.into_iter().flatten() {
                 match read_record(&record.json) {
                     Some(session) => reads_now.push((record.id, session)),
-                    None => beside.later.extend(finished_as(&record.json)),
+                    // When, and on what day, the session a record holds
+                    // says it finished, where the record is JSON that says
+                    // so, though this build cannot read it as a session:
+                    // one a later build stored, most likely. A damaged
+                    // record says nothing, but for one damaged so that it
+                    // is JSON still and says both.
+                    None => beside.later.extend(key_of(&record.json)),
                 }
             }
             beside.read_now = reads_now.len();
@@ -1949,22 +1977,6 @@ struct Beside {
     read_now: usize,
 }
 
-/// When, and on what day, the session a record holds says it finished,
-/// where the record is JSON that says so, though this build cannot read it
-/// as a session: one a later build stored, most likely
-/// ([`AppCtx::restore_beside`]). A damaged record says nothing, but for
-/// one damaged so that it is JSON still and says both.
-fn finished_as(json: &str) -> Option<SessionKey> {
-    #[derive(serde::Deserialize)]
-    struct Finished {
-        timestamp: u64,
-        date: String,
-    }
-    serde_json::from_str::<Finished>(json)
-        .ok()
-        .map(|finished| SessionKey::new(finished.timestamp, finished.date))
-}
-
 /// What to say of the sessions of a backup a restore left out, `count` of
 /// them, as records stored here that this build cannot read say they hold
 /// them ([`AppCtx::restore_beside`]): nothing, where there are none.
@@ -2251,7 +2263,7 @@ mod tests {
 
         /// Keep `session`, as a session finished here is kept.
         fn finish(&self, session: SessionResult) {
-            self.act(|ctx| crate::session_runtime::keep_and_show(ctx, session));
+            self.act(|ctx| crate::state::keep_and_show(ctx, session));
         }
 
         /// The record of the session that finished on `day`, here.

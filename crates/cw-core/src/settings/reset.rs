@@ -55,7 +55,7 @@ impl TrainingSettings {
     /// shows it: before, or after, as a switch put back on can bring the
     /// aim onto the card.
     fn put_section(&mut self, which: SettingsSection, from: &Self) {
-        let shown = crate::sampling::aim_section(self) == which;
+        let shown = super::aim_section(self) == which;
         match which {
             SettingsSection::SessionShape => {
                 let (c, p) = (&from.curriculum, &from.playback);
@@ -116,9 +116,10 @@ impl TrainingSettings {
                     .caller_styles
                     .clone_from(&from.contest.caller_styles);
                 self.contest.hunter_dx_percent = from.contest.hunter_dx_percent;
-                self.contest
-                    .caller_odds
-                    .reset_card(crate::contest::OddsCard::Contest, &from.contest.caller_odds);
+                self.contest.caller_odds.reset_card(
+                    crate::rulebook::OddsCard::Contest,
+                    &from.contest.caller_odds,
+                );
                 // A single caller again, or no contest: the stations a
                 // pile-up opened go back; a pile-up again opens them.
                 self.fit_stations_to_pileup();
@@ -157,7 +158,7 @@ impl TrainingSettings {
                 self.contest.contest_flutter = from.contest.contest_flutter;
                 self.contest
                     .caller_odds
-                    .reset_card(crate::contest::OddsCard::Band, &from.contest.caller_odds);
+                    .reset_card(crate::rulebook::OddsCard::Band, &from.contest.caller_odds);
             }
             SettingsSection::AutoLevel => {
                 let a = &from.auto_level;
@@ -187,7 +188,7 @@ impl TrainingSettings {
             }
         }
         *self = std::mem::take(self).clamp();
-        if shown || crate::sampling::aim_section(self) == which {
+        if shown || super::aim_section(self) == which {
             self.curriculum.aim = from.curriculum.aim;
         }
     }

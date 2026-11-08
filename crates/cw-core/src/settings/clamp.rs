@@ -29,8 +29,7 @@ impl TrainingSettings {
         let c = &mut self.curriculum;
         c.custom_sequence = Self::unique_alphabet(&c.custom_sequence);
         c.kept_sequence = Self::unique_alphabet(&c.kept_sequence);
-        c.word_list =
-            crate::words::WordList::from_words(c.word_list.iter().map(String::as_str)).words;
+        c.word_list = super::WordList::from_words(c.word_list.iter().map(String::as_str)).words;
         c.level = c.level.clamp(LEVEL_MIN, LETTER_LEVEL_CEILING);
         c.digits_level = c.digits_level.clamp(LEVEL_MIN, MAX_DIGITS_LEVEL);
         c.callsign_level = c.callsign_level.clamp(CALLSIGN_TIER_MIN, CALLSIGN_TIER_MAX);
@@ -101,7 +100,7 @@ impl TrainingSettings {
         b.qsb_depth = b.qsb_depth.clamp(0.0, 1.0);
         b.qsb_rate_hz = b.qsb_rate_hz.clamp(QSB_RATE_MIN_HZ, QSB_RATE_MAX_HZ);
         b.qrn_level = b.qrn_level.clamp(0.0, 1.0);
-        b.noise_level = crate::band::whole_db_noise_level(b.noise_level.clamp(0.0, 1.0));
+        b.noise_level = super::whole_db_noise_level(b.noise_level.clamp(0.0, 1.0));
         b.rf_gain_db = b.rf_gain_db.clamp(RF_GAIN_MIN_DB, RF_GAIN_MAX_DB);
 
         let a = &mut self.auto_level;
@@ -130,7 +129,7 @@ impl TrainingSettings {
         // not vary, or one this build does not know, keeps none, and one as
         // on the air is not kept.
         k.caller_styles.retain(|name, choice| {
-            let Some(kind) = crate::contest::ContestKind::from_name(name) else {
+            let Some(kind) = crate::rulebook::ContestKind::from_name(name) else {
                 return false;
             };
             let rules = kind.rules();
@@ -138,7 +137,7 @@ impl TrainingSettings {
             if replies == 0 {
                 return false;
             }
-            choice.at = crate::contest::into_shape(replies, choice.at);
+            choice.at = crate::rulebook::into_shape(replies, choice.at);
             choice.off.retain(|at| *at < replies);
             choice.off.sort_unstable();
             choice.off.dedup();

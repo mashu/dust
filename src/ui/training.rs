@@ -2,12 +2,13 @@ use cw_core::{ChosenSpeed, CountdownTo, GROUP_SIZE_MAX, MonoMs, SKIPPED, answer_
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
-use crate::session_runtime::{AnswerOutbox, TypedAnswer};
+use crate::state::{AnswerOutbox, TypedAnswer};
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
-    CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool,
+    CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, TOUCH_BUILD, control_id,
+    html_bool,
 };
 
 /// Incomplete answers wait this long before the session sees them. Short
@@ -349,12 +350,10 @@ impl InputMethod {
 /// Put the cursor in group `idx`'s box, so a keyboard types straight into
 /// it.
 fn focus_box(idx: usize) {
-    // Tests have no page to run it on.
+    // Tests have no page to run it on, and the harness is not asked to look
+    // for the box.
     #[cfg(not(test))]
-    spawn(async move {
-        let script = crate::ui::widgets::focus_script(&format!("group-input-{idx}"));
-        let _ = document::eval(&script).await;
-    });
+    crate::page::focus_by_id(&format!("group-input-{idx}"), crate::page::Caret::AsIs);
     #[cfg(test)]
     let _ = idx;
 }
@@ -508,10 +507,6 @@ fn AnswerBox(
         }
     }
 }
-
-/// Whether touch is how this build types: the phone and tablet builds,
-/// where the keypad always shows. Elsewhere it shows only on a touch screen.
-pub(crate) const TOUCH_BUILD: bool = cfg!(any(feature = "mobile", feature = "mobile-silent"));
 
 /// A key on the keypad.
 #[derive(Clone, Debug, PartialEq)]

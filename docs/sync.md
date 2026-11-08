@@ -171,7 +171,7 @@ elsewhere (`src/sync/http.rs`).
 
 ## When it syncs
 
-`src/sync/ctx.rs`: as the app opens; three seconds after a session is kept,
+`src/state/sync.rs`: as the app opens; three seconds after a session is kept,
 a deletion or a restore made, or the settings stored; as the app comes back
 into sight, if it has not synced for two minutes; and on *Sync now*. Never
 while a session or a run is under way: once it is over. A browser whose
@@ -245,7 +245,7 @@ into the folder `dx` serves the app from, or try sync on the Pages site.
 
 The Rust tests sync devices through an in-memory folder, through a fake of
 Drive's REST API (`src/sync/drive/fake.rs`), and through the app itself
-(`src/sync/ctx/tests.rs`); the computer's sign-in is tested through a real
+(`src/state/sync/tests.rs`); the computer's sign-in is tested through a real
 loopback socket. `scripts/browser-sync-check.cjs` syncs two browsers in
 Chromium, on the site as `web-site.yml` builds it, against a fake Google:
 the sign-in window, `oauth.html`, the passphrase, a history and settings

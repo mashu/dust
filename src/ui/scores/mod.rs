@@ -15,7 +15,6 @@ mod best;
 mod board;
 #[cfg(test)]
 mod board_tests;
-mod medal;
 mod runs;
 mod timeline;
 
@@ -27,52 +26,17 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::short_date;
 use crate::state::SessionPick;
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::figures::History;
-use crate::ui::format::short_date;
 use crate::ui::settings_charset::mode_label;
+use crate::ui::standing::{per_group_label, rating_label, rating_unit};
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 use best::BestCard;
 use board::BoardList;
-pub use medal::Medal;
 use runs::RunsCard;
 use timeline::ScoreTimeline;
-
-/// What a session of `mode` is called in a sentence: "callsign sessions".
-pub fn mode_noun(mode: CharSetMode) -> &'static str {
-    match mode {
-        CharSetMode::Koch => "Koch",
-        CharSetMode::Digits => "digit",
-        CharSetMode::Mixed => "mixed",
-        CharSetMode::Callsign => "callsign",
-        CharSetMode::Words => "word",
-        CharSetMode::Contest => "contest",
-    }
-}
-
-/// What a session earned a group, as the board shows it: "72.4".
-pub fn per_group_label(per_group: f64) -> String {
-    format!("{per_group:.1}")
-}
-
-/// What a board ranks by, as the board shows it: "72.4" points a group, a
-/// verified score of "1312", "86" clean QSOs an hour.
-pub fn rating_label(ranking: Ranking, rating: f64) -> String {
-    match ranking {
-        Ranking::PerGroup => per_group_label(rating),
-        Ranking::Verified(_) | Ranking::CleanRate => format!("{rating:.0}"),
-    }
-}
-
-/// What follows a rating's figure: "points a group".
-pub fn rating_unit(ranking: Ranking) -> &'static str {
-    match ranking {
-        Ranking::PerGroup => "points a group",
-        Ranking::Verified(_) => "verified points",
-        Ranking::CleanRate => "clean QSOs an hour",
-    }
-}
 
 /// A rating said in a line: "72.4 a group", "1312 verified points".
 fn rating_said(ranking: Ranking, rating: f64) -> String {
@@ -570,6 +534,7 @@ fn empty_board(sessions: &[SessionResult], of: BoardOf, assisted: bool) -> (&'st
 mod tests {
     use super::*;
     use crate::ui::settings_charset::CHAR_SET_MODES;
+    use crate::ui::standing::mode_noun;
     use cw_core::{POINTS_UP_TO, RECENT_SESSIONS};
 
     /// Past a thousand sessions on the board, the timeline draws the best

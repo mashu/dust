@@ -7,43 +7,20 @@ use std::rc::Rc;
 
 use cw_core::band::agc_decay_sec;
 use cw_core::{
-    AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, MonoMs,
-    Sampler, Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX,
-    VOLUME_MIN, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, HeardTurn, MonoMs, Sampler,
+    Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX, VOLUME_MIN,
+    compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
     generate_training_group, hear_qsos, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::AppCtx;
+use crate::state::{AppCtx, Dialogue, DialogueLine, HeardGroup, Preview};
 use crate::time::{local_hour, mono_ms, seed_rng};
 
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
-
-/// A group the stream has sent, and how fast it was sent.
-#[derive(Clone, Debug, PartialEq)]
-pub struct HeardGroup {
-    pub text: String,
-    /// The speed of the characters themselves.
-    pub char_wpm: f64,
-    /// The overall speed, spacing included; below `char_wpm` under Farnsworth.
-    pub effective_wpm: f64,
-}
-
-impl HeardGroup {
-    /// "24 WPM", or "24 WPM · 18 eff." when the gaps are stretched.
-    pub fn speed_label(&self) -> String {
-        let char_wpm = self.char_wpm.round();
-        let effective_wpm = self.effective_wpm.round();
-        if effective_wpm < char_wpm {
-            format!("{char_wpm:.0} WPM · {effective_wpm:.0} eff.")
-        } else {
-            format!("{char_wpm:.0} WPM")
-        }
-    }
-}
 
 /// The pause between letters on the Listen screen.
 const LETTER_GAP_MS: u32 = 420;
@@ -51,38 +28,6 @@ const LETTER_GAP_MS: u32 = 420;
 /// How many QSOs Hear a QSO plays: a few, enough to hear one follow
 /// another.
 const HEAR_QSOS: u32 = 3;
-
-/// What Hear a QSO has played so far, for a screen to show as a dialogue.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Dialogue {
-    /// The contest the QSOs are of.
-    pub kind: ContestKind,
-    /// Your station as they send it, where some of it stands in for yours.
-    pub stand_in: Option<String>,
-    /// How many QSOs it plays.
-    pub qsos: u32,
-    /// Each line heard whole so far, in the order they ended.
-    pub lines: Vec<DialogueLine>,
-}
-
-impl Dialogue {
-    /// The QSO it has reached: the one its newest line is part of.
-    pub fn qso(&self) -> u32 {
-        self.lines.last().map_or(1, |line| line.qso)
-    }
-}
-
-/// One line of a dialogue: your message, or what callers sent at once, as
-/// a pile-up's callers do.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DialogueLine {
-    /// Who sent it: you, the first of the callers, or QRM.
-    pub who: Sender,
-    /// What was sent, a send each, in the order they ended.
-    pub sends: Vec<String>,
-    /// Which of the QSOs it is part of, counted from 1.
-    pub qso: u32,
-}
 
 /// What the band preview calls.
 pub(crate) const BAND_PREVIEW_CALL: &str = "CQ";
@@ -102,56 +47,6 @@ pub(crate) fn band_preview_gap_ms() -> u32 {
 /// the full strength and a station 10 and 20 dB down, so the AGC can be
 /// heard evening them out, and the RF gain heard taking the weaker down.
 pub const BAND_PREVIEW_STRENGTHS: [f64; 3] = [VOLUME_MAX, 0.316_227_766_016_838, VOLUME_MIN];
-
-/// What the app is playing when no session is running.
-///
-/// These are the four things that can be true of the audio outside training,
-/// and exactly one of them is: the band preview, the letter player and an
-/// envelope sample all want the same hardware, so a second one starting means
-/// the first has stopped.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub enum Preview {
-    /// Nothing is playing, or a session has the audio.
-    #[default]
-    Idle,
-    /// The band-conditions preview, looping until stopped.
-    Band,
-    /// The Listen screen playing a character or the whole pool.
-    Letters,
-    /// Groups looping with no answers and no score — copy while you do something else.
-    Stream,
-    /// One short envelope sample, named so the chip that sent it can show it.
-    Sample(String),
-    /// A few QSOs of the chosen contest, worked by an operator who copies
-    /// every character, for a learner to hear before working one.
-    Qsos,
-}
-
-impl Preview {
-    pub fn is_band(&self) -> bool {
-        matches!(self, Self::Band)
-    }
-
-    pub fn is_letters(&self) -> bool {
-        matches!(self, Self::Letters)
-    }
-
-    pub fn is_stream(&self) -> bool {
-        matches!(self, Self::Stream)
-    }
-
-    pub fn is_qsos(&self) -> bool {
-        matches!(self, Self::Qsos)
-    }
-
-    /// The sample now sounding, for the chip that is waiting to light up.
-    pub fn sample(&self) -> Option<String> {
-        match self {
-            Self::Sample(text) => Some(text.clone()),
-            _ => None,
-        }
-    }
-}
 
 /// Whether the stream of groups plays on with the page out of sight, where
 /// everything else that plays stops. On the desktop and in a browser it

@@ -135,7 +135,7 @@ impl Player {
         self.stop_sending();
         let turn = self.next_turn();
         self.stir(true);
-        crate::stall_log::audio_held(true);
+        crate::time::stall_log::audio_held(true);
         match self.open(settings) {
             Ok(()) => Ok(Lease {
                 player: self.clone(),
@@ -144,7 +144,7 @@ impl Player {
             Err(err) => {
                 self.with_backend(|backend| backend.shutdown());
                 self.stir(false);
-                crate::stall_log::audio_held(false);
+                crate::time::stall_log::audio_held(false);
                 Err(err)
             }
         }
@@ -158,7 +158,7 @@ impl Player {
         self.next_turn();
         self.with_backend(|backend| backend.shutdown());
         self.stir(false);
-        crate::stall_log::audio_held(false);
+        crate::time::stall_log::audio_held(false);
     }
 
     /// Keep the output awake for the paddle's first squeeze, `ready`, as
@@ -405,6 +405,18 @@ impl Lease {
     pub async fn sleep(&self, ms: u32) -> Result<(), AudioError> {
         sleep_ms(ms).await;
         self.check()
+    }
+
+    /// After `ms`, waited in one go ([`Lease::sleep`]), hand this lease to
+    /// `then`, if it outlived the wait. The wait is a task of the app's own,
+    /// on the root, so it outlasts whatever screen set it going.
+    pub fn after(&self, ms: u32, then: impl FnOnce(&Lease) + 'static) {
+        let lease = self.clone();
+        dioxus::core::spawn_forever(async move {
+            if lease.sleep(ms).await.is_ok() {
+                then(&lease);
+            }
+        });
     }
 
     fn check(&self) -> Result<(), AudioError> {

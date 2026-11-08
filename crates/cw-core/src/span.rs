@@ -203,7 +203,7 @@ impl SpanBelief {
         };
         let centre = first_sent.map_or_else(
             || {
-                let (shortest, longest) = crate::sampling::group_size_bounds(settings);
+                let (shortest, longest) = crate::settings::group_size_bounds(settings);
                 (shortest + longest) as f64 / 2.0
             },
             |(shortest, longest)| (shortest + longest) / 2.0,

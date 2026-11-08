@@ -7,6 +7,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::data::counted::FIELD_DAY_DX;
+use crate::callsign::{CONTEST_ABROAD_SHARE, CONTEST_PORTABLE_SHARE, CallSpec, Countries};
 
 /// How often callers do each thing they do now and then, each a share from
 /// nothing to one ([`Odd`]).
@@ -297,6 +298,36 @@ impl<'de> Deserialize<'de> for CallerOdds {
             }
         }
         Ok(odds)
+    }
+}
+
+/// How many POTA hunters are DX until you set it, in percent: a choice,
+/// not a count, so that a run of a few minutes has some to copy.
+pub const HUNTER_DX_PERCENT: u32 = 25;
+
+impl CallSpec {
+    /// A contest's callers, from `countries`.
+    pub const fn contest(countries: Countries) -> Self {
+        Self {
+            countries,
+            contest: true,
+            dx_percent: HUNTER_DX_PERCENT,
+            field_day_dx: FIELD_DAY_DX / 100.0,
+            portable: CONTEST_PORTABLE_SHARE,
+            abroad: CONTEST_ABROAD_SHARE,
+            country_balance: 0.0,
+        }
+    }
+
+    /// The same, with its shares as `odds` sets them: Field Day's DX, and
+    /// the callers signing portable and abroad.
+    pub const fn with_odds(self, odds: &CallerOdds) -> Self {
+        Self {
+            field_day_dx: odds.field_day_dx,
+            portable: odds.portable,
+            abroad: odds.abroad,
+            ..self
+        }
     }
 }
 

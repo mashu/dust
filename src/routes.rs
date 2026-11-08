@@ -13,10 +13,10 @@ use dioxus::prelude::*;
 use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
 use crate::persist::record::RecordId;
-use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
-use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
-use crate::state::{AppCtx, Finished, Screen};
-use crate::sync::ctx::SyncStatus;
+use crate::playback::{self, STREAM_PLAYS_OUT_OF_SIGHT};
+use crate::session_runtime::{resume_session, send_event, start_session};
+use crate::state::SyncStatus;
+use crate::state::{AppCtx, Finished, Preview, Screen, TypedAnswer};
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
@@ -562,7 +562,7 @@ mod tests {
     fn the_scores_tab_left_up_past_midnight_goes_by_the_new_day() {
         run(|| async {
             let at = crate::time::now_ms();
-            let day = crate::ui::format::day_of(at).expect("a day");
+            let day = crate::format::day_of(at).expect("a day");
             pretend_today(&day);
             let mut best = stored_session(&day, &[("KM", "KM"); 10]);
             best.timestamp = at;
@@ -588,7 +588,7 @@ mod tests {
     fn the_sync_card_left_up_past_midnight_goes_by_the_new_day() {
         run(|| async {
             let at = crate::time::now_ms();
-            let day = crate::ui::format::day_of(at).expect("a day");
+            let day = crate::format::day_of(at).expect("a day");
             pretend_today(&day);
             let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
             ui.with_app(|ctx| {
@@ -602,7 +602,7 @@ mod tests {
             });
             ui.click("nav-stats");
             ui.click("seg-history");
-            let time = crate::ui::format::clock(at).expect("a time");
+            let time = crate::format::clock(at).expect("a time");
             assert!(ui.has(&format!("Synced today at {time}")), "{}", ui.html());
             pretend_today(&days_after(&day, 1));
             tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
@@ -611,7 +611,7 @@ mod tests {
             assert!(ui.has(&yesterday), "{}", ui.html());
             pretend_today(&days_after(&day, 2));
             ui.with_app(|_| crate::page_hidden::show_page());
-            let before = format!("Synced {} at {time}", crate::ui::format::short_date(&day));
+            let before = format!("Synced {} at {time}", crate::format::short_date(&day));
             assert!(ui.has(&before), "{}", ui.html());
         });
     }
@@ -718,7 +718,7 @@ mod tests {
                 .collect();
             let mut worse = stored_session("2026-10-01", &copied);
             worse.timestamp = at;
-            ui.with_app(|ctx| crate::session_runtime::keep_and_show(ctx, worse));
+            ui.with_app(|ctx| crate::state::keep_and_show(ctx, worse));
             assert_eq!(ui.screen(), "results");
             assert!(ui.has("2nd best of your 2 Koch sessions"), "{}", ui.html());
         });

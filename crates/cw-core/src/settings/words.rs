@@ -149,10 +149,11 @@ impl TrainingSettings {
 #[cfg(test)]
 mod tests {
     use super::{STARTER_WORDS, WORD_LIST_MAX, WordList, clean_word};
-    use crate::pool::{compute_char_pool, newest_unlocked};
     use crate::rng::SplitMix64;
     use crate::sampling::{CharSamplingState, generate_training_group};
-    use crate::settings::{CharSetMode, GROUP_SIZE_MAX, TrainingSettings};
+    use crate::settings::{
+        CharSetMode, GROUP_SIZE_MAX, TrainingSettings, compute_char_pool, newest_unlocked,
+    };
 
     fn words(list: &[&str]) -> TrainingSettings {
         let mut settings = TrainingSettings::default();

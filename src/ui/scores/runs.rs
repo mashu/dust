@@ -10,9 +10,9 @@
 use cw_core::{ContestKind, RunEntry, StoredLog, contest_runs};
 use dioxus::prelude::*;
 
+use crate::format::{counted, day_and_clock, minutes_seconds};
 use crate::state::SessionPick;
 use crate::ui::figures::History;
-use crate::ui::format::{counted, day_and_clock, minutes_seconds};
 use crate::ui::help;
 use crate::ui::stats_detail::{ASSISTED, HISTORY_PAGE, log_parts};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};

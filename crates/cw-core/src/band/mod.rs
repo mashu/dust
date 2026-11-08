@@ -45,6 +45,7 @@
 mod activity;
 mod agc;
 mod calibration;
+mod delay;
 mod dsp;
 mod filter;
 mod key;
@@ -53,6 +54,7 @@ mod loudness;
 mod memo;
 mod noise;
 mod output;
+mod pileup;
 mod qsb;
 mod random;
 mod source;
@@ -60,10 +62,11 @@ mod source;
 // What the players, the settings screen and the pile-up planner use. The rest
 // is the band's own business.
 pub use agc::{AGC_LOOKAHEAD_SEC, agc_decay_sec, agc_lookahead_samples};
+#[cfg(doc)]
+pub(crate) use calibration::noise_floor_snr_db;
 pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
+pub use delay::DelayLine;
 pub use dsp::{db_to_gain, gain_to_db};
-// And what the planners hold nonsense out of a send with.
-pub(crate) use dsp::finite_or;
 pub(crate) use filter::mirror_hz;
 pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
@@ -76,6 +79,9 @@ pub use output::{
     AUDIO_HIGH_PASS_HZ, AudioHighPass, SOFT_LIMIT_HEADROOM, SOFT_LIMIT_KNEE, soft_limit,
     soft_limit_curve,
 };
+#[cfg(test)]
+pub(crate) use pileup::resolve_pileup;
+pub(crate) use pileup::{PILEUP_CALLER_SEPARATION_HZ, PILEUP_SKIRT_DB, free_room, pick_in_room};
 pub use qsb::{FADE_OFFSET_MAX_SEC, FADE_STEP_SEC, Qsb};
 pub use source::BandSource;
 

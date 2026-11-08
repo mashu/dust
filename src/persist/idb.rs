@@ -29,9 +29,12 @@ use cw_core::SessionResult;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
 use super::record::{
-    self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, read_record,
+    self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, key_of, keyed,
+    not_told, read_record, taken_up, tombstone_key,
 };
-use super::{Deleted, HistorySaved, SessionKey, SetAside};
+use super::saved::HistorySaved;
+use super::session::{Deleted, SessionKey};
+use super::set_aside::SetAside;
 
 /// The page script that reaches the database: the body of a function of
 /// `options`, which hands back what the history does with it.
@@ -249,13 +252,6 @@ struct Read {
     /// What each record holds, as it is stored, where a move is to be made
     /// over them.
     raw: BTreeMap<RecordId, String>,
-}
-
-/// The key a record's session finished at, read without the rest of it.
-#[derive(serde::Deserialize)]
-struct KeyOnly {
-    timestamp: u64,
-    date: String,
 }
 
 impl<G: Glue, S: Aside> BrowserHistory<G, S> {
@@ -616,16 +612,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// new to it, `told` being those told of before: none, once each has
     /// been. They are noted as told, where this build may write.
     async fn tell(&self, unread: &[RecordId], told: Option<&str>) -> Option<usize> {
-        let told: HashSet<String> = told
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_default();
-        let new = unread
-            .iter()
-            .filter(|id| !told.contains(&id.name()))
-            .count();
-        if new == 0 {
-            return None;
-        }
+        let new = not_told(unread, told.map(str::as_bytes))?;
         let names: Vec<String> = unread.iter().map(|id| id.name()).collect();
         if self.writable.get()
             && let Ok(raw) = serde_json::to_string(&names)
@@ -807,12 +794,8 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// The deletions an older build remembers: none, where they cannot be
     /// read, which costs a session it deleted staying here, never one lost.
     fn legacy_deleted(&self) -> Vec<Deleted> {
-        self.shelf
-            .get(self.keys.deleted)
-            .ok()
-            .flatten()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+        let raw = self.shelf.get(self.keys.deleted).ok().flatten();
+        legacy::deleted_of(raw.as_deref().map(str::as_bytes))
     }
 
     /// Note the keys of what `change`, made, stored and deleted.
@@ -845,19 +828,11 @@ fn layout_text(layout: &Layout) -> Option<String> {
     String::from_utf8(layout.written().ok()?).ok()
 }
 
-/// The key of the session `json` holds, read without the rest of it.
-fn key_of(json: &str) -> Option<SessionKey> {
-    serde_json::from_str::<KeyOnly>(json)
-        .ok()
-        .map(|key| SessionKey::new(key.timestamp, key.date))
-}
-
 /// The key of every session the tombstones name.
 fn tombstoned_keys(tombstones: &[(String, Option<String>)]) -> HashSet<SessionKey> {
     tombstones
         .iter()
-        .filter_map(|(_, raw)| serde_json::from_str::<Deleted>(raw.as_deref()?).ok())
-        .map(|gone| gone.key())
+        .filter_map(|(_, raw)| tombstone_key(raw.as_deref()?.as_bytes()))
         .collect()
 }
 
@@ -922,51 +897,13 @@ fn not_moved_yet(
             *elsewhere.entry(json.as_str()).or_default() += 1;
         }
     }
-    moved
-        .into_iter()
-        .filter(|record| {
-            if read.raw.contains_key(&record.id) {
-                return true;
-            }
-            if gone.contains(&record.id) {
-                return false;
-            }
-            if let Some(count) = elsewhere
-                .get_mut(record.json.as_str())
-                .filter(|count| **count > 0)
-            {
-                *count -= 1;
-                return false;
-            }
-            !key_of(&record.json).is_some_and(|key| gone_keys.contains(&key))
-        })
-        .collect()
-}
-
-/// Every record of `sessions` by its session's key.
-fn keyed<'a>(
-    sessions: impl Iterator<Item = (RecordId, &'a SessionResult)>,
-) -> HashMap<SessionKey, Vec<RecordId>> {
-    let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
-    for (id, session) in sessions {
-        live.entry(SessionKey::of(session)).or_default().push(id);
-    }
-    live
-}
-
-/// `sessions`, in the order of their records, with `change`, made, made to
-/// them too.
-fn taken_up(sessions: &mut Vec<(RecordId, SessionResult)>, change: &HistoryChange) {
-    let forgotten: HashSet<RecordId> = change.forget.iter().map(|(id, _)| *id).collect();
-    sessions.retain(|(id, _)| !forgotten.contains(id));
-    for record in &change.put {
-        let Some(session) = read_record(&record.json) else {
-            continue;
-        };
-        if let Err(at) = sessions.binary_search_by_key(&record.id, |(id, _)| *id) {
-            sessions.insert(at, (record.id, session));
-        }
-    }
+    legacy::not_moved_yet(
+        moved,
+        |id| read.raw.contains_key(&id),
+        gone,
+        elsewhere,
+        gone_keys,
+    )
 }
 
 #[cfg(feature = "web")]
@@ -984,13 +921,13 @@ mod script {
 
     /// What the page script hands back: what the history does with the
     /// database ([`IDB_JS`]).
-    pub(in crate::persist) struct Script(JsValue);
+    pub(crate) struct Script(JsValue);
 
     impl Script {
         /// Run the page script and open the database: the script, and
         /// whether a newer Dust keeps the database, so that this one only
         /// reads it; or why it would not open.
-        pub(in crate::persist) async fn open() -> Result<(Self, bool), String> {
+        pub(crate) async fn open() -> Result<(Self, bool), String> {
             let make = js_sys::Function::new_with_args("options", IDB_JS);
             let glue = make
                 .call1(&JsValue::NULL, &JsValue::UNDEFINED)
@@ -1028,7 +965,7 @@ mod script {
 
     /// How long the script has kept the page waiting, in milliseconds: since
     /// it was last asked something, or last answered.
-    pub(in crate::persist) fn waited_ms() -> f64 {
+    pub(crate) fn waited_ms() -> f64 {
         js_sys::Date::now() - STIRRED.with(Cell::get)
     }
 

@@ -2,18 +2,19 @@
 
 use std::collections::BTreeMap;
 
-use crate::alignment::CopyTally;
-use crate::auto_level::judged_copy;
+use crate::alignment::{CopyTally, judged_copy};
 use crate::belief::{FADE_HORIZON, SESSION_FADE, sessions_faded};
 use crate::callsign::{CallSpec, GeneratedCall, generate_call};
 use crate::contest::CallSource;
 use crate::machine::GroupSource;
-use crate::pool::compute_char_pool;
 use crate::rng::{Rng, SplitMix64, weighted_random_pick};
 use crate::session::{Answered, SessionResult};
-use crate::settings::{CharSetMode, LevelAxis, SettingsSection, TrainingSettings};
+use crate::settings::{
+    CharSetMode, LevelAxis, SpeedPath, TrainingSettings, adaptive_bounds, adaptive_speed_path,
+    compute_char_pool, group_size_bounds, length_floor,
+};
 use crate::span::SpanBelief;
-use crate::speed::{SpeedBelief, SpeedPath};
+use crate::speed::SpeedBelief;
 
 pub const CHAR_SAMPLING_PRIOR_ALPHA: f64 = 1.0;
 pub const CHAR_SAMPLING_PRIOR_BETA: f64 = 1.0;
@@ -315,75 +316,6 @@ impl CallSource for Sampler {
     fn next_speed(&mut self, settings: &TrainingSettings) -> Option<(f64, f64)> {
         self.draw_speed(settings)
     }
-}
-
-/// Whether `settings` have each group's speed, or each new caller's in a
-/// contest, chosen by adaptive speed.
-pub fn adapts_speed(settings: &TrainingSettings) -> bool {
-    adaptive_speed_path(settings).is_some()
-}
-
-/// Whether the adaptive speed switch of the mode `settings` train is on,
-/// room or not: in Contest mode the callers' own, on as it ships, so group
-/// training's, off as it ships, is left as it was; in any other, group
-/// training's.
-pub fn adaptive_speed_on(settings: &TrainingSettings) -> bool {
-    if settings.curriculum.char_set_mode == CharSetMode::Contest {
-        settings.contest.contest_adapt_speed
-    } else {
-        settings.playback.adaptive_speed
-    }
-}
-
-/// The line adaptive speed moves along, when it has one: the mode's switch
-/// is on, and the speed settings leave more than one speed to choose from.
-pub(crate) fn adaptive_speed_path(settings: &TrainingSettings) -> Option<SpeedPath> {
-    let path = SpeedPath::of(settings);
-    (adaptive_speed_on(settings) && path.has_room()).then_some(path)
-}
-
-/// The shortest and longest group `settings` asks for. At least one
-/// character: a group of none is a silent send nobody can answer, and only
-/// settings that were never clamped could ask for it.
-pub(crate) fn group_size_bounds(settings: &TrainingSettings) -> (usize, usize) {
-    let shortest = settings.curriculum.min_group_size.max(1) as usize;
-    let longest = (settings.curriculum.max_group_size as usize).max(shortest);
-    (shortest, longest)
-}
-
-/// Whether `settings` have group lengths drawn by adaptive group size: what
-/// the screens say about it, read off the same rule the sampler follows.
-pub fn adapts_group_size(settings: &TrainingSettings) -> bool {
-    adaptive_bounds(settings).is_some()
-}
-
-/// The settings card that shows the aim, and so puts it back: Session shape
-/// while group size adapts, for both; Speed while only the speed does. With
-/// neither adapting it shows nowhere, and Session shape keeps it.
-pub fn aim_section(settings: &TrainingSettings) -> SettingsSection {
-    if adapts_speed(settings) && !adapts_group_size(settings) {
-        SettingsSection::Speed
-    } else {
-        SettingsSection::SessionShape
-    }
-}
-
-/// The range adaptive group size draws within, when it has one to draw in:
-/// it is switched on, there is more than one length to choose from, and the
-/// groups are drawn a character at a time: callsigns and words are as long as
-/// they are.
-pub(crate) fn adaptive_bounds(settings: &TrainingSettings) -> Option<(usize, usize)> {
-    let (shortest, longest) = group_size_bounds(settings);
-    (settings.curriculum.adaptive_group_size
-        && settings.curriculum.char_set_mode.draws_characters()
-        && shortest < longest)
-        .then_some((shortest, longest))
-}
-
-/// The shortest group adaptive group size draws, while it draws the
-/// lengths: a group longer than that answers for its own lost end.
-pub(crate) fn length_floor(settings: &TrainingSettings) -> Option<usize> {
-    adaptive_bounds(settings).map(|(shortest, _)| shortest)
 }
 
 #[derive(Clone, Debug)]
@@ -749,7 +681,7 @@ fn generate_group(
 mod tests {
     use super::*;
     use crate::session::GroupResult;
-    use crate::settings::Aim;
+    use crate::settings::{Aim, adapts_speed};
 
     /// Teach `sampler` that `typed` was the answer to `sent`, played at
     /// `played` if it was measured.

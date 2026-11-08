@@ -18,7 +18,7 @@ const REPORTS: &[(u32, f64)] = &[
 ];
 
 /// A report a caller gives, from `rng`.
-pub(in crate::contest) fn draw_report(rng: &mut impl Rng) -> u32 {
+pub(crate) fn draw_report(rng: &mut impl Rng) -> u32 {
     pick_weighted(REPORTS, rng).copied().unwrap_or(599)
 }
 

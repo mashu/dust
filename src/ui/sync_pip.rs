@@ -10,7 +10,7 @@
 use dioxus::prelude::*;
 
 use crate::state::AppCtx;
-use crate::sync::ctx::SyncStatus;
+use crate::state::SyncStatus;
 use crate::time::sleep_ms;
 use crate::ui::widgets::{Icon, IconName, control_id};
 

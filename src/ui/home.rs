@@ -5,6 +5,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::audio::AUDIO_IS_SILENT;
+use crate::page::{Caret, focus_by_id};
 use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::figures::History;
 use crate::ui::heatmap::{ActivityHeatmap, Calendar, StreakCard};
@@ -16,20 +17,12 @@ use crate::ui::settings_station::{
 };
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
 use crate::ui::widgets::{
-    CardHead, Icon, IconName, TextDraft, control_id, focus_script, keep_focus, range_label,
+    CardHead, Icon, IconName, TextDraft, control_id, keep_focus, range_label,
 };
 
 /// Give Start the cursor, as Enter in the hero's last field does.
 fn focus_start() {
-    let id = control_id("btn", "start training");
-    let script = focus_script(&id);
-    // Tests have no page to run it on: the harness looks for the button.
-    #[cfg(test)]
-    crate::testing::ask_focus(&id, &script);
-    #[cfg(not(test))]
-    spawn(async move {
-        let _ = document::eval(&script).await;
-    });
+    focus_by_id(&control_id("btn", "start training"), Caret::AsIs);
 }
 
 /// Where the learner is, as Home says it: in the hero, and on the tile.

@@ -5,24 +5,26 @@ use std::collections::BTreeMap;
 use crate::alignment::align_group;
 use crate::belief::{EstimatePoint, sessions_faded};
 use crate::board::BOARD_MIN_GROUPS;
-use crate::contest::{ContestKind, StoredLog};
+use crate::contest::StoredLog;
 use crate::morse::LCWO_SEQUENCE;
 use crate::numeric::median;
-use crate::pool::compute_char_pool;
 use crate::recognition::{
     CopyTime, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Recognition, RecognitionBands,
     copied_after, copy_times, recognise,
 };
+use crate::rulebook::ContestKind;
 use crate::sampling::{
     CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
-    adaptive_bounds, adapts_speed, belief_for, beta_posterior_mean_error,
-    compute_raw_sampling_weights, config_from_settings, draw_chances, generate_callsign_group,
-    generate_contest_call, generate_word_group, group_size_bounds,
+    belief_for, beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,
+    draw_chances, generate_callsign_group, generate_contest_call, generate_word_group,
 };
 use crate::session::{SessionResult, Untimed};
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{
+    CharSetMode, SpeedPath, TrainingSettings, adaptive_bounds, adapts_speed, compute_char_pool,
+    group_size_bounds,
+};
 use crate::span::{LengthForecast, SpanBelief};
-use crate::speed::{SpeedBelief, SpeedForecast, SpeedPath, forecast_speeds, station_shares};
+use crate::speed::{SpeedBelief, SpeedForecast, forecast_speeds, station_shares};
 
 pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;

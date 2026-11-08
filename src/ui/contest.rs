@@ -15,19 +15,19 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{
-    change_speed, focus_field, pause_run, press_key, resume_run, tick, typed_len_max,
+    change_speed, field_name, focus_field, pause_run, press_key, resume_run, tick,
 };
+use crate::format::{counted, minutes_seconds};
 use crate::page_hidden::{RUN_HIDDEN, use_page_hidden};
 use crate::session_runtime::{abort_run, finish_run};
-use crate::state::AppCtx;
+use crate::state::{AppCtx, typed_len_max};
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
 use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
-use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::training::{ANSWER_INPUT_MODE, InputMethod, Keypad, PadKey, PadRow, TOUCH_BUILD};
+use crate::ui::training::{ANSWER_INPUT_MODE, InputMethod, Keypad, PadKey, PadRow};
 use crate::ui::widgets::{
-    Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool, keep_focus,
+    Icon, IconName, ProgressHeader, StatusDot, TOUCH_BUILD, control_id, html_bool, keep_focus,
 };
 
 /// How often the run's clock and the air are drawn again, which is also how
@@ -481,7 +481,7 @@ fn worked_before(ctx: AppCtx) -> Option<u64> {
 /// A controlled input drawn again while it is typed in drops the key typed
 /// in between, so it is drawn only for what the page has not seen: a keypad
 /// or paddle letter, the fields cleared
-/// ([`crate::contest_runtime::ContestEntry`]). Upper case is the
+/// ([`crate::state::ContestEntry`]). Upper case is the
 /// stylesheet's; what is typed is read as typed. The phone's own keyboard is
 /// kept away, as from the answer box: the keypad types here.
 #[component]
@@ -572,7 +572,7 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
 /// Exchange, as a call has no spaces; from Exchange back to Call, as
 /// MorseRunner's and N1MM's space bar goes, so a call is put right with one
 /// key, but where it separates the exchange's next item
-/// ([`crate::contest_runtime::ContestEntry::space_to_call`]): nowhere, and
+/// ([`crate::state::ContestEntry::space_to_call`]): nowhere, and
 /// it is a space. Moved, the cursor lands at the end of the field.
 fn space_goes_to(ctx: AppCtx, field: EntryField) -> Option<EntryField> {
     match field {
@@ -584,22 +584,13 @@ fn space_goes_to(ctx: AppCtx, field: EntryField) -> Option<EntryField> {
 /// A word space keyed on the paddles, or Space from the keypad's Space:
 /// where [`space_goes_to`] says, or else the space before the exchange's
 /// next item, typed. A Space pressed by hand ends the paddles' word first
-/// ([`crate::contest_runtime::ContestEntry::finish_letter`]), so their word
+/// ([`crate::state::ContestEntry::finish_letter`]), so their word
 /// space does not follow it with another.
 fn field_space(ctx: AppCtx) {
     match space_goes_to(ctx, ctx.entry.focus()) {
         Some(to) => focus_field(ctx, to),
         None => ctx.entry.push_space(),
     }
-}
-
-/// A field's id, and what it is called.
-pub fn field_name(field: EntryField) -> (String, &'static str) {
-    let label = match field {
-        EntryField::Call => "Call",
-        EntryField::Exchange => "Exchange",
-    };
-    (control_id("field", label), label)
 }
 
 /// What the exchange reads as: each field read, a token a later one of its
@@ -1058,9 +1049,9 @@ fn use_pause_when_hidden(ctx: AppCtx) {
 mod tests {
     use super::*;
     use crate::audio::fake::Recorder;
+    use crate::page::focus_end_script;
     use crate::persist::Store;
     use crate::testing::{Ui, contest_settings, run};
-    use crate::ui::widgets::focus_end_script;
     use cw_core::{QsoCheck, QsoError, RunClock};
 
     /// The text of the first element whose class list starts with `class`,

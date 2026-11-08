@@ -70,21 +70,11 @@ pub fn use_click_elsewhere(at: Elsewhere, mut on_elsewhere: impl FnMut() + 'stat
     // Tests have no page to run it on: they click elsewhere through
     // [`crate::testing::Ui::click_elsewhere`].
     #[cfg(not(test))]
-    {
-        use_hook(move || {
-            spawn(async move {
-                let mut page = document::eval(&listen_script(at));
-                while page.recv::<bool>().await.is_ok() {
-                    on_elsewhere.call(());
-                }
-            })
-        });
-        use_drop(move || {
-            dioxus::core::spawn_forever(async move {
-                let _ = document::eval(&stop_script(at)).await;
-            });
-        });
-    }
+    crate::page::use_page_listener(
+        move || listen_script(at),
+        move || stop_script(at),
+        move |_: bool| on_elsewhere.call(()),
+    );
     #[cfg(test)]
     use_hook(move || {
         let _ = at;

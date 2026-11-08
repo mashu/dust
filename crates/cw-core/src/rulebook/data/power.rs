@@ -10,15 +10,15 @@ use crate::callsign::pick_weighted;
 use crate::rng::Rng;
 
 /// The power a DX caller sends, from `rng`.
-pub(in crate::contest) fn draw_power(rng: &mut impl Rng) -> &'static str {
+pub(crate) fn draw_power(rng: &mut impl Rng) -> &'static str {
     pick_weighted(POWERS, rng).copied().unwrap_or("100")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contest::Field;
     use crate::rng::SplitMix64;
+    use crate::rulebook::Field;
 
     /// The counted shares: a hundred watts a third of the time, a kilowatt
     /// written two ways a third more, and the others a few percent between

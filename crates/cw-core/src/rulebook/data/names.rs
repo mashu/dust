@@ -215,8 +215,8 @@ pub(crate) fn draw_name(country: &str, rng: &mut impl Rng) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contest::Field;
     use crate::rng::SplitMix64;
+    use crate::rulebook::Field;
 
     /// Every list, North America's first.
     fn lists() -> Vec<Vec<&'static str>> {

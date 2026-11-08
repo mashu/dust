@@ -11,19 +11,17 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use super::check::{QsoCheck, QsoError, QsoText, check_qso};
-use super::exchange::Field;
-use super::rules::{ContestRules, Side};
 use super::score::{ContestScore, MyStation, Placed, Rates, ScoredQso, contest_score};
-use super::{ContestKind, RunStyle};
 use crate::alignment::CopyTally;
-use crate::score::{calculate_total_chars, compute_average_response_ms};
-use crate::session::{GroupResult, SessionResult, SessionTiming};
+use crate::rulebook::exchange::Field;
+use crate::rulebook::rules::{ContestRules, Side};
+use crate::rulebook::{ContestKind, RunStyle};
+use crate::score::calculate_total_chars;
+use crate::session::{
+    CONTEST_MARK, ContestLog, GroupResult, SessionResult, SessionTiming,
+    compute_average_response_ms,
+};
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
-
-/// What a run's alphabet fingerprint starts with: `contest:wpx`. A build
-/// older than contest mode drops the log on its next save but keeps the
-/// fingerprint, so the mark is what still makes the run a run after that.
-pub(crate) const CONTEST_MARK: &str = "contest:";
 
 /// What follows the contest in the mark of a run with Show copy on:
 /// `contest:wpx:a`, so the run is still known for assisted once an older
@@ -36,19 +34,9 @@ const ASSISTED_MARK: &str = ":a";
 pub(crate) const LAYOUT: u32 = 1;
 
 /// A QSO's kind, as `k` keeps it: logged is empty.
+pub(super) const LOGGED: &str = "";
 pub(super) const LOST: &str = "lost";
 pub(super) const NIL: &str = "nil";
-
-/// A run's log, exactly as it was read.
-///
-/// Kept as plain JSON rather than parsed into a struct, because a struct
-/// that reads any layout leniently cannot write a newer layout back
-/// unchanged: a field it does not know would be lost, a renamed one
-/// defaulted. Held as a value, a log written by a later version goes back to
-/// disk as it came, whatever this version makes of it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ContestLog(pub serde_json::Value);
 
 /// A run's log as this build reads it. Strict: every key without a default
 /// below must be there, so a layout this build does not know is not read as
@@ -148,6 +136,28 @@ fn is_zero(n: &u32) -> bool {
 }
 
 impl QsoRecord {
+    /// What every QSO keeps, for one of kind `kind` ([`LOGGED`], [`NIL`] or
+    /// [`LOST`]) that ended at `t`, in run time, its station first heard at
+    /// `first`, or when it ended if never, and never later; owning `groups`
+    /// of the session's groups, as many as a `u32` counts; and sent your
+    /// serial `nr`. The rest is left empty, for each kind to fill in.
+    pub(super) fn ended(kind: &str, t: u64, first: Option<u64>, groups: usize, nr: u32) -> Self {
+        Self {
+            t,
+            h: first.unwrap_or(t).min(t),
+            g: u32::try_from(groups).unwrap_or(u32::MAX),
+            nr,
+            k: kind.to_string(),
+            c: String::new(),
+            lp: Vec::new(),
+            l: Vec::new(),
+            lc: String::new(),
+            s: Vec::new(),
+            sc: String::new(),
+            a: 0,
+        }
+    }
+
     /// What [`Self::lp`] keeps of where `call`, logged, places its station.
     pub(crate) fn place_of(call: &str) -> Vec<String> {
         let placed = Placed::of(call);
@@ -708,6 +718,15 @@ pub(crate) enum GroupCopy {
     Field(Field),
     /// Nothing the run's layout names.
     Other,
+}
+
+/// Whether a contest run's group says how fast you copy: a call or a number
+/// (NR, ZN) does, a field from a short list does not, being half guessed.
+pub(crate) fn tells_speed(copy: GroupCopy) -> bool {
+    matches!(
+        copy,
+        GroupCopy::Call | GroupCopy::Field(Field::Nr | Field::Zn)
+    )
 }
 
 /// A QSO of a stored run, with the groups it owns.

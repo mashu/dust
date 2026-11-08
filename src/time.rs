@@ -1,3 +1,5 @@
+pub mod stall_log;
+
 use std::borrow::Cow;
 
 use cw_core::{SessionResult, settle_clock_ahead};
@@ -9,7 +11,7 @@ pub const POLL_MS: u32 = 16;
 pub async fn sleep_ms(ms: u32) {
     let ms = ms.max(1);
     // Under way until it is over, or given up with the task that waits.
-    let _due = crate::stall_log::due_in(ms);
+    let _due = stall_log::due_in(ms);
     #[cfg(target_arch = "wasm32")]
     {
         gloo_timers::future::TimeoutFuture::new(ms).await;

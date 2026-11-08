@@ -18,12 +18,16 @@ compile_error!(
 mod app;
 mod audio;
 mod contest_runtime;
+mod format;
 mod history;
+#[cfg(all(target_os = "android", not(test)))]
+mod jvm;
 mod keep_awake;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod linux_webview;
 #[cfg(feature = "desktop")]
 mod menus;
+mod page;
 mod page_closed;
 mod page_hidden;
 mod persist;
@@ -31,7 +35,6 @@ mod playback;
 mod player;
 mod routes;
 mod session_runtime;
-mod stall_log;
 mod state;
 mod sync;
 // A phone's Back and a browser's; tests press it on a page of their own.
@@ -44,14 +47,14 @@ mod time;
 #[cfg(test)]
 mod timing_tests;
 mod ui;
+#[cfg(not(feature = "web"))]
+mod webview_assets;
 
 use crate::app::App;
-
-/// Keeps the app's tasks running while its page is out of sight: a window
-/// minimised or covered, a phone locked or another app in front. Every
-/// webview build has it in the page's head, ahead of the renderer.
 #[cfg(not(feature = "web"))]
-pub(crate) const KEEP_RUNNING_JS: &str = include_str!("keep_running.js");
+use crate::webview_assets::KEEP_RUNNING_JS;
+#[cfg(feature = "desktop")]
+use crate::webview_assets::window_icon;
 
 /// The paper the app is drawn on, as a webview paints it before the page
 /// has loaded: the light theme's page colour, so a window or a phone's
@@ -209,14 +212,6 @@ mod tests {
     }
 }
 
-/// The Dust mark on the window. GNOME's launcher uses the `.desktop` icon;
-/// this is what the title bar shows.
-#[cfg(feature = "desktop")]
-pub(crate) fn window_icon() -> dioxus::desktop::tao::window::Icon {
-    dioxus::desktop::icon_from_memory(include_bytes!("../assets/icon.png"))
-        .expect("assets/icon.png")
-}
-
 #[cfg(feature = "desktop")]
 fn launch_desktop() {
     // Safety: process start, before other threads exist.
@@ -321,7 +316,7 @@ fn main() {
         #[cfg(all(target_os = "android", not(test)))]
         {
             kick_the_event_loop();
-            stall_log::start();
+            time::stall_log::start();
         }
         // The history is read on a thread of its own while the webview
         // starts up. Android hands the app its folder before `main` runs.

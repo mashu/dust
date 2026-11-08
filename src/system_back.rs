@@ -156,14 +156,7 @@ fn step_script(step: Step) -> String {
 
 #[cfg(not(test))]
 fn listen(on_popped: Callback<bool>) {
-    use_hook(move || {
-        spawn(async move {
-            let mut page = document::eval(&listen_script());
-            while let Ok(on_own) = page.recv::<bool>().await {
-                on_popped.call(on_own);
-            }
-        })
-    });
+    crate::page::use_page_messages(listen_script, move |on_own: bool| on_popped.call(on_own));
 }
 
 #[cfg(not(test))]

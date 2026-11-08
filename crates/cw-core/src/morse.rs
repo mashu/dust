@@ -94,6 +94,11 @@ pub(crate) fn is_scored_char(ch: char) -> bool {
 /// can be.
 pub(crate) const MORSE_CHARACTERS: usize = MORSE_PAIRS.len();
 
+/// PARIS-style dot duration in seconds from character WPM.
+pub fn dot_seconds(wpm: f64) -> f64 {
+    1.2 / wpm.max(1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

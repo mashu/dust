@@ -1,3 +1,4 @@
+pub mod app_widgets;
 pub mod auto_level;
 pub mod backup;
 pub mod band;
@@ -19,7 +20,6 @@ pub mod file_pick;
 #[cfg(feature = "desktop")]
 pub mod floating;
 pub mod forecast;
-pub mod format;
 pub mod hear_qso;
 pub mod heatmap;
 pub mod help;
@@ -36,6 +36,7 @@ pub mod scores;
 pub mod settings;
 pub mod settings_charset;
 pub mod settings_station;
+pub mod standing;
 pub mod stats;
 pub mod stats_detail;
 pub mod sync;

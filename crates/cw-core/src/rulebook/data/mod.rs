@@ -14,10 +14,10 @@
 //!   others draw from.
 
 pub(crate) mod counted;
-pub(super) mod fd;
+pub(crate) mod fd;
 pub(crate) mod names;
 pub(crate) mod places;
-pub(super) mod power;
-pub(super) mod reports;
+pub(crate) mod power;
+pub(crate) mod reports;
 pub(crate) mod sections;
 pub(crate) mod zones;

@@ -51,15 +51,24 @@ use cw_core::SessionResult;
 use flate2::read::GzDecoder;
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::desktop::{
-    DELETED, SESSIONS, copy_aside, move_aside, place_whole, shown, sync_dir, write_whole,
-};
+use super::disk::{aside_name, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
-use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, read_record};
-use super::{Deleted, HistorySaved, SessionKey, SetAside};
+use super::record::{
+    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, key_of, keyed, not_told,
+    read_record, taken_up, tombstone_key,
+};
+use super::saved::HistorySaved;
+use super::session::{Deleted, SessionKey};
+use super::set_aside::SetAside;
 
 /// The folder of the history, in the store's.
 const HISTORY: &str = "history";
+/// The history as builds before records keep it whole, which the move to
+/// records reads once and leaves as it was ([`HistoryFiles`]).
+pub(super) const SESSIONS: &str = "sessions.json";
+/// The sessions deleted by hand ([`super::Deleted`]), as builds before
+/// records remember them.
+pub(super) const DELETED: &str = "deleted.json";
 /// The records, in the history's folder.
 const RECORDS: &str = "sessions";
 /// The tombstones, in the history's folder.
@@ -98,6 +107,9 @@ const WRITERS: usize = 8;
 /// any of it is written ([`HistoryFiles::stream_backup`]): some two
 /// megabytes, at some seven kilobytes a session, however long the history.
 const BACKUP_PART: usize = 256;
+
+/// The thread the history's files are read and written on.
+pub(super) const THREAD: &str = "dust-history";
 
 /// The history as files under one folder.
 pub(super) struct HistoryFiles {
@@ -205,13 +217,6 @@ struct Journaled {
     undone: Vec<String>,
 }
 
-/// The key a record's session finished at, read without the rest of it.
-#[derive(serde::Deserialize)]
-struct KeyOnly {
-    timestamp: u64,
-    date: String,
-}
-
 impl HistoryFiles {
     /// The history in the store's folder `root`.
     pub(super) fn at(root: &Path) -> Self {
@@ -250,7 +255,7 @@ impl HistoryFiles {
     }
 
     /// From here on the files are the worker's: looked at and written on
-    /// its thread alone ([`super::worker::THREAD`]).
+    /// its thread alone ([`THREAD`]).
     pub(super) fn keep_to_worker(&mut self) {
         self.on_worker = true;
     }
@@ -260,10 +265,10 @@ impl HistoryFiles {
     /// that reaches them is one the app's taps wait on.
     fn on_its_thread(&self) {
         debug_assert!(
-            !self.on_worker || thread::current().name() == Some(super::worker::THREAD),
+            !self.on_worker || thread::current().name() == Some(THREAD),
             "the history's files were reached from {:?}, not from {}",
             thread::current().name(),
-            super::worker::THREAD
+            THREAD
         );
     }
 
@@ -446,10 +451,8 @@ impl HistoryFiles {
             } else {
                 self.place_record(record)?
             };
-            if let Ok(key) = serde_json::from_str::<KeyOnly>(&record.json) {
-                self.keys
-                    .borrow_mut()
-                    .insert(id, SessionKey::new(key.timestamp, key.date));
+            if let Some(key) = key_of(&record.json) {
+                self.keys.borrow_mut().insert(id, key);
             }
         }
         if !change.put.is_empty() {
@@ -774,8 +777,7 @@ impl HistoryFiles {
                 None => {
                     let Some(key) = self
                         .raw_record(*id, &listing.packed)
-                        .and_then(|raw| serde_json::from_str::<KeyOnly>(&raw).ok())
-                        .map(|key| SessionKey::new(key.timestamp, key.date))
+                        .and_then(|raw| key_of(&raw))
                     else {
                         continue;
                     };
@@ -921,23 +923,13 @@ impl HistoryFiles {
                 *elsewhere.entry(json).or_default() += 1;
             }
         }
-        Ok(moved
-            .into_iter()
-            .filter(|record| {
-                if here.contains(&record.id) {
-                    return true;
-                }
-                if gone.contains(&record.id) {
-                    return false;
-                }
-                if let Some(count) = elsewhere.get_mut(&record.json).filter(|count| **count > 0) {
-                    *count -= 1;
-                    return false;
-                }
-                !serde_json::from_str::<KeyOnly>(&record.json)
-                    .is_ok_and(|key| gone_keys.contains(&SessionKey::new(key.timestamp, key.date)))
-            })
-            .collect())
+        Ok(legacy::not_moved_yet(
+            moved,
+            |id| here.contains(&id),
+            &gone,
+            elsewhere,
+            &gone_keys,
+        ))
     }
 
     /// The key of every session deleted here that its tombstone names.
@@ -948,9 +940,7 @@ impl HistoryFiles {
         gone.into_iter()
             .filter_map(|id| {
                 let raw = fs::read(self.tombstones().join(file_name(id))).ok()?;
-                serde_json::from_slice::<Deleted>(&raw)
-                    .ok()
-                    .map(|gone| gone.key())
+                tombstone_key(&raw)
             })
             .collect()
     }
@@ -960,17 +950,7 @@ impl HistoryFiles {
     /// what was told may be noted, so it is told of once.
     fn tell(&self, unread: &[RecordId], writable: bool) -> Option<usize> {
         let path = self.dir.join(TOLD);
-        let told: HashSet<String> = fs::read(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .unwrap_or_default();
-        let new = unread
-            .iter()
-            .filter(|id| !told.contains(&id.name()))
-            .count();
-        if new == 0 {
-            return None;
-        }
+        let new = not_told(unread, fs::read(&path).ok().as_deref())?;
         if writable {
             let names: Vec<String> = unread.iter().map(|id| id.name()).collect();
             if let Ok(raw) = serde_json::to_vec(&names) {
@@ -1393,36 +1373,30 @@ fn read_with_fingerprint(path: &Path) -> io::Result<Option<(Vec<u8>, Fingerprint
 /// The deletions an older build remembers: none, where they cannot be
 /// read, which costs a session it deleted staying here, never one lost.
 fn legacy_deleted(root: &Path) -> Vec<Deleted> {
-    fs::read(root.join(DELETED))
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
+    legacy::deleted_of(fs::read(root.join(DELETED)).ok().as_deref())
 }
 
-/// Every record of `sessions` by its session's key.
-fn keyed<'a>(
-    sessions: impl Iterator<Item = (RecordId, &'a SessionResult)>,
-) -> HashMap<SessionKey, Vec<RecordId>> {
-    let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
-    for (id, session) in sessions {
-        live.entry(SessionKey::of(session)).or_default().push(id);
+/// Keep `unread`, sessions of the history in `root` that could not be
+/// read, in a file of their own beside it, and say what it is called:
+/// nothing, where a file set aside before holds them already.
+pub(super) fn copy_aside(root: &Path, unread: &[u8]) -> io::Result<Option<String>> {
+    let kept = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("sessions.unreadable-")
+                && fs::read(entry.path()).is_ok_and(|kept| kept == unread)
+        });
+    if kept {
+        return Ok(None);
     }
-    live
-}
-
-/// `sessions`, in the order of their records, with `change`, made, made to
-/// them too.
-fn taken_up(sessions: &mut Vec<(RecordId, SessionResult)>, change: &HistoryChange) {
-    let forgotten: HashSet<RecordId> = change.forget.iter().map(|(id, _)| *id).collect();
-    sessions.retain(|(id, _)| !forgotten.contains(id));
-    for record in &change.put {
-        let Some(session) = read_record(&record.json) else {
-            continue;
-        };
-        if let Err(at) = sessions.binary_search_by_key(&record.id, |(id, _)| *id) {
-            sessions.insert(at, (record.id, session));
-        }
-    }
+    let name = aside_name(root, "sessions");
+    write_whole(root, &name, unread)?;
+    Ok(Some(name))
 }
 
 #[cfg(test)]

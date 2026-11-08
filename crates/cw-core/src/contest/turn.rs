@@ -19,8 +19,11 @@
 use std::sync::Arc;
 
 use crate::band::{FADE_STEP_SEC, Qsb, SOFT_LIMIT_KNEE};
+use crate::rulebook::rules::Sender;
 use crate::session::MonoMs;
-use crate::settings::{TrainingSettings, VOLUME_MAX};
+use crate::settings::{
+    ContestSettings, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, TrainingSettings, VOLUME_MAX,
+};
 use crate::timing::{
     CharSpan, Interferer, PlannedTransmission, PlaybackPlan, StationVoice, ToneEvent, Transmission,
     plan_from, plan_morse_playback_at, plan_morse_playback_for,
@@ -43,22 +46,16 @@ use crate::timing::{
 /// kilohertz, and going louder would only bend more of it.
 pub const MONITOR_LEVEL: f64 = SOFT_LIMIT_KNEE;
 
-/// Who sends a segment of a turn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Sender {
-    You,
-    /// A caller, by its number in the run.
-    Caller(u32),
-    /// A station on your frequency that is not calling you, heard through
-    /// the receiver as a caller is: the QRM of rough habits (§5.6 of the
-    /// design). It never answers, and is no caller and no part of a QSO.
-    Qrm,
-}
-
-impl Sender {
-    /// Whether it is a caller: a station that may answer you.
-    pub fn is_caller(self) -> bool {
-        matches!(self, Self::Caller(_))
+impl ContestSettings {
+    /// How loud your own messages play, as a peak of full scale: the
+    /// monitor's level, [`MONITOR_LEVEL`], turned down by your sending's
+    /// decibels, and nothing at all at [`MY_SENDING_OFF_DB`].
+    pub fn sending_level(&self) -> f64 {
+        if self.my_sending_db <= MY_SENDING_OFF_DB {
+            return 0.0;
+        }
+        let db = f64::from(self.my_sending_db.min(MY_SENDING_MAX_DB));
+        MONITOR_LEVEL * 10f64.powf(db / 20.0)
     }
 }
 

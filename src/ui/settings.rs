@@ -17,7 +17,9 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::playback::Dialogue;
+use crate::format::percent;
+use crate::state::Dialogue;
+use crate::ui::app_widgets::SectionReset;
 use crate::ui::band::BandConditionsCard;
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::help;
@@ -25,9 +27,8 @@ use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
-    CardHead, FoldPanel, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange,
-    SliderField, Switch, control_id, db_share, html_bool, pretty_number, range_label, share_db,
-    whole,
+    CardHead, FoldPanel, Icon, IconName, NumberField, Seg, SettingsRange, SliderField, Switch,
+    control_id, db_share, html_bool, pretty_number, range_label, share_db, whole,
 };
 
 /// What an aim is called on screen.
@@ -295,14 +296,14 @@ impl SessionShape {
 /// group size adapts; of the characters right, if speed does.
 fn aim_note(aim: Aim, groups: bool, chars: bool) -> String {
     let label = aim_label(aim);
-    let whole = aim.groups_whole() * 100.0;
-    let right = aim.chars_right() * 100.0;
+    let whole = percent(aim.groups_whole());
+    let right = percent(aim.chars_right());
     match (groups, chars) {
         (true, true) => format!(
-            "{label} aims for {whole:.0}% of groups copied whole and {right:.0}% of characters right."
+            "{label} aims for {whole} of groups copied whole and {right} of characters right."
         ),
-        (false, true) => format!("{label} aims for {right:.0}% of characters right."),
-        _ => format!("{label} aims for {whole:.0}% of groups copied whole."),
+        (false, true) => format!("{label} aims for {right} of characters right."),
+        _ => format!("{label} aims for {whole} of groups copied whole."),
     }
 }
 
@@ -679,7 +680,7 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 value_label: if speed.fist_variation <= 0.0 {
                     "Keyers".to_string()
                 } else {
-                    format!("{:.0}%", speed.fist_variation * 100.0)
+                    percent(speed.fist_variation)
                 },
                 value: speed.fist_variation,
                 min: 0.0,

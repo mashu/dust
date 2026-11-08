@@ -28,47 +28,38 @@ use std::collections::BTreeSet;
 use super::caller::{CallMatch, Caller, CallerState, Likeness, Says, exchange_at, match_call};
 use super::check::{QsoCheck, QsoText, check_qso};
 use super::clock::RunClock;
-use super::data::places::home_country;
-use super::data::zones::home_continent;
 use super::esm::{
-    EntryField, Fields, MessagePart, QsoState, call_copied, esm, loggable, message_text,
-    unheard_hint,
+    EntryField, Fields, QsoState, call_copied, esm, loggable, message_text, unheard_hint,
 };
-use super::exchange::Field;
+use super::message::MessagePart;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
-use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
-use super::rules::{ContestRules, FAREWELLS, Fill, GREETING_HOUR, Side, greeting};
+use super::record::{ContestRun, LAYOUT, LOGGED, LOST, NIL, QsoRecord, tells_speed};
 use super::score::rate_at;
+use super::source::CallSource;
 use super::turn::{
-    Fade, Segment, Sender, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
+    Fade, Segment, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
 };
-use super::{CallSource, CallerHabits, MS_PER_MINUTE, RunStyle};
 use crate::alignment::CopyTally;
 use crate::band::Qsb;
 use crate::callsign::parse_callsign;
 use crate::machine::COUNTDOWN_STEP_MS;
+use crate::mono::whole_ms;
 use crate::recognition::{CharTimes, Keys};
 use crate::rng::{Rng, SplitMix64};
+use crate::rulebook::data::places::home_country;
+use crate::rulebook::data::zones::home_continent;
+use crate::rulebook::exchange::Field;
+use crate::rulebook::rules::{
+    ContestRules, FAREWELLS, Fill, GREETING_HOUR, Sender, Side, greeting,
+};
+use crate::rulebook::{CallerHabits, MS_PER_MINUTE, RunStyle};
 use crate::score::MIN_RESPONSE_MS_PER_CHAR;
-use crate::session::{Answered, GroupResult, MonoMs, SessionResult, SessionTiming, whole_ms};
+use crate::session::{Answered, GroupResult, MonoMs, PauseWhy, SessionResult, SessionTiming};
 use crate::settings::{STATIONS_MAX, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
-use crate::speed::tells_speed;
 use crate::timing::CharSpan;
 use crate::timing::{SEND_RELEASE_SEC, StationVoice};
-
-/// Why a run, or a session of groups, is paused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PauseWhy {
-    /// You paused it: a run with its Pause or the system's Back, a session
-    /// of groups, which has no Pause of its own, with Back.
-    You,
-    /// The page was hidden or the phone locked. It never resumes by itself.
-    Hidden,
-    /// The sound failed after every retry.
-    Sound,
-}
 
 /// Where a run is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -380,7 +371,7 @@ const SHOWN_AFTER_MS: u64 = 1_000;
 
 /// Once this many QSOs are logged, as many of the callers who join as you
 /// set are stations worked before (§4.7 of the design,
-/// [`crate::contest::CallerOdds::dupe`]).
+/// [`crate::rulebook::CallerOdds::dupe`]).
 const DUPES_AFTER: u32 = 5;
 
 /// The stream, forked off the run's generator, that the run's own draws
@@ -4481,11 +4472,6 @@ impl<S: CallSource> ContestMachine<S> {
         };
         Entry {
             record: QsoRecord {
-                t: run_ms,
-                h: heard.first.unwrap_or(run_ms).min(run_ms),
-                g: u32::try_from(groups.len()).unwrap_or(u32::MAX),
-                nr,
-                k: String::new(),
                 c: station.caller.call.country.to_string(),
                 lp: QsoRecord::place_of(&logged.call),
                 l,
@@ -4493,6 +4479,7 @@ impl<S: CallSource> ContestMachine<S> {
                 s,
                 sc: if again { sent.call } else { String::new() },
                 a: heard.asked(),
+                ..QsoRecord::ended(LOGGED, run_ms, heard.first, groups.len(), nr)
             },
             row: Some(Row {
                 call: logged.call.clone(),
@@ -4603,12 +4590,6 @@ impl<S: CallSource> ContestMachine<S> {
         };
         Entry {
             record: QsoRecord {
-                t: run_ms,
-                h: first.unwrap_or(run_ms).min(run_ms),
-                g: u32::try_from(groups.len()).unwrap_or(u32::MAX),
-                nr,
-                k: NIL.to_string(),
-                c: String::new(),
                 lp: QsoRecord::place_of(&logged.call),
                 l: rules
                     .copied(side)
@@ -4625,11 +4606,10 @@ impl<S: CallSource> ContestMachine<S> {
                 } else {
                     String::new()
                 },
-                s: Vec::new(),
-                sc: String::new(),
                 // No QSO with the station it is against: nothing asked of
                 // it was for this one.
                 a: 0,
+                ..QsoRecord::ended(NIL, run_ms, first, groups.len(), nr)
             },
             row: Some(Row {
                 call: logged.call.clone(),
@@ -4670,18 +4650,9 @@ impl<S: CallSource> ContestMachine<S> {
         groups.extend(misses(&exchange, &exch_voice));
         self.entries.push(Entry {
             record: QsoRecord {
-                t: run_ms,
-                h: heard.first.unwrap_or(run_ms).min(run_ms),
-                g: u32::try_from(groups.len()).unwrap_or(u32::MAX),
-                nr,
-                k: LOST.to_string(),
                 c: station.caller.call.country.to_string(),
-                lp: Vec::new(),
-                l: Vec::new(),
-                lc: String::new(),
-                s: Vec::new(),
-                sc: String::new(),
                 a: heard.asked(),
+                ..QsoRecord::ended(LOST, run_ms, heard.first, groups.len(), nr)
             },
             groups,
             row: None,
@@ -5084,9 +5055,9 @@ mod tests {
         Habit, ScriptCalls, default_run_settings, run_settings, work,
     };
     use crate::contest::bot::{Copied, Operator, Runtime, copy_of};
-    use crate::contest::exchange::read_number;
-    use crate::contest::rules::RULES;
     use crate::contest::turn::{plan_turn, sending_sec};
+    use crate::rulebook::exchange::read_number;
+    use crate::rulebook::rules::RULES;
     use crate::sampling::Sampler;
     use crate::timing::ToneEvent;
 

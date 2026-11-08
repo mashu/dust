@@ -22,11 +22,12 @@ mod keyer;
 mod learner_sim;
 mod level;
 mod machine;
+mod mono;
 mod morse;
 mod numeric;
-mod pool;
 mod recognition;
 mod rng;
+mod rulebook;
 mod sampling;
 mod score;
 mod sequences;
@@ -39,7 +40,6 @@ mod speed;
 mod stats;
 mod streak;
 mod timing;
-mod words;
 
 pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, SKIPPED, align_group};
 pub use auto_level::{
@@ -91,10 +91,8 @@ pub use keyer::{
 pub use machine::{
     AUTO_CONFIRM_DELAY_MS, AnswerClose, GroupSource, SessionEffect, SessionEvent, SessionMachine,
 };
+pub use mono::MonoMs;
 pub use morse::{MAX_DIGITS_LEVEL, morse_for};
-pub use pool::{
-    compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
-};
 pub use recognition::{
     ALONG_FLOOR_MS, CharTimes, CopyTime, KEEPING_UP_MS, KeyLog, Keys, REACTION_MIN_MS,
     RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES,
@@ -102,14 +100,11 @@ pub use recognition::{
     answer_chars, copied_after, copy_times, first_key_late_ms, recognise, typed_along,
 };
 pub use rng::{Rng, SplitMix64};
-pub use sampling::{
-    CharSamplingState, Sampler, SamplerPrior, adaptive_speed_on, adapts_group_size, adapts_speed,
-    aim_section, generate_training_group,
-};
+pub use sampling::{CharSamplingState, Sampler, SamplerPrior, generate_training_group};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
-    Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, MonoMs, SendStart,
-    SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys, Untimed,
+    Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, SendStart, SessionId,
+    SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys, Untimed,
     answer_length_matches, settle_clock_ahead,
 };
 pub use settings::{
@@ -124,12 +119,15 @@ pub use settings::{
     MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
     PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, QSB_DEPTH_MAX_DB,
     QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RangeValues,
-    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
-    STEEPNESS_MIN_MS, SettingsSection, StyleChoice, TrainingSettings, VOLUME_MAX, VOLUME_MIN,
-    WPM_MAX, WPM_MIN, class_reading, power_reading, section_code, state_code,
+    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STARTER_WORDS, STATIONS_MAX, STATIONS_MIN,
+    STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, SpeedPath, StyleChoice, TrainingSettings,
+    VOLUME_MAX, VOLUME_MIN, WORD_LIST_MAX, WPM_MAX, WPM_MIN, WordList, adaptive_speed_on,
+    adapts_group_size, adapts_speed, aim_section, class_reading, clean_word, compute_char_pool,
+    current_practice_window, newest_unlocked, power_reading, section_code, state_code,
+    unlocked_practice_count,
 };
 pub use span::LengthForecast;
-pub use speed::{SpeedForecast, SpeedPath};
+pub use speed::SpeedForecast;
 pub use stats::{
     AccuracyPoint, BUILDING_MIN_ACCURACY, BigramCell, BigramHeatmap, CharTally,
     CharacterDiagnostic, ConfusionEntry, EARLIER_TRIES, GROUP_START_BIGRAM_TOKEN,
@@ -146,4 +144,3 @@ pub use timing::{
     StationVoice, ToneEvent, Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm,
     edge_gain, envelope_shape, plan_morse_playback_for, plan_transmission, resolve_station,
 };
-pub use words::{STARTER_WORDS, WORD_LIST_MAX, WordList, clean_word};

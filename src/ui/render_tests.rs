@@ -28,8 +28,7 @@ use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
 use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView, focused_box_open};
 use crate::audio::fake::Recorder;
-use crate::session_runtime::{AnswerOutbox, TypedAnswer};
-use crate::state::{AppState, Screen, in_root};
+use crate::state::{AnswerOutbox, AppState, Screen, TypedAnswer, in_root};
 use crate::testing::reads_as;
 
 std::thread_local! {
@@ -2254,7 +2253,7 @@ fn every_listen_chip_has_an_id_of_its_own() {
 /// stays out of sight, and so does one stopped before a line was heard.
 #[test]
 fn listen_in_contest_mode_offers_hear_a_qso_and_shows_its_lines() {
-    use crate::playback::{Dialogue, DialogueLine};
+    use crate::state::{Dialogue, DialogueLine};
     use cw_core::{ContestKind, Sender};
     let shown = |dialogue: Option<Dialogue>, hearing: bool| {
         render_props(
@@ -5024,7 +5023,7 @@ mod interactions {
         rsx! {
             Keyed { screen: Screen::Settings, on_linux,
                 if shown() {
-                    crate::ui::widgets::TextField {
+                    crate::ui::app_widgets::TextField {
                         label: "Sequence order",
                         value: String::new(),
                         on_commit: move |_: String| {},

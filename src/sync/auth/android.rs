@@ -12,10 +12,11 @@
 //! asked already, for another request) or `error <why>`. An answer is
 //! waited for only so long: ten minutes with the user asked, two without.
 
-use dioxus::mobile::wry::prelude::{JObject, jni};
+use dioxus::mobile::wry::prelude::jni;
 use jni::objects::{JString, JValue};
 
 use super::{Auth, AuthError};
+use crate::jvm::with_activity;
 use crate::persist::record::Pending;
 
 /// How often the answer is looked for.
@@ -30,30 +31,8 @@ const ANSWER_MS: u64 = 2 * 60_000;
 /// The sign-in, through the activity.
 pub struct PlayAuth;
 
-/// Do `call` with the VM attached to this thread and the activity: what it
-/// gives, or why not.
-fn with_activity<T>(
-    call: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<T>,
-) -> Result<T, String> {
-    let android = ndk_context::android_context();
-    // Safety: tao hands ndk-context the VM, and a global reference to the
-    // activity, before the app's `main` runs, and the activity lives as
-    // long as the app does (src/persist/android.rs).
-    let vm =
-        unsafe { jni::JavaVM::from_raw(android.vm().cast()) }.map_err(|err| err.to_string())?;
-    let mut env = vm.attach_current_thread().map_err(|err| err.to_string())?;
-    // Safety: the same global reference, used as the object it refers to.
-    let activity = unsafe { JObject::from_raw(android.context().cast()) };
-    let done = env.with_local_frame(4, |env| call(env, &activity));
-    // A Java exception left pending would fail every JNI call after it.
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_clear();
-    }
-    done.map_err(|err| err.to_string())
-}
-
 /// Ask the activity for a token, `asking` the user where Play services
-/// needs them to: the request's number.
+/// needs them to: the request's number, or why not.
 fn start(asking: bool) -> Result<i64, String> {
     with_activity(|env, activity| {
         env.call_method(
@@ -64,9 +43,11 @@ fn start(asking: bool) -> Result<i64, String> {
         )?
         .j()
     })
+    .map_err(|err| err.to_string())
 }
 
-/// The answer to the request `id`, once there is one.
+/// The answer to the request `id`, once there is one; or why it could not
+/// be asked for.
 fn answer(id: i64) -> Result<Option<String>, String> {
     with_activity(|env, activity| {
         let answer = env
@@ -83,6 +64,7 @@ fn answer(id: i64) -> Result<Option<String>, String> {
         let answer = JString::from(answer);
         Ok(Some(env.get_string(&answer)?.into()))
     })
+    .map_err(|err| err.to_string())
 }
 
 /// A token from Play services, `asking` the user where it needs them to.

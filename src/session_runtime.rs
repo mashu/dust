@@ -11,32 +11,20 @@
 //! settings in Contest start one, and [`finish_run`] and [`abort_run`] reach
 //! whichever is live.
 
-use std::collections::HashSet;
-
 use cw_core::{
-    AnswerClose, CharSamplingState, CharSetMode, Completion, ContestEvent, CountersKey,
-    CountersUpdate, Group, KeyLog, Keys, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId,
-    SessionMachine, SessionResult, SplitMix64, TrainingSettings, Transmission, answer_chars,
-    apply_auto_level, complete_result, complete_session, generate_training_group, resolve_station,
+    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, Group, MonoMs,
+    SessionEffect, SessionEvent, SessionId, SessionMachine, SplitMix64, Transmission,
+    complete_session, generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::contest_runtime::{LiveContest, send_run_event, start_run};
-use crate::persist::record::{Record, RecordId};
-use crate::persist::{CutOff, OpenSession, SessionKey, SoFar};
-use crate::playback::Preview;
+use crate::contest_runtime::{send_run_event, start_run};
+use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::{AppCtx, Finished, Notice, Screen};
+use crate::state::live::AWAY_GAP_MS;
+use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, keep_and_show, settle_level};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
-
-/// What has the training screen: a session of groups, or a contest run.
-/// Each is a machine of some size, and only one is ever live, so each is
-/// boxed.
-pub enum Live {
-    Groups(Box<LiveSession>),
-    Contest(Box<LiveContest>),
-}
 
 impl Live {
     /// The session of groups, if that is what is live.
@@ -58,31 +46,6 @@ impl Live {
 /// How often a running session's heartbeat says the app is still running
 /// ([`beat`]).
 const HEARTBEAT_MS: u32 = 250;
-
-/// A gap this long since the app was last seen running a session is time it
-/// was not running: a phone locked, a process put on hold, a webview that
-/// held every task back. The heartbeat comes every quarter second, and a
-/// busy page delays one by far less.
-const HEARTBEAT_GAP_MS: u64 = 2_000;
-
-/// A session in progress: the machine that decides it, the stations it is
-/// sent by, and its hold on the audio.
-pub struct LiveSession {
-    machine: SessionMachine<Sampler>,
-    /// Where every group's stations are drawn from. Drawn afresh for each
-    /// session, so no two sessions — in one launch or across launches — hear
-    /// the same operators.
-    stations: SplitMix64,
-    lease: Lease,
-    /// When the app was last seen running the session: its last heartbeat,
-    /// or the last news it heard.
-    last_seen: MonoMs,
-    /// The local day it started: the day it counts towards, though it may
-    /// end after midnight.
-    started_on: String,
-    /// How it is marked open, for what it has done to be added to.
-    mark: OpenSession,
-}
 
 impl LiveSession {
     /// How many of its groups are answered.
@@ -145,145 +108,6 @@ impl LiveSession {
     }
 }
 
-/// The open answer box's text, on its way to the session.
-///
-/// The box tells the session what is typed once typing pauses, so a burst of
-/// keys is one event rather than one per character. Until then the text waits
-/// here, and the runtime hands it to the machine ahead of whatever comes next
-/// — the answer window closing, a send ending, Enter, End session, Exit. So
-/// nothing that moves the session on can overtake a keystroke, however close
-/// the two land.
-///
-/// It keeps when each character went in, key by key, as the box is typed
-/// into: the text waits out the pause, but recognition is timed to the keys,
-/// and the moments travel with the text.
-///
-/// The box also has a say in what is still being entered and not in it yet:
-/// a letter the paddles are keying. At a deadline it finishes what is keyed
-/// in full; auto-confirm waits until nothing is under way.
-#[derive(Clone, Copy, PartialEq)]
-pub struct AnswerOutbox(CopyValue<Outbox>);
-
-#[derive(Default)]
-struct Outbox {
-    /// Typed into the box for this group, and not handed over yet.
-    waiting: Option<(usize, String)>,
-    /// The group the box was last typed into, and when each of its
-    /// characters went in.
-    typing: Option<usize>,
-    keys: KeyLog,
-    entry: Option<Entry>,
-}
-
-/// What the box held when it was handed over: group `index`'s answer so far,
-/// and its keys.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TypedAnswer {
-    pub index: usize,
-    pub text: String,
-    pub keys: Keys<MonoMs>,
-}
-
-impl From<TypedAnswer> for SessionEvent {
-    fn from(typed: TypedAnswer) -> Self {
-        SessionEvent::Input {
-            index: typed.index,
-            text: typed.text,
-            keys: typed.keys,
-        }
-    }
-}
-
-/// What the box says about an entry still under way.
-#[derive(Clone, Copy, PartialEq)]
-struct Entry {
-    /// Puts into the box whatever is entered in full but not there yet.
-    finish: Callback,
-    /// Whether anything is still being entered.
-    open: Callback<(), bool>,
-}
-
-impl AnswerOutbox {
-    pub fn new() -> Self {
-        Self(CopyValue::new(Outbox::default()))
-    }
-
-    /// Group `index`'s box now holds `text`, not handed over yet: what is
-    /// new in it was keyed at `at`, or typed for you, untimed, at `None`.
-    pub fn hold(mut self, index: usize, text: String, at: Option<MonoMs>) {
-        let mut outbox = self.0.write();
-        if outbox.typing != Some(index) {
-            outbox.typing = Some(index);
-            outbox.keys.clear();
-        }
-        outbox.keys.typed(answer_chars(&text), at);
-        outbox.waiting = Some((index, text));
-    }
-
-    /// What group `index`'s box holds that is not handed over yet, if any.
-    pub fn waiting_for(self, index: usize) -> Option<String> {
-        let outbox = self.0.peek();
-        let (at, text) = outbox.waiting.as_ref()?;
-        (*at == index).then(|| text.clone())
-    }
-
-    /// Whatever is waiting, now handed over.
-    pub fn take(mut self) -> Option<TypedAnswer> {
-        let mut outbox = self.0.write();
-        let (index, text) = outbox.waiting.take()?;
-        let keys = outbox.keys.keys();
-        Some(TypedAnswer { index, text, keys })
-    }
-
-    /// While the calling component is mounted, `finish` puts into the box
-    /// whatever is entered in full but not there yet, and `open` says
-    /// whether anything is still being entered.
-    pub fn use_entry(
-        self,
-        mut finish: impl FnMut() + 'static,
-        mut open: impl FnMut() -> bool + 'static,
-    ) {
-        let entry = Entry {
-            finish: use_callback(move |()| finish()),
-            open: use_callback(move |()| open()),
-        };
-        use_hook(move || self.set_entry(Some(entry)));
-        use_drop(move || {
-            // Only its own: a box that has already taken over stays.
-            if self.0.peek().entry == Some(entry) {
-                self.set_entry(None);
-            }
-        });
-    }
-
-    fn set_entry(mut self, entry: Option<Entry>) {
-        self.0.write().entry = entry;
-    }
-
-    /// Have the box finish what is entered in full. It may hand the session
-    /// an answer of its own on the way.
-    fn finish(self) {
-        let entry = self.0.peek().entry;
-        if let Some(entry) = entry {
-            entry.finish.call(());
-        }
-    }
-
-    /// Whether anything is still being entered into the box.
-    fn entry_open(self) -> bool {
-        let entry = self.0.peek().entry;
-        entry.is_some_and(|entry| entry.open.call(()))
-    }
-
-    /// A new session: nothing typed for the last one carries over.
-    fn clear(mut self) {
-        let mut outbox = self.0.write();
-        outbox.waiting = None;
-        outbox.typing = None;
-        outbox.keys.clear();
-    }
-}
-
 /// How soon auto-confirm asks again while a letter is still being keyed.
 const ENTRY_RECHECK_MS: u32 = 50;
 
@@ -335,12 +159,12 @@ pub fn start_session(ctx: AppCtx) {
     // preview that had it has stopped.
     preview.set(Preview::Idle);
     let app = ctx.app();
-    let lease = match app.player.claim(&fitted) {
-        Ok(lease) => lease,
-        Err(err) => {
-            toasts.show(err.to_string());
-            return;
-        }
+    let Ok(lease) = app
+        .player
+        .claim(&fitted)
+        .inspect_err(|err| toasts.show(err.to_string()))
+    else {
+        return;
     };
     // Each session draws from a sampler of its own, seeded afresh.
     ctx.answer.clear();
@@ -403,7 +227,7 @@ fn pause_if_away(ctx: AppCtx, lease: &Lease) {
         };
         let now = MonoMs(mono_ms());
         let seen = std::mem::replace(&mut live.last_seen, now);
-        if now.since(seen) <= HEARTBEAT_GAP_MS || live.machine.session().paused() {
+        if now.since(seen) <= AWAY_GAP_MS || live.machine.session().paused() {
             return;
         }
         let mut effects = ctx
@@ -430,12 +254,12 @@ pub fn resume_session(ctx: AppCtx) {
         Some(live) if live.machine.session().paused() => live.machine.session().settings().clone(),
         _ => return,
     };
-    let lease = match app.player.claim(&settings) {
-        Ok(lease) => lease,
-        Err(err) => {
-            ctx.toasts.show(err.to_string());
-            return;
-        }
+    let Ok(lease) = app
+        .player
+        .claim(&settings)
+        .inspect_err(|err| ctx.toasts.show(err.to_string()))
+    else {
+        return;
     };
     if let Some(live) = app.session.borrow_mut().as_mut().and_then(Live::groups_mut) {
         live.lease = lease.clone();
@@ -550,12 +374,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         // begun, and a letter being keyed is one begun: once it is in, the
         // window leaves the answer to its owner.
         Some(AnswerClose::Settled | AnswerClose::Unbegun) if ctx.answer.entry_open() => {
-            let lease = lease.clone();
-            spawn_forever(async move {
-                if lease.sleep(ENTRY_RECHECK_MS).await.is_ok() {
-                    dispatch(ctx, &lease, event);
-                }
-            });
+            lease.after(ENTRY_RECHECK_MS, move |lease| dispatch(ctx, lease, event));
             return;
         }
         // A letter keyed in full and not in the box yet begins the answer
@@ -610,13 +429,10 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
             }
             SessionEffect::Play { index, text } => play(ctx, lease, index, text),
             SessionEffect::StartTimer { id, ms } => {
-                let lease = lease.clone();
                 // One wait for the whole of it. A timer the machine has since
                 // forgotten wakes once, is told so, and is gone.
-                spawn_forever(async move {
-                    if lease.sleep(ms).await.is_ok() {
-                        dispatch(ctx, &lease, SessionEvent::TimerFired { id });
-                    }
+                lease.after(ms, move |lease| {
+                    dispatch(ctx, lease, SessionEvent::TimerFired { id });
                 });
             }
             SessionEffect::PersistAndShowResults => {
@@ -753,162 +569,13 @@ fn finish_session(ctx: AppCtx) -> bool {
     true
 }
 
-/// Store what finishing a session did to its level's run, and move the
-/// level if the run earned it, saying so. A change the level has moved
-/// away from since is not made, and nothing is said of it
-/// ([`apply_auto_level`]). What it said, if anything.
-fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
-    let AppCtx {
-        mut settings,
-        toasts,
-        ..
-    } = ctx;
-    let store = ctx.app().store;
-    match &done.counters {
-        CountersUpdate::Keep(key, counters) => store.save_auto_counters(key, *counters),
-        CountersUpdate::Clear(keys) => store.clear_auto_counters(keys),
-    }
-    let change = done.change.as_ref()?;
-    // Onto the settings as they are now, not as the session started with
-    // them, so the level is all it moves. Stored by the app's settings
-    // effect.
-    if !apply_auto_level(&mut settings.write(), change) {
-        return None;
-    }
-    let message = crate::ui::auto_level::change_message(change);
-    toasts.show(message.clone());
-    Some(message)
-}
-
-/// Keep what the sessions and runs the app stopped under, `cut`, had done
-/// by then, as Exit would have kept each ([`AppCtx::tell_of_cut_off`]), and
-/// the sessions their marks carried that the store had yet to take: in the
-/// history, where each finished, and a session of groups counted towards
-/// its level's run, the level moved if the run earned it. One a mark
-/// carried was counted as it ended, and is not again.
-///
-/// Each is kept once, or not at all: one the history holds already, by
-/// when and on what day it finished, as the app stopped under it as it was
-/// stored, is not kept again, nor one deleted by hand under the record it
-/// would be stored as. Two marks that carry one session store it once:
-/// each is stored where it finished ([`RecordId::placed`]).
-pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
-    let store = ctx.app().store;
-    // Each as it is to be stored, on today's scale, as every session of the
-    // history is read, with the settings a session of groups is judged by.
-    let mut kept: Vec<(Record, SessionResult, Option<TrainingSettings>)> = Vec::new();
-    {
-        let history = ctx.sessions.peek();
-        let mut keys = HashSet::new();
-        let so_far = cut.iter().filter_map(CutOff::so_far).map(|so_far| {
-            let settings = so_far.settings.clone().map(TrainingSettings::clamp);
-            (so_far.result.clone(), settings)
-        });
-        let carried = cut
-            .iter()
-            .flat_map(CutOff::unstored)
-            .map(|session| (session.clone(), None));
-        for (mut result, settings) in so_far.chain(carried) {
-            let key = SessionKey::of(&result);
-            if history.has_key(&key) || !keys.insert(key) {
-                continue;
-            }
-            result.score = result.points();
-            let Some(record) = Record::of(&result, |json| RecordId::placed(result.timestamp, json))
-            else {
-                continue;
-            };
-            kept.push((record, result, settings));
-        }
-    }
-    if kept.is_empty() {
-        ctx.let_go_of_carried(&cut);
-        return;
-    }
-    // In the history, and held with this copy's mark as sessions the store
-    // has yet to take, before the store is asked anything: the marks they
-    // came from were taken from it as they were told of, and this copy's
-    // mark has held what they carried since only for their sake
-    // ([`AppCtx::let_go_of_carried`]).
-    let put = kept
-        .iter()
-        .map(|(record, result, _)| (record.clone(), result.clone()))
-        .collect();
-    let held = ctx.hold_from_elsewhere(put);
-    ctx.let_go_of_carried(&cut);
-    if held.is_empty() {
-        return;
-    }
-    // One deleted by hand under the record it would be stored as is let
-    // go again, and so is one deleted here meanwhile.
-    let ids = held.iter().map(|record| record.id).collect();
-    let gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
-    ctx.let_go_of_held(&gone);
-    let held: Vec<Record> = {
-        let history = ctx.sessions.peek();
-        held.into_iter()
-            .filter(|record| !gone.contains(&record.id) && history.index_of(record.id).is_some())
-            .collect()
-    };
-    if held.is_empty() {
-        return;
-    }
-    // The levels moved by them before they are stored: the app stopping
-    // from here on keeps each once, its level counted once.
-    for (record, result, settings) in kept {
-        let Some(settings) = settings else {
-            continue;
-        };
-        if held.iter().all(|held| held.id != record.id) {
-            continue;
-        }
-        let run = store.load_auto_counters(&CountersKey::of(&settings));
-        let done = complete_result(result, &settings, run);
-        settle_level(ctx, &done);
-    }
-    let mut notices = ctx.notices;
-    ctx.store_held(held, move |saved| {
-        store.ask_to_keep();
-        if let Some(problem) = saved.problem() {
-            notices.write().push(Notice::History(problem));
-        }
-    });
-}
-
-/// Add `finished` to the history, store it, and show it on the results
-/// screen, with the record it is found by there: a session of groups and a
-/// contest run alike. Its mark stays, as it holds it, until the store has
-/// taken it, so the app stopping before then, or a store with no room for
-/// it, still keeps it.
-pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
-    let AppCtx {
-        mut screen,
-        mut result,
-        mut notices,
-        ..
-    } = ctx;
-    ctx.mark_kept();
-    let store = ctx.app().store;
-    let kept = ctx.keep_finished(finished.clone(), move |saved| {
-        // A browser may clear its store to make room; there is now
-        // something in it worth asking it to keep.
-        store.ask_to_keep();
-        // Up until it is read: a session not stored is a session at risk.
-        if let Some(problem) = saved.problem() {
-            notices.write().push(Notice::History(problem));
-        }
-    });
-    result.set(Some(Finished::Kept(Box::new(finished), kept)));
-    screen.set(Screen::Results);
-    // Again starts from a history one session longer.
-    ctx.warm_sampler();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audio::fake::{Behaviour, Call};
-    use crate::persist::Store;
+    use crate::persist::{CutOff, OpenSession, Store};
+    use crate::state::answer::Entry;
+    use crate::state::{Finished, Notice, keep_cut_off};
     use crate::testing::{Harness, run, test_settings};
     use cw_core::AutoLevelCounters;
     use cw_core::SessionEffect;

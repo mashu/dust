@@ -13,10 +13,10 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::page::{Caret, focus_by_id};
+use crate::ui::app_widgets::{SectionReset, TextField};
 use crate::ui::help;
-use crate::ui::widgets::{
-    CardHead, IconName, NumberField, SectionReset, TextDraft, TextField, control_id, whole,
-};
+use crate::ui::widgets::{CardHead, IconName, NumberField, TextDraft, control_id, whole};
 
 /// What the callsign, name, state, zone and power fields are called, and so
 /// their ids.
@@ -35,15 +35,7 @@ const ZONE_ENTRY_LABEL: &str = "Your CQ zone";
 /// be drawn already: a field the same press brings in is focused from an
 /// effect, which runs once the page has the render.
 fn focus_field(label: &'static str) {
-    let id = control_id("field", label);
-    let script = crate::ui::widgets::focus_script(&id);
-    // Tests have no page to run it on: the harness looks for the field.
-    #[cfg(test)]
-    crate::testing::ask_focus(&id, &script);
-    #[cfg(not(test))]
-    spawn(async move {
-        let _ = document::eval(&script).await;
-    });
+    focus_by_id(&control_id("field", label), Caret::AsIs);
 }
 
 /// Give the callsign field the focus, as a start refused for want of a

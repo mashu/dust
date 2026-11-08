@@ -34,15 +34,12 @@
 
 use std::borrow::Cow;
 
-use crate::alignment::CopyTally;
-use crate::sampling::{adaptive_bounds, adaptive_speed_path, length_floor};
-use crate::score::copy_speed;
+use crate::alignment::{CopyTally, judged_copy};
 use crate::session::{GroupResult, GroupSession, SessionResult};
 use crate::settings::{
     ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, CharSetMode, LevelAxis, MixedAutoLevelAxis,
-    TrainingSettings,
+    TrainingSettings, adaptive_bounds, adaptive_speed_path, length_floor,
 };
-use crate::speed::speed_tally;
 
 /// How near an end of the speed range, in log speed, a group is sent for it
 /// to count as sent at that end: within about 5%. Pressed against an end,
@@ -175,35 +172,6 @@ fn candidate_axes(
     chosen.into_iter().map(LevelAxis::from).collect()
 }
 
-/// One group's characters as they are judged: every one sent and every one
-/// typed that was not, as the session scored them, unless adaptive group
-/// size drew its length, `length_floor` the shortest it draws. Then its
-/// lost end is left out where the length answers for it, and what is
-/// judged is what the speed could have changed ([`speed_tally`]), the same
-/// characters adaptive speed learns from; a group with nothing typed counts
-/// as its first character missed.
-///
-/// What auto level judges a session by, and what each character's own
-/// tally counts ([`SessionResult::letter_accuracy`]): a character lost off
-/// the end of a group sent long on purpose is the length's, not a miss of
-/// that character.
-pub(crate) fn judged_copy(sent: &str, received: &str, length_floor: Option<usize>) -> CopyTally {
-    let Some(floor) = length_floor else {
-        return CopyTally::of(sent, received);
-    };
-    if received.trim().is_empty() {
-        // Nothing typed reached nothing, which is no session to level up
-        // on, whatever answers for it: its first character missed.
-        let mut tally = CopyTally::default();
-        if let Some(first) = sent.chars().next() {
-            let entry = tally.sent.entry(first.to_ascii_uppercase()).or_default();
-            entry.total += 1;
-        }
-        return tally;
-    }
-    speed_tally(sent, received, Some(floor)).unwrap_or_default()
-}
-
 /// What auto level judges `groups` of a session by under `settings`
 /// ([`judged_copy`]).
 fn judged_groups<'a>(
@@ -227,20 +195,6 @@ fn judged_tally<'a>(result: &'a SessionResult, settings: &TrainingSettings) -> C
     Cow::Owned(judged_groups(&result.groups, settings))
 }
 
-/// The copy speed group `index` of `result` was sent at, in WPM: its own
-/// where it was measured, the session's otherwise.
-fn group_speed(result: &SessionResult, index: usize) -> f64 {
-    let timing = result.group_timings.get(index);
-    copy_speed(
-        timing
-            .and_then(|timing| timing.char_wpm)
-            .unwrap_or(result.char_wpm),
-        timing
-            .and_then(|timing| timing.effective_wpm)
-            .unwrap_or(result.effective_wpm),
-    )
-}
-
 /// What the groups of `result` sent at an end of the speed range say, as
 /// auto level judges them: those whose copy speed, in log speed, `at_end`
 /// takes as at it. None when they are too few to be a session's worth.
@@ -253,7 +207,7 @@ fn judged_at_end(
         .groups
         .iter()
         .enumerate()
-        .filter(|(index, _)| at_end(group_speed(result, *index).ln()))
+        .filter(|(index, _)| at_end(result.group_speed(*index).ln()))
         .map(|(_, group)| group)
         .collect();
     a_sessions_worth(groups.len(), settings).then(|| judged_groups(groups, settings))

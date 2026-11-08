@@ -8,17 +8,16 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use crate::alignment::{CopyTally, LetterAccuracy, SKIPPED};
-use crate::auto_level::judged_copy;
-use crate::contest::{CONTEST_MARK, ContestLog, PauseWhy};
+use crate::alignment::{CopyTally, LetterAccuracy, SKIPPED, judged_copy};
 use crate::level::LEVEL_MIN;
 use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
-use crate::sampling::length_floor;
 use crate::score::{
     GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
-    compute_average_response_ms, copied_whole, copy_speed, session_points,
+    copied_whole, copy_speed, session_points,
 };
-use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
+use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, length_floor, mode_on_disk};
+
+pub use crate::mono::MonoMs;
 
 /// The longest an answer is kept, against the group it answers: twice its
 /// length, or this many characters for a short one. Room for every honest
@@ -37,41 +36,6 @@ impl SessionId {
     pub fn raw(self) -> u64 {
         self.0
     }
-}
-
-/// A moment on a clock that only runs forward, in milliseconds from wherever
-/// that clock starts.
-///
-/// Response times are measured between two of these, so they must come from
-/// a monotonic clock: the wall clock steps when it is corrected, and a step
-/// back between a send ending and its answer used to score the answer as
-/// instant.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MonoMs(pub u64);
-
-impl MonoMs {
-    /// Milliseconds since `earlier`; none if it is not earlier.
-    pub fn since(self, earlier: Self) -> u64 {
-        self.0.saturating_sub(earlier.0)
-    }
-
-    #[must_use]
-    pub fn plus(self, ms: u64) -> Self {
-        Self(self.0.saturating_add(ms))
-    }
-
-    /// `seconds` later, to the nearest millisecond: how far off a player
-    /// says a send is heard, where a segment of a turn starts. A negative
-    /// span moves it nowhere.
-    #[must_use]
-    pub fn plus_sec(self, seconds: f64) -> Self {
-        self.plus(whole_ms(seconds))
-    }
-}
-
-/// Seconds as whole milliseconds; none for a negative span.
-pub(crate) fn whole_ms(seconds: f64) -> u64 {
-    (seconds.max(0.0) * 1_000.0).round() as u64
 }
 
 /// A send as it starts: the speeds it goes at, and when its characters go to
@@ -113,7 +77,7 @@ impl SendStart {
         let chars_until = f64::from(*last) / 1_000.0;
         let lost = until_sec.min(chars_until) - from_sec.max(chars_from);
         if self.char_wpm > 0.0 {
-            lost >= crate::timing::dot_seconds(self.char_wpm) / 2.0
+            lost >= crate::morse::dot_seconds(self.char_wpm) / 2.0
         } else {
             lost > 0.0
         }
@@ -188,6 +152,18 @@ struct Completed {
     /// When the latest send heard to its end had ended by then, if one had:
     /// what the answer is timed from.
     after: Option<MonoMs>,
+}
+
+/// Why a run, or a session of groups, is paused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PauseWhy {
+    /// You paused it: a run with its Pause or the system's Back, a session
+    /// of groups, which has no Pause of its own, with Back.
+    You,
+    /// The page was hidden or the phone locked. It never resumes by itself.
+    Hidden,
+    /// The sound failed after every retry.
+    Sound,
 }
 
 /// Where a session is. Every phase that is about a group names it.
@@ -1037,6 +1013,27 @@ impl SessionTiming {
     }
 }
 
+/// The average answer of a session with none to average: a second a
+/// character.
+const NO_ANSWERS_MS: f64 = 1_000.0;
+
+/// The average of a session's answer times a character, its `groups` timed
+/// as `timings` say, as older builds show it
+/// ([`crate::SessionResult::avg_response_ms`]).
+pub fn compute_average_response_ms(groups: &[GroupResult], timings: &[SessionTiming]) -> f64 {
+    let (sum, count) = groups
+        .iter()
+        .zip(timings)
+        .map(|(group, timing)| timing.ms_per_char(&group.sent))
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .fold((0.0, 0u32), |(sum, count), v| (sum + v, count + 1));
+    if count == 0 {
+        NO_ANSWERS_MS
+    } else {
+        sum / f64::from(count)
+    }
+}
+
 fn one_send() -> u32 {
     1
 }
@@ -1054,6 +1051,22 @@ fn session_mode_legacy() -> CharSetMode {
 fn session_wpm_default() -> f64 {
     18.0
 }
+
+/// What a run's alphabet fingerprint starts with: `contest:wpx`. A build
+/// older than contest mode drops the log on its next save but keeps the
+/// fingerprint, so the mark is what still makes the run a run after that.
+pub(crate) const CONTEST_MARK: &str = "contest:";
+
+/// A run's log, exactly as it was read.
+///
+/// Kept as plain JSON rather than parsed into a struct, because a struct
+/// that reads any layout leniently cannot write a newer layout back
+/// unchanged: a field it does not know would be lost, a renamed one
+/// defaulted. Held as a value, a log written by a later version goes back to
+/// disk as it came, whatever this version makes of it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContestLog(pub serde_json::Value);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(from = "StoredSession")]
@@ -1469,6 +1482,19 @@ impl SessionResult {
     /// What the session earns ([`crate::score`]): every group's points,
     /// added up. Worked out from what is stored, so a session saved before
     /// speed counted can be scored the same way as one finished today.
+    ///
+    /// Each group is scored at its own copy speed, worked out apart from
+    /// `Self::group_speed`, which the speed belief and auto level read,
+    /// because the two differ for older saves and one rule for both would
+    /// change them: what they score, or how they move the speed belief and
+    /// auto level. A group timed without its own effective speed is spaced
+    /// here as the session was, its effective speed scaled with its
+    /// character speed (25 WPM characters in a 20/20 session score at 25
+    /// WPM, where `group_speed` reads 22.4), which can move the last bit
+    /// even where the scaling is by one; and a group with no timing at all
+    /// is left out of the points, where `group_speed` reads it at the
+    /// session's speed. Wherever a group's effective speed was kept, the
+    /// two agree.
     pub fn points(&self) -> f64 {
         let sent: Vec<&str> = self.groups.iter().map(|g| g.sent.as_str()).collect();
         let copies: Vec<GroupCopy> = self
@@ -1496,6 +1522,22 @@ impl SessionResult {
             })
             .collect();
         session_points(&copies, calculate_effective_alphabet_size(&sent))
+    }
+
+    /// The copy speed group `index` was sent at, in WPM: its own where it
+    /// was measured, the session's otherwise. What the speed belief and
+    /// auto level read a group's speed by; [`Self::points`] keeps its own
+    /// rule for older saves.
+    pub(crate) fn group_speed(&self, index: usize) -> f64 {
+        let timing = self.group_timings.get(index);
+        copy_speed(
+            timing
+                .and_then(|timing| timing.char_wpm)
+                .unwrap_or(self.char_wpm),
+            timing
+                .and_then(|timing| timing.effective_wpm)
+                .unwrap_or(self.effective_wpm),
+        )
     }
 
     /// How each character sent was copied. Sessions saved before that was

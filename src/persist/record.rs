@@ -11,13 +11,15 @@
 //! once need no merge: each takes up the records and tombstones the other
 //! left ([`super::Store::history_listing`]).
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
 use cw_core::SessionResult;
 
-use super::{Deleted, SetAside};
+use super::session::{Deleted, SessionKey};
+use super::set_aside::SetAside;
 
 /// What names a record: `order`, where it falls in the history, which is
 /// the order sessions finished in, and `nonce`, what it holds
@@ -202,6 +204,73 @@ pub fn read_record(raw: &str) -> Option<SessionResult> {
 pub(super) fn scored(mut session: SessionResult) -> SessionResult {
     session.score = session.points();
     session
+}
+
+/// The key a record's session finished at, read without the rest of it.
+#[derive(serde::Deserialize)]
+struct KeyOnly {
+    timestamp: u64,
+    date: String,
+}
+
+/// The key of the session `json` holds, read without the rest of it.
+pub fn key_of(json: &str) -> Option<SessionKey> {
+    serde_json::from_str::<KeyOnly>(json)
+        .ok()
+        .map(|key| SessionKey::new(key.timestamp, key.date))
+}
+
+/// The key of the session a tombstone names, `raw` being what it holds as
+/// it is stored ([`Deleted`]). None for one that is empty or does not
+/// read, which deletes its record all the same.
+pub(super) fn tombstone_key(raw: &[u8]) -> Option<SessionKey> {
+    serde_json::from_slice::<Deleted>(raw)
+        .ok()
+        .map(|gone| gone.key())
+}
+
+/// How many of `unread`, the records this build cannot read, are new to
+/// it, `told` being the names of those told of before, as they were noted:
+/// none, once each has been told of. A note that does not read told of
+/// none.
+pub(super) fn not_told(unread: &[RecordId], told: Option<&[u8]>) -> Option<usize> {
+    let told: HashSet<String> = told
+        .and_then(|raw| serde_json::from_slice(raw).ok())
+        .unwrap_or_default();
+    let new = unread
+        .iter()
+        .filter(|id| !told.contains(&id.name()))
+        .count();
+    if new == 0 {
+        return None;
+    }
+    Some(new)
+}
+
+/// Every record of `sessions` by its session's key.
+pub(super) fn keyed<'a>(
+    sessions: impl Iterator<Item = (RecordId, &'a SessionResult)>,
+) -> HashMap<SessionKey, Vec<RecordId>> {
+    let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
+    for (id, session) in sessions {
+        live.entry(SessionKey::of(session)).or_default().push(id);
+    }
+    live
+}
+
+/// `sessions`, in the order of their records, with `change`, made, made to
+/// them too.
+pub(super) fn taken_up(sessions: &mut Vec<(RecordId, SessionResult)>, change: &HistoryChange) {
+    let forgotten: HashSet<RecordId> = change.forget.iter().map(|(id, _)| *id).collect();
+    sessions.retain(|(id, _)| !forgotten.contains(id));
+    for record in &change.put {
+        let Some(session) = read_record(&record.json) else {
+            continue;
+        };
+        if let Err(at) = sessions.binary_search_by_key(&record.id, |(id, _)| *id) {
+            sessions.insert(at, (record.id, session));
+        }
+    }
 }
 
 /// A change to the history, made whole by the store or not at all: what is

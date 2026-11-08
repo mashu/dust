@@ -1,12 +1,13 @@
 //! Morse timing: the units and gaps a send is built from, the stations that
 //! send it, who else is calling, and the plan of what is heard when.
 //!
-//! - this module: dot lengths, Farnsworth spacing and the gaps between sends;
+//! - this module: Farnsworth spacing and the gaps between sends;
 //! - [`station`]: the operator at the other end — pitch, speed, level, fist;
-//! - [`pileup`]: whoever else is calling, placed where the receiver hears them;
+//! - [`pileup`]: whoever else is calling across the station you copy;
 //! - [`plan`]: a send laid out as tones against one clock, for any backend;
 //! - [`envelope`]: the keying envelope each tone is shaped by.
 
+use crate::morse::dot_seconds;
 use crate::settings::{EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN};
 
 mod envelope;
@@ -15,10 +16,7 @@ mod plan;
 mod station;
 
 pub use envelope::{EnvelopePoint, EnvelopeShape, edge_gain, envelope_shape};
-#[cfg(test)]
-pub(crate) use pileup::resolve_pileup;
 pub use pileup::{Interferer, Transmission};
-pub(crate) use pileup::{PILEUP_CALLER_SEPARATION_HZ, PILEUP_SKIRT_DB, free_room, pick_in_room};
 pub use plan::{
     CharSpan, DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC, ToneEvent,
     plan_morse_playback_for, plan_transmission,
@@ -34,11 +32,6 @@ fn clamp_extra_spacing(value: f64) -> f64 {
     } else {
         1.0
     }
-}
-
-/// PARIS-style dot duration in seconds from character WPM.
-pub fn dot_seconds(wpm: f64) -> f64 {
-    1.2 / wpm.max(1.0)
 }
 
 /// Word space plus the reading pause, used between different groups.

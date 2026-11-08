@@ -9,11 +9,13 @@
 //! whole, behind the record API, where its database will not open
 //! ([`BlobHistory`]).
 
+use std::borrow::Borrow;
 #[cfg(any(feature = "web", test))]
 use std::cell::{Cell, RefCell};
 #[cfg(any(feature = "web", test))]
 use std::collections::BTreeMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
 
 use cw_core::SessionResult;
 use serde::Deserialize;
@@ -21,9 +23,11 @@ use serde::Deserialize;
 use super::record::{self, HistoryChange, RecordId};
 #[cfg(any(feature = "web", test))]
 use super::record::{HistoryLoad, Record};
-use super::{Deleted, SessionKey};
 #[cfg(any(feature = "web", test))]
-use super::{HistorySaved, SetAside};
+use super::saved::HistorySaved;
+use super::session::{Deleted, SessionKey};
+#[cfg(any(feature = "web", test))]
+use super::set_aside::SetAside;
 
 /// How much of the site's page storage the history kept whole may take, in
 /// characters. Browsers give a site about five million; the rest is left
@@ -52,7 +56,7 @@ pub(super) const HISTORY_BUDGET: usize = 3_000_000;
 /// settle a session stamped ahead of the clock for themselves
 /// ([`crate::time::as_shown`]).
 pub(super) fn read_history(raw: &str) -> Option<ReadHistory> {
-    let raw = super::unmarked(raw);
+    let raw = super::settings::unmarked(raw);
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
     let (sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {
@@ -455,6 +459,14 @@ fn latest(deleted: &[Deleted]) -> u64 {
     deleted.iter().map(|gone| gone.at).max().unwrap_or(0)
 }
 
+/// The deletions an older build remembers, `raw` being what it keeps of
+/// them as it wrote it: none, where it keeps none or they cannot be read,
+/// which costs a session it deleted staying, never one lost.
+pub(super) fn deleted_of(raw: Option<&[u8]>) -> Vec<Deleted> {
+    raw.and_then(|raw| serde_json::from_slice(raw).ok())
+        .unwrap_or_default()
+}
+
 /// The move from a history kept whole: each of `sessions`, oldest first,
 /// as a record ([`record::records_for_blob`]), and the layout to write once
 /// every record is, `now`. `fingerprint` is the history kept whole as it
@@ -482,6 +494,41 @@ pub(super) fn moved(
         unread: serde_json::Map::new(),
     };
     (record::records_for_blob(sessions), layout)
+}
+
+/// Of `moved`, the records a move makes, those to write into a store that
+/// holds records already, each store saying for itself what it holds: one
+/// there under its own name, as `here` says, is written; one deleted by
+/// name, in `gone`, is not; one whose bytes are there under a name the
+/// move does not give, as `elsewhere` counts them, is not, as many times as
+/// it counts them; nor is one whose session's key a tombstone names, in
+/// `gone_keys`. The rest are written.
+pub(super) fn not_moved_yet<K: Borrow<str> + Hash + Eq>(
+    moved: Vec<record::Record>,
+    here: impl Fn(RecordId) -> bool,
+    gone: &BTreeSet<RecordId>,
+    mut elsewhere: HashMap<K, usize>,
+    gone_keys: &HashSet<SessionKey>,
+) -> Vec<record::Record> {
+    moved
+        .into_iter()
+        .filter(|record| {
+            if here(record.id) {
+                return true;
+            }
+            if gone.contains(&record.id) {
+                return false;
+            }
+            if let Some(count) = elsewhere
+                .get_mut(record.json.as_str())
+                .filter(|count| **count > 0)
+            {
+                *count -= 1;
+                return false;
+            }
+            !record::key_of(&record.json).is_some_and(|key| gone_keys.contains(&key))
+        })
+        .collect()
 }
 
 /// What to take up of a history kept whole that an older build changed
@@ -841,12 +888,8 @@ impl<S: Aside> BlobHistory<S> {
     /// The deletions remembered: none, where they cannot be read, which
     /// costs a session deleted staying, never one kept going.
     fn deleted(&self) -> Vec<Deleted> {
-        self.shelf
-            .get(self.keys.deleted)
-            .ok()
-            .flatten()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+        let raw = self.shelf.get(self.keys.deleted).ok().flatten();
+        deleted_of(raw.as_deref().map(str::as_bytes))
     }
 
     fn save_deleted(&self, deleted: &[Deleted]) {

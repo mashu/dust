@@ -6,10 +6,10 @@
 //! the sampler learns from each answer. The runtime only plays, waits, and
 //! reports back.
 
-use crate::contest::PauseWhy;
 use crate::recognition::Keys;
 use crate::session::{
-    Answered, GroupSession, MonoMs, SendStart, SessionId, SessionPhase, answer_length_matches,
+    Answered, GroupSession, MonoMs, PauseWhy, SendStart, SessionId, SessionPhase,
+    answer_length_matches,
 };
 use crate::settings::TrainingSettings;
 use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};

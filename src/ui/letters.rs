@@ -22,6 +22,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::percent;
 use crate::ui::figures::History;
 
 use crate::ui::bigram::id_part;
@@ -125,12 +126,12 @@ fn letter_note(letter: &CharacterDiagnostic) -> String {
 fn letter_label(letter: &CharacterDiagnostic, bands: RecognitionBands, timing: bool) -> String {
     let (low, high) = letter.accuracy_interval(LIKELY);
     let mut text = format!(
-        "{}: {:.0}% right of {}, likely {:.0}% to {:.0}%, {}",
+        "{}: {:.0}% right of {}, likely {} to {}, {}",
         letter.letter,
         letter.accuracy_pct,
         letter.total,
-        low * 100.0,
-        high * 100.0,
+        percent(low),
+        percent(high),
         status_word(letter.status)
     );
     match trend(letter) {
@@ -263,7 +264,7 @@ pub fn LettersTab(settings: TrainingSettings, #[props(into)] sessions: History) 
         (MasteryStatus::FewTries, "Few tries"),
     ];
     let mastered = with_status(&letters, MasteryStatus::Mastered).len();
-    let line = MASTERED_MIN_ACCURACY * 100.0;
+    let line = percent(MASTERED_MIN_ACCURACY);
     // Recognised at once, of those timed enough to say, each with its band;
     // and whether any is timed enough, or at all.
     let banded: Vec<(char, RecognitionBand, bool)> = letters
@@ -332,7 +333,7 @@ pub fn LettersTab(settings: TrainingSettings, #[props(into)] sessions: History) 
                 span { i { class: "err-swatch to-work-on" } "weak" }
                 span { i { class: "err-swatch finding-out" } "few tries" }
                 span { i { class: "err-swatch range" } "where it likely is" }
-                span { i { class: "err-swatch mark" } "mastered from {line:.0}%" }
+                span { i { class: "err-swatch mark" } "mastered from {line}" }
             }
             if recognising {
                 div { class: "err-legend", aria_hidden: "true",

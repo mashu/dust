@@ -250,22 +250,20 @@ fn claim_audio_session() {
 /// thread, as its window is.
 #[cfg(all(target_os = "android", not(test)))]
 fn claim_volume_keys() {
-    use dioxus::mobile::wry::prelude::{dispatch, jni};
+    use dioxus::mobile::wry::prelude::jni;
+
+    use crate::jvm::on_activity_thread;
 
     /// `AudioManager.STREAM_MUSIC`.
     const STREAM_MUSIC: i32 = 3;
-    dispatch(|env, activity, _webview| {
-        let set = env.call_method(
+    on_activity_thread(|env, activity| {
+        env.call_method(
             activity,
             "setVolumeControlStream",
             "(I)V",
             &[jni::objects::JValue::Int(STREAM_MUSIC)],
-        );
-        // A Java exception left pending would fail every JNI call after
-        // it, the webview's own among them.
-        if set.is_err() && env.exception_check().unwrap_or(false) {
-            let _ = env.exception_clear();
-        }
+        )?;
+        Ok(())
     });
 }
 

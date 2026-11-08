@@ -12,9 +12,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-fn pct(share: f64) -> String {
-    format!("{:.0}%", share * 100.0)
-}
+use crate::format::percent;
 
 /// The colours and marks every bar card shares: where the paler stretch
 /// runs, and what the notch is.
@@ -34,8 +32,8 @@ fn likely_and_notch(notch: String) -> Element {
 /// What comes up next: how often each character goes wrong, against the
 /// share wrong the level-up threshold leaves, `limit`.
 pub fn next_up(limit: f64) -> Element {
-    let pass = pct(1.0 - limit);
-    let limit = pct(limit);
+    let pass = percent(1.0 - limit);
+    let limit = percent(limit);
     rsx! {
         p {
             "One row a character of your set. The bar is how often you get it wrong: the trainer's best guess from every time you have heard it, whatever set it was sent in, recent sessions counting more. A session ten sessions back counts half as much as your latest, so a weakness you put right long ago stops holding a character back, and one you have not heard for a while is less certain again."
@@ -72,8 +70,8 @@ pub fn letters(bands: RecognitionBands) -> Element {
         icr_ms: icr,
         slow_ms: slow,
     } = bands;
-    let mastered = pct(MASTERED_MIN_ACCURACY);
-    let building = pct(BUILDING_MIN_ACCURACY);
+    let mastered = percent(MASTERED_MIN_ACCURACY);
+    let building = percent(BUILDING_MIN_ACCURACY);
     let along = ALONG_FLOOR_MS + KEEPING_UP_MS;
     rsx! {
         p {
@@ -119,7 +117,7 @@ pub fn letters(bands: RecognitionBands) -> Element {
 
 /// The Sampling tab's Speed card, against `aim` of characters right.
 pub fn speed(aim: f64) -> Element {
-    let aim = pct(aim);
+    let aim = percent(aim);
     rsx! {
         p {
             "One row a speed the next group can come at, in words a minute. The bar is the share of characters you copy right at it, as the trainer's model of your copy reads it from every group you have heard: speeds you have heard little at are filled in from the ones around them."
@@ -148,7 +146,7 @@ pub fn speed(aim: f64) -> Element {
 
 /// The Sampling tab's Group length card, against `aim` of groups whole.
 pub fn group_length(aim: f64) -> Element {
-    let aim = pct(aim);
+    let aim = percent(aim);
     rsx! {
         p {
             "One row a length the next group can have. The bar is how often you copy a group that long whole, without a mistake, as the trainer's model of your copy span reads it."
@@ -260,7 +258,7 @@ pub fn accuracy_over_time(pass: Option<f64>, grouped: bool) -> Element {
         if let Some(pass) = pass {
             dl { class: "help-terms",
                 dt { "The dashed green line" }
-                dd { "Your Auto level threshold, {pct(pass)}: a session over it counts towards the next level." }
+                dd { "Your Auto level threshold, {percent(pass)}: a session over it counts towards the next level." }
             }
         } else {
             p {
@@ -295,7 +293,7 @@ pub fn copy_span() -> Element {
 
 /// Copy speed, at `aim` of characters right.
 pub fn copy_speed(aim: f64) -> Element {
-    let aim = pct(aim);
+    let aim = percent(aim);
     rsx! {
         p {
             "The speed at which you copy {aim} of characters right, your Aim for, as the trainer's model reads it after each session of the character set shown."

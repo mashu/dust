@@ -3,9 +3,9 @@
 //! each field copied wrong. Values are compared canonically, as the contest
 //! reads them ([`ContestRules::same`]), so `7` logged for `TT7` is right.
 
-use super::exchange::Field;
 use super::parse::normalize_call;
-use super::rules::ContestRules;
+use crate::rulebook::exchange::Field;
+use crate::rulebook::rules::ContestRules;
 
 /// A QSO's call and exchange: as you logged it, or as the station sent it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

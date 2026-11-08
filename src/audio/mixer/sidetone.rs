@@ -16,9 +16,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crate::audio::ToneRequest;
-use crate::audio::shape::GATE_RAMP_SEC;
-use crate::audio::tone::SIDETONE_LEAD_MARGIN_SEC;
+use crate::audio::shape::{GATE_RAMP_SEC, SIDETONE_LATE_MAX_SEC, SIDETONE_QUIET_SEC};
+use crate::audio::tone::{SIDETONE_LEAD_MARGIN_SEC, ToneRequest};
 
 /// Seconds on the one clock the UI and the audio callback both read, from
 /// whenever it was first read.
@@ -155,16 +154,6 @@ const DRIFT: f64 = 5e-4;
 /// are.
 const LONGEST_FORGET_SEC: f64 = 0.5;
 
-/// How long the key has to be quiet before the lead is let change: a new
-/// lead mid-letter would move every edge after it.
-const QUIET_SEC: f64 = 0.5;
-
-/// The latest the first edge after a quiet spell can come and still set
-/// the time for the rest: a stream woken by a squeeze plays its first
-/// frame some milliseconds after it, and the edges after it keep their
-/// distance from it rather than land on time without it.
-const LATE_START_MAX_SEC: f64 = 0.1;
-
 /// Where the stream's frames stand on the shared clock.
 struct StreamClock {
     /// When frame 0 was due: the soonest any callback has come, less the
@@ -255,10 +244,10 @@ impl Sidetone {
         self.played += frames as u64;
     }
 
-    /// Whether the gate is shut and has been since `QUIET_SEC` before
-    /// `now`, with no edge waiting.
+    /// Whether the gate is shut and has been since `SIDETONE_QUIET_SEC`
+    /// before `now`, with no edge waiting.
     fn quiet_at(&self, now: f64) -> bool {
-        !self.keyed && self.progress == 0.0 && now - self.last_edge >= QUIET_SEC
+        !self.keyed && self.progress == 0.0 && now - self.last_edge >= SIDETONE_QUIET_SEC
     }
 
     /// Take the measure of a callback of `frames` that came at `now`.
@@ -308,7 +297,7 @@ impl Sidetone {
         let mut frame =
             ((at + clock.lead - clock.origin) * sample_rate).round() - self.played as f64;
         let overdue = (from as f64 - frame) / sample_rate;
-        if overdue > 0.0 && starts_burst && overdue <= LATE_START_MAX_SEC {
+        if overdue > 0.0 && starts_burst && overdue <= SIDETONE_LATE_MAX_SEC {
             // The first edge of a burst, late: the burst keeps its time from
             // here, as late as it began.
             clock.lead += overdue;

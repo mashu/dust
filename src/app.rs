@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::refocus_run;
 use crate::keep_awake::use_keep_awake;
+use crate::page::scroll_to_top;
 use crate::page_closed::use_end_on_close;
 use crate::page_hidden::{APP_HIDDEN, APP_SHOWN, use_page_hidden, use_page_shown};
 use crate::routes::Route;
@@ -312,7 +313,7 @@ pub fn App() -> Element {
 /// moving between screens writes nothing.
 fn use_stored_settings(ctx: AppCtx) {
     let edits = use_hook(|| Rc::new(Cell::new(EditWait::default())));
-    use_page_hidden(APP_HIDDEN, move || store_settings_now(ctx));
+    use_page_hidden(APP_HIDDEN, move || ctx.store_settings_now());
     use_effect(move || {
         let AppCtx {
             screen,
@@ -374,29 +375,6 @@ fn use_stored_settings(ctx: AppCtx) {
 struct EditWait {
     due: Option<u64>,
     waits: bool,
-}
-
-/// Store the settings at once, rather than once an edit on the settings
-/// screen has been still for a moment, or once the effect that stores them
-/// next runs: the page has gone out of sight, or the app is closing, and a
-/// tab closed or an app put away straight after an edit would lose it while
-/// it waited. Not while a session runs, which stores nothing until it ends.
-pub(crate) fn store_settings_now(ctx: AppCtx) {
-    if *ctx.screen.peek() != Screen::Training {
-        ctx.store_settings();
-    }
-}
-
-/// Scroll the page back to its top. The script outlives the component that
-/// asked for it, which a press of Resume takes off the page.
-pub(crate) fn scroll_to_top() {
-    // Tests have no page to run it on: the harness counts the asking.
-    #[cfg(test)]
-    crate::testing::ask_scroll_to_top();
-    #[cfg(not(test))]
-    dioxus::core::spawn_forever(async {
-        let _ = document::eval("window.scrollTo(0, 0);").await;
-    });
 }
 
 fn toggle_fullscreen() {
@@ -512,6 +490,7 @@ mod tests {
 mod ui_tests {
     use crate::persist::memory::MemoryStore;
     use crate::persist::{OpenSession, Store};
+    use crate::state::AppCtx;
     use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
     use dioxus::prelude::{Code, Key, ReadableExt, WritableExt};
@@ -688,7 +667,7 @@ mod ui_tests {
             ui.open_disclosures();
             ui.type_into("slider-rise-time", "12");
             assert_eq!(ui.store.settings_saves.get(), 0, "still waiting");
-            ui.with_app(super::store_settings_now);
+            ui.with_app(AppCtx::store_settings_now);
             assert_eq!(ui.store.settings_saves.get(), 1);
             assert_eq!(ui.store.load_settings().band.steepness, 12.0);
             ui.advance(1_000).await;
@@ -700,7 +679,7 @@ mod ui_tests {
                 let mut settings = ctx.settings;
                 settings.write().band.steepness = 20.0;
             });
-            ui.with_app(super::store_settings_now);
+            ui.with_app(AppCtx::store_settings_now);
             assert_eq!(ui.store.settings_saves.get(), 1, "stored mid-session");
         });
     }

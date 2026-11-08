@@ -10,7 +10,6 @@
 
 use dioxus::prelude::*;
 
-use crate::app::store_settings_now;
 use crate::session_runtime::finish_run;
 use crate::state::AppCtx;
 
@@ -26,7 +25,7 @@ pub fn use_end_on_close(ctx: AppCtx) {
         // does an edit still waiting on the settings screen. The app's
         // settings effect would store them only after this: a closed
         // desktop window is gone by then, and a page left may be.
-        store_settings_now(ctx);
+        ctx.store_settings_now();
         // The history is written on a thread of its own, which the app's
         // going would cut short: what the end kept is waited for.
         ctx.flush_history();

@@ -239,22 +239,14 @@ pub fn use_run_keys(ctx: AppCtx) {
     // Tests have no page to run it on: they press the keys through
     // [`pressed`].
     #[cfg(not(test))]
-    {
-        use_hook(move || {
-            spawn(async move {
-                let by_place = ctx.settings.peek().playback.paddle_keys_by_place;
-                let mut page = document::eval(&keys_script(by_place));
-                while let Ok(name) = page.recv::<String>().await {
-                    pressed(ctx, &name);
-                }
-            })
-        });
-        use_drop(|| {
-            dioxus::core::spawn_forever(async {
-                let _ = document::eval(STOP_LISTENING).await;
-            });
-        });
-    }
+    crate::page::use_page_listener(
+        move || {
+            let by_place = ctx.settings.peek().playback.paddle_keys_by_place;
+            keys_script(by_place)
+        },
+        || STOP_LISTENING.to_string(),
+        move |name: String| pressed(ctx, &name),
+    );
     #[cfg(test)]
     let _ = ctx;
 }

@@ -20,12 +20,11 @@
 //!
 //! [`run`] is a sync, start to end, against any store and any folder; the
 //! folder is Google Drive's ([`drive`]), reached over HTTPS ([`http`])
-//! once the user has signed in ([`auth`]); and [`ctx`] is the app's side of
+//! once the user has signed in ([`auth`]); and [`crate::state::sync`] is the app's side of
 //! it: when it syncs, and what the card on the History tab shows of it.
 
 pub mod auth;
 pub mod config;
-pub mod ctx;
 pub mod drive;
 pub mod http;
 pub mod pack;
