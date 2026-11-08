@@ -737,6 +737,7 @@ mod experience;
 mod ranges;
 mod reset;
 mod save;
+mod sequence;
 
 pub use adapt::{SpeedPath, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section};
 pub(crate) use adapt::{adaptive_bounds, adaptive_speed_path, group_size_bounds, length_floor};
