@@ -18,6 +18,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::playback::Dialogue;
+use crate::ui::app_widgets::SectionReset;
 use crate::ui::band::BandConditionsCard;
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::help;
@@ -25,9 +26,8 @@ use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
-    CardHead, FoldPanel, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange,
-    SliderField, Switch, control_id, db_share, html_bool, pretty_number, range_label, share_db,
-    whole,
+    CardHead, FoldPanel, Icon, IconName, NumberField, Seg, SettingsRange, SliderField, Switch,
+    control_id, db_share, html_bool, pretty_number, range_label, share_db, whole,
 };
 
 /// What an aim is called on screen.

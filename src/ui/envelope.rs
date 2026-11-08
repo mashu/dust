@@ -7,10 +7,9 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::ui::app_widgets::SectionReset;
 use crate::ui::help;
-use crate::ui::widgets::{
-    CardHead, Icon, IconName, SectionReset, SliderField, control_id, pretty_number,
-};
+use crate::ui::widgets::{CardHead, Icon, IconName, SliderField, control_id, pretty_number};
 
 const VIEW_W: f64 = 320.0;
 const VIEW_H: f64 = 120.0;
