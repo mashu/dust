@@ -624,6 +624,17 @@ impl AppCtx {
         merged
     }
 
+    /// Store the settings at once, rather than once an edit on the settings
+    /// screen has been still for a moment, or once the effect that stores them
+    /// next runs: the page has gone out of sight, or the app is closing, and a
+    /// tab closed or an app put away straight after an edit would lose it while
+    /// it waited. Not while a session runs, which stores nothing until it ends.
+    pub fn store_settings_now(self) {
+        if *self.screen.peek() != Screen::Training {
+            self.store_settings();
+        }
+    }
+
     /// A sampler for a session, a run or a stream of `settings`, seeded
     /// with `seed`: what [`Sampler::new`] makes of the history, from the
     /// prior built last while the history and what the prior reads of the
