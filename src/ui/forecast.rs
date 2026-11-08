@@ -12,15 +12,14 @@
 //! they say there is none to read, rather than the model's first guess.
 
 use cw_core::{
-    CharSetMode, EstimateReading, SpeedForecast, SpeedPath, TrainingSettings, adapts_speed,
-    group_length_forecast, speed_forecast,
+    CharSetMode, EstimateReading, SpeedForecast, SpeedPath, TrainingSettings, adaptive_speed_on,
+    adapts_speed, group_length_forecast, speed_forecast,
 };
 use dioxus::prelude::*;
 
-use crate::ui::figures::{History, without_band};
+use crate::ui::figures::{History, span_history_of, speed_history_of, without_band};
 use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds, span_history_of, speed_history_of};
 use crate::ui::widgets::{CardHead, IconName, control_id};
 
 /// How far either side of the best guess the likely range runs, in its
@@ -28,6 +27,25 @@ use crate::ui::widgets::{CardHead, IconName, control_id};
 const LIKELY_Z: f64 = 1.2816;
 /// How far under the aim, as a share, a row is still near it.
 const NEAR: f64 = 0.10;
+
+/// What the run screen's keys do to the speeds, however the callers' speeds
+/// come.
+pub(crate) const YOUR_SPEED_KEYS: &str = "The run screen's − and + move only your own speed.";
+
+/// How a contest's callers' speeds come under `settings`: from your copy
+/// speed in contests while their switch is on; every one at the one speed
+/// set while it is on with no room to adapt; and evenly from your range
+/// while it is off. Then what − and + do, the same either way.
+pub(crate) fn contest_speeds(settings: &TrainingSettings) -> String {
+    let callers = if adapts_speed(settings) {
+        "Each new caller's speed is drawn from your copy speed, within your range: faster as you copy calls and numbers clean, slower as you miss them."
+    } else if adaptive_speed_on(settings) {
+        "One speed is set, so every caller comes at it."
+    } else {
+        "Callers' speeds are drawn evenly from your range."
+    };
+    format!("{callers} {YOUR_SPEED_KEYS}")
+}
 
 /// Where a share copied stands against `aim`: at or over it, near under it,
 /// or further under; in whole percents, as the row shows it, so that a row

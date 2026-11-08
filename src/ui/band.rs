@@ -9,11 +9,12 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::format::counted;
+use crate::ui::app_widgets::SectionReset;
 use crate::ui::help;
 use crate::ui::odds::{OddSlider, OddsFold, OddsGroup};
 use crate::ui::widgets::{
-    CardHead, DISCLOSURE, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch,
-    control_id, range_label,
+    CardHead, DISCLOSURE, Icon, IconName, Seg, SettingsRange, SliderField, Switch, control_id,
+    range_label,
 };
 
 /// The AGC's decays, in the order the control offers them.

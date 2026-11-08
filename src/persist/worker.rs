@@ -26,11 +26,8 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use super::HistorySaved;
-use super::files::{HistoryFiles, Watch};
+use super::files::{HistoryFiles, THREAD, Watch};
 use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
-
-/// The thread the history's files are read and written on.
-pub(super) const THREAD: &str = "dust-history";
 
 /// How long a change the files would not take waits, at the head of the
 /// queue, before it is tried again: twice, before the app is told. A file

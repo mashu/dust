@@ -14,7 +14,10 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cw_core::{BandSettings, SessionResult, TrainingSettings};
+use cw_core::{
+    BandSettings, CharSetMode, EstimatePoint, SessionResult, TrainingSettings, practised_modes,
+    span_history, speed_history,
+};
 use dioxus::prelude::*;
 
 use crate::history::StoredHistory;
@@ -196,6 +199,54 @@ pub fn without_band(settings: &TrainingSettings) -> TrainingSettings {
         band: BandSettings::default(),
         ..settings.clone()
     }
+}
+
+/// The character sets `sessions` hold any practice in ([`practised_modes`]),
+/// as every card that offers them reads them.
+pub(crate) fn practised(sessions: &History) -> Rc<Vec<CharSetMode>> {
+    sessions.figure("practised modes", (), practised_modes)
+}
+
+/// The character set a trend card shows: the one chosen, while it has
+/// history; else the one practised now, if it has any; else the first that
+/// does. Nothing when none has: a set chosen in the settings never hides
+/// another's history.
+pub(crate) fn shown_mode(
+    chosen: Option<CharSetMode>,
+    modes: &[CharSetMode],
+    current: CharSetMode,
+) -> Option<CharSetMode> {
+    chosen
+        .filter(|mode| modes.contains(mode))
+        .or_else(|| modes.contains(&current).then_some(current))
+        .or_else(|| modes.first().copied())
+}
+
+/// Your copy span after each session of the character set `settings`
+/// train ([`span_history`]), as the Overview and the Sampling tab read it:
+/// it reads the set, and the group lengths when the set's first session
+/// sent none.
+pub(crate) fn span_history_of(
+    sessions: &History,
+    settings: &TrainingSettings,
+) -> Rc<Vec<EstimatePoint>> {
+    let curriculum = settings.curriculum.clone();
+    sessions.figure("span history", curriculum, |sessions| {
+        span_history(settings, sessions)
+    })
+}
+
+/// Your copy speed after each session of the character set `settings`
+/// train ([`speed_history`]), as the Overview and the Sampling tab read it:
+/// it reads the curriculum alone, the set, the aim and the group lengths.
+pub(crate) fn speed_history_of(
+    sessions: &History,
+    settings: &TrainingSettings,
+) -> Rc<Vec<EstimatePoint>> {
+    let curriculum = settings.curriculum.clone();
+    sessions.figure("speed history", curriculum, |sessions| {
+        speed_history(settings, sessions)
+    })
 }
 
 /// The app's history as the screens share it: a handle made anew with each

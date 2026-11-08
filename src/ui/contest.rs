@@ -25,9 +25,9 @@ use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
 use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::training::{ANSWER_INPUT_MODE, InputMethod, Keypad, PadKey, PadRow, TOUCH_BUILD};
+use crate::ui::training::{ANSWER_INPUT_MODE, InputMethod, Keypad, PadKey, PadRow};
 use crate::ui::widgets::{
-    Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool, keep_focus,
+    Icon, IconName, ProgressHeader, StatusDot, TOUCH_BUILD, control_id, html_bool, keep_focus,
 };
 
 /// How often the run's clock and the air are drawn again, which is also how

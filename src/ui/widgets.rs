@@ -1,10 +1,8 @@
 use cw_core::band::{db_to_gain, gain_to_db};
-use cw_core::{GroupResult, RangeSetting, SettingsSection, TrainingSettings, align_group};
+use cw_core::{GroupResult, RangeSetting, TrainingSettings, align_group};
 use dioxus::prelude::*;
 
 pub use crate::page::{control_id, focus_script};
-use crate::state::AppCtx;
-use crate::ui::paddle::use_typed_field;
 
 /// What was typed into a number field, held inside its bounds. `None` for
 /// anything that is not a finite number, which leaves the value as it was.
@@ -42,6 +40,10 @@ fn pct_between(value: f64, min: f64, max: f64) -> f64 {
 /// this way before they look for anything else, and a disclosure has to carry
 /// an `open` class while its panel is up so they can tell it worked.
 pub const DISCLOSURE: &str = "disclosure";
+
+/// Whether touch is how this build types: the phone and tablet builds,
+/// where the keypad always shows. Elsewhere it shows only on a touch screen.
+pub(crate) const TOUCH_BUILD: bool = cfg!(any(feature = "mobile", feature = "mobile-silent"));
 
 /// A button that leaves the cursor where it is: a click would otherwise take
 /// it from the box being typed in, so that the letters typed next went
@@ -814,59 +816,6 @@ impl TextDraft {
     }
 }
 
-/// A line of text typed in.
-///
-/// What is typed stays as typed until it is committed, on Enter or on
-/// leaving the box, or by a button given its `draft`, and only then is it
-/// kept as the setting keeps it ([`TextDraft`]). Each commit redraws the
-/// box, so it shows what was kept even when that is what it held already.
-///
-/// The paddles key nothing into it, so the keys right of P type there
-/// ([`crate::ui::paddle::TypedField`]): a call's `/`, or an unlock order's
-/// `+`.
-#[component]
-pub fn TextField(
-    label: &'static str,
-    value: String,
-    #[props(default)] placeholder: Option<&'static str>,
-    /// The field's class: `field`, or a field of a width of its own.
-    #[props(default = "field")]
-    class: &'static str,
-    on_commit: EventHandler<String>,
-    /// Where something outside the field keeps what is typed in it, as
-    /// Home's Start does; otherwise the field holds its own.
-    #[props(default)]
-    draft: Option<TextDraft>,
-) -> Element {
-    let own = TextDraft::use_draft();
-    let draft = draft.unwrap_or(own);
-    let shown = draft.shown(|| value);
-    let id = control_id("field", label);
-    let typed = use_typed_field();
-    rsx! {
-        div { class,
-            label { r#for: "{id}", "{label}" }
-            input {
-                id,
-                class: "group-text",
-                value: "{shown}",
-                placeholder,
-                autocapitalize: "characters",
-                autocomplete: "off",
-                spellcheck: false,
-                "data-typed": "true",
-                onfocus: move |_| typed.focus(),
-                onblur: move |_| typed.blur(),
-                oninput: move |e| draft.hold(e.value()),
-                onchange: move |e| {
-                    draft.settle();
-                    on_commit.call(e.value());
-                },
-            }
-        }
-    }
-}
-
 /// A number typed in, or stepped with − and +.
 ///
 /// What is typed stays in the box, and reaches `onchange` only once it is
@@ -963,49 +912,6 @@ pub fn NumberField(
                     "+"
                 }
             }
-        }
-    }
-}
-
-/// Put one card back to its defaults.
-///
-/// Sits with the card's own tools rather than in one page-wide "reset
-/// everything", because the thing you want back is almost always the corner
-/// you have just been experimenting in — and a single global reset is the one
-/// nobody dares press.
-///
-/// In the app, Undo is offered for a while after ([`AppCtx::reset_section`]):
-/// a card can hold what took typing, and one press should not cost it. A
-/// card drawn on its own, with no app around it, just resets.
-#[component]
-pub fn SectionReset(
-    /// The card's title, as it shows: "Band conditions".
-    #[props(into)]
-    card: String,
-    settings: Signal<TrainingSettings>,
-    section: SettingsSection,
-    /// What the card does besides, as it is reset.
-    #[props(default)]
-    on_reset: EventHandler<()>,
-) -> Element {
-    let app = try_use_context::<AppCtx>();
-    let title = format!("Reset {} to defaults", card.to_lowercase());
-    let id = control_id("reset", &card);
-    rsx! {
-        button {
-            id,
-            class: "icon-btn",
-            r#type: "button",
-            title: "{title}",
-            aria_label: "{title}",
-            onclick: move |_| {
-                on_reset.call(());
-                match app {
-                    Some(app) => app.reset_section(section, &card),
-                    None => settings.write().reset_section(section),
-                }
-            },
-            Icon { name: IconName::Reset }
         }
     }
 }

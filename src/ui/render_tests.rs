@@ -5023,7 +5023,7 @@ mod interactions {
         rsx! {
             Keyed { screen: Screen::Settings, on_linux,
                 if shown() {
-                    crate::ui::widgets::TextField {
+                    crate::ui::app_widgets::TextField {
                         label: "Sequence order",
                         value: String::new(),
                         on_commit: move |_: String| {},

@@ -31,13 +31,15 @@ use dioxus::core::Task;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::refocus_run;
+use crate::page::bring_into_sight;
 use crate::session_runtime::{abort_run, start_session};
 use crate::state::{AppCtx, Screen, Tour};
 use crate::time::{POLL_MS, sleep_ms};
 use crate::ui::discard::Discarded;
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::training::TOUCH_BUILD;
-use crate::ui::widgets::{Icon, IconName, control_id, html_bool, keep_focus, pretty_number};
+use crate::ui::widgets::{
+    Icon, IconName, TOUCH_BUILD, control_id, html_bool, keep_focus, pretty_number,
+};
 
 /// How long Show me points at a control before it makes the move there.
 const POINT_MS: u32 = 700;
@@ -758,63 +760,6 @@ fn pointer_css(ids: &[String]) -> String {
     )
 }
 
-/// The script that brings the first control of `ids` the page has into
-/// sight, clear of the guide's dock and with room for the ring it draws,
-/// and leaves it where it is if it is in sight already: a move made by hand
-/// points at the control next to it, and the page should not jump for
-/// that.
-fn scroll_script(ids: &[String]) -> String {
-    let ids: Vec<String> = ids.iter().map(|id| format!("{id:?}")).collect();
-    format!(
-        r#"const target = [{}].map((id) => document.getElementById(id)).find((el) => el);
-if (!target) {{
-    return;
-}}
-// The ring the guide draws reaches 7px past the control.
-const ring = 8;
-// The dock covers the foot or the head of the window, whichever it is
-// nearer: what is under it, and the nav under a dock at the foot, is out of
-// sight, and the rest is clear.
-const dock = document.getElementById("tour-dock");
-const cover = dock ? dock.getBoundingClientRect() : null;
-let top = 0;
-let bottom = window.innerHeight;
-if (cover !== null && cover.top - top > bottom - cover.bottom) {{
-    bottom = cover.top;
-}} else if (cover !== null) {{
-    top = cover.bottom;
-}}
-const box = target.getBoundingClientRect();
-if (box.top - ring >= top && box.bottom + ring <= bottom) {{
-    return;
-}}
-// Into the middle of what is clear, or its head for a control taller than
-// that. A guide docked at the foot covers the middle of a short window, so
-// centring in the window would put the control behind it.
-const by = box.height + 2 * ring > bottom - top
-    ? box.top - ring - top
-    : (box.top + box.bottom - top - bottom) / 2;
-window.scrollBy({{ top: by, behavior: "smooth" }});"#,
-        ids.join(", ")
-    )
-}
-
-/// Bring the first control of `ids` the page draws into sight, clear of the
-/// guide where it is open ([`scroll_script`]): what the guide points at, or
-/// a control a press has just put in place of the one it pointed at.
-pub(crate) fn bring_into_sight(ids: &[String]) {
-    // Tests have no page to run it on.
-    #[cfg(not(test))]
-    {
-        let script = scroll_script(ids);
-        spawn(async move {
-            let _ = document::eval(&script).await;
-        });
-    }
-    #[cfg(test)]
-    let _ = ids;
-}
-
 /// Open the guide at its start, on the practice screen where a first session
 /// starts, or in Contest mode a run, and remember that it has been opened:
 /// it opens by itself only on a first launch.
@@ -1230,15 +1175,13 @@ mod tests {
 
     use super::{
         CONTEST_STEPS, LETTER_MS, Move, POINT_MS, SHOWN_MS, STEPS, Seen, next_letter, pointer_css,
-        scroll_script,
     };
     use crate::audio::fake::{Call, Recorder};
     use crate::persist::Store;
     use crate::persist::memory::MemoryStore;
     use crate::state::{Screen, Tour};
     use crate::testing::{Ui, contest_settings, run, stored_session, test_settings};
-    use crate::ui::training::TOUCH_BUILD;
-    use crate::ui::widgets::pretty_number;
+    use crate::ui::widgets::{TOUCH_BUILD, pretty_number};
 
     /// Settings on which every move the guide asks for is still to make: a
     /// fixed speed, size and pitch, callsigns, which have no unlock order,
@@ -1910,34 +1853,6 @@ mod tests {
             include_str!("../../assets/styles.css").contains("@keyframes tour-ring"),
             "the pointer's pulse is the stylesheet's"
         );
-    }
-
-    /// The harness never mounts anything on a page, so the script is the one
-    /// part of bringing a control into sight a test can see.
-    #[test]
-    fn the_first_control_there_is_is_brought_into_sight_clear_of_the_dock() {
-        let script = scroll_script(&["from-side-tone".to_string(), "to-side-tone".to_string()]);
-        assert!(
-            script.contains(r#"["from-side-tone", "to-side-tone"].map("#),
-            "{script}"
-        );
-        assert!(
-            script.contains(r#"document.getElementById("tour-dock")"#),
-            "{script}"
-        );
-        // Under the dock is out of sight, whether it is docked at the foot
-        // or the head of the window, and so is the ring past the control.
-        let under = script
-            .find("if (cover !== null && cover.top - top > bottom - cover.bottom)")
-            .expect("a control under the dock is not in sight");
-        let in_sight = script
-            .find("if (box.top - ring >= top && box.bottom + ring <= bottom)")
-            .expect("a control in sight is left where it is");
-        let scroll = script
-            .find("(box.top + box.bottom - top - bottom) / 2")
-            .expect("it is brought to the middle of what is clear");
-        assert!(under < in_sight && in_sight < scroll, "{script}");
-        assert!(script.contains("window.scrollBy("), "{script}");
     }
 
     /// Every move reads as what it does.

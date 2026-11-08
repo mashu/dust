@@ -1,3 +1,4 @@
+pub mod app_widgets;
 pub mod auto_level;
 pub mod backup;
 pub mod band;
@@ -35,6 +36,7 @@ pub mod scores;
 pub mod settings;
 pub mod settings_charset;
 pub mod settings_station;
+pub mod standing;
 pub mod stats;
 pub mod stats_detail;
 pub mod sync;

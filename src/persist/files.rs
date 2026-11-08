@@ -51,15 +51,19 @@ use cw_core::SessionResult;
 use flate2::read::GzDecoder;
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::desktop::{
-    DELETED, SESSIONS, copy_aside, move_aside, place_whole, shown, sync_dir, write_whole,
-};
+use super::disk::{aside_name, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, read_record};
 use super::{Deleted, HistorySaved, SessionKey, SetAside};
 
 /// The folder of the history, in the store's.
 const HISTORY: &str = "history";
+/// The history as builds before records keep it whole, which the move to
+/// records reads once and leaves as it was ([`HistoryFiles`]).
+pub(super) const SESSIONS: &str = "sessions.json";
+/// The sessions deleted by hand ([`super::Deleted`]), as builds before
+/// records remember them.
+pub(super) const DELETED: &str = "deleted.json";
 /// The records, in the history's folder.
 const RECORDS: &str = "sessions";
 /// The tombstones, in the history's folder.
@@ -98,6 +102,9 @@ const WRITERS: usize = 8;
 /// any of it is written ([`HistoryFiles::stream_backup`]): some two
 /// megabytes, at some seven kilobytes a session, however long the history.
 const BACKUP_PART: usize = 256;
+
+/// The thread the history's files are read and written on.
+pub(super) const THREAD: &str = "dust-history";
 
 /// The history as files under one folder.
 pub(super) struct HistoryFiles {
@@ -250,7 +257,7 @@ impl HistoryFiles {
     }
 
     /// From here on the files are the worker's: looked at and written on
-    /// its thread alone ([`super::worker::THREAD`]).
+    /// its thread alone ([`THREAD`]).
     pub(super) fn keep_to_worker(&mut self) {
         self.on_worker = true;
     }
@@ -260,10 +267,10 @@ impl HistoryFiles {
     /// that reaches them is one the app's taps wait on.
     fn on_its_thread(&self) {
         debug_assert!(
-            !self.on_worker || thread::current().name() == Some(super::worker::THREAD),
+            !self.on_worker || thread::current().name() == Some(THREAD),
             "the history's files were reached from {:?}, not from {}",
             thread::current().name(),
-            super::worker::THREAD
+            THREAD
         );
     }
 
@@ -1397,6 +1404,29 @@ fn legacy_deleted(root: &Path) -> Vec<Deleted> {
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
         .unwrap_or_default()
+}
+
+/// Keep `unread`, sessions of the history in `root` that could not be
+/// read, in a file of their own beside it, and say what it is called:
+/// nothing, where a file set aside before holds them already.
+pub(super) fn copy_aside(root: &Path, unread: &[u8]) -> io::Result<Option<String>> {
+    let kept = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("sessions.unreadable-")
+                && fs::read(entry.path()).is_ok_and(|kept| kept == unread)
+        });
+    if kept {
+        return Ok(None);
+    }
+    let name = aside_name(root, "sessions");
+    write_whole(root, &name, unread)?;
+    Ok(Some(name))
 }
 
 /// Every record of `sessions` by its session's key.

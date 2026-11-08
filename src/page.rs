@@ -55,6 +55,63 @@ input.setSelectionRange(end, end);"#,
     )
 }
 
+/// The script that brings the first control of `ids` the page has into
+/// sight, clear of the guide's dock and with room for the ring it draws,
+/// and leaves it where it is if it is in sight already: a move made by hand
+/// points at the control next to it, and the page should not jump for
+/// that.
+fn scroll_script(ids: &[String]) -> String {
+    let ids: Vec<String> = ids.iter().map(|id| format!("{id:?}")).collect();
+    format!(
+        r#"const target = [{}].map((id) => document.getElementById(id)).find((el) => el);
+if (!target) {{
+    return;
+}}
+// The ring the guide draws reaches 7px past the control.
+const ring = 8;
+// The dock covers the foot or the head of the window, whichever it is
+// nearer: what is under it, and the nav under a dock at the foot, is out of
+// sight, and the rest is clear.
+const dock = document.getElementById("tour-dock");
+const cover = dock ? dock.getBoundingClientRect() : null;
+let top = 0;
+let bottom = window.innerHeight;
+if (cover !== null && cover.top - top > bottom - cover.bottom) {{
+    bottom = cover.top;
+}} else if (cover !== null) {{
+    top = cover.bottom;
+}}
+const box = target.getBoundingClientRect();
+if (box.top - ring >= top && box.bottom + ring <= bottom) {{
+    return;
+}}
+// Into the middle of what is clear, or its head for a control taller than
+// that. A guide docked at the foot covers the middle of a short window, so
+// centring in the window would put the control behind it.
+const by = box.height + 2 * ring > bottom - top
+    ? box.top - ring - top
+    : (box.top + box.bottom - top - bottom) / 2;
+window.scrollBy({{ top: by, behavior: "smooth" }});"#,
+        ids.join(", ")
+    )
+}
+
+/// Bring the first control of `ids` the page draws into sight, clear of the
+/// guide where it is open ([`scroll_script`]): what the guide points at, or
+/// a control a press has just put in place of the one it pointed at.
+pub(crate) fn bring_into_sight(ids: &[String]) {
+    // Tests have no page to run it on.
+    #[cfg(not(test))]
+    {
+        let script = scroll_script(ids);
+        dioxus::prelude::spawn(async move {
+            let _ = dioxus::prelude::document::eval(&script).await;
+        });
+    }
+    #[cfg(test)]
+    let _ = ids;
+}
+
 /// Scroll the page back to its top. The script outlives the component that
 /// asked for it, which a press of Resume takes off the page.
 pub(crate) fn scroll_to_top() {
@@ -69,7 +126,7 @@ pub(crate) fn scroll_to_top() {
 
 #[cfg(test)]
 mod tests {
-    use super::{control_id, focus_end_script, focus_script};
+    use super::{control_id, focus_end_script, focus_script, scroll_script};
 
     /// The harness never mounts anything on a page, so the script is the one
     /// part of an input taking the focus a test can see.
@@ -102,6 +159,34 @@ mod tests {
             .expect("the cursor at the end, nothing selected");
         assert!(focus < end, "{script}");
         assert!(script.contains("const end = input.value.length;"));
+    }
+
+    /// The harness never mounts anything on a page, so the script is the one
+    /// part of bringing a control into sight a test can see.
+    #[test]
+    fn the_first_control_there_is_is_brought_into_sight_clear_of_the_dock() {
+        let script = scroll_script(&["from-side-tone".to_string(), "to-side-tone".to_string()]);
+        assert!(
+            script.contains(r#"["from-side-tone", "to-side-tone"].map("#),
+            "{script}"
+        );
+        assert!(
+            script.contains(r#"document.getElementById("tour-dock")"#),
+            "{script}"
+        );
+        // Under the dock is out of sight, whether it is docked at the foot
+        // or the head of the window, and so is the ring past the control.
+        let under = script
+            .find("if (cover !== null && cover.top - top > bottom - cover.bottom)")
+            .expect("a control under the dock is not in sight");
+        let in_sight = script
+            .find("if (box.top - ring >= top && box.bottom + ring <= bottom)")
+            .expect("a control in sight is left where it is");
+        let scroll = script
+            .find("(box.top + box.bottom - top - bottom) / 2")
+            .expect("it is brought to the middle of what is clear");
+        assert!(under < in_sight && in_sight < scroll, "{script}");
+        assert!(script.contains("window.scrollBy("), "{script}");
     }
 
     #[test]

@@ -20,8 +20,7 @@ use crate::state::{AppCtx, AppState, Screen, Toasts, in_root};
 use crate::time::mono_ms;
 #[cfg(not(all(feature = "desktop", not(test))))]
 use crate::time::sleep_ms;
-use crate::ui::training::TOUCH_BUILD;
-use crate::ui::widgets::control_id;
+use crate::ui::widgets::{TOUCH_BUILD, control_id};
 
 /// How many decoded characters the practice pad keeps: about a line's worth.
 const HEARD_KEEP: usize = 32;

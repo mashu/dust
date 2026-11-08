@@ -7,7 +7,8 @@ use crate::time::{mono_ms, sleep_ms};
 use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
-    CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool,
+    CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, TOUCH_BUILD, control_id,
+    html_bool,
 };
 
 /// Incomplete answers wait this long before the session sees them. Short
@@ -508,10 +509,6 @@ fn AnswerBox(
         }
     }
 }
-
-/// Whether touch is how this build types: the phone and tablet builds,
-/// where the keypad always shows. Elsewhere it shows only on a touch screen.
-pub(crate) const TOUCH_BUILD: bool = cfg!(any(feature = "mobile", feature = "mobile-silent"));
 
 /// A key on the keypad.
 #[derive(Clone, Debug, PartialEq)]
