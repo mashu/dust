@@ -22,6 +22,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::{send_run_event, start_run};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
+use crate::state::live::AWAY_GAP_MS;
 use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, keep_and_show, settle_level};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
@@ -45,12 +46,6 @@ impl Live {
 /// How often a running session's heartbeat says the app is still running
 /// ([`beat`]).
 const HEARTBEAT_MS: u32 = 250;
-
-/// A gap this long since the app was last seen running a session is time it
-/// was not running: a phone locked, a process put on hold, a webview that
-/// held every task back. The heartbeat comes every quarter second, and a
-/// busy page delays one by far less.
-const HEARTBEAT_GAP_MS: u64 = 2_000;
 
 impl LiveSession {
     /// How many of its groups are answered.
@@ -164,12 +159,12 @@ pub fn start_session(ctx: AppCtx) {
     // preview that had it has stopped.
     preview.set(Preview::Idle);
     let app = ctx.app();
-    let lease = match app.player.claim(&fitted) {
-        Ok(lease) => lease,
-        Err(err) => {
-            toasts.show(err.to_string());
-            return;
-        }
+    let Ok(lease) = app
+        .player
+        .claim(&fitted)
+        .inspect_err(|err| toasts.show(err.to_string()))
+    else {
+        return;
     };
     // Each session draws from a sampler of its own, seeded afresh.
     ctx.answer.clear();
@@ -232,7 +227,7 @@ fn pause_if_away(ctx: AppCtx, lease: &Lease) {
         };
         let now = MonoMs(mono_ms());
         let seen = std::mem::replace(&mut live.last_seen, now);
-        if now.since(seen) <= HEARTBEAT_GAP_MS || live.machine.session().paused() {
+        if now.since(seen) <= AWAY_GAP_MS || live.machine.session().paused() {
             return;
         }
         let mut effects = ctx
@@ -259,12 +254,12 @@ pub fn resume_session(ctx: AppCtx) {
         Some(live) if live.machine.session().paused() => live.machine.session().settings().clone(),
         _ => return,
     };
-    let lease = match app.player.claim(&settings) {
-        Ok(lease) => lease,
-        Err(err) => {
-            ctx.toasts.show(err.to_string());
-            return;
-        }
+    let Ok(lease) = app
+        .player
+        .claim(&settings)
+        .inspect_err(|err| ctx.toasts.show(err.to_string()))
+    else {
+        return;
     };
     if let Some(live) = app.session.borrow_mut().as_mut().and_then(Live::groups_mut) {
         live.lease = lease.clone();
@@ -379,12 +374,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         // begun, and a letter being keyed is one begun: once it is in, the
         // window leaves the answer to its owner.
         Some(AnswerClose::Settled | AnswerClose::Unbegun) if ctx.answer.entry_open() => {
-            let lease = lease.clone();
-            spawn_forever(async move {
-                if lease.sleep(ENTRY_RECHECK_MS).await.is_ok() {
-                    dispatch(ctx, &lease, event);
-                }
-            });
+            lease.after(ENTRY_RECHECK_MS, move |lease| dispatch(ctx, lease, event));
             return;
         }
         // A letter keyed in full and not in the box yet begins the answer
@@ -439,13 +429,10 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
             }
             SessionEffect::Play { index, text } => play(ctx, lease, index, text),
             SessionEffect::StartTimer { id, ms } => {
-                let lease = lease.clone();
                 // One wait for the whole of it. A timer the machine has since
                 // forgotten wakes once, is told so, and is gone.
-                spawn_forever(async move {
-                    if lease.sleep(ms).await.is_ok() {
-                        dispatch(ctx, &lease, SessionEvent::TimerFired { id });
-                    }
+                lease.after(ms, move |lease| {
+                    dispatch(ctx, lease, SessionEvent::TimerFired { id });
                 });
             }
             SessionEffect::PersistAndShowResults => {

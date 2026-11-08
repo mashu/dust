@@ -19,13 +19,9 @@ use dioxus::prelude::*;
 use crate::page::{Caret, control_id, focus_by_id_anywhere};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
+use crate::state::live::AWAY_GAP_MS;
 use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen, keep_and_show};
 use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
-
-/// A gap this long between two of the run screen's ticks is time the app
-/// was not running: a phone locked, a process put on hold. The ticks come
-/// every quarter second, and a busy page delays one by far less.
-const HEARTBEAT_GAP_MS: u64 = 2_000;
 
 /// Start a run of `settings`, clamped already: the training screen comes up
 /// on its countdown, or on its first CQ. A run that cannot start says what
@@ -54,12 +50,12 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     // that had it has stopped.
     preview.set(Preview::Idle);
     let app = ctx.app();
-    let lease = match app.player.claim(&sound) {
-        Ok(lease) => lease,
-        Err(err) => {
-            toasts.show(err.to_string());
-            return;
-        }
+    let Ok(lease) = app
+        .player
+        .claim(&sound)
+        .inspect_err(|err| toasts.show(err.to_string()))
+    else {
+        return;
     };
     // The callers' calls lean on what the history says is hard, and on what
     // the run copies as it goes.
@@ -155,12 +151,12 @@ pub fn resume_run(ctx: AppCtx) {
     let Some(sound) = paused else {
         return;
     };
-    let lease = match app.player.claim(&sound) {
-        Ok(lease) => lease,
-        Err(err) => {
-            ctx.toasts.show(err.to_string());
-            return;
-        }
+    let Ok(lease) = app
+        .player
+        .claim(&sound)
+        .inspect_err(|err| ctx.toasts.show(err.to_string()))
+    else {
+        return;
     };
     if let Some(Live::Contest(live)) = app.session.borrow_mut().as_mut() {
         live.lease = lease;
@@ -193,8 +189,7 @@ impl LiveContest {
     /// The tick the app was last seen running at, if it has not been seen
     /// since for longer than a tick can take.
     fn away_since(&self, now: MonoMs) -> Option<MonoMs> {
-        self.last_tick
-            .filter(|tick| now.since(*tick) > HEARTBEAT_GAP_MS)
+        self.last_tick.filter(|tick| now.since(*tick) > AWAY_GAP_MS)
     }
 
     /// What the run would keep were it ended at `now`, as End run keeps it,
@@ -292,14 +287,11 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
                 lease.release();
             }
             ContestEffect::StartTimer { id, ms } => {
-                let lease = lease.clone();
                 // One wait for the whole of it. A timer the machine has since
                 // forgotten wakes once, is told so, and is gone; one a pause
                 // let go of with the audio never wakes.
-                spawn_forever(async move {
-                    if lease.sleep(ms).await.is_ok() {
-                        dispatch(ctx, &lease, ContestEvent::TimerFired { id });
-                    }
+                lease.after(ms, move |lease| {
+                    dispatch(ctx, lease, ContestEvent::TimerFired { id });
                 });
             }
             ContestEffect::ClearFields => ctx.entry.clear(),

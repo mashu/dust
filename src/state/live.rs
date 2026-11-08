@@ -3,6 +3,13 @@ use cw_core::{ContestMachine, MonoMs, Sampler, SessionMachine, SplitMix64, Train
 use crate::persist::OpenSession;
 use crate::player::Lease;
 
+/// A gap this long since the app was last seen running what is live is time
+/// it was not running: a phone locked, a process put on hold, a webview that
+/// held every task back. A session of groups is seen by its heartbeat and a
+/// run by its screen's ticks; each comes every quarter second, and a busy
+/// page delays one by far less.
+pub const AWAY_GAP_MS: u64 = 2_000;
+
 /// What has the training screen: a session of groups, or a contest run.
 /// Each is a machine of some size, and only one is ever live, so each is
 /// boxed.

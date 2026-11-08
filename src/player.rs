@@ -407,6 +407,18 @@ impl Lease {
         self.check()
     }
 
+    /// After `ms`, waited in one go ([`Lease::sleep`]), hand this lease to
+    /// `then`, if it outlived the wait. The wait is a task of the app's own,
+    /// on the root, so it outlasts whatever screen set it going.
+    pub fn after(&self, ms: u32, then: impl FnOnce(&Lease) + 'static) {
+        let lease = self.clone();
+        dioxus::core::spawn_forever(async move {
+            if lease.sleep(ms).await.is_ok() {
+                then(&lease);
+            }
+        });
+    }
+
     fn check(&self) -> Result<(), AudioError> {
         if self.is_current() {
             Ok(())
