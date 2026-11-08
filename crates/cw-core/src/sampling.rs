@@ -7,12 +7,11 @@ use crate::belief::{FADE_HORIZON, SESSION_FADE, sessions_faded};
 use crate::callsign::{CallSpec, GeneratedCall, generate_call};
 use crate::contest::CallSource;
 use crate::machine::GroupSource;
-use crate::pool::compute_char_pool;
 use crate::rng::{Rng, SplitMix64, weighted_random_pick};
 use crate::session::{Answered, SessionResult};
 use crate::settings::{
     CharSetMode, LevelAxis, SpeedPath, TrainingSettings, adaptive_bounds, adaptive_speed_path,
-    group_size_bounds, length_floor,
+    compute_char_pool, group_size_bounds, length_floor,
 };
 use crate::span::SpanBelief;
 use crate::speed::SpeedBelief;

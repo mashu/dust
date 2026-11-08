@@ -25,7 +25,6 @@ mod machine;
 mod mono;
 mod morse;
 mod numeric;
-mod pool;
 mod recognition;
 mod rng;
 mod sampling;
@@ -93,9 +92,6 @@ pub use machine::{
 };
 pub use mono::MonoMs;
 pub use morse::{MAX_DIGITS_LEVEL, morse_for};
-pub use pool::{
-    compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
-};
 pub use recognition::{
     ALONG_FLOOR_MS, CharTimes, CopyTime, KEEPING_UP_MS, KeyLog, Keys, REACTION_MIN_MS,
     RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES,
@@ -125,8 +121,9 @@ pub use settings::{
     SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STARTER_WORDS, STATIONS_MAX, STATIONS_MIN,
     STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, SpeedPath, StyleChoice, TrainingSettings,
     VOLUME_MAX, VOLUME_MIN, WORD_LIST_MAX, WPM_MAX, WPM_MIN, WordList, adaptive_speed_on,
-    adapts_group_size, adapts_speed, aim_section, class_reading, clean_word, power_reading,
-    section_code, state_code,
+    adapts_group_size, adapts_speed, aim_section, class_reading, clean_word, compute_char_pool,
+    current_practice_window, newest_unlocked, power_reading, section_code, state_code,
+    unlocked_practice_count,
 };
 pub use span::LengthForecast;
 pub use speed::SpeedForecast;

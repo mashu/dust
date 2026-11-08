@@ -734,6 +734,7 @@ mod contest;
 mod contest_preset;
 mod curriculum;
 mod experience;
+mod pool;
 mod ranges;
 mod reset;
 mod save;
@@ -751,6 +752,9 @@ pub use contest_preset::ContestPreset;
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
 pub use curriculum::LevelAxis;
 pub use experience::Experience;
+pub use pool::{
+    compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
+};
 pub use words::{STARTER_WORDS, WORD_LIST_MAX, WordList, clean_word};
 
 #[cfg(test)]

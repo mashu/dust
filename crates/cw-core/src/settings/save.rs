@@ -308,7 +308,7 @@ impl From<SettingsSave> for TrainingSettings {
         ) {
             (Some(named), _, _) => named,
             (None, Some(start), Some(end)) => {
-                window_from_bounds(crate::pool::unlocked_practice_count(&settings), start, end)
+                window_from_bounds(super::unlocked_practice_count(&settings), start, end)
             }
             (None, _, _) => PracticeWindow::All,
         };
