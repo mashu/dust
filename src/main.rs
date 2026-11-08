@@ -20,6 +20,8 @@ mod audio;
 mod contest_runtime;
 mod format;
 mod history;
+#[cfg(all(target_os = "android", not(test)))]
+mod jvm;
 mod keep_awake;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod linux_webview;
