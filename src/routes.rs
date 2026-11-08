@@ -718,7 +718,7 @@ mod tests {
                 .collect();
             let mut worse = stored_session("2026-10-01", &copied);
             worse.timestamp = at;
-            ui.with_app(|ctx| crate::session_runtime::keep_and_show(ctx, worse));
+            ui.with_app(|ctx| crate::state::keep_and_show(ctx, worse));
             assert_eq!(ui.screen(), "results");
             assert!(ui.has("2nd best of your 2 Koch sessions"), "{}", ui.html());
         });

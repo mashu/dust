@@ -1,9 +1,11 @@
 //! What the app is: its state, reactive and not, and the moves every screen
 //! shares.
 
+mod keep;
 pub mod preview;
 pub mod sync;
 
+pub use keep::{keep_and_show, keep_cut_off, settle_level};
 pub use preview::{Dialogue, DialogueLine, HeardGroup, Preview};
 pub use sync::SyncStatus;
 
@@ -32,7 +34,7 @@ use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
 };
 use crate::player::{AudioError, BackendFactory, Player};
-use crate::session_runtime::{AnswerOutbox, Live, keep_cut_off};
+use crate::session_runtime::{AnswerOutbox, Live};
 use crate::time::{POLL_MS, now_ms, sleep_ms};
 
 /// How long after the store last refused what the app has yet to store it
@@ -2267,7 +2269,7 @@ mod tests {
 
         /// Keep `session`, as a session finished here is kept.
         fn finish(&self, session: SessionResult) {
-            self.act(|ctx| crate::session_runtime::keep_and_show(ctx, session));
+            self.act(|ctx| crate::state::keep_and_show(ctx, session));
         }
 
         /// The record of the session that finished on `day`, here.
