@@ -159,8 +159,9 @@ that lag.
     mode is not callsigns. Otherwise it keeps the even draw, unchanged.
   - `learn` takes the group as it was answered (`Answered`) and updates
     both the character beliefs and the span.
-  - `aim_section` says which settings card shows the aim, and so which
-    card's reset puts it back.
+- `settings/adapt.rs`: `adaptive_bounds` (when group size adapts, and its
+  range) and `aim_section` (which settings card shows the aim, and so which
+  card's reset puts it back).
 - `settings/mod.rs`: `adaptive_group_size` (default `false`) in the Session
   shape section, and `aim` (`Aim`: `Comfortable | Balanced | Stretch`,
   default `Balanced`, saved as `groupSizeTarget`). The aim is shared with
