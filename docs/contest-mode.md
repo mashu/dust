@@ -2750,7 +2750,7 @@ the preset.
   and that `From<SettingsSave>` reads back as Contest. An older build opens
   in Callsigns at the same tier instead of failing the strict parse into
   Mixed (`TrainingSettings`'s `Serialize`, `settings/save.rs`;
-  `recover_settings`, `persist/mod.rs`). Its next save
+  `recover_settings`, `persist/settings.rs`). Its next save
   drops Your station: settings, which a backup holds, not training data.
   Nothing writes `"contest"` as the mode; a save edited by hand that names
   it opens in Contest, and `start_session` starts a run from it.
