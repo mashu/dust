@@ -2,7 +2,7 @@ use cw_core::band::{db_to_gain, gain_to_db};
 use cw_core::{GroupResult, RangeSetting, TrainingSettings, align_group};
 use dioxus::prelude::*;
 
-pub use crate::page::{control_id, focus_script};
+pub use crate::page::control_id;
 
 /// What was typed into a number field, held inside its bounds. `None` for
 /// anything that is not a finite number, which leaves the value as it was.

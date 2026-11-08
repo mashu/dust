@@ -7,8 +7,8 @@
 
 use dioxus::prelude::*;
 
-use crate::page::bring_into_sight;
-use crate::ui::widgets::{Icon, IconName, control_id, focus_script, keep_focus};
+use crate::page::{Caret, bring_into_sight, focus_by_id};
+use crate::ui::widgets::{Icon, IconName, control_id, keep_focus};
 
 /// What a Discard throws away, as its buttons and its question name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,23 +77,11 @@ pub fn use_discard_ask(what: Discarded) -> Asking {
         if (asking.open)() {
             bring_into_sight(&[what.confirm_id()]);
             if *asking.by_key.peek() {
-                focus(what.keep_id());
+                focus_by_id(&what.keep_id(), Caret::AsIs);
             }
         }
     });
     asking
-}
-
-/// Give the button `id` the cursor.
-fn focus(id: String) {
-    let script = focus_script(&id);
-    // Tests have no page to run it on: the harness looks for the button.
-    #[cfg(test)]
-    crate::testing::ask_focus(&id, &script);
-    #[cfg(not(test))]
-    spawn(async move {
-        let _ = document::eval(&script).await;
-    });
 }
 
 /// Discard as it first stands: it only asks. Pressed, it leaves the cursor

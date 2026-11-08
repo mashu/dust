@@ -16,7 +16,7 @@ use cw_core::{
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::page::control_id;
+use crate::page::{Caret, control_id, focus_by_id_anywhere};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen, keep_and_show};
@@ -433,14 +433,7 @@ pub fn field_name(field: EntryField) -> (String, &'static str) {
 pub fn focus_field(ctx: AppCtx, field: EntryField) {
     ctx.entry.set_focus(field);
     let (id, _) = field_name(field);
-    let script = crate::page::focus_end_script(&id);
-    // Tests have no page to run it on: the harness looks for the field.
-    #[cfg(test)]
-    crate::testing::ask_focus(&id, &script);
-    #[cfg(not(test))]
-    spawn_forever(async move {
-        let _ = document::eval(&script).await;
-    });
+    focus_by_id_anywhere(&id, Caret::AtEnd);
 }
 
 /// While a run has the training screen, the cursor back in its field, as it

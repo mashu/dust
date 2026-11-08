@@ -55,6 +55,56 @@ input.setSelectionRange(end, end);"#,
     )
 }
 
+/// Where the cursor goes in a control given the focus ([`focus_by_id`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Caret {
+    /// Where the control has it ([`focus_script`]): a button, or a field as
+    /// it was left.
+    AsIs,
+    /// At the end of what the field holds, nothing selected
+    /// ([`focus_end_script`]).
+    AtEnd,
+}
+
+impl Caret {
+    /// The script that gives the control `id` the focus, unless it has it,
+    /// with the cursor where this says.
+    fn script(self, id: &str) -> String {
+        match self {
+            Self::AsIs => focus_script(id),
+            Self::AtEnd => focus_end_script(id),
+        }
+    }
+}
+
+/// Give the control `id` the focus, unless it has it, with the cursor as
+/// `caret` says, from a task of the calling component. The script looks
+/// for the control at once, so it has to be drawn already.
+pub fn focus_by_id(id: &str, caret: Caret) {
+    let script = caret.script(id);
+    // Tests have no page to run it on: the harness looks for the control.
+    #[cfg(test)]
+    crate::testing::ask_focus(id, &script);
+    #[cfg(not(test))]
+    dioxus::prelude::spawn(async move {
+        let _ = dioxus::prelude::document::eval(&script).await;
+    });
+}
+
+/// As [`focus_by_id`], from a task of the app's own rather than the calling
+/// component's: for what is not a component, a run's timers and the tasks
+/// on the root, which no component outlives.
+pub fn focus_by_id_anywhere(id: &str, caret: Caret) {
+    let script = caret.script(id);
+    // Tests have no page to run it on: the harness looks for the control.
+    #[cfg(test)]
+    crate::testing::ask_focus(id, &script);
+    #[cfg(not(test))]
+    dioxus::core::spawn_forever(async move {
+        let _ = dioxus::prelude::document::eval(&script).await;
+    });
+}
+
 /// The script that brings the first control of `ids` the page has into
 /// sight, clear of the guide's dock and with room for the ring it draws,
 /// and leaves it where it is if it is in sight already: a move made by hand

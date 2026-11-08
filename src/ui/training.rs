@@ -350,12 +350,10 @@ impl InputMethod {
 /// Put the cursor in group `idx`'s box, so a keyboard types straight into
 /// it.
 fn focus_box(idx: usize) {
-    // Tests have no page to run it on.
+    // Tests have no page to run it on, and the harness is not asked to look
+    // for the box.
     #[cfg(not(test))]
-    spawn(async move {
-        let script = crate::ui::widgets::focus_script(&format!("group-input-{idx}"));
-        let _ = document::eval(&script).await;
-    });
+    crate::page::focus_by_id(&format!("group-input-{idx}"), crate::page::Caret::AsIs);
     #[cfg(test)]
     let _ = idx;
 }
