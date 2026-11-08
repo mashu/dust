@@ -16,9 +16,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crate::audio::ToneRequest;
 use crate::audio::shape::GATE_RAMP_SEC;
-use crate::audio::tone::SIDETONE_LEAD_MARGIN_SEC;
+use crate::audio::tone::{SIDETONE_LEAD_MARGIN_SEC, ToneRequest};
 
 /// Seconds on the one clock the UI and the audio callback both read, from
 /// whenever it was first read.
