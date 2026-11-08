@@ -2,6 +2,8 @@
 //! `YYYY-MM-DD`; one that cannot be read is shown as it was stored rather
 //! than not at all.
 
+pub mod auto_level;
+
 use std::fmt::Display;
 
 use chrono::{NaiveDate, TimeZone};

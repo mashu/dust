@@ -775,7 +775,7 @@ fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
     if !apply_auto_level(&mut settings.write(), change) {
         return None;
     }
-    let message = crate::ui::auto_level::change_message(change);
+    let message = crate::format::auto_level::change_message(change);
     toasts.show(message.clone());
     Some(message)
 }
