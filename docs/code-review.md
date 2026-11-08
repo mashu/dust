@@ -47,6 +47,8 @@
 
 ¹ Run on the fixed `cw-core`, which has changed since only by a test and a doc comment. The ranges were chosen with a local patch that offsets the seeds (`SOAK_BASE`); it is not in the branch (§6, item 18).
 
+**Follow-up (§7).** After this review was merged, the module cycles of §2.4 were removed from both crates by moving items, and most of the duplication of §2.3 was folded into shared code without changing behaviour; §7.4 gives the reason for each piece left (a change in behaviour, no code saved, the stores' protocols, or not a copy at all). The app now has no module cycle under any of the rules §7.1 defines; cw-core has none under the default rule, and one, left on purpose, under the stricter two. The suites, the lints, an Android type-check and reviews of the commits show nothing else changed.
+
 ## 1. How the review was done
 
 1. **Baseline.** Built and tested the configurations of CI's Linux job (desktop tests, web/wasm clippy, mobile-silent) on the pinned toolchain; CI's Android, iOS, Windows and macOS clippy jobs cannot run here. Ran the desktop suite four times with fresh random seeds to look for flaky, timing-dependent tests; there were none.
@@ -100,7 +102,7 @@ Not in the function sense: of about 2,900 production functions in 0.16.9 (test m
 | `cw-core/src/band/agc.rs` | `Agc` has 34 fields; `next_gain` 132 lines | detector, limiter, hang, ceiling and look-ahead in one routine | `TwoWindow` (used 3×), `DelayLine` (used 3× across crates), then detect/limit/hang steps |
 | `src/ui/tour.rs`, `paddle.rs`, `widgets.rs`, `settings_charset.rs` | 1.2–1.7k production lines each (1.5–2.3k with tests) | data + automation + DOM scripts + components; widgets is a grab-bag of formatting, icons and fields | one module per concern: data, automation, page scripts and components apart |
 
-These sizes are those of 0.16.9. This review's fixes added roughly 3.5k production lines, mostly where this section already saw too much: `AppCtx` now has 31 fields and 52 methods, `sync/ctx.rs` grew by half and `audio/native.rs` by a third. The hierarchy is also flat: cw-core has 31 top-level modules, its analytics among them, and `src/ui` holds about 50 files in one folder. Sync's logic (plan, pack, seal, state, run, drive, remote, http) imports only the store and cw-core, and only `sync/ctx.rs` reaches Dioxus and the app's state; the core of persistence (record, files, backup, legacy) needs only cw-core and the clock. A storage-and-sync crate would make the compiler enforce the layering §2.4 asks for.
+These sizes are those of 0.16.9. This review's fixes added roughly 3.5k production lines, mostly where this section already saw too much: `AppCtx` now has 31 fields and 52 methods, `sync/ctx.rs` grew by half and `audio/native.rs` by a third. The hierarchy is also flat: cw-core has 30 top-level modules (and two more for tests), its analytics among them, and `src/ui` holds about 50 files in one folder. Sync's logic (plan, pack, seal, state, run, drive, remote, http) imports only the store and cw-core, and only `sync/ctx.rs` reaches Dioxus and the app's state; the core of persistence (record, files, backup, legacy) needs only cw-core and the clock. A storage-and-sync crate would make the compiler enforce the layering §2.4 asks for.
 
 Inline test modules are about half of most large files (`files.rs` 1.3k of 2.5k lines, `desktop.rs` 1.1k of 2.0k, `machine.rs` 9k of 14k). Moving them to sibling `tests.rs` files, as `band/` and `persist/idb/` already do, would roughly halve what a reader has to scroll past.
 
@@ -124,11 +126,13 @@ Literal copy-paste is rare (a clone scan over 6-line windows found only ~40 dupl
 | JNI call scaffolding | `persist/android.rs` (4 copies) ↔ `sync/auth/android.rs` (`with_activity`) | one `with_activity` |
 | One restore at a time | `AppCtx`'s queue (`41eb9f1`) ↔ the backup card's wait for any restore under way | keep one; the card never queues, so the queue runs only in tests |
 
+Section 7.4 records what has since been consolidated, and why the rest was left.
+
 Dead code was not swept for as such; two items surfaced: `BandSource::fill` and `board_place` are used only by tests (`pub mod band` is exempt from the dead-code check cw-core otherwise relies on).
 
 ### 2.4 Abstraction and hierarchy
 
-- **Layering inversions.** Domain and runtime code reaches up into the UI layer for words: `state.rs → ui::format`, `session_runtime.rs → ui::auto_level::change_message`, `sync/ctx.rs → ui::format`. Production code has top-level module cycles `state↔ui`, `state↔sync`, `state↔session_runtime`, `state↔contest_runtime`, `session_runtime↔contest_runtime`, `session_runtime↔ui`, `contest_runtime↔ui`, `sync↔ui`, `playback↔state` and `app↔page_closed`. Moving `ui::format` to a neutral `text` module, and having state return typed outcomes that the UI words, removes the cycles through the UI's words (`state↔ui`, `sync↔ui`, and `session_runtime↔ui` if `change_message` moves too). The others need the context split below (`AppCtx` holds `SyncCtx`, the runtimes take `AppCtx`).
+- **Layering inversions.** Domain and runtime code reaches up into the UI layer for words: `state.rs → ui::format`, `session_runtime.rs → ui::auto_level::change_message`, `sync/ctx.rs → ui::format`. Production code has top-level module cycles `state↔ui`, `state↔sync`, `state↔session_runtime`, `state↔contest_runtime`, `session_runtime↔contest_runtime`, `session_runtime↔ui`, `contest_runtime↔ui`, `sync↔ui`, `playback↔state` and `app↔page_closed`. Moving `ui::format` to a neutral `text` module, and having state return typed outcomes that the UI words, removes the cycles through the UI's words (`state↔ui`, `sync↔ui`, and `session_runtime↔ui` if `change_message` moves too). The others need the context split below (`AppCtx` holds `SyncCtx`, the runtimes take `AppCtx`). All of these cycles, and those inside `ui`, `persist` and cw-core, have since been removed by moving items, without that split (§7).
 - **Stringly-typed errors.** There are 41 `Result<_, String>` signatures in the app, several at subsystem boundaries (`MorseBackend::start`, `Http::send`, `Store::write_settings`, `HistorySaved::Failed(String)`, …). The few real error types (`AudioError`, `RemoteError`, `AuthError`, `JoinError`, `NotSaved`) mostly end in a string catch-all (`Failed(String)`, or `Device(String)` for `AudioError`). Transient failures (timeout, 5xx, device busy) cannot be told from permanent ones, so the retries that exist (a desktop history write after 100 and 400 ms, an audio send three times, unsaved history every minute) retry every failure alike, and sync retries a failed request only once, with a fresh token, after a refused sign-in: a timeout, a 429 or a 5xx is not retried. Small error enums with `Display` would fix that.
 - **Booleans that are states.** Examples: `mark_running(run: bool)`, `OpenSession.run`, `Toast.long`, the four flags of `Tour`, `WaitFlags` (five bools plus options whose precedence lives in a function), `CallSpec.contest`, `Replying` (4 bools), `Caller` (~13 bools mixing fixed traits with QSO progress), and phase-specific fields of `SessionMachine` (`resume`, `countdown_to`, `missed`, …) that are valid only in one phase. Moving them into enum variants (`Paused { resume, since, why }`, …) makes the invalid combinations unrepresentable.
 - **Indices as identity.** Contest stations are identified by their index in a `Vec` that Esc truncates. That is the root cause of the crash fixed in this review (C-1). A stable `StationId`, with "withdrawn" as a state rather than a truncation, would remove the class of bug.
@@ -397,7 +401,7 @@ All Low; each was judged not worth the risk of a change in this review.
 
 ## 6. Refactoring plan
 
-Ordered by risk removed per unit of effort. Phases 1–2 are worth doing before new features; phase 3 is hygiene to do as files are touched.
+Ordered by risk removed per unit of effort. Phases 1–2 are worth doing before new features; phase 3 is hygiene to do as files are touched. Section 7.6 says how the follow-up changed items 7, 8, 9, 12, 13 and 15.
 
 ### Phase 0: before this branch is merged
 
@@ -441,6 +445,194 @@ The other §5.1 items (cut-off marks released only once held, read failures read
 17. Tie undo state (`trash`, `before_restore`, `before_reset`, `before_starter_words`) to the lifetime of its toast, so a restore's Undo does not keep a whole history alive for the rest of the run.
 18. Make the soak's coverage floors relative (§5), let an environment variable move their seed range, and add an allocation-counting test around `BandMixer::next` in cw-core (the app's mixer already has one).
 
+## 7. Follow-up: module cycles and duplication removed
+
+*After this review was merged (`a50e8eb`), on the same branch.* The cycles of §2.4 and the duplication of §2.3 came next.
+- **Cycles:** all are gone but one, left on purpose under the two stricter rules below.
+- **Duplication:** most of it is folded into shared code; §7.4 gives the reason for each piece left.
+
+No behaviour changed. Every test that passed before still passes, some under a new module path where what they test moved, and the one new test is `format::percent`'s.
+
+### 7.1 How cycles were counted
+
+A scratch tool (not in the repository) builds the dependency graph of production code:
+- It masks comments and strings and cuts `cfg(test)` code.
+- It resolves `use` trees and paths to the module that *defines* each item, following re-exports and globs. It has three known gaps:
+  - it skips a path whose first name arrives only through a glob import;
+  - it resolves a name defined on one build and re-exported on another to the definition alone;
+  - it stops at the last module reached when it cannot find an item.
+- It also counts calls of inherent methods whose `impl` block lives away from their type, since those are dependencies no path shows. It counts only the calls it can tell by name: a `.name(` call counts when exactly one inherent method in the crate has that name, and that name is neither a trait method's nor a common std name. So calls such as `settings.clamp()`, `settings.range(..)` and `settings.words()` are not seen.
+
+Depth 1 is the top-level modules, depth 2 adds their children, and "every module" goes all the way down. Three rules decide what counts as a cycle:
+
+- **Default:** a module's own descendants may use it. An edge from a module to one of its ancestors is dropped, so no cycle that needs one is counted, even one that runs through siblings (`p → p/a → p/b → p`). Rust's privacy runs the same way: descendants see an ancestor's private items, not the reverse. The crate root is not treated as an ancestor, here or under the lineage rule, so an edge into `main.rs` or `lib.rs` always counts.
+- **Lineage:** a component is exempt only when every edge in it joins a module and one of its own ancestors, so a cycle through items a parent `mod.rs` *defines*, or through a sibling, is counted.
+- **Strict:** the lineage rule, plus one more: a path that reaches its item through a re-export in another module also counts as depending on that module (the crate root excepted).
+
+Two independent scans checked the tool part-way through the work. Reviewers wrote them from scratch: one evaluated each platform's build of the app separately (at `cb6281c`), the other used its own resolver for cw-core (at `94f94eb`). Both found the same cycles as the tool under each rule. Four of those cycles were still standing at the time, all under the stricter rules: the app's `persist` and `audio`, and cw-core's `contest` and `timing`. `abeaa11`, `b301439`, `1076190` and `95975ef` cut them.
+
+The scans also listed what this tool does not see:
+- calls through trait impls and field reads, which no scan of paths shows;
+- intra-doc links and test-only code, which it masks and cuts;
+- paths inside strings (rsx format strings, serde `with` attributes);
+- the method calls and glob-reached names its name matching skips.
+
+Apart from intra-doc links, none of these closes a cycle in production code. A few doc links still point up to a module that imports the linking one:
+- `settings/mod.rs:50` to `crate::band::full_volume_gain`;
+- `callsign.rs:80` to `crate::rulebook::CallerOdds`;
+- `settings/contest.rs:33` and `:156` to `crate::MONITOR_LEVEL`.
+
+Test builds also still have a few cycles. cw-core's scan lists both kinds.
+
+### 7.2 Result
+
+| Crate | Rule | Depth 1 | Depth 2 | Every module |
+|---|---|---|---|---|
+| app (`src/`) | default | 2 → **0** | 3 → **0** | 3 → **0** |
+| app | lineage | 2 → **0** | 3 → **0** | 3 → **0** |
+| app | strict | 2 → **0** | 4 → **0** | 4 → **0** |
+| cw-core | default | 1 → **0** | 1 → **0** | 1 → **0** |
+| cw-core | lineage | 1 → **0** | 1 → 1 | 1 → 1 |
+| cw-core | strict | 1 → **0** | 1 → 1 | 1 → 1 |
+
+Before, the app's largest cycle at depth 1 had 13 modules: the crate root, `app`, both runtimes, `state`, `sync`, `ui`, `playback`, `routes` and four shell modules. At depth 2 it had 51. cw-core had one cycle of 18 of its 30 top-level modules.
+
+**The one cycle left** is cw-core's `settings` family, under the lineage and strict rules only.
+- `settings/mod.rs` defines `TrainingSettings` and four of its six section structs. The other two live elsewhere: `ContestSettings` in the child `contest`, `RecognitionBands` in `recognition`.
+- It also re-exports its children's items, and its `impl TrainingSettings` blocks live in the child files (`contest`, `curriculum`, `ranges`, `words`, …), which use its types.
+- Four children also use a sibling's items, and none is used back in return:
+  - `curriculum` calls methods that `contest` and `words` define;
+  - `experience` calls `ranges`' setters;
+  - `pool` uses `curriculum`'s `LevelAxis` and level methods;
+  - `contest_preset` uses `experience`'s functions `holds` and `put`.
+
+Under the default rule, which lets a module's descendants use it, the family has no cycle. Removing it under the stricter rules would mean moving the items those sibling uses reach away from the sections they belong to: `holds`, `put`, `LevelAxis` and about ten methods of `TrainingSettings` and `CharSetMode`. That scatters each section's code for no gain.
+
+### 7.3 What moved
+
+Each step either moved whole items or only re-pointed imports. Otherwise it changed only `use` lines, paths, visibility, `mod` declarations, doc comments, and the `impl` lines around methods moved to another file. A reviewer then tried to show it changed more. The one exception is declared in its commit: `app::store_settings_now` became the method `AppCtx::store_settings_now`.
+
+**App, top level** (`0e9a0f2`…`e4974a1`, `2fab8df`):
+- `stall_log` went under `time`, and `ui::format` became the top-level `format`, with the auto-level words in `format::auto_level`. `state`, `sync` and `session_runtime` no longer reach up into `ui` for words.
+- A leaf `page` module holds the page scripts (control ids, focus and scroll), so the runtimes no longer use `ui` or `app`.
+- `sync/ctx.rs` became `state/sync.rs`, so `sync` no longer uses `state`. Within the app it uses only `persist`, `time` and, for Android's sign-in since `0889b6c`, `jvm`.
+- These moved under `state/`, into `preview`, `keep`, `answer`, `entry` and `live`:
+  - the preview types, the keep functions, `AnswerOutbox` and `ContestEntry`, each with its impls;
+  - the definitions of `Live`, `LiveSession` and `LiveContest`, whose impls stay in the runtimes.
+
+  So `state` no longer uses `playback` or either runtime.
+- `KEEP_RUNNING_JS` and `window_icon` moved from `main.rs` to `webview_assets`, because `ui::floating` had reached up into the crate root.
+
+The layering is now, from the bottom:
+1. `time`, `format`, `page` and the other leaves;
+2. `audio`, `persist` and `page_hidden`;
+3. `history`, `player` and `sync`;
+4. `state`;
+5. `playback` and `contest_runtime`;
+6. `session_runtime`;
+7. `ui`;
+8. the shell: `routes`, `theme`, `keep_awake`, `page_closed` and `system_back`;
+9. `app`;
+10. `main.rs`.
+
+**App, inside `ui`** (`a07e4f0`…`09affad`, and the merge `cd306aa`):
+- `TOUCH_BUILD` moved down to `widgets` (`b1af0d1`).
+- `bring_into_sight` moved to `widgets` (`a07e4f0`), then, in the merge `cd306aa`, to the leaf `page`.
+- `TextField` and `SectionReset` moved to `ui/app_widgets`. They are the only widgets that read a context the app provides: the paddles' `PaddleKeys` and `AppCtx`. `widgets` now uses only cw-core, Dioxus and `page`, whose `control_id` it re-exports.
+- The trend figures moved to `figures`, the contest speeds to `forecast`, and `Medal`, the place line and the rating labels to `ui/standing`.
+
+**App, `persist` and `audio`:**
+- The file helpers that `files`, `desktop` and `android` share moved to `persist/disk` (`e4d3d5a`).
+- `SESSIONS`, `DELETED` and `copy_aside` moved from `desktop` into `files` (`afab1fb`), and `THREAD` from `worker` (`c3c4264`).
+- `persist/mod.rs`'s shared vocabulary moved to four modules of its own, all leaves except `saved`, which uses `record` (`abeaa11`):
+  - `session` and `set_aside`;
+  - `saved`, for `HistorySaved`;
+  - `settings`, for the settings-file helpers.
+
+  `mod.rs` re-exports the four types `SessionKey`, `Deleted`, `SetAside` and `HistorySaved`, and keeps the settings-file helpers private, so every outside path is unchanged.
+- `audio::mixer` takes `ToneRequest` from `audio::tone` (`b301439`).
+
+**cw-core** (`73a8e81`…`95975ef`): `settings` was the hub of the cycle. Its types held parts defined above it, and two of its methods used modules above it. The parts moved down, and the methods moved up beside what they use.
+- Moved down:
+  - `dot_seconds` to `morse` and the dB math to `numeric`;
+  - the noise steps into `settings`;
+  - `words` and `pool` under `settings`;
+  - the what-adapts helpers and `SpeedPath` to `settings/adapt`, and the sequence methods to `settings/sequence`.
+- Moved up: `TrainingSettings::af_gain` to `band/loudness`, and `ContestSettings::sending_level` to `contest/turn`.
+- Shared vocabulary moved down:
+  - `MonoMs` to a new `mono`;
+  - `PauseWhy`, `ContestLog` and `CONTEST_MARK` to `session`;
+  - `speed_tally` and `judged_copy` to `alignment`.
+- Contest's static rulebook (contest kinds, rules, exchange fields, caller odds, serials and data) became a new `rulebook` module below `settings`. The run itself stays in `contest`, above it.
+- Pile-up placement moved to `band/pileup`, `CallSource` to `contest/source` and `MessagePart` to `contest/message`.
+- `contest`'s files, and `timing`'s `plan.rs` and `envelope.rs`, now import from the defining module rather than through their parent's re-exports (`1076190`, `95975ef`). Elsewhere such imports remain, for example `sampling.rs`'s `crate::settings::SpeedPath`.
+
+At the end of these moves (`95975ef`), cw-core's 395 exported names and its public `band` items were the same items as before, so the app needed no edit for them. `48fdb33` (§7.4) has since added one public `band` item, `DelayLine`. Every serialised type's derives and attributes are byte-identical.
+
+### 7.4 Duplication
+
+| §2.3 row | Now | Left, and why |
+|---|---|---|
+| Record-store algorithm | `KeyOnly`/`key_of`/`keyed`/`taken_up` once, in `persist::record`, also for `state.rs`'s third copy (`94a72ea`, `87e9c93`); the move's four-rule filter, the tombstone, deletions and told-of reads shared, each store passing its own inputs (`6c2ca6a`) | A generic core over a backend trait: the two stores' protocols differ. `files` makes each step durable before the next, on a worker thread; IndexedDB does one transaction per change with a compare-and-swap on the layout, in async code that is not `Send`. Their "already here" inputs also differ (files counts a record left beside its tombstone, IndexedDB does not). Merging them would change one outcome, a record beside an empty or unreadable tombstone, so only the filter is shared |
+| Run lifecycle | one `AWAY_GAP_MS`, and `Lease::after` for the three timer spawns; the four claim-or-toast blocks were rewritten in one shorter let-else form, though each is still written out at its site (`cf2a5e6`) | `RunMachine` plus `LiveRun<M>`: it needs about ten hook methods, so it moves the code behind a trait rather than removing it. Unifying liveness changes behaviour: a run's time away would be judged by a root heartbeat instead of its screen's ticks, so it would pause at other moments: on a gap while its screen is unmounted, and up to a tick earlier or later |
+| Band sync and continuation timing | — | Band sync: sharing it needs a new trait for about zero lines saved, and adds a module edge. Continuation timing: the two backends use different clocks and round the fade origin differently |
+| Grid-belief replay | — | The shared part is boilerplate, about 45 lines of code in each type, of which a trait would save about 20; both types are crate-private |
+| Percent formatting | `format::percent` for a share in whole percent, in place of 13 copies (`0b7f1e7`, `8f66ca8`). Auto-level's helper, which takes a value already in percent, is renamed `percent_to_tenth` so the two cannot be confused (`e359c82`) | Some of the other helpers differ on purpose: a value already in percent, a tenth below ten, "under 1%". The rest take a tie away from zero with `.round()` where `{:.0}` takes it to even, and nothing shows that difference was chosen |
+| Page-listener boilerplate | `page::use_page_messages` and `use_page_listener`, for all 6 (`369505d`) | — |
+| Focus by id | `page::focus_by_id` with a `Caret`, and `focus_by_id_anywhere` for the runtime's `spawn_forever`, for all 5 (`9a6d771`) | — |
+| "Last mounted wins" | — | The three are shaped differently: a `Lender<T>` would need a key function, a per-render update and a release hook, so each call site would stay about as long as it is now |
+| Sidetone burst constants | one set, in `audio::shape` (`ac03f34`) | — |
+| A group's copy speed | `SessionResult::group_speed` for the identical pair (`146fe3b`) | `points()` differs on purpose for older saves without a group's own effective speed; its doc now says how and why |
+| `QsoRecord` construction | `QsoRecord::ended` (`f88ed96`) | — |
+| JNI call scaffolding | `jvm::attached` and `with_activity`: 5 copies and 9 `unsafe` blocks down to 2 (`0889b6c`). `jvm::on_activity_thread` for the two calls made on the activity's own thread (`bd70edc`) | — |
+| One restore at a time | — | Different policies, not copies: the queue restores every backup asked for, while the card restores only the newest file chosen and never during a session. Production never queues. Revisit with a `RestoreCtx` split (§6, item 7) |
+| `agc.rs` (§2.2) | `TwoWindow` for the peak, crest and weaker windows, which took `Agc` from 34 fields to 26 (`d08fcec`), and to 25 once its look-ahead became a `DelayLine` (`48fdb33`). One `cw_core::band::DelayLine` for the look-ahead rings of the AGC, the mixer and `loudest_through` (`48fdb33`, `9f516af`) | — |
+
+The design for these steps had missed some copies. The final review found them: a third `key_of`, a third look-ahead ring, seven more inline percents, and the activity-thread calls. They were folded in the same way.
+
+Arithmetic that could drift was checked by differential tests: the old code was pasted beside the new, run on seeded random inputs and compared bit for bit, then deleted.
+- `TwoWindow` and `DelayLine` in the AGC: 4,500 cases each, about 174 and 170 million samples, including carry-overs between rates.
+- `DelayLine` alone against both old rings: 26 million pushes, and the mixer driven through random operations.
+- `loudest_through` against its old loop: 10,000 cases.
+- `group_speed`: 200,000 sessions.
+- The seven percent sites of `8f66ca8`: their old and new texts over 70,000 seeded values, ties such as 0.125 included. The six of `0b7f1e7` were the same `format!` moved into `format::percent`, checked by reading and by its new test.
+
+All were bit-identical.
+
+### 7.5 Verification
+
+- **Per step:** each step was checked with `cargo fmt` and clippy before it was committed. All but sixteen steps ran the three clippy configurations. The sixteen cw-core steps from `73a8e81` to `07ca683` ran cw-core's own clippy (`-p cw-core --all-targets`) and its tests instead, with the three configurations following at the end of their group.
+- **Per group:** each group ran the full suites.
+- **At the end:**
+  - Tests: cw-core 1359 passed, as before. Desktop 1413 and silent 1285 passed, against 1412 and 1284 before; the difference is `format::percent`'s test. That test is the only addition, and no test was lost. 69 of the app's tests (in both suites) and 128 of cw-core's now run under a new module path, as what they test moved, each under its old name.
+  - Lints: clippy `-D warnings` is clean for desktop, web (wasm32) and silent, and `cargo fmt --check` is clean.
+  - Doc links: no new broken intra-doc links in either crate.
+- **Android:** CI's Android lint ran here too: `cargo clippy -p dust --no-default-features --features mobile --target aarch64-linux-android --locked -- -D warnings`. It used a stand-in C++ compiler, since clippy never links and a build script's objects only have to exist. So the Android-only Rust, which §4 says could not be compiled here, was type-checked:
+  - at the end of every group and after each merge;
+  - before the commit of each consolidation step that changed it (`0889b6c`, `369505d`, `bd70edc`).
+
+  Cycle steps that changed it, such as `0e9a0f2` and `e4d3d5a`, were checked only with their group. The Kotlin activity still was not compiled.
+- **Reviews:** every commit but eleven was reviewed by an agent that tried to show it changed more than its message said: not a pure move, or not equivalent. The eleven are follow-ups that answered a review, in docs, doc comments and test paths: `c784c17`, `7fb2268`, `a06cf01`, `0317804`, `713930f`, `f0a4bc7`, `e684dd8`, `27b3493`, `94f94eb`, `d654fd3` and `47ce510`.
+  - What the reviews found: documentation still naming moved items at their old homes, links and a script broken until a later commit, and the missed duplicate copies above. They found no change in behaviour.
+  - All of it was fixed in later commits except two findings on `1076190`: `contest`'s files take `MonoMs` through `session`'s re-export, and test code names rulebook's items through `contest`'s re-exports. These are naming only, and close no cycle.
+- **Still CI-only:**
+  - the iOS type-check;
+  - the Android type-check's build of cpal's oboe C++, which the stand-in compiler skips;
+  - desktop lint on Windows and macOS;
+  - the web site's build with its browser checks.
+
+### 7.6 Effect on the plan (§6)
+
+- **Item 7:** the cycles were removed without splitting `AppCtx`. The split remains worth doing for its own sake.
+- **Item 8:** only the small consolidations above. A `RunMachine` trait would not make the code shorter, and one heartbeat for both runtimes would change when a run pauses.
+- **Item 9:** the helpers are shared. A single record-store core needs the two stores' protocols redesigned first.
+- **Item 12:** closer. `sync` depends only on `persist`, `time` and, for Android's sign-in, the leaf `jvm`. `persist`'s core depends only on cw-core and the clock.
+- **Item 13:** both kept, as two policies.
+- **Item 15:** done, with these exceptions:
+  - `Lender<T>`: each call site would stay about as long;
+  - the `GridModel` trait: it would save only about 20 lines of boilerplate in two crate-private types;
+  - the percent helpers that differ from `format::percent`, whether on purpose or in how `.round()` takes a tie.
+
 ## Appendix A: examined and found sound
 
 These looked risky and were checked in detail. They are recorded so they need not be checked again.
@@ -477,7 +669,7 @@ These looked risky and were checked in detail. They are recorded so they need no
 
 ## Appendix B: coverage by module
 
-Every module was read by the ten bug-class sweeps (§1, step 3), which ran over the whole code base. Each was also given to one of the ten subsystem reviews, as below. "Fixes" points to §4. Modules are named as they were at `ef0ab8f`: cw-core's module split has since moved `rules`, `exchange`, `serial`, `odds` and `data` from `contest/` to `rulebook/`, and `words` and `pool` under `settings/`.
+Every module was read by the ten bug-class sweeps (§1, step 3), which ran over the whole code base. Each was also given to one of the ten subsystem reviews, as below. "Fixes" points to §4. Modules are named as they were at `ef0ab8f`: cw-core's module split has since moved `rules`, `exchange`, `serial`, `odds` and `data` from `contest/` to `rulebook/`, and `words` and `pool` under `settings/`; the app's has moved sync's `ctx` to `src/state/sync.rs`, `stall_log` to `src/time/stall_log.rs` and `ui/format` to `src/format.rs` (§7.3).
 
 | Area | Modules | Subsystem review | Outcome |
 |---|---|---|---|
