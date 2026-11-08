@@ -36,9 +36,8 @@ use crate::state::{AppCtx, Screen, Tour};
 use crate::time::{POLL_MS, sleep_ms};
 use crate::ui::discard::Discarded;
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::training::TOUCH_BUILD;
 use crate::ui::widgets::{
-    Icon, IconName, bring_into_sight, control_id, html_bool, keep_focus, pretty_number,
+    Icon, IconName, TOUCH_BUILD, bring_into_sight, control_id, html_bool, keep_focus, pretty_number,
 };
 
 /// How long Show me points at a control before it makes the move there.
@@ -1181,8 +1180,7 @@ mod tests {
     use crate::persist::memory::MemoryStore;
     use crate::state::{Screen, Tour};
     use crate::testing::{Ui, contest_settings, run, stored_session, test_settings};
-    use crate::ui::training::TOUCH_BUILD;
-    use crate::ui::widgets::pretty_number;
+    use crate::ui::widgets::{TOUCH_BUILD, pretty_number};
 
     /// Settings on which every move the guide asks for is still to make: a
     /// fixed speed, size and pitch, callsigns, which have no unlock order,

@@ -42,6 +42,10 @@ fn pct_between(value: f64, min: f64, max: f64) -> f64 {
 /// an `open` class while its panel is up so they can tell it worked.
 pub const DISCLOSURE: &str = "disclosure";
 
+/// Whether touch is how this build types: the phone and tablet builds,
+/// where the keypad always shows. Elsewhere it shows only on a touch screen.
+pub(crate) const TOUCH_BUILD: bool = cfg!(any(feature = "mobile", feature = "mobile-silent"));
+
 /// A stable element id for a control, built from the label it shows.
 ///
 /// Every interactive control carries one: it is what a stylesheet, an anchor or
