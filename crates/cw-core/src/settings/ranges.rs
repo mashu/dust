@@ -338,7 +338,7 @@ impl TrainingSettings {
     pub fn sidetone_rise_sec(&self) -> f64 {
         let rise = finite_within(self.band.steepness, STEEPNESS_MIN_MS, STEEPNESS_MAX_MS);
         let wpm = finite_within(self.playback.keyer_wpm, WPM_MIN, WPM_MAX);
-        let quarter_dit = crate::timing::dot_seconds(wpm) / 4.0;
+        let quarter_dit = crate::morse::dot_seconds(wpm) / 4.0;
         (rise / 1_000.0)
             .min(quarter_dit)
             .max(STEEPNESS_MIN_MS / 1_000.0)

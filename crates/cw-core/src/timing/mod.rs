@@ -7,6 +7,7 @@
 //! - [`plan`]: a send laid out as tones against one clock, for any backend;
 //! - [`envelope`]: the keying envelope each tone is shaped by.
 
+use crate::morse::dot_seconds;
 use crate::settings::{EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN};
 
 mod envelope;
@@ -34,11 +35,6 @@ fn clamp_extra_spacing(value: f64) -> f64 {
     } else {
         1.0
     }
-}
-
-/// PARIS-style dot duration in seconds from character WPM.
-pub fn dot_seconds(wpm: f64) -> f64 {
-    1.2 / wpm.max(1.0)
 }
 
 /// Word space plus the reading pause, used between different groups.

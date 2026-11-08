@@ -113,7 +113,7 @@ impl SendStart {
         let chars_until = f64::from(*last) / 1_000.0;
         let lost = until_sec.min(chars_until) - from_sec.max(chars_from);
         if self.char_wpm > 0.0 {
-            lost >= crate::timing::dot_seconds(self.char_wpm) / 2.0
+            lost >= crate::morse::dot_seconds(self.char_wpm) / 2.0
         } else {
             lost > 0.0
         }

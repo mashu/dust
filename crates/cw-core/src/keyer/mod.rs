@@ -34,8 +34,7 @@ mod clock;
 
 pub use clock::{KeyedLetter, Keyer, KeyerOutput, ToneEdge};
 
-use crate::morse::{decode_morse_pattern, is_morse_code_prefix};
-use crate::timing::dot_seconds;
+use crate::morse::{decode_morse_pattern, dot_seconds, is_morse_code_prefix};
 
 /// Dot duration in milliseconds for paddle letter-spacing.
 pub fn dit_ms_for_wpm(wpm: f64) -> u64 {
