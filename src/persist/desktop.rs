@@ -22,12 +22,6 @@ const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
 const TOLD_OF_PADDLE_KEYS: &str = "told_of_paddle_keys.txt";
 const SETTINGS: &str = "settings.json";
-/// The history as builds before records keep it whole, which the move to
-/// records reads once and leaves as it was ([`HistoryFiles`]).
-pub(super) const SESSIONS: &str = "sessions.json";
-/// The sessions deleted by hand ([`super::Deleted`]), as builds before
-/// records remember them.
-pub(super) const DELETED: &str = "deleted.json";
 const COUNTERS: &str = "auto_adjust.json";
 const LAST_BACKUP: &str = "last_backup.txt";
 /// What sync keeps ([`Store::load_sync`]).
@@ -288,29 +282,6 @@ fn private_file(path: &Path) -> io::Result<fs::File> {
 #[cfg(not(unix))]
 fn private_file(path: &Path) -> io::Result<fs::File> {
     fs::File::create(path)
-}
-
-/// Keep `unread`, sessions of the history in `root` that could not be
-/// read, in a file of their own beside it, and say what it is called:
-/// nothing, where a file set aside before holds them already.
-pub(super) fn copy_aside(root: &Path, unread: &[u8]) -> io::Result<Option<String>> {
-    let kept = fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("sessions.unreadable-")
-                && fs::read(entry.path()).is_ok_and(|kept| kept == unread)
-        });
-    if kept {
-        return Ok(None);
-    }
-    let name = aside_name(root, "sessions");
-    write_whole(root, &name, unread)?;
-    Ok(Some(name))
 }
 
 /// The auto-level counters, by what each counts ([`CountersKey`]).
@@ -812,6 +783,7 @@ pub(super) mod tests {
     use super::*;
     use crate::persist::Deleted;
     use crate::persist::backup::{read_backup, read_backup_as_0_16_2, write_backup};
+    use crate::persist::files::SESSIONS;
     use crate::persist::record::{RecordId, records_for_blob};
     use crate::persist::tests::{every_setting_moved, session};
     use crate::persist::worker::wait;
