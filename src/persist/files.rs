@@ -54,7 +54,9 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::disk::{aside_name, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, read_record};
-use super::{Deleted, HistorySaved, SessionKey, SetAside};
+use super::saved::HistorySaved;
+use super::session::{Deleted, SessionKey};
+use super::set_aside::SetAside;
 
 /// The folder of the history, in the store's.
 const HISTORY: &str = "history";

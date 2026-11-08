@@ -31,7 +31,9 @@ use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep
 use super::record::{
     self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, read_record,
 };
-use super::{Deleted, HistorySaved, SessionKey, SetAside};
+use super::saved::HistorySaved;
+use super::session::{Deleted, SessionKey};
+use super::set_aside::SetAside;
 
 /// The page script that reaches the database: the body of a function of
 /// `options`, which hands back what the history does with it.
@@ -984,13 +986,13 @@ mod script {
 
     /// What the page script hands back: what the history does with the
     /// database ([`IDB_JS`]).
-    pub(in crate::persist) struct Script(JsValue);
+    pub(crate) struct Script(JsValue);
 
     impl Script {
         /// Run the page script and open the database: the script, and
         /// whether a newer Dust keeps the database, so that this one only
         /// reads it; or why it would not open.
-        pub(in crate::persist) async fn open() -> Result<(Self, bool), String> {
+        pub(crate) async fn open() -> Result<(Self, bool), String> {
             let make = js_sys::Function::new_with_args("options", IDB_JS);
             let glue = make
                 .call1(&JsValue::NULL, &JsValue::UNDEFINED)
@@ -1028,7 +1030,7 @@ mod script {
 
     /// How long the script has kept the page waiting, in milliseconds: since
     /// it was last asked something, or last answered.
-    pub(in crate::persist) fn waited_ms() -> f64 {
+    pub(crate) fn waited_ms() -> f64 {
         js_sys::Date::now() - STIRRED.with(Cell::get)
     }
 

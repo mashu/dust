@@ -21,7 +21,8 @@ use serde_json::value::RawValue;
 #[cfg(test)]
 use super::legacy::parse_sessions;
 use super::record::{Pending, Record, RecordId, scored};
-use super::{SessionKey, load_settings_from};
+use super::session::SessionKey;
+use super::settings::load_settings_from;
 
 /// The key that marks a file as a backup, and the version of its layout.
 const MARK: &str = "dustBackup";

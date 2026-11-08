@@ -17,7 +17,8 @@ use std::pin::Pin;
 
 use cw_core::SessionResult;
 
-use super::{Deleted, SetAside};
+use super::session::Deleted;
+use super::set_aside::SetAside;
 
 /// What names a record: `order`, where it falls in the history, which is
 /// the order sessions finished in, and `nonce`, what it holds

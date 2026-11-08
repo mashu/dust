@@ -21,9 +21,11 @@ use serde::Deserialize;
 use super::record::{self, HistoryChange, RecordId};
 #[cfg(any(feature = "web", test))]
 use super::record::{HistoryLoad, Record};
-use super::{Deleted, SessionKey};
 #[cfg(any(feature = "web", test))]
-use super::{HistorySaved, SetAside};
+use super::saved::HistorySaved;
+use super::session::{Deleted, SessionKey};
+#[cfg(any(feature = "web", test))]
+use super::set_aside::SetAside;
 
 /// How much of the site's page storage the history kept whole may take, in
 /// characters. Browsers give a site about five million; the rest is left
@@ -52,7 +54,7 @@ pub(super) const HISTORY_BUDGET: usize = 3_000_000;
 /// settle a session stamped ahead of the clock for themselves
 /// ([`crate::time::as_shown`]).
 pub(super) fn read_history(raw: &str) -> Option<ReadHistory> {
-    let raw = super::unmarked(raw);
+    let raw = super::settings::unmarked(raw);
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
     let (sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {
