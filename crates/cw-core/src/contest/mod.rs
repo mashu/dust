@@ -1,13 +1,12 @@
 //! Contest mode: runs against stations that answer your CQ, as a contester
 //! works them. `docs/contest-mode.md` is the plan it is built from.
 //!
-//! - [`rules`]: each contest as one row of a table: what is sent, what is
-//!   copied, who calls and how it scores.
-//! - [`exchange`], [`parse`]: an exchange's fields, their canonical values and
-//!   cut numbers, and how what you type is read.
+//! - [`crate::rulebook`]: the contests and their rules, exchange fields,
+//!   caller odds, serials and data a run reads, re-exported here.
+//! - [`parse`]: how what you type is read.
 //! - [`esm`]: what Enter sends next (Enter Sends Message).
 //! - [`message`]: the parts a message you send is made of.
-//! - [`clock`], [`serial`]: the run's clock, and the serials callers send.
+//! - [`clock`]: the run's clock.
 //! - [`check`], [`score`]: a logged QSO checked against what was sent, and a
 //!   log's contest score and rates.
 //! - [`record`]: how a run is kept in the history, so that every build, older
@@ -20,7 +19,6 @@
 //! - [`turn`]: each thing you send and every reply to it, as one send, each
 //!   caller fading on a path of its own.
 //! - [`machine`]: the run itself, as a pure state machine.
-//! - [`data`]: the values callers' exchanges are drawn from.
 //! - [`bot`]: operators that work a run as a person would, and the QSOs
 //!   Hear a QSO plays.
 

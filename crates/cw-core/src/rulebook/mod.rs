@@ -1,3 +1,16 @@
+//! What a contest is, apart from any run of it: the contests Dust knows, how
+//! each is saved, and the tables a run reads.
+//!
+//! - [`kind`]: the contests Dust knows, and how a run of one is set up, each
+//!   saved by its name.
+//! - [`rules`]: each contest as one row of a table: what is sent, what is
+//!   copied, who calls and how it scores.
+//! - [`exchange`]: an exchange's fields, their canonical values and cut
+//!   numbers.
+//! - [`odds`]: how often callers do each thing they do now and then.
+//! - [`serial`]: the serials callers send.
+//! - [`data`]: the values callers' exchanges are drawn from.
+
 pub(crate) mod data;
 pub(crate) mod exchange;
 mod kind;
