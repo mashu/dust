@@ -1,3 +1,8 @@
+//! Whoever else is calling, placed where the receiver lets you hear them.
+//!
+//! Where a caller can sit is decided by the filter you are listening
+//! through.
+
 use super::qsb::FADE_OFFSET_MAX_SEC;
 use crate::rng::Rng;
 use crate::settings::TrainingSettings;

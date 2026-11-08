@@ -1,7 +1,6 @@
-//! Whoever else is calling, placed where the receiver lets you hear them.
-//!
-//! The only part of Morse timing that looks at the receiver: where a caller
-//! can sit is decided by the filter you are listening through.
+//! Everything the receiver hears during one send: the station you copy, and
+//! whoever else is calling across it. Where the others sit is the band's to
+//! decide, by the filter you are listening through.
 
 use super::station::StationVoice;
 

@@ -1,9 +1,9 @@
 //! Morse timing: the units and gaps a send is built from, the stations that
 //! send it, who else is calling, and the plan of what is heard when.
 //!
-//! - this module: dot lengths, Farnsworth spacing and the gaps between sends;
+//! - this module: Farnsworth spacing and the gaps between sends;
 //! - [`station`]: the operator at the other end — pitch, speed, level, fist;
-//! - [`pileup`]: whoever else is calling, placed where the receiver hears them;
+//! - [`pileup`]: whoever else is calling across the station you copy;
 //! - [`plan`]: a send laid out as tones against one clock, for any backend;
 //! - [`envelope`]: the keying envelope each tone is shaped by.
 
