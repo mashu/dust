@@ -6,12 +6,14 @@
 //! - [`exchange`], [`parse`]: an exchange's fields, their canonical values and
 //!   cut numbers, and how what you type is read.
 //! - [`esm`]: what Enter sends next (Enter Sends Message).
+//! - [`message`]: the parts a message you send is made of.
 //! - [`clock`], [`serial`]: the run's clock, and the serials callers send.
 //! - [`check`], [`score`]: a logged QSO checked against what was sent, and a
 //!   log's contest score and rates.
 //! - [`record`]: how a run is kept in the history, so that every build, older
 //!   or newer, reads it back as practice and keeps what it does not know.
 //! - [`caller`]: the stations that answer.
+//! - [`source`]: where the callers come from.
 //! - [`place`]: where callers sit against the receiver, and how loud.
 //! - [`qrm`]: under rough habits, stations on your frequency that are not
 //!   calling you.
@@ -28,19 +30,18 @@ mod check;
 mod clock;
 mod esm;
 mod machine;
+mod message;
 mod parse;
 mod place;
 mod qrm;
 mod record;
 mod score;
+mod source;
 mod turn;
 
 pub(crate) use crate::rulebook::{data, exchange, odds, rules, serial};
 
-use crate::callsign::{CallSpec, GeneratedCall};
 use crate::rulebook::{MS_PER_HOUR, MS_PER_MINUTE};
-use crate::session::Answered;
-use crate::settings::TrainingSettings;
 
 pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 #[cfg(test)]
@@ -52,6 +53,7 @@ pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
     RowStatus, ShownText,
 };
+pub use message::MessagePart;
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub use place::filter_capacity;
 #[cfg(test)]
@@ -59,6 +61,7 @@ pub(crate) use record::LAYOUT;
 pub(crate) use record::tells_speed;
 pub use record::{ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use score::{ContestScore, MyStation, Placed, Rates, ScoredQso, Tally, contest_score, rate_at};
+pub use source::CallSource;
 pub use turn::{Fade, MONITOR_LEVEL, Segment, Turn, plan_turn};
 
 pub use crate::rulebook::{
@@ -70,52 +73,3 @@ pub use crate::rulebook::{
     send_serial, send_zone, shape_corners, shares_without, toggle_corner,
 };
 pub use crate::session::{ContestLog, PauseWhy};
-
-/// Where a contest's callers come from, and how fast they send where it
-/// chooses, and where what was copied of their calls goes back to, as
-/// [`crate::machine::GroupSource`] is for groups.
-pub trait CallSource {
-    /// The next caller's call, at the callsign tier `settings` hold, from the
-    /// countries `spec` admits. A call `avoid` refuses — one already on the
-    /// frequency or in the log — is drawn again, a few times at most.
-    fn next_call(
-        &mut self,
-        settings: &TrainingSettings,
-        spec: CallSpec,
-        avoid: &dyn Fn(&str) -> bool,
-    ) -> GeneratedCall;
-    /// A call or field the user has just copied.
-    fn learn(&mut self, answered: Answered<'_>);
-    /// A call or a number the user has just copied, beside [`Self::learn`]:
-    /// what says how fast they copy, as the copy-speed series reads a run.
-    /// A field from a short list is half guessed, and says nothing of it.
-    fn learn_speed(&mut self, _answered: Answered<'_>) {}
-    /// The character and effective speed the next caller sends at, if the
-    /// source chooses it. Otherwise the caller draws its own from the Speed
-    /// card's ranges.
-    fn next_speed(&mut self, _settings: &TrainingSettings) -> Option<(f64, f64)> {
-        None
-    }
-}
-
-/// One part of a message you send.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MessagePart {
-    Cq,
-    /// Their call as typed: whole, or a partial that asks (`K5?`).
-    HisCall(String),
-    /// Your exchange.
-    Exchange,
-    /// `?`: send it again.
-    Again,
-    /// TU, which ends the QSO.
-    Tu,
-    /// Your call alone.
-    MyCall,
-    /// `QSO B4`: worked before.
-    B4,
-    /// `NIL`: not in your log.
-    Nil,
-    /// `NR?`, or the contest's own word for it: send your exchange again.
-    NrQuery,
-}

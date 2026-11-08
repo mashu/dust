@@ -34,16 +34,18 @@ use super::esm::{
     EntryField, Fields, QsoState, call_copied, esm, loggable, message_text, unheard_hint,
 };
 use super::exchange::Field;
+use super::message::MessagePart;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord, tells_speed};
 use super::rules::{ContestRules, FAREWELLS, Fill, GREETING_HOUR, Sender, Side, greeting};
 use super::score::rate_at;
+use super::source::CallSource;
 use super::turn::{
     Fade, Segment, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
 };
-use super::{CallSource, CallerHabits, MS_PER_MINUTE, MessagePart, RunStyle};
+use super::{CallerHabits, MS_PER_MINUTE, RunStyle};
 use crate::alignment::CopyTally;
 use crate::band::Qsb;
 use crate::callsign::parse_callsign;

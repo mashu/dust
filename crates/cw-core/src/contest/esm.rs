@@ -20,9 +20,9 @@
 //! It is pure, so the machine runs it on a key and the screen on its own
 //! field text, for the key's label and the hint.
 
-use super::MessagePart;
 use super::caller::{CallMatch, match_call};
 use super::exchange::Field;
+use super::message::MessagePart;
 use super::parse::{ExchangeState, normalize_call, parse_exchange};
 use super::rules::{ContestRules, Fill, Side};
 use crate::callsign::parse_callsign;
