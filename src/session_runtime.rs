@@ -25,9 +25,8 @@ use dioxus::prelude::*;
 use crate::contest_runtime::{LiveContest, send_run_event, start_run};
 use crate::persist::record::{Record, RecordId};
 use crate::persist::{CutOff, OpenSession, SessionKey, SoFar};
-use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::{AppCtx, Finished, Notice, Screen};
+use crate::state::{AppCtx, Finished, Notice, Preview, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
 /// What has the training screen: a session of groups, or a contest run.

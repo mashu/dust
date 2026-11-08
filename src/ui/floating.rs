@@ -32,8 +32,7 @@ use dioxus::desktop::{Config, DesktopService, LogicalSize, WindowBuilder, window
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 
-use crate::playback::HeardGroup;
-use crate::state::{AppCtx, in_root};
+use crate::state::{AppCtx, HeardGroup, in_root};
 use crate::time::sleep_ms;
 
 /// How often the floating window looks for a new group.

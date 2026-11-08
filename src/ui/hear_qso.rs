@@ -5,7 +5,7 @@
 use cw_core::Sender;
 use dioxus::prelude::*;
 
-use crate::playback::Dialogue;
+use crate::state::Dialogue;
 
 /// A QSO line by line, who sends each named before it.
 #[component]

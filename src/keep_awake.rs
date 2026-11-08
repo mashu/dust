@@ -19,8 +19,8 @@
 use cw_core::{ContestPhase, ContestView, GroupSession};
 use dioxus::prelude::*;
 
-use crate::playback::{Preview, STREAM_PLAYS_OUT_OF_SIGHT};
-use crate::state::Screen;
+use crate::playback::STREAM_PLAYS_OUT_OF_SIGHT;
+use crate::state::{Preview, Screen};
 
 /// Hold the screen on for exactly as long as the training screen is up with
 /// a session on it that is not paused, or a contest run on it is live, or

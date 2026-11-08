@@ -1,8 +1,10 @@
 //! What the app is: its state, reactive and not, and the moves every screen
 //! shares.
 
+pub mod preview;
 pub mod sync;
 
+pub use preview::{Dialogue, DialogueLine, HeardGroup, Preview};
 pub use sync::SyncStatus;
 
 use std::cell::RefCell;
@@ -29,7 +31,6 @@ use crate::persist::record::{HistoryChange, HistoryLoad, Record, RecordId, read_
 use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
 };
-use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live, keep_cut_off};
 use crate::time::{POLL_MS, now_ms, sleep_ms};
@@ -166,10 +167,10 @@ pub struct AppCtx {
     /// Whatever is playing outside a session.
     pub preview: Signal<Preview>,
     /// The groups the stream has sent, newest last.
-    pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
+    pub stream_heard: Signal<Vec<HeardGroup>>,
     /// What Hear a QSO has played, as far as it has been heard: kept once it
     /// ends, until something else plays or the screen is left.
-    pub dialogue: Signal<Option<crate::playback::Dialogue>>,
+    pub dialogue: Signal<Option<Dialogue>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
     /// The run's Call and Exchange fields, as typed.

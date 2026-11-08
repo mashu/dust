@@ -9,8 +9,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::format::counted;
-use crate::playback::Dialogue;
-use crate::state::AppCtx;
+use crate::state::{AppCtx, Dialogue};
 use crate::time::local_hour;
 use crate::ui::callsign_reach::{CountrySplit, Split, TierSteps};
 use crate::ui::file_pick::{ChosenFile, FileButton};

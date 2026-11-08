@@ -17,7 +17,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::playback::Dialogue;
+use crate::state::Dialogue;
 use crate::ui::band::BandConditionsCard;
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::help;

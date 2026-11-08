@@ -2254,7 +2254,7 @@ fn every_listen_chip_has_an_id_of_its_own() {
 /// stays out of sight, and so does one stopped before a line was heard.
 #[test]
 fn listen_in_contest_mode_offers_hear_a_qso_and_shows_its_lines() {
-    use crate::playback::{Dialogue, DialogueLine};
+    use crate::state::{Dialogue, DialogueLine};
     use cw_core::{ContestKind, Sender};
     let shown = |dialogue: Option<Dialogue>, hearing: bool| {
         render_props(

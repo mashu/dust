@@ -20,10 +20,9 @@ use dioxus::prelude::*;
 
 use crate::page::control_id;
 use crate::persist::{OpenSession, SoFar};
-use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::session_runtime::{Live, keep_and_show};
-use crate::state::{AppCtx, Finished, Said, Screen};
+use crate::state::{AppCtx, Finished, Preview, Said, Screen};
 use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
 
 /// A gap this long between two of the run screen's ticks is time the app

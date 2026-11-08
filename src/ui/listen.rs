@@ -1,7 +1,7 @@
 use cw_core::{CharSetMode, TrainingSettings, compute_char_pool, morse_for, newest_unlocked};
 use dioxus::prelude::*;
 
-use crate::playback::{Dialogue, HeardGroup};
+use crate::state::{Dialogue, HeardGroup};
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, heard_label};
 use crate::ui::widgets::{Icon, IconName, control_id, html_bool};
 
