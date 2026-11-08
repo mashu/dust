@@ -53,6 +53,7 @@ mod loudness;
 mod memo;
 mod noise;
 mod output;
+mod pileup;
 mod qsb;
 mod random;
 mod source;
@@ -74,6 +75,9 @@ pub use output::{
     AUDIO_HIGH_PASS_HZ, AudioHighPass, SOFT_LIMIT_HEADROOM, SOFT_LIMIT_KNEE, soft_limit,
     soft_limit_curve,
 };
+#[cfg(test)]
+pub(crate) use pileup::resolve_pileup;
+pub(crate) use pileup::{PILEUP_CALLER_SEPARATION_HZ, PILEUP_SKIRT_DB, free_room, pick_in_room};
 pub use qsb::{FADE_OFFSET_MAX_SEC, FADE_STEP_SEC, Qsb};
 pub use source::BandSource;
 

@@ -298,8 +298,8 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::band::PILEUP_CALLER_SEPARATION_HZ;
     use crate::settings::FilterShape;
-    use crate::timing::PILEUP_CALLER_SEPARATION_HZ;
 
     fn gain(edit: impl FnOnce(&mut TrainingSettings)) -> f64 {
         let mut settings = TrainingSettings::default();
