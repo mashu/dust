@@ -7,9 +7,9 @@
 //! report of 599 as `5NN`. A cut letter is read only in a field that holds a
 //! number: elsewhere `TN` is Tennessee and `AL` a name.
 
-use super::CallerHabits;
 use super::data::places::place_code;
 use super::data::sections::{fold_yukon, listed_section};
+use super::kind::CallerHabits;
 use super::odds::CallerOdds;
 use crate::alignment::align_group;
 use crate::rng::Rng;

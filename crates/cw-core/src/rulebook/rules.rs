@@ -3,8 +3,8 @@
 
 use super::data::places::{DX, fold_labrador, in_us_or_canada, w_ve};
 use super::exchange::{self, Field, cut_power, cut_serial, cut_zone};
+use super::kind::{ContestKind, TuCall};
 use super::serial::{SPRINT_SERIALS, SerialFit, WPX_SERIALS};
-use super::{ContestKind, TuCall};
 use crate::callsign::{CallSpec, Countries};
 
 /// Your side of the ARRL DX contest, from your call: W/VE works only DX, and
@@ -711,6 +711,23 @@ pub(crate) const RULES: &[ContestRules] = &[
         ),
     },
 ];
+
+impl ContestKind {
+    /// Its rules: every contest on the card has its row, as a test checks.
+    pub fn rules(self) -> &'static ContestRules {
+        RULES
+            .iter()
+            .find(|rules| rules.kind == self)
+            .expect("every contest has its row of rules")
+    }
+
+    /// Whether a run of it has a contest score, as every contest but Simple
+    /// QSO and POTA does, which are told by their pace and their copy
+    /// instead.
+    pub fn scored(self) -> bool {
+        self.rules().scoring.is_some()
+    }
+}
 
 /// The greeting of the time of day at `hour`, local time, as operators send
 /// one: `GM` in the morning, from 4, `GA` in the afternoon, from noon, and
@@ -2609,6 +2626,29 @@ mod tests {
             let rows = RULES.iter().filter(|rules| rules.kind == kind).count();
             assert!(rows <= 1, "{kind:?} has {rows} rows");
         }
+    }
+
+    /// Every contest scores but Simple QSO and POTA, which are no contests.
+    #[test]
+    fn every_contest_but_simple_qso_and_pota_is_scored() {
+        for kind in ContestKind::ALL {
+            let unscored = matches!(kind, ContestKind::SimpleQso | ContestKind::Pota);
+            assert_eq!(kind.scored(), !unscored, "{kind:?}");
+        }
+    }
+
+    /// Every contest on the card has its row of rules, and one only.
+    #[test]
+    fn every_contest_has_its_rules() {
+        assert_eq!(RULES.len(), ContestKind::ALL.len());
+        for kind in ContestKind::ALL {
+            assert_eq!(kind.rules().kind, kind);
+            assert!(!kind.label().is_empty());
+        }
+        assert_eq!(ContestKind::default(), ContestKind::Wpx);
+        assert_eq!(ContestKind::Wpx.label(), "CQ WPX");
+        assert_eq!(ContestKind::Pota.label(), "POTA");
+        assert_eq!(ContestKind::from_name("pota"), Some(ContestKind::Pota));
     }
 
     #[test]

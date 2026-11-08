@@ -349,7 +349,7 @@ pub(crate) fn call_section(call: &str) -> Option<&'static str> {
 
 /// Where a station is, as far as its call says.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::rulebook) enum Whereabouts {
+pub(super) enum Whereabouts {
     /// A state, province or territory.
     Place(&'static str),
     /// One of a US call district's states, each with its people.
@@ -362,7 +362,7 @@ pub(in crate::rulebook) enum Whereabouts {
 /// (`VE3ABC/0`) leaves the station where its own call is. Labrador is LB
 /// where `labrador` counts it apart, and NL otherwise. None for a call
 /// outside the US and Canada.
-pub(in crate::rulebook) fn whereabouts(call: &str, labrador: bool) -> Option<Whereabouts> {
+pub(super) fn whereabouts(call: &str, labrador: bool) -> Option<Whereabouts> {
     let area = call_area(call)?;
     let home = home(call, &area)?;
     if let Some(marker) = area.marker
