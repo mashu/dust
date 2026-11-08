@@ -371,7 +371,7 @@ const SHOWN_AFTER_MS: u64 = 1_000;
 
 /// Once this many QSOs are logged, as many of the callers who join as you
 /// set are stations worked before (§4.7 of the design,
-/// [`crate::contest::CallerOdds::dupe`]).
+/// [`crate::rulebook::CallerOdds::dupe`]).
 const DUPES_AFTER: u32 = 5;
 
 /// The stream, forked off the run's generator, that the run's own draws
