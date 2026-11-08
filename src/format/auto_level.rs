@@ -4,6 +4,9 @@ use super::counted;
 
 /// A percentage as the level's messages give it: whole, or to a tenth where
 /// it has one.
+///
+/// `value` is in percent already, 87.5 for "87.5%": not the share from 0 to
+/// 1 that [`super::percent`] is handed and gives in whole percent.
 pub fn percent(value: f64) -> String {
     let tenth = (value * 10.0).round() / 10.0;
     if tenth.fract() == 0.0 {

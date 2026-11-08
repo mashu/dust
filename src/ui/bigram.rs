@@ -5,6 +5,7 @@
 use cw_core::{BigramCell, BigramHeatmap, CharTally, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_RATIO};
 use dioxus::prelude::*;
 
+use crate::format::percent;
 use crate::ui::elsewhere::{PAIR_CARD, use_click_elsewhere};
 use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
@@ -47,10 +48,6 @@ fn pair_label(cell: &BigramCell) -> String {
     } else {
         format!("{name}: {} of {} wrong", cell.wrong, cell.total)
     }
-}
-
-fn percent(rate: f64) -> String {
-    format!("{:.0}%", rate * 100.0)
 }
 
 /// One line of a pair's card, drawn the way the calendar's day card draws

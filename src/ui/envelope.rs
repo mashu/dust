@@ -7,6 +7,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::percent;
 use crate::ui::app_widgets::SectionReset;
 use crate::ui::help;
 use crate::ui::widgets::{CardHead, Icon, IconName, SliderField, control_id, pretty_number};
@@ -214,7 +215,7 @@ pub fn EnvelopeCard(
                 }
                 SliderField {
                     label: "Edge smoothing".to_string(),
-                    value_label: format!("{:.0}%", envelope.smoothing * 100.0),
+                    value_label: percent(envelope.smoothing),
                     value: envelope.smoothing,
                     min: 0.0,
                     max: 1.0,

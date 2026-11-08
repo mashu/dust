@@ -17,6 +17,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::percent;
 use crate::state::Dialogue;
 use crate::ui::app_widgets::SectionReset;
 use crate::ui::band::BandConditionsCard;
@@ -679,7 +680,7 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 value_label: if speed.fist_variation <= 0.0 {
                     "Keyers".to_string()
                 } else {
-                    format!("{:.0}%", speed.fist_variation * 100.0)
+                    percent(speed.fist_variation)
                 },
                 value: speed.fist_variation,
                 min: 0.0,

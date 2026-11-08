@@ -17,6 +17,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::percent;
 use crate::ui::figures::{History, span_history_of, speed_history_of, without_band};
 use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
@@ -78,10 +79,6 @@ fn likely(share: f64, sd: f64) -> (f64, f64) {
     )
 }
 
-fn pct(share: f64) -> String {
-    format!("{:.0}%", share * 100.0)
-}
-
 /// One row: `key` at the left; a bar as long as `share`, in the colour of
 /// where it stands against `aim`, paler past it to the top of where it
 /// likely is, with a notch at the aim; the share beside it, and `note`
@@ -103,7 +100,7 @@ fn bar_row(id: String, key: String, share: f64, sd: f64, aim: f64, note: String)
                 span { class: "bar-fill stat-fill", style: "width: {along(share):.1}%;" }
                 span { class: "bar-mark", style: "left: {along(aim):.1}%;" }
             }
-            span { class: "mono muted stat-value", "{pct(share)}" }
+            span { class: "mono muted stat-value", "{percent(share)}" }
             span { class: "tiny", "{note}" }
         }
     }
@@ -117,7 +114,7 @@ fn legend(aim: f64) -> Element {
             span { i { class: "err-swatch building" } "within {NEAR * 100.0:.0} points" }
             span { i { class: "err-swatch to-work-on" } "further under" }
             span { i { class: "err-swatch range" } "where it likely is" }
-            span { i { class: "err-swatch mark" } "your aim, {pct(aim)}" }
+            span { i { class: "err-swatch mark" } "your aim, {percent(aim)}" }
         }
     }
 }
@@ -213,7 +210,7 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &History) -> Ele
     } else {
         format!(
             "Adaptive group size leans each group's length towards where you copy {} of groups whole.",
-            pct(aim)
+            percent(aim)
         )
     };
     let reach = length_reach(
@@ -227,13 +224,17 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &History) -> Ele
     let across = if rows.len() > 1 {
         format!(
             "{} whole at {} characters, {} at {}",
-            pct(first.whole),
+            percent(first.whole),
             first.length,
-            pct(last.whole),
+            percent(last.whole),
             last.length
         )
     } else {
-        format!("{} whole at {} characters", pct(first.whole), first.length)
+        format!(
+            "{} whole at {} characters",
+            percent(first.whole),
+            first.length
+        )
     };
     rsx! {
         div { class: "card stack-sm",
@@ -244,7 +245,7 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &History) -> Ele
                 help: help::group_length(aim),
             }
             div { class: "err-summary",
-                {summary_row(format!("Your aim · {} whole", pct(aim)), reach)}
+                {summary_row(format!("Your aim · {} whole", percent(aim)), reach)}
                 {summary_row("Across your range".to_string(), across)}
             }
             {legend(aim)}
@@ -263,7 +264,7 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &History) -> Ele
                                 "likely {:.0}–{:.0}% whole · {} chance next",
                                 low * 100.0,
                                 high * 100.0,
-                                pct(row.drawn)
+                                percent(row.drawn)
                             ),
                         )
                     }
@@ -329,7 +330,7 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &History) -> Element {
     } else {
         format!(
             "Adaptive speed leans each group's speed towards where you copy {} of characters right.",
-            pct(aim)
+            percent(aim)
         )
     };
     if !playback.link_char_to_effective {
@@ -340,13 +341,13 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &History) -> Element {
     let across = if rows.len() > 1 {
         format!(
             "{} right at {:.0} WPM, {} at {:.0}",
-            pct(first.right),
+            percent(first.right),
             first.wpm,
-            pct(last.right),
+            percent(last.right),
             last.wpm
         )
     } else {
-        format!("{} right at {:.0} WPM", pct(first.right), first.wpm)
+        format!("{} right at {:.0} WPM", percent(first.right), first.wpm)
     };
     let next = if contest {
         "chance of the first callers"
@@ -362,7 +363,7 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &History) -> Element {
                 help: help::speed(aim),
             }
             div { class: "err-summary",
-                {summary_row(format!("Your aim · {} right", pct(aim)), reach)}
+                {summary_row(format!("Your aim · {} right", percent(aim)), reach)}
                 {summary_row("Across your range".to_string(), across)}
             }
             {legend(aim)}
@@ -381,7 +382,7 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &History) -> Element {
                                 "likely {:.0}–{:.0}% right · {} {next}",
                                 low * 100.0,
                                 high * 100.0,
-                                pct(row.drawn)
+                                percent(row.drawn)
                             ),
                         )
                     }

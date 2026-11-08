@@ -1,4 +1,4 @@
-//! How dates, counts and places read on screen. Dates are stored as
+//! How dates, counts, shares and places read on screen. Dates are stored as
 //! `YYYY-MM-DD`; one that cannot be read is shown as it was stored rather
 //! than not at all.
 
@@ -105,6 +105,16 @@ pub fn counted_in_words(n: usize, noun: &str) -> String {
     }
 }
 
+/// A share, from 0 to 1, in whole percent: "90%" for 0.9. A share half way
+/// between two goes to the even one, as `{:.0}` rounds it: "12%" for
+/// 0.125, "38%" for 0.375.
+///
+/// Not the Auto level's [`auto_level::percent`], which is handed a value in
+/// percent already and gives it to a tenth where it has one.
+pub fn percent(share: f64) -> String {
+    format!("{:.0}%", share * 100.0)
+}
+
 /// A stretch of run time as a clock reads it: "07:42", "60:00".
 pub fn minutes_seconds(ms: u64) -> String {
     let seconds = ms / 1_000;
@@ -199,6 +209,19 @@ mod tests {
         assert_eq!(counted_in_words(2, "NR"), "two NRs");
         assert_eq!(counted_in_words(0, "QSO"), "no QSOs");
         assert_eq!(counted_in_words(13, "call"), "13 calls");
+    }
+
+    #[test]
+    fn a_share_reads_in_whole_percent() {
+        assert_eq!(percent(0.0), "0%");
+        assert_eq!(percent(0.9), "90%");
+        assert_eq!(percent(1.0), "100%");
+        // Half way between two, it goes to the even one.
+        assert_eq!(percent(0.125), "12%");
+        assert_eq!(percent(0.375), "38%");
+        // A share, where the Auto level's is in percent already.
+        assert_eq!(percent(0.875), "88%");
+        assert_eq!(auto_level::percent(87.5), "87.5%");
     }
 
     #[test]

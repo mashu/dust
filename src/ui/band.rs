@@ -8,7 +8,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::format::counted;
+use crate::format::{counted, percent};
 use crate::ui::app_widgets::SectionReset;
 use crate::ui::help;
 use crate::ui::odds::{OddSlider, OddsFold, OddsGroup};
@@ -441,7 +441,7 @@ pub fn BandConditionsCard(
                 label: "Intensity".to_string(),
                 id: "slider-qrn-intensity".to_string(),
                 long_label: "QRN static intensity",
-                value_label: format!("{:.0}%", b.qrn_level * 100.0),
+                value_label: percent(b.qrn_level),
                 value: b.qrn_level,
                 min: 0.0,
                 max: 1.0,
