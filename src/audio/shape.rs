@@ -114,16 +114,21 @@ pub fn fade_in_gain(progress: f64) -> f64 {
 #[cfg(any(feature = "web", test))]
 const SIDETONE_EDGE_LINES: f64 = 32.0;
 
-/// How long the key has to be quiet before the browser's sidetone takes a
-/// fresh reading of where the keyer's clock stands on the context's.
-#[cfg(any(feature = "web", test))]
-const SIDETONE_QUIET_SEC: f64 = 0.5;
+/// How long the key has to be quiet before the sidetone takes a fresh
+/// reading of its clocks: the computer's lets the lead its audio callback
+/// keys each edge by change, and the browser's reads again where the
+/// keyer's clock stands on the context's. A new reading mid-letter would
+/// move every edge after it.
+pub const SIDETONE_QUIET_SEC: f64 = 0.5;
 
-/// The most a burst of keying is ever played later than it was keyed for:
-/// for the context's own unevenness, or for the first edge coming late.
-/// Past this, an edge sounds as soon as it can.
-#[cfg(any(feature = "web", test))]
-const SIDETONE_LATE_MAX_SEC: f64 = 0.1;
+/// The most a burst of keying is ever played later than it was keyed for.
+/// The first edge after a quiet spell can come this late and still set the
+/// time for the rest: a stream woken by a squeeze plays its first frame
+/// some milliseconds after it, and the edges after it keep their distance
+/// from it rather than land on time without it. A browser allows as much
+/// for the context's own unevenness. Past this, an edge sounds as soon as
+/// it can.
+pub const SIDETONE_LATE_MAX_SEC: f64 = 0.1;
 
 /// One edge of the browser's sidetone gate, as scheduled.
 #[cfg(any(feature = "web", test))]
