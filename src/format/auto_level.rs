@@ -7,7 +7,7 @@ use super::counted;
 ///
 /// `value` is in percent already, 87.5 for "87.5%": not the share from 0 to
 /// 1 that [`super::percent`] is handed and gives in whole percent.
-pub fn percent(value: f64) -> String {
+pub fn percent_to_tenth(value: f64) -> String {
     let tenth = (value * 10.0).round() / 10.0;
     if tenth.fract() == 0.0 {
         format!("{tenth:.0}%")
@@ -61,7 +61,7 @@ pub fn change_message(change: &AutoLevelChange) -> String {
     let evidence = format!(
         "accuracy {}{at}, threshold {}, {} {}",
         percent_beside(change.accuracy_pct, change.threshold_pct),
-        percent(change.threshold_pct),
+        percent_to_tenth(change.threshold_pct),
         counted(change.sessions, "session"),
         if change.raised() { "above" } else { "below" },
     );
@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(percent_beside(90.2, 90.4), "90%");
         assert_eq!(percent_beside(90.45, 90.45), "90.5%");
         assert_eq!(percent_beside(40.0, 90.0), "40%");
-        assert_eq!(percent(87.5), "87.5%");
+        assert_eq!(percent_to_tenth(87.5), "87.5%");
     }
 
     #[test]

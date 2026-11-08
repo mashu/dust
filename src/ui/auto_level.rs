@@ -1,7 +1,7 @@
 use cw_core::{AutoLevelProgress, MixedAutoLevelAxis};
 use dioxus::prelude::*;
 
-use crate::format::auto_level::{percent, spaced_out, wpm};
+use crate::format::auto_level::{percent_to_tenth, spaced_out, wpm};
 use crate::ui::widgets::{CardHead, IconName};
 
 #[component]
@@ -35,7 +35,7 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
     } else {
         format!("{}/{}", progress.below_count, progress.below_target)
     };
-    let pass = format!("{} to pass", percent(progress.threshold));
+    let pass = format!("{} to pass", percent_to_tenth(progress.threshold));
     // Where adaptive speed lets a session count, each end as the Speed
     // settings put it.
     let speed_hint = progress.judged_at.map(|(slowest, fastest)| {

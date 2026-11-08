@@ -109,8 +109,8 @@ pub fn counted_in_words(n: usize, noun: &str) -> String {
 /// between two goes to the even one, as `{:.0}` rounds it: "12%" for
 /// 0.125, "38%" for 0.375.
 ///
-/// Not the Auto level's [`auto_level::percent`], which is handed a value in
-/// percent already and gives it to a tenth where it has one.
+/// Not the Auto level's [`auto_level::percent_to_tenth`], which is handed a
+/// value in percent already and gives it to a tenth where it has one.
 pub fn percent(share: f64) -> String {
     format!("{:.0}%", share * 100.0)
 }
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(percent(0.375), "38%");
         // A share, where the Auto level's is in percent already.
         assert_eq!(percent(0.875), "88%");
-        assert_eq!(auto_level::percent(87.5), "87.5%");
+        assert_eq!(auto_level::percent_to_tenth(87.5), "87.5%");
     }
 
     #[test]
