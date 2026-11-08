@@ -4,8 +4,12 @@
 //! What asks it: where the app keeps its files and its backups
 //! (src/persist/android.rs), and the sign-in to Google
 //! (src/sync/auth/android.rs).
+//!
+//! What belongs to the activity's own thread, as its window does, is
+//! handed to that thread instead ([`on_activity_thread`]): keeping the
+//! screen on (src/keep_awake.rs), and the volume keys (src/audio/native.rs).
 
-use dioxus::mobile::wry::prelude::{JNIEnv, JObject, jni};
+use dioxus::mobile::wry::prelude::{JNIEnv, JObject, dispatch, jni};
 
 /// Do `call` with the VM attached to this thread, and the activity: what
 /// it gives, or why the VM could not be reached. A Java exception the call
@@ -34,4 +38,18 @@ pub fn with_activity<T>(
     call: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<T>,
 ) -> jni::errors::Result<T> {
     attached(|env, activity| env.with_local_frame(4, |env| call(env, activity)))?
+}
+
+/// Do `call` on the activity's own thread, with the activity, once that
+/// thread comes to it: nothing waits for it. Where the call fails, a Java
+/// exception it left pending is cleared: one left pending would fail every
+/// JNI call after it, the webview's own among them.
+pub fn on_activity_thread(
+    call: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<()> + Send + 'static,
+) {
+    dispatch(move |env, activity, _webview| {
+        if call(env, activity).is_err() && env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+        }
+    });
 }

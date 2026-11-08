@@ -121,7 +121,9 @@ if (held.want) {{
 
 #[cfg(all(target_os = "android", not(test)))]
 mod android {
-    use dioxus::mobile::wry::prelude::{JNIEnv, JObject, dispatch, jni};
+    use dioxus::mobile::wry::prelude::{JNIEnv, JObject, jni};
+
+    use crate::jvm::on_activity_thread;
 
     /// `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON`.
     const FLAG_KEEP_SCREEN_ON: i32 = 0x0000_0080;
@@ -130,15 +132,7 @@ mod android {
     /// the thread that made it, so this runs there, on the activity's own
     /// thread.
     pub fn keep_screen_on(on: bool) {
-        dispatch(move |env, activity, _webview| {
-            if set_flag(env, activity, on).is_err() {
-                // A Java exception left pending would fail every JNI call
-                // after it, the webview's own among them.
-                if env.exception_check().unwrap_or(false) {
-                    let _ = env.exception_clear();
-                }
-            }
-        });
+        on_activity_thread(move |env, activity| set_flag(env, activity, on));
     }
 
     fn set_flag(env: &mut JNIEnv, activity: &JObject, on: bool) -> jni::errors::Result<()> {
