@@ -137,7 +137,7 @@ impl TrainingSettings {
             if replies == 0 {
                 return false;
             }
-            choice.at = crate::contest::into_shape(replies, choice.at);
+            choice.at = crate::rulebook::into_shape(replies, choice.at);
             choice.off.retain(|at| *at < replies);
             choice.off.sort_unstable();
             choice.off.dedup();

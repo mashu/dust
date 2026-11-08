@@ -9,16 +9,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::contest::HUNTER_DX_PERCENT;
+pub use crate::rulebook::HUNTER_DX_PERCENT;
 
 use super::{CharSetMode, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
 use crate::callsign::{CallSpec, parse_callsign};
-use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
-use crate::contest::data::sections::{fold_yukon, listed_section};
-use crate::contest::data::zones::zone_of;
-use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{CallerOdds, Field, Side};
-use crate::rulebook::{CallerHabits, ContestKind, RunStyle, TuCall};
+use crate::rulebook::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
+use crate::rulebook::data::sections::{fold_yukon, listed_section};
+use crate::rulebook::data::zones::zone_of;
+use crate::rulebook::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
+use crate::rulebook::{CallerHabits, CallerOdds, ContestKind, Field, RunStyle, Side, TuCall};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;

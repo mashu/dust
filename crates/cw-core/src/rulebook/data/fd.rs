@@ -15,14 +15,14 @@ use crate::callsign::pick_weighted;
 use crate::rng::Rng;
 
 /// The class a caller sends, from `rng`.
-pub(in crate::contest) fn draw_class(rng: &mut impl Rng) -> &'static str {
+pub(crate) fn draw_class(rng: &mut impl Rng) -> &'static str {
     pick_weighted(CLASSES, rng).copied().unwrap_or("1D")
 }
 
 /// The section a caller signing `call` sends, from `rng`: the one its call
 /// gives by itself, or else one of the sections of the place drawn for it,
 /// or DX for a station Dust cannot place.
-pub(in crate::contest) fn draw_section(call: &str, rng: &mut impl Rng) -> &'static str {
+pub(crate) fn draw_section(call: &str, rng: &mut impl Rng) -> &'static str {
     if let Some(section) = call_section(call) {
         return section;
     }

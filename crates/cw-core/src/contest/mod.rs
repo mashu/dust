@@ -26,21 +26,19 @@ pub(crate) mod bot;
 mod caller;
 mod check;
 mod clock;
-pub(crate) mod data;
 mod esm;
-pub(crate) mod exchange;
 mod machine;
-mod odds;
 mod parse;
 mod place;
 mod qrm;
 mod record;
-mod rules;
 mod score;
-mod serial;
 mod turn;
 
+pub(crate) use crate::rulebook::{data, exchange, odds, rules, serial};
+
 use crate::callsign::{CallSpec, GeneratedCall};
+use crate::rulebook::{MS_PER_HOUR, MS_PER_MINUTE};
 use crate::session::Answered;
 use crate::settings::TrainingSettings;
 
@@ -49,60 +47,31 @@ pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 pub(crate) use caller::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
-pub use data::places::{home_country, place_name};
-pub use data::sections::section_name;
-pub use data::zones::home_continent;
 pub use esm::{
     EntryField, Esm, Fields, MessagePart, QsoState, esm, loggable, message_text, space_to_call,
-};
-pub use exchange::{
-    Field, cut_power, cut_serial, cut_zone, keyed_token, read_number, send_power, send_report,
-    send_serial, send_zone,
 };
 pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
     RowStatus, ShownText,
 };
-pub use odds::{CallerOdds, HUNTER_DX_PERCENT, Odd, OddsCard};
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub use place::filter_capacity;
 #[cfg(test)]
 pub(crate) use record::LAYOUT;
 pub(crate) use record::tells_speed;
 pub use record::{ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
-pub use rules::{
-    CallerStyles, ContestRules, FAREWELLS, Fill, Form, GREETING_HOUR, Multiplier, PerSide, Points,
-    STYLE_EVEN, Scoring, Sender, Side, Sides, Styles, corner_shares, greeting, into_shape,
-    shape_corners, shares_without, toggle_corner,
-};
 pub use score::{ContestScore, MyStation, Placed, Rates, ScoredQso, Tally, contest_score, rate_at};
-pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};
 pub use turn::{Fade, MONITOR_LEVEL, Segment, Turn, plan_turn};
 
-pub use crate::rulebook::{CallerHabits, ContestKind, RunStyle, TuCall};
+pub use crate::rulebook::{
+    CallerHabits, CallerOdds, CallerStyles, ContestKind, ContestRules, FAREWELLS, Field, Fill,
+    Form, GREETING_HOUR, Multiplier, Odd, OddsCard, PerSide, Points, RunStyle, SPRINT_SERIALS,
+    STYLE_EVEN, Scoring, Sender, SerialFit, SerialModel, Side, Sides, Styles, TuCall, WPX_SERIALS,
+    corner_shares, cut_power, cut_serial, cut_zone, greeting, home_continent, home_country,
+    into_shape, keyed_token, place_name, read_number, section_name, send_power, send_report,
+    send_serial, send_zone, shape_corners, shares_without, toggle_corner,
+};
 pub use crate::session::{ContestLog, PauseWhy};
-
-/// Run time is kept in milliseconds; rates and contests are told in minutes
-/// and hours.
-const MS_PER_MINUTE: u64 = 60_000;
-const MS_PER_HOUR: u64 = 60 * MS_PER_MINUTE;
-
-impl ContestKind {
-    /// Its rules: every contest on the card has its row, as a test checks.
-    pub fn rules(self) -> &'static ContestRules {
-        rules::RULES
-            .iter()
-            .find(|rules| rules.kind == self)
-            .expect("every contest has its row of rules")
-    }
-
-    /// Whether a run of it has a contest score, as every contest but Simple
-    /// QSO and POTA does, which are told by their pace and their copy
-    /// instead.
-    pub fn scored(self) -> bool {
-        self.rules().scoring.is_some()
-    }
-}
 
 /// Where a contest's callers come from, and how fast they send where it
 /// chooses, and where what was copied of their calls goes back to, as
@@ -128,33 +97,5 @@ pub trait CallSource {
     /// card's ranges.
     fn next_speed(&mut self, _settings: &TrainingSettings) -> Option<(f64, f64)> {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every contest scores but Simple QSO and POTA, which are no contests.
-    #[test]
-    fn every_contest_but_simple_qso_and_pota_is_scored() {
-        for kind in ContestKind::ALL {
-            let unscored = matches!(kind, ContestKind::SimpleQso | ContestKind::Pota);
-            assert_eq!(kind.scored(), !unscored, "{kind:?}");
-        }
-    }
-
-    /// Every contest on the card has its row of rules, and one only.
-    #[test]
-    fn every_contest_has_its_rules() {
-        assert_eq!(rules::RULES.len(), ContestKind::ALL.len());
-        for kind in ContestKind::ALL {
-            assert_eq!(kind.rules().kind, kind);
-            assert!(!kind.label().is_empty());
-        }
-        assert_eq!(ContestKind::default(), ContestKind::Wpx);
-        assert_eq!(ContestKind::Wpx.label(), "CQ WPX");
-        assert_eq!(ContestKind::Pota.label(), "POTA");
-        assert_eq!(ContestKind::from_name("pota"), Some(ContestKind::Pota));
     }
 }

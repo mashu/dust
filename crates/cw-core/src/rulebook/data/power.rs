@@ -10,7 +10,7 @@ use crate::callsign::pick_weighted;
 use crate::rng::Rng;
 
 /// The power a DX caller sends, from `rng`.
-pub(in crate::contest) fn draw_power(rng: &mut impl Rng) -> &'static str {
+pub(crate) fn draw_power(rng: &mut impl Rng) -> &'static str {
     pick_weighted(POWERS, rng).copied().unwrap_or("100")
 }
 

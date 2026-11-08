@@ -314,8 +314,8 @@ impl From<CallerHabits> for Habits {
 
 /// A report of 599, and the two ways a caller with real habits sends it.
 const REPORT_599: u32 = 599;
-pub(super) const CUT_599: &str = "5NN";
-pub(super) const ENN: &str = "ENN";
+pub(crate) const CUT_599: &str = "5NN";
+pub(crate) const ENN: &str = "ENN";
 
 /// `digits` with each run of zeros as `T`s, as MorseRunner's callers send
 /// one whatever else they cut (`Station.pas:536-537`): the padding of a
@@ -436,7 +436,7 @@ pub fn send_report(report: u32, habits: impl Into<Habits>, rng: &mut impl Rng) -
 /// A report of 599 as a caller sends it in one message: `5NN`, as every
 /// caller cuts it, or under real habits `ENN` as often as its odds have it
 /// (`Station.pas:527-528`).
-pub(super) fn send_5nn(habits: impl Into<Habits>, rng: &mut impl Rng) -> &'static str {
+pub(crate) fn send_5nn(habits: impl Into<Habits>, rng: &mut impl Rng) -> &'static str {
     let Habits { level, odds } = habits.into();
     if level != CallerHabits::Easy && rng.f64() < odds.enn {
         ENN

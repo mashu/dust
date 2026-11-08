@@ -1,4 +1,30 @@
+pub(crate) mod data;
+pub(crate) mod exchange;
+pub(crate) mod odds;
+pub(crate) mod rules;
+pub(crate) mod serial;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+pub use data::places::{home_country, place_name};
+pub use data::sections::section_name;
+pub use data::zones::home_continent;
+pub use exchange::{
+    Field, cut_power, cut_serial, cut_zone, keyed_token, read_number, send_power, send_report,
+    send_serial, send_zone,
+};
+pub use odds::{CallerOdds, HUNTER_DX_PERCENT, Odd, OddsCard};
+pub use rules::{
+    CallerStyles, ContestRules, FAREWELLS, Fill, Form, GREETING_HOUR, Multiplier, PerSide, Points,
+    STYLE_EVEN, Scoring, Sender, Side, Sides, Styles, corner_shares, greeting, into_shape,
+    shape_corners, shares_without, toggle_corner,
+};
+pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};
+
+/// Run time is kept in milliseconds; rates and contests are told in minutes
+/// and hours.
+pub(crate) const MS_PER_MINUTE: u64 = 60_000;
+pub(crate) const MS_PER_HOUR: u64 = 60 * MS_PER_MINUTE;
 
 /// The contests Dust knows, in the order the card lists them, each with its
 /// row of rules ([`ContestKind::rules`]). A contest joins with its row.
@@ -70,6 +96,21 @@ impl ContestKind {
             Self::Sprint | Self::ArrlDx => "an",
             _ => "a",
         }
+    }
+
+    /// Its rules: every contest on the card has its row, as a test checks.
+    pub fn rules(self) -> &'static ContestRules {
+        rules::RULES
+            .iter()
+            .find(|rules| rules.kind == self)
+            .expect("every contest has its row of rules")
+    }
+
+    /// Whether a run of it has a contest score, as every contest but Simple
+    /// QSO and POTA does, which are told by their pace and their copy
+    /// instead.
+    pub fn scored(self) -> bool {
+        self.rules().scoring.is_some()
     }
 }
 
@@ -280,6 +321,15 @@ mod tests {
         );
     }
 
+    /// Every contest scores but Simple QSO and POTA, which are no contests.
+    #[test]
+    fn every_contest_but_simple_qso_and_pota_is_scored() {
+        for kind in ContestKind::ALL {
+            let unscored = matches!(kind, ContestKind::SimpleQso | ContestKind::Pota);
+            assert_eq!(kind.scored(), !unscored, "{kind:?}");
+        }
+    }
+
     /// A name this build does not know is the default, not a failed save.
     #[test]
     fn an_unknown_name_reads_as_the_default() {
@@ -320,5 +370,19 @@ mod tests {
             let saved = serde_json::to_value(choice).expect("it saves");
             assert_eq!(serde_json::from_value::<TuCall>(saved).ok(), Some(choice));
         }
+    }
+
+    /// Every contest on the card has its row of rules, and one only.
+    #[test]
+    fn every_contest_has_its_rules() {
+        assert_eq!(rules::RULES.len(), ContestKind::ALL.len());
+        for kind in ContestKind::ALL {
+            assert_eq!(kind.rules().kind, kind);
+            assert!(!kind.label().is_empty());
+        }
+        assert_eq!(ContestKind::default(), ContestKind::Wpx);
+        assert_eq!(ContestKind::Wpx.label(), "CQ WPX");
+        assert_eq!(ContestKind::Pota.label(), "POTA");
+        assert_eq!(ContestKind::from_name("pota"), Some(ContestKind::Pota));
     }
 }
