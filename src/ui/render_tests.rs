@@ -28,8 +28,7 @@ use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
 use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView, focused_box_open};
 use crate::audio::fake::Recorder;
-use crate::session_runtime::{AnswerOutbox, TypedAnswer};
-use crate::state::{AppState, Screen, in_root};
+use crate::state::{AnswerOutbox, AppState, Screen, TypedAnswer, in_root};
 use crate::testing::reads_as;
 
 std::thread_local! {

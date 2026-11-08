@@ -14,9 +14,9 @@ use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_pag
 use crate::persist::auto_progress;
 use crate::persist::record::RecordId;
 use crate::playback::{self, STREAM_PLAYS_OUT_OF_SIGHT};
-use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
+use crate::session_runtime::{resume_session, send_event, start_session};
 use crate::state::SyncStatus;
-use crate::state::{AppCtx, Finished, Preview, Screen};
+use crate::state::{AppCtx, Finished, Preview, Screen, TypedAnswer};
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
