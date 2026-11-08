@@ -53,7 +53,10 @@ use flate2::read::GzDecoder;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::disk::{aside_name, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
-use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, read_record};
+use super::record::{
+    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, key_of, keyed, read_record,
+    taken_up,
+};
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
 use super::set_aside::SetAside;
@@ -212,13 +215,6 @@ struct Journaled {
     ids: Vec<String>,
     #[serde(default)]
     undone: Vec<String>,
-}
-
-/// The key a record's session finished at, read without the rest of it.
-#[derive(serde::Deserialize)]
-struct KeyOnly {
-    timestamp: u64,
-    date: String,
 }
 
 impl HistoryFiles {
@@ -455,10 +451,8 @@ impl HistoryFiles {
             } else {
                 self.place_record(record)?
             };
-            if let Ok(key) = serde_json::from_str::<KeyOnly>(&record.json) {
-                self.keys
-                    .borrow_mut()
-                    .insert(id, SessionKey::new(key.timestamp, key.date));
+            if let Some(key) = key_of(&record.json) {
+                self.keys.borrow_mut().insert(id, key);
             }
         }
         if !change.put.is_empty() {
@@ -783,8 +777,7 @@ impl HistoryFiles {
                 None => {
                     let Some(key) = self
                         .raw_record(*id, &listing.packed)
-                        .and_then(|raw| serde_json::from_str::<KeyOnly>(&raw).ok())
-                        .map(|key| SessionKey::new(key.timestamp, key.date))
+                        .and_then(|raw| key_of(&raw))
                     else {
                         continue;
                     };
@@ -943,8 +936,7 @@ impl HistoryFiles {
                     *count -= 1;
                     return false;
                 }
-                !serde_json::from_str::<KeyOnly>(&record.json)
-                    .is_ok_and(|key| gone_keys.contains(&SessionKey::new(key.timestamp, key.date)))
+                !key_of(&record.json).is_some_and(|key| gone_keys.contains(&key))
             })
             .collect())
     }
@@ -1429,32 +1421,6 @@ pub(super) fn copy_aside(root: &Path, unread: &[u8]) -> io::Result<Option<String
     let name = aside_name(root, "sessions");
     write_whole(root, &name, unread)?;
     Ok(Some(name))
-}
-
-/// Every record of `sessions` by its session's key.
-fn keyed<'a>(
-    sessions: impl Iterator<Item = (RecordId, &'a SessionResult)>,
-) -> HashMap<SessionKey, Vec<RecordId>> {
-    let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
-    for (id, session) in sessions {
-        live.entry(SessionKey::of(session)).or_default().push(id);
-    }
-    live
-}
-
-/// `sessions`, in the order of their records, with `change`, made, made to
-/// them too.
-fn taken_up(sessions: &mut Vec<(RecordId, SessionResult)>, change: &HistoryChange) {
-    let forgotten: HashSet<RecordId> = change.forget.iter().map(|(id, _)| *id).collect();
-    sessions.retain(|(id, _)| !forgotten.contains(id));
-    for record in &change.put {
-        let Some(session) = read_record(&record.json) else {
-            continue;
-        };
-        if let Err(at) = sessions.binary_search_by_key(&record.id, |(id, _)| *id) {
-            sessions.insert(at, (record.id, session));
-        }
-    }
 }
 
 #[cfg(test)]

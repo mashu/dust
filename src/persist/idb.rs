@@ -29,7 +29,8 @@ use cw_core::SessionResult;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
 use super::record::{
-    self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, read_record,
+    self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, key_of, keyed,
+    read_record, taken_up,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -251,13 +252,6 @@ struct Read {
     /// What each record holds, as it is stored, where a move is to be made
     /// over them.
     raw: BTreeMap<RecordId, String>,
-}
-
-/// The key a record's session finished at, read without the rest of it.
-#[derive(serde::Deserialize)]
-struct KeyOnly {
-    timestamp: u64,
-    date: String,
 }
 
 impl<G: Glue, S: Aside> BrowserHistory<G, S> {
@@ -847,13 +841,6 @@ fn layout_text(layout: &Layout) -> Option<String> {
     String::from_utf8(layout.written().ok()?).ok()
 }
 
-/// The key of the session `json` holds, read without the rest of it.
-fn key_of(json: &str) -> Option<SessionKey> {
-    serde_json::from_str::<KeyOnly>(json)
-        .ok()
-        .map(|key| SessionKey::new(key.timestamp, key.date))
-}
-
 /// The key of every session the tombstones name.
 fn tombstoned_keys(tombstones: &[(String, Option<String>)]) -> HashSet<SessionKey> {
     tombstones
@@ -943,32 +930,6 @@ fn not_moved_yet(
             !key_of(&record.json).is_some_and(|key| gone_keys.contains(&key))
         })
         .collect()
-}
-
-/// Every record of `sessions` by its session's key.
-fn keyed<'a>(
-    sessions: impl Iterator<Item = (RecordId, &'a SessionResult)>,
-) -> HashMap<SessionKey, Vec<RecordId>> {
-    let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
-    for (id, session) in sessions {
-        live.entry(SessionKey::of(session)).or_default().push(id);
-    }
-    live
-}
-
-/// `sessions`, in the order of their records, with `change`, made, made to
-/// them too.
-fn taken_up(sessions: &mut Vec<(RecordId, SessionResult)>, change: &HistoryChange) {
-    let forgotten: HashSet<RecordId> = change.forget.iter().map(|(id, _)| *id).collect();
-    sessions.retain(|(id, _)| !forgotten.contains(id));
-    for record in &change.put {
-        let Some(session) = read_record(&record.json) else {
-            continue;
-        };
-        if let Err(at) = sessions.binary_search_by_key(&record.id, |(id, _)| *id) {
-            sessions.insert(at, (record.id, session));
-        }
-    }
 }
 
 #[cfg(feature = "web")]
