@@ -7,8 +7,7 @@
 
 use dioxus::prelude::*;
 
-use crate::ui::tour::bring_into_sight;
-use crate::ui::widgets::{Icon, IconName, control_id, focus_script, keep_focus};
+use crate::ui::widgets::{Icon, IconName, bring_into_sight, control_id, focus_script, keep_focus};
 
 /// What a Discard throws away, as its buttons and its question name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
