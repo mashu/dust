@@ -1,3 +1,6 @@
+//! Monotonic time: [`MonoMs`], a moment on a clock that only runs forward,
+//! and [`whole_ms`], seconds as whole milliseconds.
+
 /// A moment on a clock that only runs forward, in milliseconds from wherever
 /// that clock starts.
 ///
