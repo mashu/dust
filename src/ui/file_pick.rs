@@ -24,6 +24,7 @@ use dioxus::html::FileData;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::page::use_page_messages;
 use crate::state::AppCtx;
 use crate::ui::widgets::{Icon, IconName};
 
@@ -535,26 +536,24 @@ pub fn FileButton(
     let mut picked = use_signal(|| 0u64);
     if WEBVIEW_PICKER {
         let script = picker_script(&id, accept, max_bytes, by_mark);
-        use_hook(move || {
-            spawn(async move {
-                let mut picker = document::eval(&script);
-                let mut pieces = Pieces::default();
-                while let Ok(piece) = picker.recv::<Piece>().await {
-                    let Some(file) = pieces.take(piece) else {
-                        continue;
-                    };
-                    match on_pick {
-                        Some(on_pick) => on_pick.call(PickedFile {
-                            name: file.name,
-                            size: file.size,
-                            by_mark,
-                            file: Picked::Read(file.text),
-                        }),
-                        None => on_choose.call(file),
-                    }
+        let mut pieces = Pieces::default();
+        use_page_messages(
+            move || script,
+            move |piece: Piece| {
+                let Some(file) = pieces.take(piece) else {
+                    return;
+                };
+                match on_pick {
+                    Some(on_pick) => on_pick.call(PickedFile {
+                        name: file.name,
+                        size: file.size,
+                        by_mark,
+                        file: Picked::Read(file.text),
+                    }),
+                    None => on_choose.call(file),
                 }
-            })
-        });
+            },
+        );
         return rsx! {
             button { id, class: "btn btn-secondary btn-sm", r#type: "button",
                 Icon { name: icon }

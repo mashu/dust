@@ -74,23 +74,15 @@ fn stop_watching(slot: &str) -> String {
 fn listen_visibility(slot: &'static str, on_change: Callback<()>, hidden: bool) {
     // Tests have no page to run it on.
     #[cfg(not(test))]
-    {
-        use_hook(move || {
-            spawn(async move {
-                let mut page = document::eval(&visibility_script(slot));
-                while let Ok(now_hidden) = page.recv::<bool>().await {
-                    if now_hidden == hidden {
-                        on_change.call(());
-                    }
-                }
-            })
-        });
-        use_drop(move || {
-            dioxus::core::spawn_forever(async move {
-                let _ = document::eval(&stop_watching(slot)).await;
-            });
-        });
-    }
+    crate::page::use_page_listener(
+        move || visibility_script(slot),
+        move || stop_watching(slot),
+        move |now_hidden: bool| {
+            if now_hidden == hidden {
+                on_change.call(());
+            }
+        },
+    );
     // A test hides the page by hand ([`hide_page`]), or shows it again
     // ([`show_page`]), and each listener hears it for as long as its screen
     // is up.

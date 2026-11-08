@@ -174,6 +174,44 @@ pub(crate) fn scroll_to_top() {
     });
 }
 
+/// While the calling component is mounted, `heard` hears each message the
+/// page sends (`dioxus.send`) from the script `script` builds, until the
+/// page's end of it fails or a message does not read as a `T`.
+///
+/// The listening task builds the script and runs it when it first runs, and
+/// goes with the component. What the script leaves on the page stays there:
+/// [`use_page_listener`] takes it off again.
+pub fn use_page_messages<T: serde::de::DeserializeOwned + 'static>(
+    script: impl FnOnce() -> String + 'static,
+    mut heard: impl FnMut(T) + 'static,
+) {
+    dioxus::prelude::use_hook(move || {
+        dioxus::prelude::spawn(async move {
+            let mut page = dioxus::prelude::document::eval(&script());
+            while let Ok(message) = page.recv::<T>().await {
+                heard(message);
+            }
+        })
+    });
+}
+
+/// As [`use_page_messages`], and once the component goes, the script `stop`
+/// builds takes the listener off the page again, run from a task of the
+/// app's own, as the component's tasks go with it.
+#[cfg(not(test))]
+pub fn use_page_listener<T: serde::de::DeserializeOwned + 'static>(
+    script: impl FnOnce() -> String + 'static,
+    stop: impl FnOnce() -> String + 'static,
+    heard: impl FnMut(T) + 'static,
+) {
+    use_page_messages(script, heard);
+    dioxus::prelude::use_drop(move || {
+        dioxus::core::spawn_forever(async move {
+            let _ = dioxus::prelude::document::eval(&stop()).await;
+        });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{control_id, focus_end_script, focus_script, scroll_script};

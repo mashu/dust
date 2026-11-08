@@ -1071,19 +1071,11 @@ fn listen_page_paddles(keys: PaddleKeys) {
             let _ = document::eval(&script).await;
         });
     });
-    use_hook(move || {
-        spawn(async move {
-            let mut page = document::eval(PAGE_PADDLES_SCRIPT);
-            while let Ok((kind, key, code)) = page.recv::<(String, String, String)>().await {
-                page_key(keys, &kind, &key, &code);
-            }
-        })
-    });
-    use_drop(|| {
-        dioxus::core::spawn_forever(async {
-            let _ = document::eval(STOP_PAGE_PADDLES).await;
-        });
-    });
+    crate::page::use_page_listener(
+        || PAGE_PADDLES_SCRIPT.to_string(),
+        || STOP_PAGE_PADDLES.to_string(),
+        move |(kind, key, code): (String, String, String)| page_key(keys, &kind, &key, &code),
+    );
 }
 
 #[cfg(not(all(
