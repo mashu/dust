@@ -2,7 +2,8 @@
 //! works them. `docs/contest-mode.md` is the plan it is built from.
 //!
 //! - [`crate::rulebook`]: the contests and their rules, exchange fields,
-//!   caller odds, serials and data a run reads, re-exported here.
+//!   caller odds, serials and data a run reads; what lib.rs exports of
+//!   them is re-exported here.
 //! - [`parse`]: how what you type is read.
 //! - [`esm`]: what Enter sends next (Enter Sends Message).
 //! - [`message`]: the parts a message you send is made of.
