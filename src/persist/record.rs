@@ -214,7 +214,7 @@ struct KeyOnly {
 }
 
 /// The key of the session `json` holds, read without the rest of it.
-pub(super) fn key_of(json: &str) -> Option<SessionKey> {
+pub fn key_of(json: &str) -> Option<SessionKey> {
     serde_json::from_str::<KeyOnly>(json)
         .ok()
         .map(|key| SessionKey::new(key.timestamp, key.date))

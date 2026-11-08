@@ -34,7 +34,7 @@ use crate::history::{StoredHistory, settle_or_spawn};
 use crate::persist::backup::{
     Backup, BackupFile, Filled, NotSaved, backup_name, filled_in, merge_sessions,
 };
-use crate::persist::record::{HistoryChange, HistoryLoad, Record, RecordId, read_record};
+use crate::persist::record::{HistoryChange, HistoryLoad, Record, RecordId, key_of, read_record};
 use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
 };
@@ -1410,7 +1410,13 @@ impl AppCtx {
             for record in read.into_iter().flatten() {
                 match read_record(&record.json) {
                     Some(session) => reads_now.push((record.id, session)),
-                    None => beside.later.extend(finished_as(&record.json)),
+                    // When, and on what day, the session a record holds
+                    // says it finished, where the record is JSON that says
+                    // so, though this build cannot read it as a session:
+                    // one a later build stored, most likely. A damaged
+                    // record says nothing, but for one damaged so that it
+                    // is JSON still and says both.
+                    None => beside.later.extend(key_of(&record.json)),
                 }
             }
             beside.read_now = reads_now.len();
@@ -1969,22 +1975,6 @@ struct Beside {
     later: HashSet<SessionKey>,
     /// How many records here that could not be read before read now.
     read_now: usize,
-}
-
-/// When, and on what day, the session a record holds says it finished,
-/// where the record is JSON that says so, though this build cannot read it
-/// as a session: one a later build stored, most likely
-/// ([`AppCtx::restore_beside`]). A damaged record says nothing, but for
-/// one damaged so that it is JSON still and says both.
-fn finished_as(json: &str) -> Option<SessionKey> {
-    #[derive(serde::Deserialize)]
-    struct Finished {
-        timestamp: u64,
-        date: String,
-    }
-    serde_json::from_str::<Finished>(json)
-        .ok()
-        .map(|finished| SessionKey::new(finished.timestamp, finished.date))
 }
 
 /// What to say of the sessions of a backup a restore left out, `count` of
