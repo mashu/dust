@@ -1449,13 +1449,12 @@ mod tests {
                 amplitude * (TAU * 600.0 * i as f64 / f64::from(SR)).sin()
             }
         };
-        let lag = agc_lookahead_samples(SR);
-        let mut sent = vec![0.0; lag];
+        let mut sent = DelayLine::new(agc_lookahead_samples(SR));
         let mut loudest = 0.0f64;
         for i in 0..seconds(0.5) {
             let now = tone(i);
             let gain = agc.next_gain(now);
-            let due = std::mem::replace(&mut sent[i % lag], now);
+            let due = sent.push(now);
             loudest = loudest.max((due * gain).abs());
         }
         let held = amplitude * db_to_gain(agc_law_db(over_db));

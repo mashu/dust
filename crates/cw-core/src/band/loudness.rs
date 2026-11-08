@@ -15,6 +15,7 @@
 
 use super::agc::{AGC_MAX_DUCK_DB, Agc, agc_lookahead_samples};
 use super::calibration::{heard_floor_rms, noise_level};
+use super::delay::DelayLine;
 use super::dsp::db_to_gain;
 use super::filter::{FilterDesign, ReceiverFilter};
 use super::knee::agc_knee;
@@ -256,16 +257,14 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, c
     let sr = f64::from(LISTEN_RATE);
     let mut filter = ReceiverFilter::new(LISTEN_RATE, receiver);
     let lookahead = agc_lookahead_samples(LISTEN_RATE);
-    let mut waiting = vec![0.0; lookahead];
-    let mut next = 0;
+    let mut waiting = DelayLine::new(lookahead);
     let mut loudest = 0.0f64;
     let mut at = 0usize;
     let mut playing = false;
     let mut listen = |sample: f64| {
         let heard = filter.process(sample);
         let gain = agc.next_gain(heard);
-        let due = std::mem::replace(&mut waiting[next], heard);
-        next = (next + 1) % waiting.len();
+        let due = waiting.push(heard);
         playing |= due.abs() > STATION_OUT_OF_THE_HISS * crest;
         if playing {
             loudest = loudest.max((due.abs() + crest) * gain);
