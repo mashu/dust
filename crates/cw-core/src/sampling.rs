@@ -2,8 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::alignment::CopyTally;
-use crate::auto_level::judged_copy;
+use crate::alignment::{CopyTally, judged_copy};
 use crate::belief::{FADE_HORIZON, SESSION_FADE, sessions_faded};
 use crate::callsign::{CallSpec, GeneratedCall, generate_call};
 use crate::contest::CallSource;

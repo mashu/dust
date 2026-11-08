@@ -42,7 +42,7 @@
 use std::sync::OnceLock;
 
 use crate::aim::{self, Leaning, Spread};
-use crate::alignment::{CopyTally, align_group, align_holding};
+use crate::alignment::{align_group, speed_tally};
 use crate::belief::{
     Estimate, EstimatePoint, FADE_HORIZON, FirstGuess, GridBelief, Tally, joined, pick_index,
     range_of, sessions_in_order,
@@ -149,73 +149,6 @@ fn log_chance_table() -> &'static [[f64; 2]] {
             })
             .collect()
     })
-}
-
-/// The characters of a group a faster or slower send could have changed,
-/// each copied right or not, and those typed that were never sent: what a
-/// group says about speed, and what auto level judges while group size
-/// adapts.
-///
-/// Everything up to the last character typed counts, misheard, dropped or
-/// added. A group can also end early, with characters lost off its end, and
-/// that happens two ways: the group was longer than you could hold, or copy
-/// broke off at a character you did not recognise and the rest went by while
-/// you looked for it. One group cannot tell which. The rest of a lost end is
-/// a consequence either way, and is the length's alone. The character copy
-/// broke off at, the first one lost, counts as a miss unless adaptive group
-/// size can still answer for it: `length_floor` is the shortest group it
-/// draws while it adapts, and a group longer than that can be sent shorter.
-/// A group already as short as the range allows, or one whose length does
-/// not adapt, has nothing else to answer for its break. Left out, a learner
-/// who stops typing at the first miss only ever showed the speed characters
-/// copied right, and drove it to the top of the range while copying almost
-/// nothing.
-///
-/// A group with nothing typed speaks of no character: neither what was
-/// recognised nor where copy broke. While group size adapts it is the
-/// length's alone, at the shortest length too: there a blank is as often a
-/// slip as a send too fast, and a send too fast shows in what does get
-/// typed, now that the character copy broke off at counts. Where the length
-/// does not adapt, nothing else learns from it, and it counts as its first
-/// character missed.
-///
-/// Nothing sent, or a blank the length answers for: nothing to count.
-pub(crate) fn speed_tally(
-    sent: &str,
-    received: &str,
-    length_floor: Option<usize>,
-) -> Option<CopyTally> {
-    let sent_chars: Vec<char> = sent.chars().map(|c| c.to_ascii_uppercase()).collect();
-    if sent_chars.is_empty() {
-        return None;
-    }
-    let length_answers = length_floor.is_some_and(|floor| sent_chars.len() > floor);
-    let mut tally = CopyTally::default();
-    let lost = if received.trim().is_empty() {
-        if length_floor.is_some() {
-            return None;
-        }
-        sent_chars.len()
-    } else {
-        let (held, lost) = align_holding(sent, received);
-        for pair in held {
-            match (pair.sent_char, pair.received_char) {
-                (Some(ch), _) => {
-                    let entry = tally.sent.entry(ch).or_default();
-                    entry.total += 1;
-                    entry.correct += u32::from(pair.matched);
-                }
-                (None, Some(ch)) => *tally.inserted.entry(ch).or_default() += 1,
-                (None, None) => {}
-            }
-        }
-        lost
-    };
-    if lost > 0 && !length_answers {
-        let broke_at = sent_chars[sent_chars.len() - lost];
-        tally.sent.entry(broke_at).or_default().total += 1;
-    }
-    (!tally.sent.is_empty() || !tally.inserted.is_empty()).then_some(tally)
 }
 
 /// What a group says about speed ([`speed_tally`]): of the characters a

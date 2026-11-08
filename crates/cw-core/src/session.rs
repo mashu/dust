@@ -8,8 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use crate::alignment::{CopyTally, LetterAccuracy, SKIPPED};
-use crate::auto_level::judged_copy;
+use crate::alignment::{CopyTally, LetterAccuracy, SKIPPED, judged_copy};
 use crate::contest::{CONTEST_MARK, ContestLog, PauseWhy};
 use crate::level::LEVEL_MIN;
 use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};

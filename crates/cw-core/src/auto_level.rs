@@ -34,7 +34,7 @@
 
 use std::borrow::Cow;
 
-use crate::alignment::CopyTally;
+use crate::alignment::{CopyTally, judged_copy};
 use crate::sampling::{adaptive_bounds, adaptive_speed_path, length_floor};
 use crate::score::copy_speed;
 use crate::session::{GroupResult, GroupSession, SessionResult};
@@ -42,7 +42,6 @@ use crate::settings::{
     ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, CharSetMode, LevelAxis, MixedAutoLevelAxis,
     TrainingSettings,
 };
-use crate::speed::speed_tally;
 
 /// How near an end of the speed range, in log speed, a group is sent for it
 /// to count as sent at that end: within about 5%. Pressed against an end,
@@ -173,35 +172,6 @@ fn candidate_axes(
         deserving
     };
     chosen.into_iter().map(LevelAxis::from).collect()
-}
-
-/// One group's characters as they are judged: every one sent and every one
-/// typed that was not, as the session scored them, unless adaptive group
-/// size drew its length, `length_floor` the shortest it draws. Then its
-/// lost end is left out where the length answers for it, and what is
-/// judged is what the speed could have changed ([`speed_tally`]), the same
-/// characters adaptive speed learns from; a group with nothing typed counts
-/// as its first character missed.
-///
-/// What auto level judges a session by, and what each character's own
-/// tally counts ([`SessionResult::letter_accuracy`]): a character lost off
-/// the end of a group sent long on purpose is the length's, not a miss of
-/// that character.
-pub(crate) fn judged_copy(sent: &str, received: &str, length_floor: Option<usize>) -> CopyTally {
-    let Some(floor) = length_floor else {
-        return CopyTally::of(sent, received);
-    };
-    if received.trim().is_empty() {
-        // Nothing typed reached nothing, which is no session to level up
-        // on, whatever answers for it: its first character missed.
-        let mut tally = CopyTally::default();
-        if let Some(first) = sent.chars().next() {
-            let entry = tally.sent.entry(first.to_ascii_uppercase()).or_default();
-            entry.total += 1;
-        }
-        return tally;
-    }
-    speed_tally(sent, received, Some(floor)).unwrap_or_default()
 }
 
 /// What auto level judges `groups` of a session by under `settings`
