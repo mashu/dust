@@ -40,7 +40,6 @@ mod speed;
 mod stats;
 mod streak;
 mod timing;
-mod words;
 
 pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, SKIPPED, align_group};
 pub use auto_level::{
@@ -123,10 +122,11 @@ pub use settings::{
     MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
     PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, QSB_DEPTH_MAX_DB,
     QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RangeValues,
-    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
-    STEEPNESS_MIN_MS, SettingsSection, SpeedPath, StyleChoice, TrainingSettings, VOLUME_MAX,
-    VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section,
-    class_reading, power_reading, section_code, state_code,
+    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STARTER_WORDS, STATIONS_MAX, STATIONS_MIN,
+    STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, SpeedPath, StyleChoice, TrainingSettings,
+    VOLUME_MAX, VOLUME_MIN, WORD_LIST_MAX, WPM_MAX, WPM_MIN, WordList, adaptive_speed_on,
+    adapts_group_size, adapts_speed, aim_section, class_reading, clean_word, power_reading,
+    section_code, state_code,
 };
 pub use span::LengthForecast;
 pub use speed::SpeedForecast;
@@ -146,4 +146,3 @@ pub use timing::{
     StationVoice, ToneEvent, Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm,
     edge_gain, envelope_shape, plan_morse_playback_for, plan_transmission, resolve_station,
 };
-pub use words::{STARTER_WORDS, WORD_LIST_MAX, WordList, clean_word};

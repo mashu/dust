@@ -29,8 +29,7 @@ impl TrainingSettings {
         let c = &mut self.curriculum;
         c.custom_sequence = Self::unique_alphabet(&c.custom_sequence);
         c.kept_sequence = Self::unique_alphabet(&c.kept_sequence);
-        c.word_list =
-            crate::words::WordList::from_words(c.word_list.iter().map(String::as_str)).words;
+        c.word_list = super::WordList::from_words(c.word_list.iter().map(String::as_str)).words;
         c.level = c.level.clamp(LEVEL_MIN, LETTER_LEVEL_CEILING);
         c.digits_level = c.digits_level.clamp(LEVEL_MIN, MAX_DIGITS_LEVEL);
         c.callsign_level = c.callsign_level.clamp(CALLSIGN_TIER_MIN, CALLSIGN_TIER_MAX);

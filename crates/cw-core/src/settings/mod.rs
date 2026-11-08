@@ -738,6 +738,7 @@ mod ranges;
 mod reset;
 mod save;
 mod sequence;
+mod words;
 
 pub use adapt::{SpeedPath, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section};
 pub(crate) use adapt::{adaptive_bounds, adaptive_speed_path, group_size_bounds, length_floor};
@@ -750,6 +751,7 @@ pub use contest_preset::ContestPreset;
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
 pub use curriculum::LevelAxis;
 pub use experience::Experience;
+pub use words::{STARTER_WORDS, WORD_LIST_MAX, WordList, clean_word};
 
 #[cfg(test)]
 mod tests {
