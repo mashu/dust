@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::contest::HUNTER_DX_PERCENT;
+
 use super::{CharSetMode, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
 use crate::callsign::{CallSpec, parse_callsign};
 use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
@@ -318,10 +320,6 @@ fn forgiving_wpm<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u3
 fn forgiving_sending<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
     forgiving_number(deserializer, |db| db as i32, MY_SENDING_DEFAULT_DB)
 }
-
-/// How many POTA hunters are DX until you set it, in percent: a choice,
-/// not a count, so that a run of a few minutes has some to copy.
-pub const HUNTER_DX_PERCENT: u32 = 25;
 
 /// Where you put the knob in a contest's shape of caller styles, across
 /// and down from the middle, and the replies, by their corners from the top

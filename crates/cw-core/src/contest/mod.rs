@@ -65,7 +65,7 @@ pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
     RowStatus, ShownText,
 };
-pub use odds::{CallerOdds, Odd, OddsCard};
+pub use odds::{CallerOdds, HUNTER_DX_PERCENT, Odd, OddsCard};
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub use place::filter_capacity;
 #[cfg(test)]
