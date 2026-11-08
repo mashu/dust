@@ -401,18 +401,20 @@ Reproduce with `cargo test -p cw-core --release auto_level_simulation --
 
 - `speed.rs`: `SpeedBelief` (the speed's grid and curve on a `GridBelief`:
   history replay, learning from each group, `draw_speed`, `estimate`, and for
-  the Sampling card `drawn_near` and `right_at`), `speed_tally` and
-  `speed_evidence` (which characters count against the speed: the character
-  copy broke off at too, unless adaptive group size can still send the group
-  shorter, which the belief knows as its `length_floor`), `whole_evidence` (a
-  contest's call or number, every character of it counting, those lost off
-  its end too), and `SpeedPath` (the line through the speed settings).
+  the Sampling card `drawn_near` and `right_at`), `speed_evidence` (which
+  characters count against the speed: the character copy broke off at too,
+  unless adaptive group size can still send the group shorter, which the
+  belief knows as its `length_floor`), and `whole_evidence` (a contest's
+  call or number, every character of it counting, those lost off its end
+  too).
 - `belief.rs` and `aim.rs`: the grid posterior and the aim found by
   bisection, shared with the span. The speed's `Leaning` keeps its wider
   share around the aim (`Spread::Around`).
-- `alignment.rs`: `align_holding`, the alignment that loses the most off the
-  end, which `speed_evidence` reads. It shares its table of edits with
-  `align_group`.
+- `alignment.rs`: `speed_tally`, the tally `speed_evidence` reads, on
+  `align_holding`, the alignment that loses the most off the end, which
+  shares its table of edits with `align_group`; and `judged_copy`, the
+  characters a group is judged by, which each character's own tally reads
+  too (`SessionResult::letter_accuracy`).
 - `sampling.rs`: `Sampler` holds a `SpeedBelief` beside its `SpanBelief`.
   `next_speed` draws a speed only when `adapts_speed` allows: the switch is
   on and the speed settings leave more than one speed. `learn` updates it
@@ -432,13 +434,18 @@ Reproduce with `cargo test -p cw-core --release auto_level_simulation --
 - `settings/mod.rs`: `adaptive_speed` (default `false`) in the Speed section;
   `Aim::chars_right` for the character targets. A contest's callers have a
   switch of their own in the same section, `contestAdaptSpeed` (default
-  `true`, `settings/contest.rs`), which `adaptive_speed_on` reads in
-  Contest mode, for `adaptive_speed_path` and the Speed card alike.
+  `true`, `settings/contest.rs`), which `adaptive_speed_on`
+  (`settings/adapt.rs`) reads in Contest mode, for `adaptive_speed_path` and
+  the Speed card alike.
+- `settings/adapt.rs`: what the settings leave to adapt. `adapts_speed`,
+  `adaptive_speed_on` (the mode's switch, room or not) and
+  `adaptive_speed_path`, the line adaptive speed moves along (`SpeedPath`,
+  through the speed settings); `adapts_group_size` and `adaptive_bounds`,
+  whether group size adapts and its range, and `length_floor`, the shortest
+  group it draws; and `aim_section`, the card that shows the aim.
 - `auto_level.rs`: `verdict`, how a session counts towards a level while
-  either feature steers, `judged_copy`, the characters a group is judged
-  by, which each character's own tally reads too
-  (`SessionResult::letter_accuracy`), and `level_up_line`, where the
-  accuracy chart marks the threshold.
+  either feature steers, and `level_up_line`, where the accuracy chart
+  marks the threshold.
   `learner_sim.rs` holds the simulated learners and the table above.
 - `stats.rs`: `speed_history`, and `speed_forecast` for the Sampling card:
   round speeds across the range, with the chance of each and the share of
