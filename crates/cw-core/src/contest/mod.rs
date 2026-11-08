@@ -47,9 +47,7 @@ pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 pub(crate) use caller::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
-pub use esm::{
-    EntryField, Esm, Fields, MessagePart, QsoState, esm, loggable, message_text, space_to_call,
-};
+pub use esm::{EntryField, Esm, Fields, QsoState, esm, loggable, message_text, space_to_call};
 pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
     RowStatus, ShownText,
@@ -98,4 +96,26 @@ pub trait CallSource {
     fn next_speed(&mut self, _settings: &TrainingSettings) -> Option<(f64, f64)> {
         None
     }
+}
+
+/// One part of a message you send.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MessagePart {
+    Cq,
+    /// Their call as typed: whole, or a partial that asks (`K5?`).
+    HisCall(String),
+    /// Your exchange.
+    Exchange,
+    /// `?`: send it again.
+    Again,
+    /// TU, which ends the QSO.
+    Tu,
+    /// Your call alone.
+    MyCall,
+    /// `QSO B4`: worked before.
+    B4,
+    /// `NIL`: not in your log.
+    Nil,
+    /// `NR?`, or the contest's own word for it: send your exchange again.
+    NrQuery,
 }

@@ -31,8 +31,7 @@ use super::clock::RunClock;
 use super::data::places::home_country;
 use super::data::zones::home_continent;
 use super::esm::{
-    EntryField, Fields, MessagePart, QsoState, call_copied, esm, loggable, message_text,
-    unheard_hint,
+    EntryField, Fields, QsoState, call_copied, esm, loggable, message_text, unheard_hint,
 };
 use super::exchange::Field;
 use super::parse::{Reading, normalize_call, parse_exchange};
@@ -44,7 +43,7 @@ use super::score::rate_at;
 use super::turn::{
     Fade, Segment, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
 };
-use super::{CallSource, CallerHabits, MS_PER_MINUTE, RunStyle};
+use super::{CallSource, CallerHabits, MS_PER_MINUTE, MessagePart, RunStyle};
 use crate::alignment::CopyTally;
 use crate::band::Qsb;
 use crate::callsign::parse_callsign;
