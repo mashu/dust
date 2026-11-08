@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use super::fake::{FakeAuth, FakeDrive};
@@ -24,7 +24,10 @@ fn now<T>(pending: impl Future<Output = T>) -> T {
 }
 
 fn drive(fake: &Rc<FakeDrive>, auth: &Rc<FakeAuth>) -> Rc<Drive> {
-    Drive::new(Rc::new(Rc::clone(fake)), Rc::clone(auth) as Rc<dyn Auth>)
+    Drive::new(
+        Rc::new(Rc::clone(fake)),
+        Counted::of(Rc::clone(auth) as Rc<dyn Auth>),
+    )
 }
 
 /// Files made, listed a page at a time, read back and changed, then
@@ -83,6 +86,80 @@ fn a_refused_token_is_asked_for_afresh_once() {
     auth.signed_in.set(false);
     assert_eq!(now(drive.list()), Err(RemoteError::SignIn));
     assert_eq!(auth.asked.get(), 0, "the user is never asked from here");
+}
+
+/// Two accounts' drives behind Drive's one API, each request answered by
+/// the drive of the account whose token it bears; and what happens as the
+/// first request is under way, `meanwhile`.
+struct Accounts {
+    first: Rc<FakeDrive>,
+    second: Rc<FakeDrive>,
+    meanwhile: RefCell<Option<Box<dyn FnOnce()>>>,
+}
+
+impl Http for Accounts {
+    fn send(&self, request: Request) -> Pending<Result<Response, String>> {
+        if let Some(meanwhile) = self.meanwhile.borrow_mut().take() {
+            meanwhile();
+        }
+        let token = request
+            .header_of("Authorization")
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_string();
+        if self.second.tokens.borrow().contains(&token) {
+            self.second.send(request)
+        } else {
+            self.first.send(request)
+        }
+    }
+}
+
+/// A request begun with one sign-in asks nothing more once sync is turned
+/// off and on anew with another account as it is under way: neither a
+/// token of the first refused and asked for afresh, nor the next page of a
+/// listing, goes with the other account's token, to its drive, sealed with
+/// a key its sync does not go by. Each used to.
+#[test]
+fn a_request_under_way_as_another_account_signs_in_asks_nothing_of_its_drive() {
+    for listing in [false, true] {
+        let first = FakeDrive::taking("ours");
+        let second = FakeDrive::taking("theirs");
+        let auth = FakeAuth::signed_in(&[if listing { "ours" } else { "spent" }, "ours"]);
+        let signed_in = Counted::of(Rc::clone(&auth) as Rc<dyn Auth>);
+        let (switching, app) = (Rc::clone(&auth), Rc::clone(&signed_in));
+        let accounts = Rc::new(Accounts {
+            first: Rc::clone(&first),
+            second: Rc::clone(&second),
+            // Sync turned off, as the app turns it off, and on anew there
+            // with another account.
+            meanwhile: RefCell::new(Some(Box::new(move || {
+                app.forget();
+                *switching.tokens.borrow_mut() = vec!["theirs".into()];
+                now(app.sign_in()).expect("signed in");
+            }))),
+        });
+        let drive = Drive::new(accounts, signed_in);
+        if listing {
+            let ours = self::drive(&first, &FakeAuth::signed_in(&["ours"]));
+            for name in ["dust-p-1", "dust-p-2"] {
+                now(ours.create(name, vec![1])).expect("made");
+            }
+            first.page.set(Some(1));
+            assert_eq!(now(drive.list()), Err(RemoteError::SignIn));
+        } else {
+            assert_eq!(
+                now(drive.create("dust-p-1", vec![1])),
+                Err(RemoteError::SignIn)
+            );
+        }
+        assert!(
+            second.asked.borrow().is_empty(),
+            "{:?}",
+            second.asked.borrow()
+        );
+        assert!(second.names().is_empty());
+    }
 }
 
 /// What Drive says of a failure is read as sync reads it.

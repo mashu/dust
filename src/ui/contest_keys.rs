@@ -23,6 +23,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::{change_speed, pause_run, press_key, resume_run};
 use crate::session_runtime::finish_run;
 use crate::state::AppCtx;
+use crate::ui::training::INPUT_METHOD_KEY_CODE;
 
 /// How far − / + move your speed, in WPM: MorseRunner's step.
 pub const SPEED_STEP_WPM: i32 = 2;
@@ -152,10 +153,14 @@ fn listed(kind: fn(Known) -> Option<&'static str>) -> String {
 /// the browser and tells the run, and locks Esc in fullscreen where the
 /// browser can. A key held down is kept from the browser too, but told
 /// once. Ctrl and the Command key make a shortcut of any other key, and
-/// Shift of any but a character, so those are passed by. A listener left by
-/// a run before is taken off first. `by_place`, a character typed on the
-/// keys the paddles sit on is the paddles' (a German keyboard's `+`), but
-/// in a field they key nothing into.
+/// Shift of any but a character, so those are passed by. So is a key the
+/// input method took: one typed while it composes, and the one that ends a
+/// composition, which WebKit, in Safari, on an iPhone and on a Mac, hands
+/// over once the composition is over, not as composing, but with the input
+/// method's key code ([`INPUT_METHOD_KEY_CODE`]). A listener left by a run
+/// before is taken off first. `by_place`, a character typed on the keys
+/// the paddles sit on is the paddles' (a German keyboard's `+`), but in a
+/// field they key nothing into.
 fn keys_script(by_place: bool) -> String {
     format!(
         r#"{STOP_LISTENING}
@@ -180,7 +185,7 @@ const name = (e) => {{
     return !e.shiftKey && alone.has(e.code) ? e.code : null;
 }};
 const heard = (e) => {{
-    if (e.metaKey || e.isComposing) {{
+    if (e.metaKey || e.isComposing || e.keyCode === {INPUT_METHOD_KEY_CODE}) {{
         return;
     }}
     const key = name(e);

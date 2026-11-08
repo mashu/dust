@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use cw_core::SessionResult;
+use dioxus::core::{Runtime, ScopeId};
 
 use crate::persist::SessionKey;
 use crate::persist::record::{HistoryLoad, Pending, Record, RecordId, records_for_blob};
@@ -180,8 +181,24 @@ impl StoredHistory {
         self.unread.insert(id);
     }
 
-    /// How many changes the history has had.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The records `ids`, of those this build could not read, are no
+    /// longer stored.
+    pub fn forget_unread(&mut self, ids: &[RecordId]) {
+        for id in ids {
+            self.unread.remove(id);
+        }
+    }
+
+    /// The record `id`, which this build could not read, reads after all,
+    /// as one a moment's failure kept from being read does: `session` goes
+    /// in its place.
+    pub fn read_after_all(&mut self, id: RecordId, session: SessionResult) {
+        self.unread.remove(&id);
+        self.insert(id, session);
+    }
+
+    /// How many changes the history has had: one more for every session
+    /// put in or taken out, and for nothing else written of it.
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -221,10 +238,12 @@ pub fn settle_or_spawn<T: 'static>(mut pending: Pending<T>, then: impl FnOnce(T)
                 going: Some(Box::pin(async move { then(pending.await) })),
                 task: None,
             }));
-            WAITING.with(|all| all.borrow_mut().push(waiting.clone()));
+            // In the app's runtime, which its task is spawned in too.
+            let list = Waitlist::of(&Runtime::current());
+            list.0.borrow_mut().push(waiting.clone());
             dioxus::core::spawn_forever(std::future::poll_fn(move |asked| {
                 waiting.borrow_mut().task = Some(asked.waker().clone());
-                look(&waiting, asked)
+                look(&list, &waiting, asked)
             }));
         }
     }
@@ -240,14 +259,31 @@ struct Waiting {
     task: Option<Waker>,
 }
 
-thread_local! {
-    /// Every change still on its way, in the order it was asked for.
-    static WAITING: RefCell<Vec<Rc<RefCell<Waiting>>>> = const { RefCell::new(Vec::new()) };
+/// Every change still on its way, in the order it was asked for: kept in
+/// the app's runtime, at its root, not by the thread that asked. On
+/// Android the webview hands each tap to the app on a thread of its own,
+/// while the app's tasks run on the event loop's (src/time.rs): a list each
+/// thread kept for itself had a change asked for in a tap put on the tap's
+/// thread's list and taken off the event loop's, which never held it, so it
+/// stayed for good, out of [`settle_waiting`]'s sight. Dioxus touches its
+/// runtime from either thread only while it holds a lock of its own, and
+/// this list is touched only from what runs in that runtime, so the two
+/// threads reach it one at a time.
+#[derive(Clone, Default)]
+struct Waitlist(Rc<RefCell<Vec<Rc<RefCell<Waiting>>>>>);
+
+impl Waitlist {
+    /// `runtime`'s list, made the first time it is asked for.
+    fn of(runtime: &Runtime) -> Self {
+        runtime
+            .has_context::<Self>(ScopeId::ROOT)
+            .unwrap_or_else(|| runtime.provide_context(ScopeId::ROOT, Self::default()))
+    }
 }
 
 /// Look whether the change `waiting` waits on is made, `asked` to be woken
-/// once it is, and if it is, do what follows it.
-fn look(waiting: &Rc<RefCell<Waiting>>, asked: &mut Context) -> Poll<()> {
+/// once it is, and if it is, do what follows it, and take it off `list`.
+fn look(list: &Waitlist, waiting: &Rc<RefCell<Waiting>>, asked: &mut Context) -> Poll<()> {
     let going = waiting.borrow_mut().going.take();
     let Some(mut going) = going else {
         return Poll::Ready(());
@@ -258,21 +294,28 @@ fn look(waiting: &Rc<RefCell<Waiting>>, asked: &mut Context) -> Poll<()> {
         waiting.borrow_mut().going = Some(going);
         return Poll::Pending;
     }
-    WAITING.with(|all| all.borrow_mut().retain(|held| !Rc::ptr_eq(held, waiting)));
+    list.0
+        .borrow_mut()
+        .retain(|held| !Rc::ptr_eq(held, waiting));
     Poll::Ready(())
 }
 
-/// Do now what follows each change the store has made, of those asked for
-/// before, rather than when the app's tasks come round to it: as the app
-/// closes, they may never. Each is done once, here or by its task.
+/// Do now what follows each change the store has made, of those the app
+/// whose runtime this runs in asked for before, rather than when its tasks
+/// come round to it: as the app closes, they may never. Each is done once,
+/// here or by its task.
 pub fn settle_waiting() {
-    let waiting = WAITING.with(|all| all.borrow().clone());
+    let Some(runtime) = Runtime::try_current() else {
+        return;
+    };
+    let list = Waitlist::of(&runtime);
+    let waiting = list.0.borrow().clone();
     for one in &waiting {
         // Looked at as its task would look, so that task is the one woken
         // once a change still on its way is made.
         let task = one.borrow().task.clone();
         let waker = task.unwrap_or_else(|| Waker::noop().clone());
-        let _ = look(one, &mut Context::from_waker(&waker));
+        let _ = look(&list, one, &mut Context::from_waker(&waker));
     }
 }
 
@@ -443,6 +486,36 @@ mod tests {
         assert_eq!(looks.get(), 2);
     }
 
+    /// What follows a change waits in the runtime of the app that asked for
+    /// it, not on the thread it was asked on: another app closing on that
+    /// thread settles none of it, and the app itself settles it, whichever
+    /// of its threads asked. On Android a tap is handed to the app on a
+    /// thread of the webview's, and the app's tasks run on the event loop's:
+    /// a list each thread kept had a change asked for in a tap put on the
+    /// tap's thread's, and taken off the event loop's, which never held it.
+    #[test]
+    fn what_follows_a_change_waits_in_the_app_that_asked_for_it() {
+        let (ours, theirs) = (VirtualDom::new(|| rsx! {}), VirtualDom::new(|| rsx! {}));
+        let got: Rc<RefCell<Vec<u32>>> = Rc::default();
+        let made = Rc::new(Cell::new(false));
+        let (into, done) = (got.clone(), made.clone());
+        ours.in_scope(ScopeId::ROOT, move || {
+            let pending: Pending<u32> = Box::pin(std::future::poll_fn(move |_| {
+                if done.get() {
+                    Poll::Ready(5)
+                } else {
+                    Poll::Pending
+                }
+            }));
+            settle_or_spawn(pending, move |value| into.borrow_mut().push(value));
+        });
+        made.set(true);
+        theirs.in_runtime(settle_waiting);
+        assert!(got.borrow().is_empty(), "another app's to settle");
+        ours.in_runtime(settle_waiting);
+        assert_eq!(*got.borrow(), [5], "its own");
+    }
+
     /// What follows a change made since it was asked for is done there and
     /// then, as the app closes, rather than by its task, which the app's
     /// going may cut short; and once, whichever comes to it first. One
@@ -467,18 +540,20 @@ mod tests {
                 settle_or_spawn(pending, move |value| into.borrow_mut().push(value));
             }
         });
-        // The tasks have looked, and wait.
+        // The tasks have looked, and wait. The app settles them as it
+        // closes, in its own runtime.
         app.process_events();
-        settle_waiting();
+        app.in_runtime(settle_waiting);
         assert!(got.borrow().is_empty(), "nothing made yet");
         made.set(true);
-        settle_waiting();
+        app.in_runtime(settle_waiting);
         assert_eq!(*got.borrow(), [1, 2], "in the order asked");
         if let Some(waker) = later.borrow_mut().take() {
             waker.wake();
         }
         app.process_events();
         assert_eq!(*got.borrow(), [1, 2], "and once");
-        assert!(WAITING.with(|all| all.borrow().is_empty()));
+        let left = app.in_runtime(|| Waitlist::of(&Runtime::current()).0.borrow().len());
+        assert_eq!(left, 0, "none left waiting");
     }
 }

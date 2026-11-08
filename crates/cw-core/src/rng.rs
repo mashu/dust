@@ -29,13 +29,21 @@ pub trait Rng {
         lo + self.f64() * (hi - lo)
     }
 
+    /// A whole number from `min` to `max`, either way round, each end in
+    /// the draw where it is whole. A range too narrow to hold a whole number
+    /// gives its lower end, as a range of one value gives that value.
     fn pick_in_range_inclusive_int(&mut self, min: f64, max: f64) -> f64 {
         if (min - max).abs() < f64::EPSILON {
             return min;
         }
         let lo = min.min(max);
         let hi = min.max(max);
-        (lo + self.f64() * (hi - lo + 1.0)).floor().min(hi.floor())
+        let draw = self.f64();
+        let (first, last) = (lo.ceil(), hi.floor());
+        if first > last {
+            return lo;
+        }
+        (first + draw * (last - first + 1.0)).floor().min(last)
     }
 
     /// A standard normal deviate, by Box–Muller. Straight-line: no draw is
@@ -51,12 +59,25 @@ pub trait Rng {
 
     /// A normal deviate about `mean` that strays at most `limit` either
     /// side: half the limit is one standard deviation, and the tails are
-    /// cut at the whole of it, so most draws sit near the mean.
+    /// cut at the whole of it, so most draws sit near the mean. A limit
+    /// that is no distance, below nothing or no number at all, lets it
+    /// stray nowhere, and a mean that is no number is given back as it is:
+    /// neither reaches the cut, which panics on its ends the wrong way round
+    /// or no number. The draws are taken all the same.
     fn normal_within(&mut self, mean: f64, limit: f64) -> f64
     where
         Self: Sized,
     {
-        (mean + self.normal() * limit / 2.0).clamp(mean - limit, mean + limit)
+        let deviate = self.normal();
+        if !mean.is_finite() {
+            return mean;
+        }
+        let limit = if limit.is_finite() {
+            limit.max(0.0)
+        } else {
+            0.0
+        };
+        (mean + deviate * limit / 2.0).clamp(mean - limit, mean + limit)
     }
 
     /// A Poisson count with mean `mean`, by multiplying uniforms (Knuth),
@@ -231,6 +252,37 @@ mod tests {
             "{wide} beyond half the limit"
         );
         assert_eq!(Fixed(0.5).normal_within(4.0, 0.0), 4.0);
+    }
+
+    /// A limit that is no distance, below nothing or no number at all, lets
+    /// a draw stray nowhere, and a mean that is no number has nowhere to
+    /// stray from: `f64::clamp` panicked on the bounds either made.
+    #[test]
+    fn a_normal_draw_within_no_distance_stays_where_it_is() {
+        let mut rng = SplitMix64::new(3);
+        for limit in [-2.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(rng.normal_within(4.0, limit), 4.0, "{limit}");
+        }
+        assert!(rng.normal_within(f64::NAN, 2.0).is_nan());
+        let endless = rng.normal_within(f64::INFINITY, f64::INFINITY);
+        assert_eq!(endless, f64::INFINITY);
+    }
+
+    /// A whole number is drawn from inside its range however its ends are
+    /// written: ends with a fraction drew below the lower one, 400 for a
+    /// range from 400.5. A range too narrow to hold a whole number gives its
+    /// lower end, as a range of one value gives that value.
+    #[test]
+    fn integer_picks_stay_inside_a_range_with_fractional_ends() {
+        for (draw, expected) in [(0.0, 401.0), (0.5, 501.0), (0.999_999, 600.0), (1.0, 600.0)] {
+            let mut rng = Fixed(draw);
+            assert_eq!(rng.pick_in_range_inclusive_int(400.5, 600.2), expected);
+            assert_eq!(rng.pick_in_range_inclusive_int(600.2, 400.5), expected);
+        }
+        for draw in [0.0, 0.5, 1.0] {
+            let mut rng = Fixed(draw);
+            assert_eq!(rng.pick_in_range_inclusive_int(400.2, 400.8), 400.2);
+        }
     }
 
     #[test]

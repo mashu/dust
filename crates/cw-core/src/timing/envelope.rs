@@ -2,6 +2,7 @@
 //! the settings screen draws.
 
 use super::dot_seconds;
+use crate::band::finite_or;
 use crate::settings::TrainingSettings;
 
 /// Points per second on a keying envelope's curve. The shortest edge the
@@ -14,8 +15,11 @@ pub const ENVELOPE_SAMPLE_RATE: u32 = 4800;
 /// through it: a blend of a straight line and a raised cosine, `smoothing`
 /// of the way to the cosine. A rise reads it forwards and a fall backwards,
 /// and the paddle's sidetone opens and closes along it too, so your own
-/// key sounds as the stations and your messages do.
+/// key sounds as the stations and your messages do. Smoothing is held to
+/// its range, and one that is no number is the cosine, as a whole curve's
+/// is ([`build_envelope_curve`]).
 pub fn edge_gain(progress: f64, smoothing: f64) -> f64 {
+    let smoothing = finite_or(smoothing, 1.0).clamp(0.0, 1.0);
     let p = progress.clamp(0.0, 1.0);
     let cosine = (1.0 - (std::f64::consts::PI * p).cos()) / 2.0;
     p * (1.0 - smoothing) + cosine * smoothing
@@ -131,7 +135,7 @@ pub fn envelope_shape(settings: &TrainingSettings) -> EnvelopeShape {
     let dot_sec = dot_seconds(wpm);
     let dash_sec = dot_sec * 3.0;
     let rise = (settings.band.steepness / 1000.0).max(0.0);
-    let smoothing = settings.band.envelope_smoothing.clamp(0.0, 1.0);
+    let smoothing = finite_or(settings.band.envelope_smoothing, 1.0).clamp(0.0, 1.0);
     let (dit_edge, dah_edge) = (
         edge_sec(rise, dot_sec, dot_sec),
         edge_sec(rise, dash_sec, dot_sec),
@@ -194,6 +198,20 @@ mod tests {
         };
         assert!(plateau(&fast) > plateau(&slow));
         assert!(envelope_shape(&slow).rise_share_of_dit > envelope_shape(&fast).rise_share_of_dit);
+    }
+
+    /// The sidetone and the players read an edge with the smoothing they
+    /// are handed. One that is no number shaped it as no number, NaN at
+    /// every step: it is the raised cosine now, as a whole curve's is, and
+    /// the preview says so.
+    #[test]
+    fn an_edge_smoothed_by_no_number_is_the_raised_cosine() {
+        for progress in [0.0, 0.25, 0.5, 1.0] {
+            assert_eq!(edge_gain(progress, f64::NAN), edge_gain(progress, 1.0));
+        }
+        let mut settings = TrainingSettings::default();
+        settings.band.envelope_smoothing = f64::NAN;
+        assert_eq!(envelope_shape(&settings).smoothing, 1.0);
     }
 
     #[test]

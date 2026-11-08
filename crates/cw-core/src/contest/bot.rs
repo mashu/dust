@@ -525,7 +525,8 @@ pub struct HeardTurn {
 /// station is yours where `settings` give enough of it for a run, and
 /// stands in for yours where they do not ([`HeardQsos::stand_in`]). You
 /// greet the stations as a run at the local `hour` does, where your
-/// exchange holds a greeting ([`ContestMachine::set_local_hour`]).
+/// exchange holds a greeting ([`ContestMachine::set_local_hour`]). QSOs
+/// that never end are heard only for [`HEARD_TURNS_A_QSO`] turns each.
 pub fn hear_qsos<S: CallSource>(
     seed: u64,
     settings: &TrainingSettings,
@@ -554,10 +555,18 @@ pub fn hear_qsos<S: CallSource>(
     HeardQsos { turns, stand_in }
 }
 
+/// The most turns [`hear_qsos`] works for each QSO it is to hear: about
+/// three times what the slowest QSOs take, callers asking for your
+/// exchange again among them. Only QSOs that can never end reach it, and
+/// they are cut short there rather than worked on the screen's thread to
+/// the end of the hour a run may last, and played.
+const HEARD_TURNS_A_QSO: usize = 20;
+
 /// The run [`hear_qsos`] plays, worked by the perfect operator until
-/// `qsos` QSOs are in its log, greeting as at the local `hour`: the runtime
-/// it went through, the settings it ran on, and your station where some of
-/// it stands in for yours.
+/// `qsos` QSOs are in its log, or [`HEARD_TURNS_A_QSO`] turns each have
+/// gone out, greeting as at the local `hour`: the runtime it went through,
+/// the settings it ran on, and your station where some of it stands in for
+/// yours.
 fn worked_to_hear<S: CallSource>(
     seed: u64,
     settings: &TrainingSettings,
@@ -576,8 +585,9 @@ fn worked_to_hear<S: CallSource>(
     // Before anything of yours that greets: the first CQ greets nobody.
     runtime.machine.set_local_hour(hour);
     // However it stops, what went on the air is what is heard.
+    let most_turns = HEARD_TURNS_A_QSO.saturating_mul(qsos.max(1) as usize);
     work_until(&mut runtime, &mut Operator::perfect(), &[], |runtime| {
-        runtime.machine.view().qsos >= qsos
+        runtime.machine.view().qsos >= qsos || runtime.turns.len() >= most_turns
     });
     (runtime, heard, stand_in)
 }
@@ -1254,6 +1264,48 @@ mod tests {
                     assert!(ats.windows(2).all(|pair| pair[0] < pair[1]), "{ats:?}");
                 }
             }
+        }
+    }
+
+    /// Hear a QSO ends on its QSOs however often you set pile-up callers to
+    /// miss your exchange. With all of them set to, no QSO ended: the
+    /// perfect operator sent your exchange again and again, worked out on
+    /// the screen's thread to the end of the hour a run may last before a
+    /// turn was heard, and then all of it played.
+    #[test]
+    fn hear_a_qso_ends_on_its_qsos_however_often_callers_miss_your_exchange() {
+        use super::super::RunStyle;
+        let mut settings = TrainingSettings::default();
+        settings.set_contest_style(RunStyle::Pileup);
+        settings.contest.caller_odds.misses_exchange = 1.0;
+        for seed in 0..8 {
+            let sampler = Sampler::new(&[], &settings, seed);
+            let heard = hear_qsos(seed, &settings, sampler, 3, GREETING_HOUR);
+            let tus = heard
+                .turns
+                .iter()
+                .flat_map(|heard| &heard.turn.segments)
+                .filter(|segment| segment.who == Sender::You && segment.text.starts_with("TU"))
+                .count();
+            assert_eq!(tus, 3, "seed {seed}");
+            let turns = heard.turns.len();
+            assert!(turns <= 20, "seed {seed}: {turns} turns");
+        }
+    }
+
+    /// A run whose QSOs can never end, its callers sending nothing the
+    /// operator can copy, is heard for a few turns a QSO: it was worked to
+    /// the end of the hour a run may last.
+    #[test]
+    fn hear_a_qso_that_can_never_end_stops_after_a_few_turns_a_qso() {
+        use super::super::RunStyle;
+        for style in RunStyle::ALL {
+            let mut settings = TrainingSettings::default();
+            settings.set_contest_style(style);
+            let nothing_to_copy = script::ScriptCalls::new(&["QQQ"; 500]);
+            let heard = hear_qsos(1, &settings, nothing_to_copy, 3, GREETING_HOUR);
+            let turns = heard.turns.len();
+            assert!(turns <= 3 * HEARD_TURNS_A_QSO, "{style:?}: {turns} turns");
         }
     }
 

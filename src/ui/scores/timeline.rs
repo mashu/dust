@@ -1,7 +1,8 @@
 use cw_core::{BoardEntry, FORM_SESSIONS, PER_SESSION_UP_TO, Ranking, TimelinePoint};
 use dioxus::prelude::*;
 
-use super::{focus, rating_said, what_it_was};
+use super::{Marked, focus, pick, rating_said, what_it_was};
+use crate::state::SessionPick;
 use crate::ui::chart::path;
 use crate::ui::format::{clock, counted, ordinal, short_date};
 use crate::ui::help;
@@ -100,10 +101,10 @@ pub(super) fn ScoreTimeline(
     dots: Vec<usize>,
     /// The board's rows, best first.
     board: Vec<BoardEntry>,
-    /// When the best was set, marked while no row is.
-    best_at: u64,
-    /// The row pointed at, else the row tapped.
-    marked: Memo<Option<u64>>,
+    /// The best, marked while no row is.
+    best: Option<SessionPick>,
+    /// The rows pointed at and tapped.
+    marked: Memo<Marked>,
     /// How many sessions are on the board.
     total: usize,
     /// The dates of the first session and the last, under either end.
@@ -121,10 +122,16 @@ pub(super) fn ScoreTimeline(
         .filter_map(|at| Some((timeline.get(*at)?, *xy.get(*at)?)))
         .collect();
     let form_line = form_path(&drawn, timeline_top(&timeline));
-    let spots: Vec<(u64, f64, f64)> = timeline
+    let spots: Vec<(SessionPick, f64, f64)> = timeline
         .iter()
         .zip(&xy)
-        .map(|(point, (x, y))| (point.timestamp, *x, *y))
+        .map(|(point, (x, y))| {
+            let at = SessionPick {
+                index: point.index,
+                timestamp: point.timestamp,
+            };
+            (at, *x, *y)
+        })
         .collect();
     let records = timeline.iter().filter(|point| point.set_record).count();
     let (title, noun) = match ranking {
@@ -155,7 +162,7 @@ pub(super) fn ScoreTimeline(
                 }
                 TimelineMark {
                     spots: spots.clone(),
-                    best_at,
+                    best,
                     marked,
                     ring: false,
                 }
@@ -169,14 +176,14 @@ pub(super) fn ScoreTimeline(
                 }
                 TimelineMark {
                     spots,
-                    best_at,
+                    best,
                     marked,
                     ring: true,
                 }
             }
             TimelineFocus {
                 board,
-                best_at,
+                best,
                 marked,
                 ranking,
             }
@@ -200,15 +207,16 @@ pub(super) fn ScoreTimeline(
 /// dots, or the ring around its dot, over them.
 #[component]
 fn TimelineMark(
-    /// When each session was set, and where its dot sits.
-    spots: Vec<(u64, f64, f64)>,
-    best_at: u64,
-    marked: Memo<Option<u64>>,
+    /// Each session, and where its dot sits.
+    spots: Vec<(SessionPick, f64, f64)>,
+    best: Option<SessionPick>,
+    marked: Memo<Marked>,
     /// The ring, else the guide.
     ring: bool,
 ) -> Element {
-    let focus = focus(marked, best_at);
-    let Some(&(_, x, y)) = spots.iter().find(|(at, ..)| *at == focus) else {
+    let held = |at| spots.iter().any(|(spot, ..)| *spot == at);
+    let focus = focus(marked, best, held);
+    let Some(&(_, x, y)) = spots.iter().find(|(at, ..)| Some(*at) == focus) else {
         return rsx! {};
     };
     if ring {
@@ -232,12 +240,14 @@ fn TimelineMark(
 #[component]
 fn TimelineFocus(
     board: Vec<BoardEntry>,
-    best_at: u64,
-    marked: Memo<Option<u64>>,
+    best: Option<SessionPick>,
+    marked: Memo<Marked>,
     ranking: Ranking,
 ) -> Element {
-    let focus = focus(marked, best_at);
-    let Some(entry) = board.iter().find(|entry| entry.timestamp == focus) else {
+    let focus = focus(marked, best, |at| {
+        board.iter().any(|entry| pick(entry) == at)
+    });
+    let Some(entry) = board.iter().find(|entry| Some(pick(entry)) == focus) else {
         return rsx! {};
     };
     rsx! {

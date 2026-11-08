@@ -89,6 +89,17 @@ impl Device {
             .expect("held")
     }
 
+    /// The session the record `id` holds.
+    fn session(&self, id: RecordId) -> SessionResult {
+        self.store
+            .load_history()
+            .sessions
+            .into_iter()
+            .find(|(held, _)| *held == id)
+            .expect("held")
+            .1
+    }
+
     /// Delete the session finished at `timestamp` by hand.
     fn delete(&self, timestamp: u64, when: u64) {
         let id = self.id_of(timestamp);
@@ -117,7 +128,8 @@ impl Device {
             ..HistoryChange::default()
         }));
         assert!(saved.kept().is_some());
-        self.state.revived.insert(id, when);
+        let at = self.state.stamp_change(id, when);
+        self.state.revived.insert(id, at);
     }
 }
 
@@ -298,6 +310,289 @@ fn a_session_put_back_after_its_deletion_comes_back_everywhere() {
     );
 }
 
+/// A session deleted by hand after another device put it back, with that
+/// device's clock an hour ahead, is deleted on every device: the deletion
+/// is stamped after the putting back it follows. It used to be stamped by
+/// the clock behind alone, earlier than the putting back, and to reach no
+/// other device until that clock caught up.
+#[test]
+fn a_deletion_after_a_session_put_back_ahead_reaches_every_device() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    // The computer's clock is an hour ahead of the phone's.
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 3_600_110).expect("synced");
+    let id = computer.id_of(2);
+    let session = computer
+        .store
+        .load_history()
+        .sessions
+        .into_iter()
+        .find(|(held, _)| *held == id)
+        .expect("held")
+        .1;
+    computer.delete(2, 3_600_120);
+    computer.sync(&remote, 3_600_130).expect("synced");
+    phone.sync(&remote, 140).expect("synced");
+    assert_eq!(phone.stamps(), [1]);
+    computer.undo(id, &session, 3_600_150);
+    computer.sync(&remote, 3_600_160).expect("synced");
+    phone.sync(&remote, 170).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "put back");
+
+    phone.delete(2, 180);
+    phone.sync(&remote, 190).expect("synced");
+    computer.sync(&remote, 3_600_200).expect("synced");
+    assert_eq!(computer.stamps(), [1], "deleted there too");
+    phone.sync(&remote, 210).expect("synced");
+    assert_eq!(phone.stamps(), [1]);
+}
+
+/// Sessions a device let go as the drive deleted them, put back there by
+/// hand since, by a restore say, and deleted there by hand after, stay
+/// deleted, and the deletions reach every device: the deletion the device
+/// took from the drive is no longer the last word on a session once it is
+/// back, whether its putting back went to the drive or the drive had it
+/// back already. It used to be, and the drive's putting back, later than
+/// it, brought each session back at the next sync, the deletion by hand
+/// undone and never sent.
+#[test]
+fn sessions_let_go_then_put_back_and_deleted_by_hand_stay_deleted() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2, 3]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let held = |device: &Device, id: RecordId| {
+        device
+            .store
+            .load_history()
+            .sessions
+            .into_iter()
+            .find(|(held, _)| *held == id)
+            .expect("held")
+            .1
+    };
+    let (two, three) = (computer.id_of(2), computer.id_of(3));
+    let (session_two, session_three) = (held(&computer, two), held(&computer, three));
+    phone.delete(2, 120);
+    phone.delete(3, 120);
+    phone.sync(&remote, 130).expect("synced");
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "let go");
+    // 3 put back on the phone, and so in the drive before the computer
+    // puts it back: the computer has nothing of it to send.
+    phone.undo(three, &session_three, 150);
+    phone.sync(&remote, 160).expect("synced");
+
+    // Both put back on the computer by hand, then deleted there by hand.
+    computer.undo(two, &session_two, 170);
+    computer.undo(three, &session_three, 170);
+    computer.sync(&remote, 180).expect("synced");
+    computer.delete(2, 190);
+    computer.delete(3, 190);
+    computer.sync(&remote, 200).expect("synced");
+    assert_eq!(computer.stamps(), [1], "neither taken back");
+    phone.sync(&remote, 210).expect("synced");
+    assert_eq!(phone.stamps(), [1], "deleted there too");
+}
+
+/// A session deleted by hand on one device and put back on another after
+/// that deletion, by a restore once it was let go there or by Undo of a
+/// deletion of its own, comes back on the device that deleted it too, and
+/// stays on both and in the drive: that device's deletion, once the drive
+/// holds it, is the drive's, and a putting back after it stands. The
+/// device that deleted it used to send its deletion again as it found the
+/// session back in the drive, and the session was gone from both.
+#[test]
+fn a_session_deleted_on_one_device_and_put_back_on_another_comes_back_on_both() {
+    for let_go_first in [true, false] {
+        let remote = MemoryRemote::default();
+        let mut phone = Device::keeping(&sessions(&[1, 2]));
+        phone.turn_on(&remote, "passphrase").expect("on");
+        phone.sync(&remote, 100).expect("synced");
+        let mut computer = Device::keeping(&[]);
+        computer.turn_on(&remote, "passphrase").expect("on");
+        computer.sync(&remote, 110).expect("synced");
+        let two = computer.id_of(2);
+        let session = computer.session(two);
+        phone.delete(2, 120);
+        phone.sync(&remote, 130).expect("synced");
+        if let_go_first {
+            computer.sync(&remote, 140).expect("synced");
+            assert_eq!(computer.stamps(), [1], "let go");
+        } else {
+            computer.delete(2, 140);
+        }
+        computer.undo(two, &session, 150);
+        computer.sync(&remote, 160).expect("synced");
+        assert_eq!(computer.stamps(), [1, 2], "put back");
+
+        phone.sync(&remote, 170).expect("synced");
+        assert_eq!(phone.stamps(), [1, 2], "taken back");
+        computer.sync(&remote, 180).expect("synced");
+        assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+        let mut joined = Device::keeping(&[]);
+        joined.turn_on(&remote, "passphrase").expect("on");
+        joined.sync(&remote, 190).expect("synced");
+        assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+    }
+}
+
+/// A session deleted by hand on two devices before either synced, and put
+/// back after on one, comes back on the other too: the drive holding the
+/// first's deletion as the second synced, the second's was the same, with
+/// nothing of its own to send, and a putting back after it stands. The
+/// second used to send its deletion as it found the session back in the
+/// drive, and the session was gone from both.
+#[test]
+fn a_session_deleted_on_two_devices_and_put_back_on_one_comes_back_on_both() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    let session = phone.session(two);
+    phone.delete(2, 120);
+    computer.delete(2, 125);
+    phone.sync(&remote, 130).expect("synced");
+    assert_eq!(computer.sync(&remote, 140).expect("synced").sent, 0);
+
+    phone.undo(two, &session, 150);
+    phone.sync(&remote, 160).expect("synced");
+    computer.sync(&remote, 170).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "taken back");
+    phone.sync(&remote, 180).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "not deleted again");
+}
+
+/// What sync keeps, `state`, as a build before deletions by hand were
+/// noted kept it: with no note of the deletion of `id`, which this build
+/// noted, nor of having looked for such deletions since.
+fn as_an_earlier_build_kept(state: &SyncState, id: RecordId) -> SyncState {
+    let mut kept: serde_json::Value =
+        serde_json::from_str(&state.written().expect("written")).expect("JSON");
+    let fields = kept.as_object_mut().expect("fields");
+    let notes = fields
+        .get_mut("applied")
+        .and_then(|notes| notes.as_object_mut())
+        .expect("notes");
+    assert!(notes.remove(&id.name()).is_some(), "noted by this build");
+    fields.remove("deletionsNoted");
+    SyncState::read(&kept.to_string()).expect("read")
+}
+
+/// A session deleted by hand on one device with an earlier build, its
+/// deletion sent from there or held by the drive already, and put back on
+/// another device after, comes back on the first once it is updated, and
+/// stays on both: the first sync after the update notes each deletion by
+/// hand the drive held that the earlier build kept no note of, as this
+/// build notes its own. A deletion by hand not yet sent is sent all the
+/// same. The first device used to send its deletion again as it found the
+/// session back in the drive, and the session was gone from both.
+#[test]
+fn a_session_deleted_with_an_earlier_build_and_put_back_elsewhere_comes_back() {
+    for sent_from_here in [true, false] {
+        let remote = MemoryRemote::default();
+        let mut phone = Device::keeping(&sessions(&[1, 2, 3]));
+        phone.turn_on(&remote, "passphrase").expect("on");
+        phone.sync(&remote, 100).expect("synced");
+        let mut computer = Device::keeping(&[]);
+        computer.turn_on(&remote, "passphrase").expect("on");
+        computer.sync(&remote, 110).expect("synced");
+        let two = computer.id_of(2);
+        let session = computer.session(two);
+        if sent_from_here {
+            phone.delete(2, 120);
+            phone.sync(&remote, 130).expect("synced");
+            computer.sync(&remote, 140).expect("synced");
+            assert_eq!(computer.stamps(), [1, 3], "let go");
+        } else {
+            computer.delete(2, 120);
+            computer.sync(&remote, 130).expect("synced");
+            phone.delete(2, 135);
+            assert_eq!(phone.sync(&remote, 140).expect("synced").sent, 0);
+        }
+        phone.delete(3, 145);
+        // Updated since: what sync keeps, as the earlier build kept it.
+        phone.state = as_an_earlier_build_kept(&phone.state, two);
+        computer.undo(two, &session, 150);
+        computer.sync(&remote, 160).expect("synced");
+
+        phone.sync(&remote, 170).expect("synced");
+        assert_eq!(phone.stamps(), [1, 2], "taken back");
+        computer.sync(&remote, 180).expect("synced");
+        assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+        let mut joined = Device::keeping(&[]);
+        joined.turn_on(&remote, "passphrase").expect("on");
+        joined.sync(&remote, 190).expect("synced");
+        assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+    }
+}
+
+/// A session deleted by hand on one device, then put back there by hand
+/// and deleted there by hand again before it syncs, is deleted on every
+/// device where another device put it back before that: the deletion
+/// after the putting back here is sent, whatever note there is of the
+/// deletion before it. Where the drive still holds that deletion, the new
+/// one is the drive's as well, and a putting back made after it brings the
+/// session back. The note of the first deletion used to stand, and the
+/// other device's putting back brought the session back on the device that
+/// deleted it last.
+#[test]
+fn a_session_put_back_and_deleted_again_before_a_sync_is_deleted_everywhere() {
+    for put_back_there_first in [true, false] {
+        let remote = MemoryRemote::default();
+        let mut phone = Device::keeping(&sessions(&[1, 2]));
+        phone.turn_on(&remote, "passphrase").expect("on");
+        phone.sync(&remote, 100).expect("synced");
+        let mut computer = Device::keeping(&[]);
+        computer.turn_on(&remote, "passphrase").expect("on");
+        computer.sync(&remote, 110).expect("synced");
+        let two = phone.id_of(2);
+        let session = phone.session(two);
+        phone.delete(2, 120);
+        phone.sync(&remote, 130).expect("synced");
+        computer.sync(&remote, 140).expect("synced");
+        assert_eq!(computer.stamps(), [1], "let go");
+        let put_back_there = |computer: &mut Device, at: u64| {
+            computer.undo(two, &session, at);
+            computer.sync(&remote, at + 5).expect("synced");
+        };
+        if put_back_there_first {
+            put_back_there(&mut computer, 150);
+        }
+
+        // Put back on the phone, from a backup say, and deleted again.
+        phone.undo(two, &session, 160);
+        phone.delete(2, 165);
+        phone.sync(&remote, 170).expect("synced");
+        assert_eq!(phone.stamps(), [1], "not taken back");
+        if put_back_there_first {
+            computer.sync(&remote, 180).expect("synced");
+            assert_eq!(computer.stamps(), [1], "deleted there too");
+        } else {
+            put_back_there(&mut computer, 180);
+            phone.sync(&remote, 190).expect("synced");
+            assert_eq!(phone.stamps(), [1, 2], "put back after it");
+            computer.sync(&remote, 200).expect("synced");
+            assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+        }
+        let mut joined = Device::keeping(&[]);
+        joined.turn_on(&remote, "passphrase").expect("on");
+        joined.sync(&remote, 210).expect("synced");
+        assert_eq!(joined.stamps(), phone.stamps(), "the drive's word");
+    }
+}
+
 /// A setting changed on one device reaches the other, and one changed on
 /// the other comes back, each the newest of its own.
 #[test]
@@ -329,6 +624,32 @@ fn a_setting_changed_anywhere_reaches_every_device() {
     phone.sync(&remote, 170).expect("synced");
     computer.sync(&remote, 180).expect("synced");
     assert_eq!(remote.writes.get(), writes);
+}
+
+/// A setting changed on a device whose clock is behind another's, after the
+/// other changed it, is the one every device keeps: it is stamped after the
+/// change it follows. It used to lose to that change, stamped by the clock
+/// ahead, and be put back on the device it was made on as it synced.
+#[test]
+fn a_setting_changed_on_a_clock_behind_is_kept_everywhere() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&[]);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    // The computer's clock is an hour ahead of the phone's.
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 3_600_110).expect("synced");
+
+    computer.settings.curriculum.num_groups = 7;
+    computer.sync(&remote, 3_600_120).expect("synced");
+    phone.sync(&remote, 130).expect("synced");
+    assert_eq!(phone.settings.curriculum.num_groups, 7);
+    phone.settings.curriculum.num_groups = 5;
+    phone.sync(&remote, 140).expect("synced");
+    assert_eq!(phone.settings.curriculum.num_groups, 5, "not put back");
+    computer.sync(&remote, 3_600_150).expect("synced");
+    assert_eq!(computer.settings.curriculum.num_groups, 5);
 }
 
 /// What a device uses beside its history reaches every other: the runs of
@@ -478,6 +799,163 @@ fn a_damaged_pack_is_passed_over() {
     assert_eq!(computer.stamps(), [2]);
     // Told once: a file that would not open is not read again.
     assert_eq!(computer.sync(&remote, 130).expect("synced").unreadable, 0);
+}
+
+/// Store `sessions` in `store` as a restore stores a backup's: each named
+/// where it finished, as a session from elsewhere ([`RecordId::placed`]).
+fn restore(store: &MemoryStore, sessions: &[SessionResult]) {
+    let put = sessions
+        .iter()
+        .map(|session| {
+            Record::of(session, |json| RecordId::placed(session.timestamp, json)).expect("a record")
+        })
+        .collect();
+    let saved = now(store.change_history(HistoryChange {
+        put,
+        ..HistoryChange::default()
+    }));
+    assert!(saved.kept().is_some(), "{saved:?}");
+}
+
+/// A history kept on one device and restored from its backup on another
+/// before either synced is one history once they do, each session once,
+/// under one name on both: never held twice, nor gone from either at any
+/// sync, whichever syncs first.
+#[test]
+fn a_session_under_two_names_ends_as_one_on_every_device() {
+    for computer_first in [false, true] {
+        let remote = MemoryRemote::default();
+        let phone = Device::keeping(&sessions(&[1, 2, 3]));
+        let computer = Device::keeping(&[]);
+        restore(&computer.store, &sessions(&[1, 2, 3]));
+        assert!(
+            listing(&phone.store)
+                .iter()
+                .all(|id| !listing(&computer.store).contains(id))
+        );
+        let mut devices = if computer_first {
+            [computer, phone]
+        } else {
+            [phone, computer]
+        };
+        for device in &mut devices {
+            device.turn_on(&remote, "passphrase").expect("on");
+        }
+        for round in 0..3 {
+            for (n, device) in devices.iter_mut().enumerate() {
+                device
+                    .sync(&remote, 100 + round * 10 + n as u64)
+                    .expect("synced");
+                assert_eq!(device.stamps(), [1, 2, 3], "never twice, never gone");
+            }
+        }
+        assert_eq!(listing(&devices[0].store), listing(&devices[1].store));
+        for device in &mut devices {
+            assert_eq!(
+                device.sync(&remote, 200).expect("synced"),
+                Synced::default()
+            );
+        }
+    }
+}
+
+/// Of a session under two names, the one let go is let go only once the
+/// one kept is in the drive: a device whose only record of it is the other
+/// is never told to let it go before it can take the one kept.
+#[test]
+fn a_twin_is_let_go_only_once_the_one_kept_is_in_the_drive() {
+    let remote = MemoryRemote::default();
+    let mut computer = Device::keeping(&[]);
+    restore(&computer.store, &sessions(&[1]));
+    let restored = listing(&computer.store)[0];
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 100).expect("synced");
+    let mut phone = Device::keeping(&sessions(&[1]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 110).expect("synced");
+    assert_eq!(phone.stamps(), [1], "not taken twice");
+    assert!(
+        !phone.state.drive.deleted(restored),
+        "the phone's own was not in the drive yet"
+    );
+    phone.sync(&remote, 120).expect("synced");
+    assert!(phone.state.drive.deleted(restored));
+    computer.sync(&remote, 130).expect("synced");
+    assert_eq!(computer.stamps(), [1]);
+    assert_eq!(listing(&computer.store), listing(&phone.store));
+}
+
+/// Two records of one session that are not alike in everything, as one a
+/// restore filled in, are not taken for one: neither is let go.
+#[test]
+fn a_session_under_two_names_not_alike_is_kept_both_ways() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1]));
+    let mut computer = Device::keeping(&[]);
+    let mut filled = at(1);
+    filled.avg_response_ms += 1.0;
+    restore(&computer.store, &[filled]);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    computer.turn_on(&remote, "passphrase").expect("on");
+    for at in [100, 110, 120, 130] {
+        phone.sync(&remote, at).expect("synced");
+        computer.sync(&remote, at + 5).expect("synced");
+    }
+    assert_eq!(phone.stamps(), [1, 1]);
+    assert_eq!(listing(&phone.store), listing(&computer.store));
+}
+
+/// A pack a later build wrote, which this one cannot read, is told of at
+/// each sync as a later build's, not as damaged, and fetched once: not
+/// passed over for good, it is read again once a build of a later layout
+/// is here, and what it holds arrives then. It used to be fetched again,
+/// and told of as damaged, at every sync.
+#[test]
+fn a_pack_of_a_later_build_is_told_of_and_read_once_dust_is_updated() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&[]);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    // What a sync with nothing new to read fetches.
+    let gets = remote.gets.get();
+    phone.sync(&remote, 105).expect("synced");
+    let each = remote.gets.get() - gets;
+    let keys = Keys::of(&DataKey::from_hex(&phone.state.key).expect("a key"));
+    let record = Record::of(&at(5), |json| RecordId::next(5, None, json)).expect("a record");
+    let name = pack_name().expect("a name");
+    let later = Pack {
+        dust_pack: 2,
+        device: "later".into(),
+        at: 110,
+        put: vec![Put {
+            id: record.id.name(),
+            s: record.json,
+        }],
+        ..Pack::default()
+    };
+    let file =
+        now(remote.create(&name, seal_pack(&keys, &name, &later).expect("sealed"))).expect("made");
+    let synced = phone.sync(&remote, 120).expect("synced");
+    assert_eq!((synced.later, synced.unreadable), (1, 0));
+    let gets = remote.gets.get();
+    let synced = phone.sync(&remote, 130).expect("synced");
+    assert_eq!((synced.later, synced.unreadable), (1, 0), "told of again");
+    assert_eq!(remote.gets.get() - gets, each, "not fetched again");
+    assert!(phone.stamps().is_empty());
+    // Updated: the same pack, as this build reads it, as it reads to a
+    // build that knows the later layout; and noted as by a build of a
+    // layout before this one's, which could not read it.
+    let readable = Pack {
+        dust_pack: PACK_LAYOUT,
+        ..later
+    };
+    now(remote.update(&file, seal_pack(&keys, &name, &readable).expect("sealed")))
+        .expect("written");
+    phone.state.later.insert(name, PACK_LAYOUT - 1);
+    let synced = phone.sync(&remote, 140).expect("synced");
+    assert_eq!((synced.took, synced.later, synced.unreadable), (1, 0, 0));
+    assert_eq!(phone.stamps(), [5]);
+    assert!(phone.state.later.is_empty());
 }
 
 /// A store with no room takes nothing, and reads nothing as read: the next

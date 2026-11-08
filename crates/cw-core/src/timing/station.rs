@@ -1,5 +1,6 @@
 //! The operator at the other end.
 
+use crate::band::finite_or;
 use crate::rng::Rng;
 use crate::settings::TrainingSettings;
 
@@ -34,8 +35,9 @@ pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> Stati
     let (char_wpm, effective_wpm) = speeds_from(settings, |min, max| rng.pick_in_range(min, max));
     // Every station is somebody, and on the air most of them are not keyers.
     // Drawn once per station and carried, so a repeat is the same operator
-    // sending again rather than a different one with the same call.
-    let spread = settings.playback.fist_variation.clamp(0.0, 1.0);
+    // sending again rather than a different one with the same call. A
+    // variation that is no number is none: a keyer.
+    let spread = finite_or(settings.playback.fist_variation, 0.0).clamp(0.0, 1.0);
     StationVoice {
         tone_hz: resolve_tone_hz(settings, rng),
         char_wpm,
@@ -146,6 +148,17 @@ mod tests {
             assert!((voice.weight - 1.0).abs() < 1e-9);
             assert!((voice.dash_ratio - 3.0).abs() < 1e-9);
         }
+    }
+
+    /// A variation that is no number, which `TrainingSettings::clamp` never
+    /// leaves but this takes from whoever calls it, is none: every station
+    /// a keyer, not one whose weight and dash ratio are no number.
+    #[test]
+    fn a_fist_variation_of_no_number_is_a_keyer() {
+        let mut s = fist(0.5);
+        s.playback.fist_variation = f64::NAN;
+        let voice = resolve_station(&s, &mut SplitMix64::new(7));
+        assert_eq!((voice.weight, voice.dash_ratio), (1.0, 3.0));
     }
 
     /// A strength range is drawn evenly in decibels, as it is shown: from

@@ -376,11 +376,7 @@ pub fn evaluate_auto_level(
     let delta = if raise { 1 } else { -1 };
     let moved = candidate_axes(&verdict.tally, settings, raise, threshold_pct)
         .into_iter()
-        .find_map(|axis| {
-            let from = settings.level(axis);
-            let to = step_level(from, delta, axis.min_level(), settings.max_level(axis));
-            (to != from).then_some((axis, from, to))
-        });
+        .find_map(|axis| step_axis(settings, axis, delta).map(|(from, to)| (axis, from, to)));
     let Some((axis, from, to)) = moved else {
         // Nowhere to go: the run is spent rather than kept pressing.
         if raise {
@@ -419,13 +415,29 @@ pub fn evaluate_auto_level(
     })
 }
 
-/// Put a change into the settings.
-pub fn apply_auto_level(settings: &mut TrainingSettings, change: &AutoLevelChange) {
+/// Put a change into the settings, where the level it moves is still kept
+/// where the session left it ([`AutoLevelChange::from`]), whatever alphabet
+/// reads it now: the change was earned there, and the runs it clears are
+/// that level's. A level moved since, by hand, in another window or by
+/// sync, as a session the app stopped under is settled only at the next
+/// launch, is left where it is now, as is one a longer alphabet has reached
+/// since; so is Mixed's turn. Whether the change was put in.
+pub fn apply_auto_level(settings: &mut TrainingSettings, change: &AutoLevelChange) -> bool {
+    // A change is only ever made from a level kept inside the alphabet it
+    // was earned in ([`evaluate_auto_level`]), so where it was earned is the
+    // level as it was kept, the axis's bottom for one kept under it.
+    let kept = settings
+        .stored_level(change.axis)
+        .max(change.axis.min_level());
+    if kept != change.from {
+        return false;
+    }
     settings.set_level(change.axis, change.to);
     if let Some(axis) = change.next_mixed_axis {
         settings.auto_level.mixed_auto_level_next_axis = axis;
     }
     *settings = std::mem::take(settings).clamp();
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -435,7 +447,11 @@ pub struct AutoLevelProgress {
     pub below_count: u32,
     pub above_target: u32,
     pub below_target: u32,
+    /// No session can raise the level: Sessions above is at zero.
     pub above_disabled: bool,
+    /// No session can lower it: Sessions below is at zero, or a fall has
+    /// nowhere to go, every level it could move being at its bottom or
+    /// kept above the top of the alphabet chosen now.
     pub below_disabled: bool,
     pub alternating_mixed: bool,
     pub next_mixed_axis: Option<MixedAutoLevelAxis>,
@@ -469,17 +485,28 @@ pub fn auto_level_progress(
     });
     let above_target = settings.auto_level.auto_adjust_above_threshold_count;
     let below_target = settings.auto_level.auto_adjust_below_threshold_count;
+    let threshold = settings
+        .auto_level
+        .auto_adjust_threshold
+        .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT);
+    // With no session yet to say which axis did well or fell short, every
+    // one being practised is in the running ([`candidate_axes`]); a move
+    // none of them can make never comes, a rise past the top of every
+    // alphabet no more than a fall below the bottom of every one.
+    let moves = |raise: bool, delta: i32| {
+        candidate_axes(&CopyTally::default(), settings, raise, threshold)
+            .into_iter()
+            .any(|axis| step_axis(settings, axis, delta).is_some())
+    };
+    let (rises, falls) = (moves(true, 1), moves(false, -1));
     Some(AutoLevelProgress {
-        threshold: settings
-            .auto_level
-            .auto_adjust_threshold
-            .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT),
+        threshold,
         above_count: counters.above,
         below_count: counters.below,
         above_target,
         below_target,
-        above_disabled: above_target == 0,
-        below_disabled: below_target == 0,
+        above_disabled: above_target == 0 || !rises,
+        below_disabled: below_target == 0 || !falls,
         alternating_mixed: mixed,
         next_mixed_axis,
         judged_at: adaptive_speed_path(settings).map(|path| path.ends()),
@@ -561,6 +588,20 @@ pub fn complete_result(
         settings: next,
         counters,
     }
+}
+
+/// Where a step of `delta` moves `axis` from, and to, if it moves it at all:
+/// not past either end of its alphabet. A level a longer alphabet reached,
+/// read at the top of the one chosen now, has nowhere to go: there is no
+/// higher, and a fall would write this alphabet's top less one over it,
+/// which the longer alphabet would come back to.
+fn step_axis(settings: &TrainingSettings, axis: LevelAxis, delta: i32) -> Option<(u32, u32)> {
+    let from = settings.level(axis);
+    if settings.stored_level(axis) > from {
+        return None;
+    }
+    let to = step_level(from, delta, axis.min_level(), settings.max_level(axis));
+    (to != from).then_some((from, to))
 }
 
 /// Move a level by `delta`, staying within `min..=max`. In unsigned
@@ -782,6 +823,40 @@ mod tests {
         assert_eq!(counters, AutoLevelCounters::default());
     }
 
+    /// Koch, an order of your own and Mixed's letters share one stored
+    /// level, read at the top of a shorter alphabet. A session that fell
+    /// short there wrote that top less one over the level a longer alphabet
+    /// had reached: 20 in LCWO's order came back as 3 after a session in an
+    /// order of five letters, and Koch's 38 as 29 after one in Mixed.
+    #[test]
+    fn a_fall_in_a_shorter_alphabet_keeps_the_level_a_longer_one_reached() {
+        let mut own = koch(20);
+        own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        own.curriculum.sequence_is_custom = true;
+        assert_eq!(own.level(LevelAxis::Letters), 4);
+        let mut counters = AutoLevelCounters::default();
+        assert_eq!(evaluate_auto_level(&after(0.5), &own, &mut counters), None);
+        assert_eq!(counters.below, 0, "the run is spent, as at the bottom");
+        let done = complete_result(after(0.5), &own, AutoLevelCounters::default());
+        assert_eq!(done.change, None);
+        assert_eq!(done.settings.curriculum.level, 20);
+
+        let mut letters = koch(38);
+        letters.curriculum.char_set_mode = CharSetMode::Mixed;
+        letters.curriculum.mixed_letters_percent = 100;
+        assert_eq!(letters.level(LevelAxis::Letters), 30);
+        let done = complete_result(after(0.5), &letters, AutoLevelCounters::default());
+        assert_eq!(done.change, None);
+        assert_eq!(done.settings.curriculum.level, 38);
+
+        // A level inside the alphabet chosen falls as ever.
+        own.curriculum.level = 4;
+        let done = complete_result(after(0.5), &own, AutoLevelCounters::default());
+        let change = done.change.expect("a fall");
+        assert_eq!((change.from, change.to), (4, 3));
+        assert_eq!(done.settings.curriculum.level, 3);
+    }
+
     #[test]
     fn each_mode_moves_its_own_level() {
         let mut own = koch(1);
@@ -978,6 +1053,83 @@ mod tests {
         let progress = auto_level_progress(&koch(1), AutoLevelCounters::default()).expect("p");
         assert!(!progress.alternating_mixed);
         assert_eq!(progress.next_mixed_axis, None);
+    }
+
+    /// A fall with nowhere to go never comes: a letter level kept above the
+    /// top of the alphabet chosen now, as Koch's past 30 is in Mixed, or one
+    /// at its bottom, with no other axis in the running. Home counted down
+    /// to such a fall all the same, and at the end of the count its run was
+    /// spent with nothing moved. It says none is coming, as it does with
+    /// Sessions below at zero, wherever a session short of the threshold
+    /// would move nothing.
+    #[test]
+    fn progress_says_no_fall_is_coming_where_one_has_nowhere_to_go() {
+        let falls = |settings: &TrainingSettings| {
+            let progress = auto_level_progress(settings, AutoLevelCounters::default());
+            !progress.expect("progress").below_disabled
+        };
+        let mut letters = koch(35);
+        letters.curriculum.char_set_mode = CharSetMode::Mixed;
+        letters.curriculum.mixed_letters_percent = 100;
+        let mut beside_digits = letters.clone();
+        beside_digits.curriculum.mixed_letters_percent = 50;
+        beside_digits.curriculum.digits_level = 5;
+        let mut digits_at_the_bottom = beside_digits.clone();
+        digits_at_the_bottom.curriculum.digits_level = 1;
+        let mut own = koch(20);
+        own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        let cases = [
+            ("Koch at 5", koch(5), true),
+            ("Koch at 1", koch(1), false),
+            ("Mixed's letters alone", letters, false),
+            ("Mixed's digits beside them", beside_digits, true),
+            ("Mixed's digits at 1", digits_at_the_bottom, false),
+            ("an order of five", own, false),
+        ];
+        for (case, settings, coming) in cases {
+            assert_eq!(falls(&settings), coming, "{case}");
+            let change = evaluate_auto_level(&after(0.0), &settings, &mut Default::default());
+            assert_eq!(change.is_some(), coming, "{case}: a session short of it");
+        }
+    }
+
+    /// A rise with nowhere to go never comes either: a letter level at the
+    /// top of its alphabet, or kept above the top of the one chosen now,
+    /// with no other axis in the running. Home counted up to such a rise all
+    /// the same, and the Overview's chart drew the line to reach for it. It
+    /// says none is coming, as for a fall with nowhere to go.
+    #[test]
+    fn progress_says_no_rise_is_coming_where_one_has_nowhere_to_go() {
+        let rises = |settings: &TrainingSettings| {
+            let progress = auto_level_progress(settings, AutoLevelCounters::default());
+            !progress.expect("progress").above_disabled
+        };
+        let top = koch(1).max_level(LevelAxis::Letters);
+        let mut letters = koch(35);
+        letters.curriculum.char_set_mode = CharSetMode::Mixed;
+        letters.curriculum.mixed_letters_percent = 100;
+        let mut beside_digits = letters.clone();
+        beside_digits.curriculum.mixed_letters_percent = 50;
+        beside_digits.curriculum.digits_level = 5;
+        let mut digits_at_the_top = beside_digits.clone();
+        digits_at_the_top.curriculum.digits_level = crate::morse::MAX_DIGITS_LEVEL;
+        let mut own = koch(20);
+        own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        let cases = [
+            ("Koch at 5", koch(5), true),
+            ("Koch at its top", koch(top), false),
+            ("Mixed's letters alone", letters, false),
+            ("Mixed's digits beside them", beside_digits, true),
+            ("Mixed's digits at their top", digits_at_the_top, false),
+            ("an order of five", own, false),
+        ];
+        for (case, settings, coming) in cases {
+            assert_eq!(rises(&settings), coming, "{case}");
+            let change = evaluate_auto_level(&after(1.0), &settings, &mut Default::default());
+            assert_eq!(change.is_some(), coming, "{case}: a session over it");
+        }
+        assert_eq!(level_up_line(&koch(top)), None, "no line to reach");
+        assert!(level_up_line(&koch(5)).is_some());
     }
 
     /// The keys are where counters already sit in people's saves, so their
@@ -1331,5 +1483,82 @@ mod tests {
             done.counters,
             CountersUpdate::Clear([CountersKey::of(&settings), CountersKey::of(&after)])
         );
+    }
+
+    /// A change is put onto the settings as they are when it is settled,
+    /// which for a session the app stopped under is at the next launch, on
+    /// settings that may have moved since: by hand, in another window, or
+    /// by sync. Its level was written whatever the level was by then, so a
+    /// rise from 5 to 6 earned before the level went to 8 lowered it to 6.
+    #[test]
+    fn a_change_moves_a_level_only_from_where_the_session_left_it() {
+        let change = complete_result(after(1.0), &koch(5), AutoLevelCounters::default())
+            .change
+            .expect("a rise");
+        assert_eq!((change.from, change.to), (5, 6));
+        let mut moved = koch(8);
+        assert!(!apply_auto_level(&mut moved, &change), "not put in");
+        assert_eq!(moved.curriculum.level, 8);
+        let mut left = koch(5);
+        assert!(apply_auto_level(&mut left, &change), "put in");
+        assert_eq!(left.curriculum.level, 6);
+
+        // A fall earned at the top of a short alphabet, put onto the same
+        // alphabet whose stored level a longer one has raised since.
+        let mut own = koch(4);
+        own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        let change = complete_result(after(0.5), &own, AutoLevelCounters::default())
+            .change
+            .expect("a fall");
+        assert_eq!((change.from, change.to), (4, 3));
+        own.curriculum.level = 20;
+        apply_auto_level(&mut own, &change);
+        assert_eq!(own.curriculum.level, 20);
+
+        // In Mixed the turn passes only with a move.
+        let change = complete_result(after(1.0), &mixed(50), AutoLevelCounters::default())
+            .change
+            .expect("letters rise");
+        assert_eq!(change.next_mixed_axis, Some(MixedAutoLevelAxis::Digits));
+        let mut moved = mixed(50);
+        moved.curriculum.level = 7;
+        apply_auto_level(&mut moved, &change);
+        assert_eq!(moved.curriculum.level, 7);
+        assert_eq!(
+            moved.auto_level.mixed_auto_level_next_axis,
+            MixedAutoLevelAxis::Letters
+        );
+    }
+
+    /// Koch, an order of your own and Mixed's letters share one stored
+    /// level, and a change is put in where that level is still where the
+    /// session left it, whatever alphabet reads it by then. It was put in
+    /// only where the level read through the alphabet chosen by then was:
+    /// a rise from 35 to 36 earned in LCWO's order, settled once Mixed was
+    /// chosen, whose letters top out at 30, read the level at 30 and was
+    /// dropped, while the runs it cleared were cleared all the same.
+    #[test]
+    fn a_change_moves_the_stored_level_whatever_alphabet_reads_it_now() {
+        let change = complete_result(after(1.0), &koch(35), AutoLevelCounters::default())
+            .change
+            .expect("a rise");
+        assert_eq!((change.from, change.to), (35, 36));
+        let mut now_mixed = koch(35);
+        now_mixed.curriculum.char_set_mode = CharSetMode::Mixed;
+        assert_eq!(now_mixed.level(LevelAxis::Letters), 30);
+        assert!(apply_auto_level(&mut now_mixed, &change), "put in");
+        assert_eq!(now_mixed.curriculum.level, 36);
+        assert_eq!(now_mixed.level(LevelAxis::Letters), 30, "read as ever");
+
+        // A fall the same way, from a level a shorter alphabet reads at its
+        // top.
+        let change = complete_result(after(0.5), &koch(35), AutoLevelCounters::default())
+            .change
+            .expect("a fall");
+        assert_eq!((change.from, change.to), (35, 34));
+        let mut now_own = koch(35);
+        now_own.curriculum.custom_sequence = vec!['K', 'M', 'R', 'S', 'U'];
+        assert!(apply_auto_level(&mut now_own, &change), "put in");
+        assert_eq!(now_own.curriculum.level, 34);
     }
 }

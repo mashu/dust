@@ -496,6 +496,7 @@ fn stats_count_sessions_from_every_character_set() {
             on_delete: None,
             backups: None,
             sync: None,
+            today: crate::time::local_date_string(),
         },
     );
     assert!(
@@ -1870,6 +1871,7 @@ fn the_level_up_line_shows_only_where_it_is_what_levels_you_up() {
                 on_delete: None,
                 backups: None,
                 sync: None,
+                today: crate::time::local_date_string(),
             },
         )
     };
@@ -3028,6 +3030,7 @@ mod interactions {
             ScoresTab,
             ScoresTabProps {
                 sessions: contest_history(3).into(),
+                today: crate::time::local_date_string(),
             },
         );
         // The personal best names its contest.
@@ -3056,6 +3059,7 @@ mod interactions {
             ScoresTab,
             ScoresTabProps {
                 sessions: contest_history(3).into(),
+                today: crate::time::local_date_string(),
             },
         );
         assert!(ui.shows("pill-all-modes") && ui.shows("pill-contest"));
@@ -5480,6 +5484,96 @@ mod interactions {
             );
             assert!(!kept, "the space is kept out of the box");
             assert!(box_shows(&ui, "K_"), "{}", ui.input_tag("group-input-0"));
+        });
+    }
+
+    /// While an input method composes a character in the box, Enter and
+    /// Space are its own: the Enter that ends the composition confirms
+    /// nothing, and a Space it takes skips nothing. Once it is done, Enter
+    /// confirms the group again. Each used to be the box's.
+    #[test]
+    fn keys_an_input_method_composes_with_are_its_own() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            ui.click("key-k");
+            let left = ui.press_key_composing("group-input-0", Key::Enter, Code::Enter);
+            assert!(left, "the input method's Enter");
+            assert!(ui.has("confirmed:0"), "{}", ui.html());
+            let space = Key::Character(" ".to_string());
+            let left = ui.press_key_composing("group-input-0", space, Code::Space);
+            assert!(left, "the input method's Space");
+            assert!(box_shows(&ui, "K"), "{}", ui.input_tag("group-input-0"));
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:1"), "{}", ui.html());
+        });
+    }
+
+    /// Where the webview hands over the Enter that ends a composition once
+    /// the composition is over, not as composing, as WebKit's does on a Mac
+    /// and an iPhone, an Enter at the moment one ends in the box is the
+    /// input method's all the same, and confirms nothing. The next confirms,
+    /// as does one pressed after another key, or well after a composition
+    /// a click ended. It confirmed the group with the word unfinished.
+    #[test]
+    fn the_enter_that_ends_a_composition_is_the_input_methods() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            ui.click("key-k");
+            ui.end_composition("group-input-0");
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:0"), "{}", ui.html());
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:1"), "{}", ui.html());
+            ui.end_composition("group-input-0");
+            ui.press_key("group-input-0", Key::Character("1".into()), Code::Digit1);
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:2"), "{}", ui.html());
+            ui.end_composition("group-input-0");
+            ui.advance(500).await;
+            ui.press_enter("group-input-0");
+            assert!(ui.has("confirmed:3"), "{}", ui.html());
+        });
+    }
+
+    /// So is the Space that ends a composition there, a candidate chosen or
+    /// a syllable finished: at the moment one ends in the box, it skips
+    /// nothing. The next skips, as does one pressed well after a
+    /// composition a click ended. It skipped a character for a word chosen.
+    #[test]
+    fn the_space_that_ends_a_composition_is_the_input_methods() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            let space = || Key::Character(" ".to_string());
+            ui.end_composition("group-input-0");
+            let left = ui.press_key("group-input-0", space(), Code::Space);
+            assert!(left, "the input method's Space");
+            assert!(box_shows(&ui, ""), "{}", ui.input_tag("group-input-0"));
+            let left = ui.press_key("group-input-0", space(), Code::Space);
+            assert!(!left, "the box's Space");
+            assert!(box_shows(&ui, "_"), "{}", ui.input_tag("group-input-0"));
+            ui.end_composition("group-input-0");
+            ui.advance(500).await;
+            ui.press_key("group-input-0", space(), Code::Space);
+            assert!(box_shows(&ui, "__"), "{}", ui.input_tag("group-input-0"));
+        });
+    }
+
+    /// The box takes no more than an answer to the longest group could
+    /// want: it says so to the page, and a page pasted in all the same is cut
+    /// there, drawn as it is kept, and handed on so. It was held whole, a key
+    /// timed for each of its characters, and handed to the session.
+    #[test]
+    fn the_box_takes_no_more_than_an_answer_wants() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(KeypadHarness, ());
+            let most = crate::ui::training::ANSWER_LEN_MAX;
+            let tag = ui.input_tag("group-input-0");
+            assert!(tag.contains(&format!("maxlength=\"{most}\"")), "{tag}");
+            ui.type_into("group-input-0", &"E".repeat(100_000));
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            let kept = "E".repeat(most);
+            assert!(box_shows(&ui, &kept), "{}", ui.input_tag("group-input-0"));
+            assert!(ui.has(&format!("committed:{kept}</p>")));
         });
     }
 

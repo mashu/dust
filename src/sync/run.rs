@@ -5,11 +5,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use cw_core::TrainingSettings;
+use cw_core::{SessionResult, TrainingSettings};
 use serde_json::Map;
 
 use super::pack::{
-    Forget, PACK_PREFIX, Pack, Put, Revive, open_pack, pack_name, packs_of, seal_pack,
+    Forget, PACK_LAYOUT, PACK_PREFIX, Pack, Put, Revive, Unopened, open_pack, pack_name, packs_of,
+    seal_pack,
 };
 use super::plan::{DriveState, Here, Plan, plan};
 use super::remote::{Remote, RemoteError, RemoteFile};
@@ -135,6 +136,9 @@ pub struct Synced {
     pub sent: usize,
     /// Files in the drive this key could not open, damaged say.
     pub unreadable: usize,
+    /// Files in the drive a later build wrote, which this one does not
+    /// read: read once it is updated.
+    pub later: usize,
 }
 
 impl Synced {
@@ -189,18 +193,29 @@ impl SyncFailed {
 /// The packs of `files` not yet read, read into `drive`, each noted in
 /// `read`; the records they hold gathered into `bytes`, each as it was
 /// sent, a session put back taking the place of the same record put
-/// before. Says how many files would not open.
+/// before. Says how many files would not open, and how many a later build
+/// wrote: one of those is noted in `later` rather than as read, and is
+/// fetched again only by a build of a later layout than this one, which
+/// may read it.
 async fn read_packs(
     remote: &dyn Remote,
     keys: &Keys,
     files: &[RemoteFile],
     read: &mut BTreeSet<String>,
+    later: &mut BTreeMap<String, u32>,
     drive: &mut DriveState,
     bytes: &mut HashMap<RecordId, String>,
-) -> Result<usize, RemoteError> {
-    let mut unreadable = 0;
+) -> Result<(usize, usize), RemoteError> {
+    let (mut unreadable, mut newer) = (0, 0);
     for file in files {
         if !file.name.starts_with(PACK_PREFIX) || read.contains(&file.name) {
+            continue;
+        }
+        if later
+            .get(&file.name)
+            .is_some_and(|&layout| layout >= PACK_LAYOUT)
+        {
+            newer += 1;
             continue;
         }
         let sealed = match remote.get(&file.id).await {
@@ -211,7 +226,7 @@ async fn read_packs(
             Err(err) => return Err(err),
         };
         match open_pack(keys, &file.name, &sealed) {
-            Some(pack) => {
+            Ok(pack) => {
                 drive.take(&pack);
                 for put in pack.put {
                     if let Some(id) = put.record_id() {
@@ -223,14 +238,21 @@ async fn read_packs(
                         bytes.insert(id, revive.s);
                     }
                 }
+                later.remove(&file.name);
             }
-            None => unreadable += 1,
+            Err(Unopened::Damaged) => unreadable += 1,
+            // What it holds arrives once this build is updated.
+            Err(Unopened::Later) => {
+                later.insert(file.name.clone(), PACK_LAYOUT);
+                newer += 1;
+                continue;
+            }
         }
-        // Read, whether it opened or not: one that will not open does not
-        // open the next time either.
+        // Read, whether it opened or not: one damaged does not open the
+        // next time either.
         read.insert(file.name.clone());
     }
-    Ok(unreadable)
+    Ok((unreadable, newer))
 }
 
 /// Sync the history in `store` and the settings `here` with the drive
@@ -266,8 +288,11 @@ pub async fn sync_once(
     let mut read = state.read.clone();
     let mut drive = state.drive.clone();
     let mut bytes = HashMap::new();
-    synced.unreadable +=
-        read_packs(remote, &keys, &files, &mut read, &mut drive, &mut bytes).await?;
+    let later = &mut state.later;
+    (synced.unreadable, synced.later) = read_packs(
+        remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
+    )
+    .await?;
 
     let listed: BTreeSet<RecordId> = store
         .history_listing()
@@ -275,6 +300,19 @@ pub async fn sync_once(
         .ok_or_else(|| SyncFailed::Store("the history here could not be read".into()))?
         .into_iter()
         .collect();
+    // A deletion the drive holds is the last word here only while the
+    // session stays gone: one listed here again, or put back here by hand
+    // since the last sync, and deleted after, was deleted by hand, which
+    // the drive is to hear of, or which a deletion it holds accounts for.
+    state
+        .applied
+        .retain(|id, _| !listed.contains(id) && !state.revived.contains_key(id));
+    // Once, at the first sync after an update from a build that noted no
+    // deletion by hand: those it made that the drive holds, noted.
+    if !state.deletions_noted {
+        note_deletions_by_hand(store, &listed, state).await;
+        state.deletions_noted = true;
+    }
     let mut planned = planned(store, &drive, &listed, state).await;
     // A record to take that only a pack read before holds, as where the
     // store here lost one: every pack read again, once.
@@ -289,10 +327,37 @@ pub async fn sync_once(
         read.clear();
         drive = DriveState::default();
         bytes.clear();
-        synced.unreadable =
-            read_packs(remote, &keys, &files, &mut read, &mut drive, &mut bytes).await?;
+        let later = &mut state.later;
+        (synced.unreadable, synced.later) = read_packs(
+            remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
+        )
+        .await?;
         planned = self::planned(store, &drive, &listed, state).await;
     }
+
+    // The deletions made here by hand to send, the twins' below left out.
+    let by_hand: BTreeSet<RecordId> = planned.send_deleted.iter().copied().collect();
+
+    // One session under two names, here and in the drive, as a backup
+    // restored on one device names its sessions anew: the smaller name is
+    // kept on every device alike, and the other let go everywhere, but only
+    // once the one kept is in the drive for every device to take.
+    let mut twins_here = Vec::new();
+    let mut not_taken = BTreeSet::new();
+    for twin in twins(store, &planned, &bytes, &listed).await {
+        if twin.theirs < twin.ours {
+            twins_here.push((twin.ours, twin.json));
+            planned.send_deleted.push(twin.ours);
+        } else {
+            not_taken.insert(twin.theirs);
+            if drive.alive(twin.ours) {
+                planned.send_deleted.push(twin.theirs);
+            }
+        }
+    }
+    let let_go_here: BTreeSet<RecordId> = twins_here.iter().map(|(id, _)| *id).collect();
+    planned.take.retain(|id| !not_taken.contains(id));
+    planned.send.retain(|id| !let_go_here.contains(id));
 
     // What the drive holds, taken here.
     let here_bytes = read_here(store, &planned).await;
@@ -325,6 +390,11 @@ pub async fn sync_once(
         };
         change.forget.push((id, deleted));
     }
+    for (id, json) in &twins_here {
+        if let Some(session) = read_record(json) {
+            change.forget.push((*id, Deleted::of(&session, now)));
+        }
+    }
     if !change.is_empty() {
         let saved = store.change_history(change.clone()).await;
         if saved.kept().is_none() {
@@ -336,7 +406,10 @@ pub async fn sync_once(
         synced.took = change.put.len();
         synced.let_go = change.forget.len();
     }
-    for &(id, at) in &planned.let_go {
+    // The deletions the drive holds that account for a session gone here,
+    // noted: those let go here, and those deleted here by hand that the
+    // drive deleted as well.
+    for &(id, at) in planned.let_go.iter().chain(&planned.deleted_too) {
         state.applied.insert(id, at);
     }
     for id in &change.unforget {
@@ -361,9 +434,9 @@ pub async fn sync_once(
     let forget: Vec<Forget> = planned
         .send_deleted
         .iter()
-        .map(|id| Forget {
+        .map(|&id| Forget {
             id: id.name(),
-            at: now,
+            at: state.stamp_change(id, now),
         })
         .collect();
     let revive: Vec<Revive> = planned
@@ -389,6 +462,18 @@ pub async fn sync_once(
                 state.revived.remove(&id);
             }
         }
+        // A deletion by hand, once the drive holds it, is the drive's,
+        // noted as one taken from it: a putting back the drive holds after
+        // it brings the session back here, as on every other device, rather
+        // than this device sending it again. A twin's is not: its session
+        // is kept under the other name.
+        for forget in &pack.forget {
+            if let Some(id) = forget.record_id()
+                && by_hand.contains(&id)
+            {
+                state.applied.insert(id, forget.at);
+            }
+        }
     }
 
     sync_settings(store, remote, &keys, &files, state, here, now, &mut synced).await?;
@@ -396,17 +481,63 @@ pub async fn sync_once(
     Ok(synced)
 }
 
+/// Note the deletions by hand made here that a build before this one,
+/// which noted none, left with no note: those of the sessions the drive
+/// held as deleted as this device last synced, each deleted by hand here
+/// and sent from here, or found deleted in the drive already. Each is noted
+/// with the drive's deletion, as this build notes one it finds the drive
+/// holding ([`Plan::deleted_too`]): a putting back the drive holds after it
+/// brings the session back here, rather than this device sending its
+/// deletion again. One put back here by hand since the last sync is left
+/// out: deleted again, it is a deletion by hand as any other.
+async fn note_deletions_by_hand(
+    store: &dyn Store,
+    listed: &BTreeSet<RecordId>,
+    state: &mut SyncState,
+) {
+    let unnoted: Vec<RecordId> = state
+        .drive
+        .tombs
+        .keys()
+        .copied()
+        .filter(|&id| {
+            state.drive.deleted(id)
+                && !listed.contains(&id)
+                && !state.applied.contains_key(&id)
+                && !state.revived.contains_key(&id)
+        })
+        .collect();
+    if unnoted.is_empty() {
+        return;
+    }
+    for id in store.forgotten(unnoted).await {
+        if let Some(&at) = state.drive.tombs.get(&id) {
+            state.applied.insert(id, at);
+        }
+    }
+}
+
 /// The plan for this sync, the store asked which of what the drive holds
-/// and it does not list it deleted by hand.
+/// and it does not list it deleted by hand: of what the drive holds alive,
+/// and of what it holds as deleted that this device has no note of, where
+/// the drive deleted it since the last sync, as a session deleted on two
+/// devices before either synced, or this device put it back by hand since
+/// and deleted it again.
 async fn planned(
     store: &dyn Store,
     drive: &DriveState,
     listed: &BTreeSet<RecordId>,
     state: &SyncState,
 ) -> Plan {
+    let deleted_since = drive.tombs.keys().copied().filter(|&id| {
+        drive.deleted(id)
+            && (!state.drive.deleted(id) || state.revived.contains_key(&id))
+            && !state.applied.contains_key(&id)
+    });
     let missing: Vec<RecordId> = drive
         .alive_ids()
         .into_iter()
+        .chain(deleted_since)
         .filter(|id| !listed.contains(id))
         .collect();
     let forgotten: BTreeSet<RecordId> = if missing.is_empty() {
@@ -423,6 +554,99 @@ async fn planned(
             revived: &state.revived,
         },
     )
+}
+
+/// A record the drive holds that is a session this device holds already
+/// under another name, alike in everything: as one device keeps a session
+/// under the name it was kept by, and another that restored it from a
+/// backup under the name the restore gave it ([`RecordId::placed`]).
+struct Twin {
+    theirs: RecordId,
+    ours: RecordId,
+    /// What this device stored of it.
+    json: String,
+}
+
+/// The twins of the records `planned` takes, the drive's read into `bytes`:
+/// each looked for only among the records here of the same millisecond, as
+/// a session's name falls where it finished, and only where one of the
+/// drive's and one of this device's are alike, so that sessions alike in
+/// everything twice over stay as many as they are.
+async fn twins(
+    store: &dyn Store,
+    planned: &Plan,
+    bytes: &HashMap<RecordId, String>,
+    listed: &BTreeSet<RecordId>,
+) -> Vec<Twin> {
+    // Those going here, or put back, are no twin of any.
+    let busy: BTreeSet<RecordId> = planned
+        .let_go
+        .iter()
+        .chain(&planned.send_back)
+        .map(|(id, _)| *id)
+        .collect();
+    let mut near: Vec<(RecordId, Vec<RecordId>)> = Vec::new();
+    for &theirs in &planned.take {
+        let from = theirs.order / 1000 * 1000;
+        let start = RecordId {
+            order: from,
+            nonce: 0,
+        };
+        let end = RecordId {
+            order: from.saturating_add(999),
+            nonce: u64::MAX,
+        };
+        let here: Vec<RecordId> = listed
+            .range(start..=end)
+            .copied()
+            .filter(|id| !busy.contains(id))
+            .collect();
+        if !here.is_empty() {
+            near.push((theirs, here));
+        }
+    }
+    if near.is_empty() {
+        return Vec::new();
+    }
+    let wanted: BTreeSet<RecordId> = near.iter().flat_map(|(_, here)| here.clone()).collect();
+    let held: HashMap<RecordId, (SessionResult, String)> = store
+        .read_records(wanted.into_iter().collect())
+        .await
+        .into_iter()
+        .flatten()
+        .filter_map(|record| Some((record.id, (read_record(&record.json)?, record.json))))
+        .collect();
+    let mut found: Vec<(RecordId, RecordId)> = Vec::new();
+    for (theirs, here) in near {
+        let Some(session) = bytes.get(&theirs).and_then(|json| read_record(json)) else {
+            continue;
+        };
+        let alike: Vec<RecordId> = here
+            .into_iter()
+            .filter(|id| held.get(id).is_some_and(|(ours, _)| *ours == session))
+            .collect();
+        if let [ours] = alike[..] {
+            found.push((theirs, ours));
+        }
+    }
+    // One of this device's alike to two of the drive's is a twin of neither.
+    let mut matched: HashMap<RecordId, usize> = HashMap::new();
+    for (_, ours) in &found {
+        *matched.entry(*ours).or_default() += 1;
+    }
+    let mut twins = Vec::new();
+    for &(theirs, ours) in &found {
+        if matched[&ours] == 1
+            && let Some((_, json)) = held.get(&ours)
+        {
+            twins.push(Twin {
+                theirs,
+                ours,
+                json: json.clone(),
+            });
+        }
+    }
+    twins
 }
 
 /// What the store holds of each record the plan sends, or deletes here for
@@ -494,11 +718,13 @@ async fn sync_settings(
             Err(RemoteError::Gone) => continue,
             Err(err) => return Err(err.into()),
         };
-        let Some(read) = keys
-            .open(&file.name, &sealed)
-            .and_then(|raw| SettingsFile::read(&raw))
-        else {
+        let Some(raw) = keys.open(&file.name, &sealed) else {
             synced.unreadable += 1;
+            continue;
+        };
+        // Sealed with this key, but none this build reads: a later one's.
+        let Some(read) = SettingsFile::read(&raw) else {
+            synced.later += 1;
             continue;
         };
         if file.name == own_name {

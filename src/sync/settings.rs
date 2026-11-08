@@ -185,19 +185,29 @@ impl Taken {
 /// This device's keys, `here`, stamped: each that changed since the last
 /// sync, from `base`, as of `now`; each other as it was stamped then, in
 /// `stamps`. One `base` had and `here` has not is taken away as of now.
+///
+/// A change is stamped after the stamp `stamps` holds of its key, where
+/// that is `now` or later: made after the change this device last took up
+/// of it, it is the newer, though another device's clock is ahead of this
+/// one's.
 pub fn stamp(
     here: &Map<String, Value>,
     base: &Map<String, Value>,
     stamps: &BTreeMap<String, u64>,
     now: u64,
 ) -> StampedSettings {
+    let changed = |key: &str| {
+        stamps
+            .get(key)
+            .map_or(now, |&seen| now.max(seen.saturating_add(1)))
+    };
     let mut stamped: StampedSettings = here
         .iter()
         .map(|(key, value)| {
             let at = if base.get(key) == Some(value) {
                 stamps.get(key).copied().unwrap_or(0)
             } else {
-                now
+                changed(key)
             };
             (
                 key.clone(),
@@ -213,7 +223,7 @@ pub fn stamp(
             key.clone(),
             Stamped {
                 v: Value::Null,
-                at: now,
+                at: changed(key),
             },
         );
     }
@@ -347,6 +357,38 @@ mod tests {
                 at: 100
             }
         );
+    }
+
+    /// A key changed, or taken away, is stamped after the newest stamp of
+    /// it this device has seen, where its clock is behind that: the change
+    /// made here, after it, is the newer.
+    #[test]
+    fn a_change_is_stamped_after_the_newest_seen_of_it() {
+        let base = TrainingSettings::default();
+        let mut here = base.clone();
+        here.curriculum.num_groups = 9;
+        let mut base_keys = keys_of(&base);
+        base_keys.insert("contestActive".into(), Value::Bool(true));
+        // Changed last on a device whose clock is an hour ahead.
+        let stamps = BTreeMap::from([
+            ("numGroups".to_string(), 3_600_100),
+            ("contestActive".to_string(), 3_600_100),
+            ("charWpmMin".to_string(), 50),
+        ]);
+        let stamped = stamp(&keys_of(&here), &base_keys, &stamps, 100);
+        assert_eq!(stamped["numGroups"].at, 3_600_101);
+        assert_eq!(
+            stamped["contestActive"],
+            Stamped {
+                v: Value::Null,
+                at: 3_600_101
+            }
+        );
+        assert_eq!(stamped["charWpmMin"].at, 50, "unchanged");
+        // Seen stamped earlier than now, a change is stamped now.
+        let stamps = BTreeMap::from([("numGroups".to_string(), 40)]);
+        let stamped = stamp(&keys_of(&here), &keys_of(&base), &stamps, 100);
+        assert_eq!(stamped["numGroups"].at, 100);
     }
 
     /// The newest of each setting wins, from whichever device; and every

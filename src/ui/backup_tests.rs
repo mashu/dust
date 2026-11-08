@@ -7,6 +7,7 @@
 use std::rc::Rc;
 
 use cw_core::{SessionResult, TrainingSettings};
+use dioxus::prelude::*;
 
 use crate::persist::backup::{read_backup, write_backup};
 use crate::persist::memory::MemoryStore;
@@ -370,6 +371,286 @@ fn a_large_backup_says_it_takes_a_while_and_restores_all_the_same() {
         );
         assert!(ui.shows("toast-undo"));
         assert_eq!(stored_dates(&ui).len(), 5);
+    });
+}
+
+/// A backup chosen is the app's to restore from the moment it is chosen:
+/// the card says it is being read at once, and leaving the tab, or the
+/// screen, while it is read leaves it restoring all the same, its message
+/// said wherever the app is by then. Restoring was the card's own, and was
+/// dropped, unsaid, with the tab.
+#[test]
+fn a_restore_goes_on_when_its_tab_is_left() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let mut saved = test_settings();
+        saved.curriculum.level = 9;
+        let file = write_backup(&saved, &all, 0);
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        assert!(ui.has("Reading dust-backup.json…"), "{}", ui.html());
+        ui.click("seg-overview");
+        ui.click("nav-practice");
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(stored_dates(&ui).len(), 5);
+        assert_eq!(ui.store.load_settings().curriculum.level, 9);
+        ui.click("nav-stats");
+        ui.click("seg-history");
+        assert!(!ui.has("Reading dust-backup.json"), "{}", ui.html());
+    });
+}
+
+/// A backup read while a session is under way is restored once it is over,
+/// as a sync is, never under it: a restore takes its settings, the level
+/// among them, which a session is not to have changed beneath it.
+#[test]
+fn a_backup_read_during_a_session_is_restored_once_it_is_over() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let mut saved = test_settings();
+        saved.curriculum.level = 9;
+        let file = write_backup(&saved, &all, 0);
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.click("nav-practice");
+        ui.click("btn-start-training");
+        ui.hold_file_reads(false);
+        ui.advance(3_000).await;
+        assert_eq!(stored_dates(&ui).len(), 2, "not under the session");
+        assert_ne!(ui.with_app(|ctx| ctx.settings.peek().curriculum.level), 9);
+        ui.click("btn-end-session");
+        ui.advance(3_000).await;
+        assert_eq!(stored_dates(&ui).len(), 5, "{}", ui.html());
+        assert_eq!(ui.with_app(|ctx| ctx.settings.peek().curriculum.level), 9);
+    });
+}
+
+/// A file that is no backup, read while its tab is left, is said in a
+/// message, as the card is not there to say it; the card, opened again,
+/// says nothing of it.
+#[test]
+fn a_file_found_no_backup_once_its_tab_is_left_is_said_in_a_message() {
+    run(|| async {
+        let mut ui = open(MemoryStore::default(), &history(2));
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "notes.txt", "hello", 5);
+        ui.click("seg-overview");
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        let said = "notes.txt is not a Dust backup: nothing was restored.";
+        let toast = ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+        assert_eq!(toast.as_deref(), Some(said), "{}", ui.html());
+        ui.click("seg-history");
+        assert!(!ui.has("backup-problem"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 2);
+    });
+}
+
+/// One backup is restored at a time: another chosen while one is read takes
+/// its place, the card saying at once that it is the one read, and it alone
+/// is restored, whenever the first is done. Both were read, and the first
+/// done said nothing was under way while the other was; then both were
+/// merged in, with both their settings. Then the second was left alone
+/// while the first was read, never restored, and nothing said so.
+#[test]
+fn a_backup_chosen_while_another_is_read_takes_its_place() {
+    run(|| async {
+        let all = history(7);
+        let mut ui = open(MemoryStore::default(), &all[3..5]);
+        let mut first = test_settings();
+        first.curriculum.level = 9;
+        let first = write_backup(&first, &all[..3], 0);
+        let mut second = test_settings();
+        second.curriculum.level = 4;
+        let second = write_backup(&second, &all[5..], 0);
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        assert!(ui.has("Reading second.json…"), "{}", ui.html());
+        assert!(!ui.has("Reading first.json"), "{}", ui.html());
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        assert!(ui.has("Restored 2 sessions and your settings."));
+        assert_eq!(stored_dates(&ui).len(), 4, "the second backup's alone");
+        assert_eq!(ui.store.load_settings().curriculum.level, 4);
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        // Once it is done, another is restored as any is.
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(100).await;
+        assert_eq!(stored_dates(&ui).len(), 7);
+        assert_eq!(ui.store.load_settings().curriculum.level, 9);
+    });
+}
+
+/// A backup chosen over another still read is the only one read as a
+/// backup: the other's file, once read, is let go without being read as
+/// one. It was read as a backup all the same, a file of up to a gigabyte
+/// on a thread of its own on a computer, and only then let go.
+#[test]
+fn a_backup_chosen_over_another_is_the_only_one_read_as_a_backup() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "first.json", &file, file.len() as u64);
+        ui.choose_file("file-backup", "second.json", &file, file.len() as u64);
+        ui.take_renders("backup read");
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(ui.take_renders("backup read"), 1, "the second's alone");
+    });
+}
+
+/// The card says a backup is under way until the store has said what
+/// became of it, as a browser's database takes a moment to: a file chosen
+/// meanwhile is not restored over it. The card stopped saying so as the
+/// store was asked, with nothing restored yet.
+#[test]
+fn the_card_says_a_backup_is_under_way_until_it_is_restored() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.store.deferred.set(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(100).await;
+        assert_eq!(stored_dates(&ui).len(), 2, "not stored yet");
+        assert!(ui.has("Reading dust-backup.json…"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 5);
+    });
+}
+
+/// A backup chosen while another is being restored is restored once that
+/// is over, merged with the history it restored: its message says what it
+/// brought itself, and its Undo takes back that alone. Merged with a
+/// history short of the first's sessions, it took them for its own, said
+/// so, and its Undo deleted them too.
+#[test]
+fn a_backup_chosen_while_another_is_restored_waits_for_it() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[4..]);
+        let first = write_backup(&test_settings(), &all[..2], 0);
+        let second = write_backup(&test_settings(), &all[..3], 0);
+        ui.store.deferred.set(true);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(100).await;
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.advance(100).await;
+        assert_eq!(ui.store.waiting(), 1, "the second waits for the first");
+        assert!(ui.has("Reading second.json…"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 1 session and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 4);
+        ui.store.deferred.set(false);
+        ui.click("toast-undo");
+        ui.advance(20).await;
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-09-01", "2026-09-02", "2026-09-05"]
+        );
+    });
+}
+
+/// A backup chosen while the Undo of a restore is under way, as a
+/// browser's database makes it a moment after it is asked for, is restored
+/// once the Undo is over, merged with the history it left: what both hold
+/// is restored. Merged with a history that still held it, it was taken for
+/// sessions already here, and the Undo deleted them.
+#[test]
+fn a_backup_chosen_while_a_restore_is_undone_waits_for_it() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[4..]);
+        let first = write_backup(&test_settings(), &all[..2], 0);
+        let second = write_backup(&test_settings(), &all[..3], 0);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(20).await;
+        assert_eq!(stored_dates(&ui).len(), 3);
+        ui.store.deferred.set(true);
+        ui.click("toast-undo");
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.advance(100).await;
+        assert_eq!(ui.store.waiting(), 1, "the second waits for the Undo");
+        assert!(ui.has("Reading second.json…"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-05"]
+        );
+    });
+}
+
+/// A file whose read never ends, as a browser's of a file moved after it
+/// was chosen never does, leaves the next one chosen to be restored: the
+/// card says at once that the newer is being read, and what it holds is
+/// restored. The first held off every restore after it until the app was
+/// opened again, the card saying for good that it was being read.
+#[test]
+fn a_backup_chosen_while_another_is_never_read_is_restored() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let mut saved = test_settings();
+        saved.curriculum.level = 9;
+        let file = write_backup(&saved, &all, 0);
+        ui.never_finish_reading("moved.json");
+        ui.choose_file("file-backup", "moved.json", &file, file.len() as u64);
+        ui.advance(100).await;
+        assert!(ui.has("Reading moved.json…"), "{}", ui.html());
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        assert!(ui.has("Reading dust-backup.json…"), "{}", ui.html());
+        assert!(!ui.has("Reading moved.json"), "{}", ui.html());
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(stored_dates(&ui).len(), 5);
+        assert_eq!(ui.store.load_settings().curriculum.level, 9);
+        assert!(!ui.has("Reading"), "{}", ui.html());
     });
 }
 

@@ -660,15 +660,16 @@ impl LetterTally {
 
 /// Each character's tallies in `sessions`, in the order of its character.
 /// Every session is read, however far back: its tries are counted in full
-/// too.
+/// too, as far as a count holds them, since a save's are not trusted to be
+/// small.
 fn letter_tallies(sessions: &[SessionResult]) -> Vec<LetterTally> {
     let mut tallies: BTreeMap<char, LetterTally> = BTreeMap::new();
     for (session, letters, worth) in sessions_faded(sessions, usize::MAX) {
         for (letter, stats) in letters.iter() {
             let tally = tallies.entry(*letter).or_default();
             tally.letter = *letter;
-            tally.correct += stats.correct;
-            tally.total += stats.total;
+            tally.correct = tally.correct.saturating_add(stats.correct);
+            tally.total = tally.total.saturating_add(stats.total);
             tally.faded_correct += worth * f64::from(stats.correct);
             tally.faded_total += worth * f64::from(stats.total);
             tally
@@ -738,8 +739,8 @@ fn trend(mut sessions: Vec<(u64, u32, u32)>) -> Option<((f64, u32), (f64, u32))>
         } else {
             break;
         };
-        into.0 += correct;
-        into.1 += tries;
+        into.0 = into.0.saturating_add(correct);
+        into.1 = into.1.saturating_add(tries);
     }
     let pct = |(correct, tries): (u32, u32)| (100.0 * f64::from(correct) / f64::from(tries), tries);
     (recent.1 >= RECENT_TRIES && earlier.1 >= EARLIER_MIN_TRIES)
@@ -1399,6 +1400,30 @@ mod tests {
         assert_eq!(k.status, MasteryStatus::Mastered);
         let m = diag.iter().find(|d| d.letter == 'M').expect("M row");
         assert_eq!(m.status, MasteryStatus::Weak);
+    }
+
+    /// The tallies a save holds are not trusted to be small: two sessions
+    /// whose tries of a letter add up past what a count holds panicked
+    /// reading Letters, its tally and its trend alike.
+    #[test]
+    fn tries_past_what_a_count_holds_are_read_without_trouble() {
+        let tried = |timestamp: u64, total: u32| {
+            let mut session = SessionResult {
+                timestamp,
+                ..SessionResult::empty_for_test()
+            };
+            let tries = LetterAccuracy {
+                correct: total,
+                total,
+            };
+            session.tally.sent.insert('K', tries);
+            session
+        };
+        let history = [tried(2, 1), tried(1, u32::MAX)];
+        let diag = character_diagnostics(&history);
+        let k = diag.iter().find(|d| d.letter == 'K').expect("K row");
+        assert_eq!((k.correct, k.total), (u32::MAX, u32::MAX));
+        assert_eq!(k.accuracy_pct, 100.0);
     }
 
     /// A character's recognition time is the median of its latest timed

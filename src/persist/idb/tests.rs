@@ -898,7 +898,7 @@ fn a_backup_holds_every_record_stored_and_none_deleted() {
 
 /// The history may have changed as another tab tells of a change or leaves
 /// its stamp, or as an older build writes the history kept whole: each is
-/// said once, until it changes again.
+/// said until a look that lists the history takes it up.
 #[test]
 fn the_history_changed_as_another_tab_or_an_older_build_says() {
     let page = Page::holding(&[ago(4)]);
@@ -909,13 +909,16 @@ fn the_history_changed_as_another_tab_or_an_older_build_says() {
     assert!(!tab.changed());
     fake.shelves().news += 1;
     assert!(tab.changed(), "told of");
-    assert!(!tab.changed(), "once");
+    assert!(tab.changed(), "until it is taken up");
+    done(tab.listing());
+    assert!(!tab.changed(), "taken up");
     let other = opened(&fake);
     done(other.apply(HistoryChange {
         put: vec![record_of(&ago(0))],
         ..HistoryChange::default()
     }));
     assert!(tab.changed(), "a stamp left");
+    done(tab.listing());
     assert!(!tab.changed());
     // Finished after the move, by an older build.
     let older = SessionResult {
@@ -932,6 +935,30 @@ fn the_history_changed_as_another_tab_or_an_older_build_says() {
     assert_eq!(tab.load().sessions.len(), 3);
     assert_eq!(tab.load().sessions, []);
     assert!(tab.changed());
+}
+
+/// A change another tab made is still to take up after a look that could
+/// not list the history, however often it is asked of, until a look that
+/// can takes it up. Asking noted it as seen, so a listing that failed left
+/// it for good: the session the other tab stored never showed here until
+/// another change, or the page was opened again.
+#[test]
+fn a_change_is_still_to_take_up_after_a_listing_that_failed() {
+    let fake = Fake::default();
+    let (tab, other) = (opened(&fake), opened(&fake));
+    let theirs = record_of(&ago(0));
+    done(other.apply(HistoryChange {
+        put: vec![theirs.clone()],
+        ..HistoryChange::default()
+    }));
+    assert!(tab.changed(), "theirs, to take up");
+    assert!(tab.changed(), "still, until it is");
+    fake.shelves().failing = Some("closed".into());
+    assert_eq!(done(tab.listing()), None);
+    fake.shelves().failing = None;
+    assert!(tab.changed(), "still to take up");
+    assert_eq!(done(tab.listing()), Some(vec![theirs.id]));
+    assert!(!tab.changed(), "taken up");
 }
 
 /// The browser clearing the database under the page loses what it held:

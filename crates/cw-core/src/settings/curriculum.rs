@@ -127,14 +127,20 @@ impl TrainingSettings {
     /// stored level may be higher, from a longer alphabet, and is kept for
     /// when that alphabet comes back.
     pub fn level(&self, axis: LevelAxis) -> u32 {
-        let stored = match axis {
+        let stored = self.stored_level(axis);
+        let min = axis.min_level();
+        stored.clamp(min, self.max_level(axis).max(min))
+    }
+
+    /// The level kept for `axis`, as far as any alphabet reaches: above
+    /// [`Self::level`] where a longer alphabet reached it.
+    pub(crate) fn stored_level(&self, axis: LevelAxis) -> u32 {
+        match axis {
             LevelAxis::Letters => self.curriculum.level,
             LevelAxis::Digits => self.curriculum.digits_level,
             LevelAxis::Callsign => self.curriculum.callsign_level,
             LevelAxis::Words => LEVEL_MIN,
-        };
-        let min = axis.min_level();
-        stored.clamp(min, self.max_level(axis).max(min))
+        }
     }
 
     pub fn set_level(&mut self, axis: LevelAxis, value: u32) {

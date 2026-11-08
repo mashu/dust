@@ -136,15 +136,19 @@ impl HeatmapGrid {
     }
 }
 
+/// Each day's practice in `sessions`, under the day each session's date
+/// names, written as the calendar writes it: a date written without its
+/// zeros, `2026-7-5`, is the same day as `2026-07-05`, as the streak reads
+/// it. A session whose date names no day is left out.
 pub fn aggregate_heatmap(sessions: &[SessionResult]) -> BTreeMap<String, HeatmapDay> {
     let mut days = BTreeMap::new();
     for session in sessions {
-        if date_to_day_index(&session.date).is_none() {
+        let Some(day) = date_to_day_index(&session.date) else {
             continue;
-        }
+        };
         let entry = days
-            .entry(session.date.clone())
-            .or_insert_with(|| HeatmapDay::new(&session.date));
+            .entry(day_index_to_date(day))
+            .or_insert_with_key(|date| HeatmapDay::new(date));
         entry.chars = entry.chars.saturating_add(session.total_chars);
         entry.sessions = entry.sessions.saturating_add(1);
         entry.group_count = entry
@@ -389,6 +393,20 @@ mod tests {
     fn a_session_with_an_unreadable_date_is_skipped() {
         let days = aggregate_heatmap(&[session("not-a-date", 10, 1.0)]);
         assert!(days.is_empty());
+    }
+
+    /// A day is the day its date names, however the date is written: one
+    /// without its zeros, `2026-7-5`, as a backup edited by hand may hold
+    /// it, counted towards the streak but never showed on the calendar,
+    /// which looks each day up as the calendar writes it.
+    #[test]
+    fn a_date_written_without_its_zeros_shows_on_its_day() {
+        let sessions = [session("2026-7-5", 10, 1.0), session("2026-07-05", 6, 1.0)];
+        let grid =
+            build_heatmap(&sessions, "2026-07-17", 1, HeatmapColorMode::Volume).expect("grid");
+        let fifth = grid.cell("2026-07-05").expect("the 5th");
+        assert_eq!((fifth.sessions, fifth.chars), (2, 16));
+        assert_eq!(grid.cells().map(|cell| cell.sessions).sum::<u32>(), 2);
     }
 
     #[test]

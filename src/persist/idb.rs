@@ -759,10 +759,12 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// another tab told of a change, or left its stamp, or an older build
     /// wrote to the history it keeps whole. A look at the stamp and at the
     /// length of that history, never a read of either.
+    ///
+    /// Nothing is noted: a change is told of each time it is asked, until a
+    /// look that lists the history takes it up ([`Self::listing`]), so one
+    /// whose look could not list it is told of again.
     pub(super) fn changed(&self) -> bool {
-        let now = self.looking();
-        let told = self.seen.replace(Some(now.clone())) != Some(now);
-        told || self.legacy_changed()
+        *self.seen.borrow() != Some(self.looking()) || self.legacy_changed()
     }
 
     /// A wait that ends as another tab tells of a change it made.
@@ -968,11 +970,13 @@ fn taken_up(sessions: &mut Vec<(RecordId, SessionResult)>, change: &HistoryChang
 }
 
 #[cfg(feature = "web")]
-pub(super) use script::Script;
+pub(super) use script::{Script, waited_ms};
 
 /// The page script, run on the page.
 #[cfg(feature = "web")]
 mod script {
+    use std::cell::Cell;
+
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
 
@@ -1016,17 +1020,30 @@ mod script {
             .ok()
     }
 
+    thread_local! {
+        /// When the script was last asked something, or last answered, by
+        /// the page's clock ([`waited_ms`]).
+        static STIRRED: Cell<f64> = const { Cell::new(0.0) };
+    }
+
+    /// How long the script has kept the page waiting, in milliseconds: since
+    /// it was last asked something, or last answered.
+    pub(in crate::persist) fn waited_ms() -> f64 {
+        js_sys::Date::now() - STIRRED.with(Cell::get)
+    }
+
     /// Ask the script's `name`, with `args`, and wait for its answer.
     async fn asked(glue: JsValue, name: &str, args: Vec<JsValue>) -> Result<JsValue, Refused> {
         let function = function(&glue, name)
             .ok_or_else(|| Refused::Failed(format!("its script has no {name}")))?;
         let args: js_sys::Array = args.into_iter().collect();
+        STIRRED.with(|stirred| stirred.set(js_sys::Date::now()));
         let promise = function
             .apply(&glue, &args)
             .map_err(|error| Refused::Failed(said(&error)))?;
-        let answer = JsFuture::from(js_sys::Promise::resolve(&promise))
-            .await
-            .map_err(|error| Refused::Failed(said(&error)))?;
+        let answer = JsFuture::from(js_sys::Promise::resolve(&promise)).await;
+        STIRRED.with(|stirred| stirred.set(js_sys::Date::now()));
+        let answer = answer.map_err(|error| Refused::Failed(said(&error)))?;
         if let Some(why) = field(&answer, "why").as_string() {
             let message = field(&answer, "message").as_string().unwrap_or_default();
             return Err(Refused::said(&why, message));

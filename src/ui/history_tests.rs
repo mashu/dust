@@ -415,6 +415,59 @@ fn a_contest_row_opens_the_runs_results() {
     });
 }
 
+/// A run's results opened from History work out where it stands on the
+/// board once for the history: the tab drawn again for a setting moved or a
+/// backup saved, as for each step of a sync, finds it worked out, rather
+/// than read every run's log of its contest again.
+#[test]
+fn a_runs_results_work_out_their_place_once() {
+    run(|| async {
+        let koch = stored_session("2026-10-01", &[("KM", "KM")]);
+        let contest = stored_run("2026-10-20", &[("K5XYZ", "214", "K5XYZ", "214")]);
+        let (mut ui, _recorder) = open_history(&[koch, contest]);
+        ui.take_all_worked_out();
+        ui.click("history-open-1");
+        assert!(ui.has("Run complete"));
+        assert_eq!(ui.take_worked_out("board place"), 1);
+        ui.with_app(|ctx| {
+            let mut last_backup = ctx.last_backup;
+            last_backup.set(Some(1));
+        });
+        ui.with_app(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().band.master_volume = 0.5;
+        });
+        assert!(ui.has("Run complete"));
+        assert_eq!(ui.take_worked_out("board place"), 0);
+    });
+}
+
+/// Two runs set at one moment, as copies of the history on two devices
+/// may hold them, each show where they stand on the board. A run's place
+/// was found by its stamp alone, and both showed the place of whichever
+/// the board ranked first.
+#[test]
+fn two_runs_set_at_one_moment_each_show_their_own_place() {
+    run(|| async {
+        let qso = ("K5XYZ", "214", "K5XYZ", "214");
+        let clean = stored_run("2026-10-20", &[qso; 5]);
+        let mut slipped = [qso; 5];
+        slipped[4].3 = "241";
+        let slipped = stored_run("2026-10-20", &slipped);
+        assert_eq!(clean.timestamp, slipped.timestamp);
+        let (mut ui, _recorder) = open_history(&[clean, slipped]);
+        let mut said = Vec::new();
+        for index in 0..2 {
+            ui.click(&format!("history-open-{index}"));
+            assert!(ui.has("Run complete"));
+            said.push((ui.has("New personal best"), ui.has("2nd best of your 2")));
+            ui.click("btn-back");
+        }
+        said.sort();
+        assert_eq!(said, [(false, true), (true, false)], "one each");
+    });
+}
+
 /// A long history makes the rows of the sessions it shows, and no others:
 /// a row reads its run's log, and a page more makes the rows of that page.
 #[test]
@@ -449,6 +502,23 @@ fn a_long_history_makes_only_the_rows_it_shows() {
         ui.click("history-select");
         ui.click("history-pick-99");
         assert_eq!(ui.take_worked_out("history rows"), 0);
+    });
+}
+
+/// A setting changed while the History tab is open is nothing the tab
+/// shows: the handlers its cards are given are made once, so the tab, given
+/// all it was given before, is not drawn again. Each was made anew with
+/// every draw of the screen, and the tab drawn again with them.
+#[test]
+fn a_setting_changed_leaves_the_history_tab_as_it_was() {
+    run(|| async {
+        let (mut ui, _recorder) = open_history(&history());
+        ui.take_renders("HistoryTab");
+        ui.with_app(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().band.master_volume = 0.5;
+        });
+        assert_eq!(ui.take_renders("HistoryTab"), 0);
     });
 }
 

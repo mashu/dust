@@ -41,6 +41,7 @@ pub mod stats_detail;
 pub mod sync;
 pub mod sync_pip;
 pub mod tips;
+pub mod today;
 pub mod tour;
 pub mod training;
 pub mod widgets;

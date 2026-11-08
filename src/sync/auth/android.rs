@@ -8,7 +8,9 @@
 //! asks it over JNI and looks for the answer every so often, as nothing
 //! here can be woken from Java: `dustDriveAuthorize` gives the request's
 //! number, and `dustDriveAnswer` its answer once there is one, as a line of
-//! text: `token <token>`, `needs-user`, `cancelled` or `error <why>`.
+//! text: `token <token>`, `needs-user`, `cancelled`, `busy` (the user is
+//! asked already, for another request) or `error <why>`. An answer is
+//! waited for only so long: ten minutes with the user asked, two without.
 
 use dioxus::mobile::wry::prelude::{JObject, jni};
 use jni::objects::{JString, JValue};
@@ -18,6 +20,12 @@ use crate::persist::record::Pending;
 
 /// How often the answer is looked for.
 const LOOK_MS: u32 = 150;
+/// How long an answer is waited for: with the user asked, as long as a
+/// computer's sign-in waits for them; with Play services alone, as long as
+/// a request to Google is given. The activity lets go of an answer kept
+/// longer than the longest of them (`DRIVE_WAIT_MS`).
+const ASKING_MS: u64 = 10 * 60_000;
+const ANSWER_MS: u64 = 2 * 60_000;
 
 /// The sign-in, through the activity.
 pub struct PlayAuth;
@@ -81,15 +89,24 @@ fn answer(id: i64) -> Result<Option<String>, String> {
 fn authorize(asking: bool) -> Pending<Result<String, AuthError>> {
     Box::pin(async move {
         let id = start(asking).map_err(AuthError::Failed)?;
+        let until = crate::time::mono_ms() + if asking { ASKING_MS } else { ANSWER_MS };
         loop {
             crate::time::sleep_ms(LOOK_MS).await;
             let Some(answer) = answer(id).map_err(AuthError::Failed)? else {
+                if crate::time::mono_ms() >= until {
+                    return Err(AuthError::Failed(
+                        "Google Play services did not answer".into(),
+                    ));
+                }
                 continue;
             };
             return match answer.split_once(' ').unwrap_or((answer.as_str(), "")) {
                 ("token", token) if !token.is_empty() => Ok(token.to_string()),
                 ("needs-user", _) => Err(AuthError::NeedsUser),
                 ("cancelled", _) => Err(AuthError::Cancelled),
+                ("busy", _) => Err(AuthError::Failed(
+                    "a sign-in to Google is waiting for you already".into(),
+                )),
                 (_, why) => Err(AuthError::Failed(if why.is_empty() {
                     "Google Play services gave no token".into()
                 } else {

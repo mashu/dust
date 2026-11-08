@@ -51,8 +51,8 @@ pub use belief::{Estimate, EstimatePoint, EstimateReading};
 pub use board::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, RATED_GROUP_CHARS,
     Ranking, RunEntry, TimelinePoint, assisted_runs, board_kinds, board_modes, board_place,
-    contest_runs, latest_run_length, per_group, rating, run_kinds, run_lengths, score_board,
-    score_timeline,
+    board_place_at, contest_runs, latest_run_length, per_group, rating, run_kinds, run_lengths,
+    score_board, score_timeline,
 };
 pub use buckets::{
     PER_SESSION_UP_TO, POINTS_UP_TO, RECENT_SESSIONS, accuracy_buckets, chart_buckets, chart_day,

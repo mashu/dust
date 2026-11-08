@@ -74,12 +74,26 @@ pub struct MemoryStore {
     pub failing: RefCell<Option<String>>,
     /// The history cannot be listed or read.
     pub unlistable: Cell<bool>,
+    /// The records listed that cannot be read for now, the way a file
+    /// another program holds open for a moment cannot.
+    pub held_open: RefCell<BTreeSet<RecordId>>,
     /// Changes to the history are made only when the test says
     /// ([`Self::settle`]), the way a browser's database makes them a
     /// moment after they are asked for.
     pub deferred: Cell<bool>,
     /// The changes asked for and not yet made, in order.
     waiting: RefCell<VecDeque<(HistoryChange, Rc<RefCell<Answer>>)>>,
+    /// Which records were deleted by hand is answered only when the test
+    /// says ([`Self::answer_forgotten`]), the way a store on a thread of
+    /// its own answers a moment after it is asked.
+    pub forgotten_later: Cell<bool>,
+    /// What was asked of which records were deleted, and not yet answered.
+    asked_forgotten: RefCell<Vec<Rc<RefCell<Forgotten>>>>,
+    /// Records are read only when the test says ([`Self::answer_reads`]),
+    /// the way a browser's database reads them a moment after it is asked.
+    pub reads_later: Cell<bool>,
+    /// The reads asked for and not yet answered.
+    asked_reads: RefCell<Vec<Rc<RefCell<Reads>>>>,
     /// How many records and tombstones have been written.
     pub record_writes: Cell<usize>,
     pub tombstone_writes: Cell<usize>,
@@ -123,6 +137,13 @@ pub struct MemoryStore {
     pub sync: RefCell<Option<String>>,
     /// What sync keeps cannot be written, as a full disk refuses it.
     pub sync_refused: Cell<bool>,
+    /// What sync keeps cannot be read just now, as a file another program
+    /// holds open cannot, though it is there.
+    pub sync_unreadable: Cell<bool>,
+    /// What another copy of the app keeps for sync just as this one has
+    /// looked whether the store holds nothing for it, as a copy turning
+    /// sync on anew at that moment would: kept once, after that look.
+    pub sync_kept_after_look: RefCell<Option<String>>,
 }
 
 /// How many changes other copies have told of, and what waits on the next.
@@ -254,6 +275,22 @@ impl Held {
 #[derive(Default)]
 struct Answer {
     saved: Option<HistorySaved>,
+    waker: Option<Waker>,
+}
+
+/// Records asked for, read later ([`MemoryStore::reads_later`]), and what
+/// waits on them.
+struct Reads {
+    ids: Vec<RecordId>,
+    read: Option<Vec<Result<Record, RecordId>>>,
+    waker: Option<Waker>,
+}
+
+/// What was asked of which records were deleted by hand, answered later
+/// ([`MemoryStore::forgotten_later`]), and what waits on the answer.
+struct Forgotten {
+    ids: Vec<RecordId>,
+    gone: Option<Vec<RecordId>>,
     waker: Option<Waker>,
 }
 
@@ -488,37 +525,65 @@ impl Store for MemoryStore {
         if let Some(page) = &self.page {
             return done(page.read(&ids));
         }
-        let records = self.records.borrow();
-        done(
-            ids.into_iter()
-                .map(|id| match records.get(&id) {
-                    Some(held) if !self.unlistable.get() => Ok(Record {
-                        id,
-                        json: held.json.clone(),
-                    }),
-                    _ => Err(id),
-                })
-                .collect(),
-        )
+        if !self.reads_later.get() {
+            return done(self.read_now(ids));
+        }
+        let asked = Rc::new(RefCell::new(Reads {
+            ids,
+            read: None,
+            waker: None,
+        }));
+        self.asked_reads.borrow_mut().push(asked.clone());
+        Box::pin(std::future::poll_fn(move |waiting| {
+            let mut asked = asked.borrow_mut();
+            match asked.read.take() {
+                Some(read) => Poll::Ready(read),
+                None => {
+                    asked.waker = Some(waiting.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }))
     }
 
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
         if let Some(page) = &self.page {
             return done(page.forgotten(&ids));
         }
-        let tombstones = self.tombstones.borrow();
-        done(
-            ids.into_iter()
-                .filter(|id| tombstones.contains_key(id))
-                .collect(),
-        )
+        if !self.forgotten_later.get() {
+            return done(self.tombstoned(ids));
+        }
+        let answer = Rc::new(RefCell::new(Forgotten {
+            ids,
+            gone: None,
+            waker: None,
+        }));
+        self.asked_forgotten.borrow_mut().push(answer.clone());
+        Box::pin(std::future::poll_fn(move |asked| {
+            let mut answer = answer.borrow_mut();
+            match answer.gone.take() {
+                Some(gone) => Poll::Ready(gone),
+                None => {
+                    answer.waker = Some(asked.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }))
     }
 
-    /// Whether the history changed since this store last read or listed
-    /// it. Tabs sharing one store share what it last saw, so a test of
-    /// tabs syncs each by hand.
     fn load_sync(&self) -> Option<String> {
+        if self.sync_unreadable.get() {
+            return None;
+        }
         self.sync.borrow().clone()
+    }
+
+    fn sync_cleared(&self) -> bool {
+        let cleared = self.sync.borrow().is_none();
+        if let Some(kept) = self.sync_kept_after_look.borrow_mut().take() {
+            *self.sync.borrow_mut() = Some(kept);
+        }
+        cleared
     }
 
     fn save_sync(&self, state: Option<&str>) -> Result<(), String> {
@@ -535,11 +600,19 @@ impl Store for MemoryStore {
         self.page.is_none()
     }
 
+    /// Whether the history changed since this store last read or listed
+    /// it. Tabs sharing one store share what it last saw, so a test of
+    /// tabs syncs each by hand.
+    ///
+    /// Nothing is noted: a change is told of each time it is asked, until
+    /// a read or a listing of the history takes it up, as the files and a
+    /// browser's database tell of one, so one whose look could not list
+    /// it is told of again.
     fn history_changed(&self) -> bool {
         if let Some(page) = &self.page {
             return page.changed();
         }
-        self.seen_changes.replace(self.changes.get()) != self.changes.get()
+        self.seen_changes.get() != self.changes.get()
     }
 
     fn history_news(&self) -> Option<Pending<()>> {
@@ -639,6 +712,64 @@ impl MemoryStore {
         self.waiting.borrow().len()
     }
 
+    /// Of `ids`, those deleted by hand.
+    fn tombstoned(&self, ids: Vec<RecordId>) -> Vec<RecordId> {
+        let tombstones = self.tombstones.borrow();
+        ids.into_iter()
+            .filter(|id| tombstones.contains_key(id))
+            .collect()
+    }
+
+    /// The records `ids`, as they are stored now: one that cannot be read
+    /// comes back as its id.
+    fn read_now(&self, ids: Vec<RecordId>) -> Vec<Result<Record, RecordId>> {
+        let (records, held_open) = (self.records.borrow(), self.held_open.borrow());
+        ids.into_iter()
+            .map(|id| match records.get(&id) {
+                Some(held) if !self.unlistable.get() && !held_open.contains(&id) => Ok(Record {
+                    id,
+                    json: held.json.clone(),
+                }),
+                _ => Err(id),
+            })
+            .collect()
+    }
+
+    /// Answer every read asked for ([`Self::reads_later`]), as the store
+    /// holds the records now, and wake what waits on each.
+    pub fn answer_reads(&self) {
+        let asked = std::mem::take(&mut *self.asked_reads.borrow_mut());
+        for reads in asked {
+            let ids = std::mem::take(&mut reads.borrow_mut().ids);
+            let read = self.read_now(ids);
+            let mut reads = reads.borrow_mut();
+            reads.read = Some(read);
+            if let Some(waker) = reads.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
+    /// How many reads are waiting to be answered ([`Self::reads_later`]).
+    pub fn reads_waiting(&self) -> usize {
+        self.asked_reads.borrow().len()
+    }
+
+    /// Answer every ask of which records were deleted by hand
+    /// ([`Self::forgotten_later`]), as the store holds them now, and wake
+    /// what waits on each.
+    pub fn answer_forgotten(&self) {
+        let asked = std::mem::take(&mut *self.asked_forgotten.borrow_mut());
+        for answer in asked {
+            let mut answer = answer.borrow_mut();
+            let ids = std::mem::take(&mut answer.ids);
+            answer.gone = Some(self.tombstoned(ids));
+            if let Some(waker) = answer.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
     /// Lose the record `id` from under the app, the way another copy
     /// writing over the store from an older read could: no tombstone says
     /// it was deleted.
@@ -650,10 +781,19 @@ impl MemoryStore {
     /// Store `raw` as a record of its own after every other, the way a
     /// newer build or a damaged disk leaves one this build cannot read.
     pub fn plant_unreadable(&self, raw: &str) -> RecordId {
-        let mut records = self.records.borrow_mut();
-        let newest = records.keys().next_back().copied();
-        let id = RecordId::next(0, newest, raw);
-        records.insert(
+        let newest = self.records.borrow().keys().next_back().copied();
+        self.plant_unreadable_as(RecordId::next(0, newest, raw), raw)
+    }
+
+    /// Store `raw` as a record of its own where a session that finished at
+    /// `timestamp` goes, the way a newer build or a damaged disk leaves one
+    /// this build cannot read.
+    pub fn plant_unreadable_at(&self, timestamp: u64, raw: &str) -> RecordId {
+        self.plant_unreadable_as(RecordId::next(timestamp, None, raw), raw)
+    }
+
+    fn plant_unreadable_as(&self, id: RecordId, raw: &str) -> RecordId {
+        self.records.borrow_mut().insert(
             id,
             Held {
                 json: raw.to_string(),
@@ -663,6 +803,14 @@ impl MemoryStore {
         self.stored.set(true);
         self.changed_here();
         id
+    }
+
+    /// Have the record `id` hold `raw` from now on, under the same name:
+    /// one that could not be read for a moment, and reads now.
+    pub fn mend(&self, id: RecordId, raw: &str) {
+        if let Some(held) = self.records.borrow_mut().get_mut(&id) {
+            held.json = raw.to_string();
+        }
     }
 
     /// The tombstone of the record `id`, if it was deleted.
@@ -994,7 +1142,8 @@ mod tests {
         assert_eq!(now(store.read_records(vec![one.id])), [Err(one.id)]);
         store.unlistable.set(false);
         assert!(store.history_changed());
-        assert!(!store.history_changed(), "seen");
+        assert_eq!(now(store.history_listing()), Some(vec![one.id]));
+        assert!(!store.history_changed(), "seen as it was listed");
         store.lose(one.id);
         assert!(store.history_changed());
         assert_eq!(now(store.history_listing()), Some(Vec::new()));
@@ -1007,6 +1156,33 @@ mod tests {
         assert_eq!(read.unread, [unread]);
         assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
         assert!(store.load_history().notices.is_empty(), "told of once");
+    }
+
+    /// A change is told of each time it is asked of, until a look that
+    /// lists the history takes it up, as the files and a browser's
+    /// database tell of one: a look that could not list it leaves it to
+    /// take up. Asking noted it as seen, so a test of a listing that
+    /// failed had the change never taken up, as no real store has it.
+    #[test]
+    fn a_change_is_still_to_take_up_after_a_listing_that_failed() {
+        let store = MemoryStore::default();
+        store.load_history();
+        assert!(!store.history_changed());
+        let one = record(&finished(1_000));
+        now(store.change_history(put(std::slice::from_ref(&one))));
+        assert!(store.history_changed(), "to take up");
+        assert!(store.history_changed(), "still, until it is");
+        store.unlistable.set(true);
+        assert_eq!(now(store.history_listing()), None);
+        store.load_history();
+        store.unlistable.set(false);
+        assert!(store.history_changed(), "still to take up");
+        assert_eq!(now(store.history_listing()), Some(vec![one.id]));
+        assert!(!store.history_changed(), "taken up");
+        store.lose(one.id);
+        assert!(store.history_changed());
+        store.load_history();
+        assert!(!store.history_changed(), "taken up as it is read");
     }
 
     /// Changes made later are made in the order they were asked for, each

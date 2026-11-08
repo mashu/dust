@@ -9,14 +9,16 @@
 //! exact name, or by a prefix of its own ([`keep_aside`], [`take_marks`]).
 
 use std::cell::{Cell, RefCell};
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::Poll;
 
 use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::idb::{BrowserHistory, Script};
+use super::idb::{BrowserHistory, Script, waited_ms};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
 use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done};
 use super::{
@@ -95,17 +97,52 @@ thread_local! {
 /// read it whole, so that the app opens on it at once, the boot screen
 /// showing meanwhile. The history kept whole in the page storage is moved
 /// in first, where it was not ([`BrowserHistory::open`]). Where the
-/// database will not open, or will not take the history, the page storage
-/// keeps it this visit ([`WebStore::default`]).
+/// database will not open, will not take the history, or stops answering
+/// as it is read ([`unless_stalled`]), the page storage keeps it this visit
+/// ([`WebStore::default`]).
 pub async fn preload() {
-    let opened = match Script::open().await {
-        Ok((script, read_only)) => BrowserHistory::open(script, read_only, Local, BLOB_KEYS)
-            .await
-            .map(Rc::new)
-            .map_err(|not| (not.why, not.set_aside)),
-        Err(why) => Err((why, Vec::new())),
+    let opening = async {
+        match Script::open().await {
+            Ok((script, read_only)) => BrowserHistory::open(script, read_only, Local, BLOB_KEYS)
+                .await
+                .map(Rc::new)
+                .map_err(|not| (not.why, not.set_aside)),
+            Err(why) => Err((why, Vec::new())),
+        }
     };
+    let opened = unless_stalled(opening)
+        .await
+        .unwrap_or_else(|| Err(("it did not answer".into(), Vec::new())));
     PRELOADED.with(|preloaded| *preloaded.borrow_mut() = Some(opened));
+}
+
+/// How long the browser's database may keep the page waiting on one thing
+/// it was asked, as the page opens, before the page storage keeps the
+/// history this visit instead: far longer than one read of it takes, as a
+/// long history is read a page at a time, but a database that has stopped
+/// answering, as a browser's now and then does, no longer leaves the app
+/// on its boot screen for good. Opening it waits no longer than the page
+/// script's own wait, `OPEN_WAIT_MS`.
+const STALLED_MS: f64 = 20_000.0;
+
+/// What `opening` comes to; or none, once the database has kept it waiting
+/// for [`STALLED_MS`], looked at every second while it waits.
+async fn unless_stalled<T>(opening: impl Future<Output = T>) -> Option<T> {
+    let mut opening = pin!(opening);
+    loop {
+        let mut second = pin!(gloo_timers::future::TimeoutFuture::new(1_000));
+        let opened = std::future::poll_fn(|asked| match opening.as_mut().poll(asked) {
+            Poll::Ready(opened) => Poll::Ready(Some(opened)),
+            Poll::Pending => second.as_mut().poll(asked).map(|()| None),
+        })
+        .await;
+        if opened.is_some() {
+            return opened;
+        }
+        if waited_ms() > STALLED_MS {
+            return None;
+        }
+    }
 }
 
 impl Default for WebStore {
@@ -651,6 +688,10 @@ impl Store for WebStore {
 
     fn load_sync(&self) -> Option<String> {
         storage()?.get_item(SYNC_KEY).ok().flatten()
+    }
+
+    fn sync_cleared(&self) -> bool {
+        storage().is_some_and(|store| matches!(store.get_item(SYNC_KEY), Ok(None)))
     }
 
     fn save_sync(&self, state: Option<&str>) -> Result<(), String> {

@@ -11,8 +11,9 @@
 
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestRules, EntryField, Esm,
-    Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, Side, TrainingSettings,
-    Turn, esm, loggable, normalize_call, parse_exchange, plan_turn, space_to_call,
+    Field, Fields, MY_CALL_MAX, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, Side,
+    TrainingSettings, Turn, esm, loggable, normalize_call, parse_exchange, plan_turn,
+    space_to_call,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -28,6 +29,26 @@ use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
 /// was not running: a phone locked, a process put on hold. The ticks come
 /// every quarter second, and a busy page delays one by far less.
 const HEARTBEAT_GAP_MS: u64 = 2_000;
+
+/// The most the Call field takes, in characters: twice the longest callsign
+/// kept ([`MY_CALL_MAX`]), which has room for a host and a marker about a
+/// call already.
+const CALL_LEN_MAX: usize = 2 * MY_CALL_MAX;
+
+/// The most the Exchange field takes, in characters: the longest exchange
+/// typed twice over, a name and a serial among it, with room to spare for
+/// what is put right in it.
+const EXCHANGE_LEN_MAX: usize = 64;
+
+/// The most `field` takes, in characters: far more than a call or an
+/// exchange is typed with, and far less than a page pasted in, which a run
+/// would key on the air and keep in its log.
+pub fn typed_len_max(field: EntryField) -> usize {
+    match field {
+        EntryField::Call => CALL_LEN_MAX,
+        EntryField::Exchange => EXCHANGE_LEN_MAX,
+    }
+}
 
 /// A run in progress: the machine that decides it, the settings its turns
 /// are played with, and its hold on the audio.
@@ -149,17 +170,28 @@ impl ContestEntry {
 
     /// `field` now holds `text`, as its input does already, so nothing is
     /// drawn for it: what is new in it keyed at `keyed`, or untimed at
-    /// `None`.
-    pub fn edit(mut self, field: EntryField, text: String, keyed: Option<MonoMs>) {
+    /// `None`. Past what the field takes ([`typed_len_max`]) it is cut, and
+    /// the field drawn as it is kept.
+    pub fn edit(mut self, field: EntryField, mut text: String, keyed: Option<MonoMs>) {
         // Only a run has fields to type in, and it reads them from the
         // start.
         let Some((rules, side)) = *self.reads.peek() else {
             return;
         };
+        let cut = text
+            .char_indices()
+            .nth(typed_len_max(field))
+            .map(|(at, _)| at);
+        if let Some(at) = cut {
+            text.truncate(at);
+        }
         self.fields
             .write()
             .edit(field, text, MonoMs(mono_ms()), keyed, rules, side);
         *self.typed.write() += 1;
+        if cut.is_some() {
+            *self.repaint.write() += 1;
+        }
     }
 
     /// Which field has the cursor: where a paddle letter goes.

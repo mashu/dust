@@ -2,16 +2,20 @@
 //! user keeps outside the app, saved and restored from here, and a word when
 //! the last one is many sessions old.
 
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::persist::backup::{
     BACKUP_DUE_AFTER, BACKUP_LARGE_BYTES, BACKUP_MAX_BYTES, Backup, read_backup_apart,
 };
-use crate::ui::file_pick::{ChosenFile, FileButton};
+use crate::state::{AppCtx, in_root};
+use crate::ui::file_pick::{ChosenFile, FileButton, PickedFile};
 use crate::ui::format::{counted, day_of, short_date};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 
-/// What the History tab needs to save and restore backups.
+/// What the History tab needs to save backups, and to say of them. A backup
+/// chosen to restore is the app's own to restore, whatever is on screen by
+/// the time it has been read.
 #[derive(Clone, PartialEq)]
 pub struct Backups {
     /// When the last backup was saved, if ever.
@@ -29,7 +33,6 @@ pub struct Backups {
     /// takes ([`crate::persist::Store::outgrows_device_backup`]).
     pub outgrows_device_backup: bool,
     pub on_save: EventHandler<()>,
-    pub on_restore: EventHandler<Backup>,
 }
 
 /// What could be lost without a backup, in the words of where it is kept.
@@ -42,6 +45,10 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
 /// What the card says where the history has grown past what Android's own
 /// backup of the app takes, which then backs up none of it.
 const OUTGROWN: &str = "Your history here is past 20 MB, and Android's own backup of an app stops at 25 MB: save a backup file now and then, so a lost or new phone still has every session.";
+
+/// How long a backup read while a session or a run is under way waits
+/// before it looks again, to be restored once that is over.
+const SESSION_WAIT_MS: u32 = 1_000;
 
 /// What a restore does: no more, and no less.
 const RESTORING: &str = "adds the sessions missing here and takes its settings, level included, though not this device's volume and paddle keys. Undo, in the message that follows, puts both back";
@@ -73,25 +80,28 @@ fn on_android() -> bool {
     }
 }
 
-/// The backup a chosen file holds, or why it could not be restored from:
-/// read on a thread of its own where there is one, as a backup of years of
-/// sessions takes seconds to read.
-async fn backup_in(file: ChosenFile) -> Result<Backup, String> {
-    let ChosenFile { name, size, text } = file;
+/// What a chosen file holds, as text, with its name; or why it could not
+/// be restored from: far larger than any backup, or not read.
+async fn text_in(file: PickedFile) -> Result<(String, String), String> {
+    let ChosenFile { name, size, text } = file.read(BACKUP_MAX_BYTES).await;
     if size > BACKUP_MAX_BYTES {
         return Err(format!(
             "{name} is far larger than any backup: nothing was restored."
         ));
     }
     let text = text.ok_or_else(|| format!("{name} could not be read: nothing was restored."))?;
+    Ok((name, text))
+}
+
+/// The backup `text`, what the file `name` holds, reads as, or why it could
+/// not be restored from: read on a thread of its own where there is one, as
+/// a backup of years of sessions takes seconds to read.
+async fn backup_in(name: &str, text: String) -> Result<Backup, String> {
+    #[cfg(test)]
+    crate::testing::rendered("backup read");
     read_backup_apart(text)
         .await
         .map_err(|not| format!("{name} {}: nothing was restored.", not.reason()))
-}
-
-/// What the card says while `file` is read as a backup.
-fn reading(file: &ChosenFile) -> String {
-    reading_for(&file.name, file.size)
 }
 
 /// What the card says while a file called `name`, of `size` bytes, is read
@@ -140,6 +150,130 @@ async fn room_for(size: u64) -> Option<String> {
     })
 }
 
+/// A backup being restored: the app's own from the moment its file is
+/// chosen, so that leaving the History tab, or the screen, while a file of
+/// years of sessions is read leaves it reading and restoring all the same.
+/// One at a time: a file chosen while another is still read takes its
+/// place, and the card says so at once; what the other holds is never read
+/// as a backup, nor restored, however long its read takes, and a read that
+/// never ends, as a browser's of a file moved after it was chosen, holds
+/// nothing off.
+#[derive(Clone, Copy)]
+struct Restoring {
+    /// What the card says while a file is read and restored.
+    under_way: Signal<Option<String>>,
+    /// Why the file chosen last could not be restored, said on the card.
+    problem: Signal<Option<String>>,
+    /// How many backup cards are drawn: with none, why a file could not be
+    /// restored is said in a message instead.
+    cards: CopyValue<usize>,
+    /// How many files have been chosen: the last is the one restored.
+    chosen: CopyValue<u64>,
+}
+
+impl Restoring {
+    /// The app's, made in its root scope the first time a card asks for it,
+    /// so that it lasts as long as the app does.
+    fn use_app() -> Self {
+        use_hook(|| {
+            in_root(|| {
+                try_consume_context::<Self>().unwrap_or_else(|| {
+                    provide_context(Self {
+                        under_way: Signal::new(None),
+                        problem: Signal::new(None),
+                        cards: CopyValue::new(0),
+                        chosen: CopyValue::new(0),
+                    })
+                })
+            })
+        })
+    }
+
+    /// Read `file` as a backup and restore what it holds, in a task of the
+    /// app's own, once no session or run, nor another restore or the Undo
+    /// of one, is under way: the card says it is being read at once, and
+    /// until it has been restored, and why not, if it could not be; with
+    /// no card drawn by then, a message does. Unless another file is
+    /// chosen before it is restored: then that one is, and nothing of this
+    /// is said.
+    fn start(self, ctx: AppCtx, file: PickedFile) {
+        let Self {
+            mut under_way,
+            mut problem,
+            cards,
+            mut chosen,
+        } = self;
+        let this = *chosen.peek() + 1;
+        chosen.set(this);
+        let chosen_last = move || *chosen.peek() == this;
+        problem.set(None);
+        under_way.set(Some(reading_for(&file.name, file.size)));
+        spawn_forever(async move {
+            // A browser reads it on the page's own thread: what the card
+            // says is shown first, with how much room the browser says it
+            // has.
+            #[cfg(feature = "web")]
+            {
+                if let Some(room) = room_for(file.size).await
+                    && chosen_last()
+                {
+                    let reading = reading_for(&file.name, file.size);
+                    under_way.set(Some(format!("{reading} {room}")));
+                }
+                crate::time::sleep_ms(crate::time::POLL_MS).await;
+            }
+            // Another file chosen meanwhile is read in its place: this one
+            // is not read at all, or, chosen over while it is read, not read
+            // as a backup, which on a computer takes a thread of its own.
+            if !chosen_last() {
+                return;
+            }
+            let read = match text_in(file).await {
+                Ok(_) if !chosen_last() => return,
+                Ok((name, text)) => backup_in(&name, text).await,
+                Err(why) => Err(why),
+            };
+            // Restored between sessions, as a sync is, never under one: a
+            // restore takes its settings, the level among them. And after
+            // any restore, or Undo of one, still under way, to be merged
+            // with the history that one left.
+            while ctx.session_running() || ctx.restore_under_way() {
+                let wait = if ctx.session_running() {
+                    SESSION_WAIT_MS
+                } else {
+                    crate::time::POLL_MS
+                };
+                crate::time::sleep_ms(wait).await;
+            }
+            // Another file chosen meanwhile is restored in its place.
+            if !chosen_last() {
+                return;
+            }
+            let backup = match read {
+                Ok(backup) => backup,
+                Err(why) => {
+                    under_way.set(None);
+                    if *cards.peek() > 0 {
+                        problem.set(Some(why));
+                    } else {
+                        ctx.toasts.show(why);
+                    }
+                    return;
+                }
+            };
+            // Said on the card until the store has said what became of it,
+            // as a browser's database takes a moment to.
+            ctx.restore_backup(backup);
+            while ctx.restore_under_way() {
+                crate::time::sleep_ms(crate::time::POLL_MS).await;
+            }
+            if chosen_last() {
+                under_way.set(None);
+            }
+        });
+    }
+}
+
 /// Save a backup, or restore one; and when `since` sessions have gone
 /// unbacked for long enough, say so.
 #[component]
@@ -148,9 +282,26 @@ pub fn BackupCard(
     /// The sessions finished since the last backup, or all of them.
     since: usize,
 ) -> Element {
-    let mut problem = use_signal(|| None::<String>);
-    // What the card says while a chosen file is read.
-    let mut under_way = use_signal(|| None::<String>);
+    let ctx = use_context::<AppCtx>();
+    let restoring = Restoring::use_app();
+    // Drawn, a card says why a file could not be restored, for as long as
+    // one is drawn.
+    use_hook(move || {
+        let mut cards = restoring.cards;
+        let drawn = *cards.peek() + 1;
+        cards.set(drawn);
+    });
+    use_drop(move || {
+        let (mut cards, mut problem) = (restoring.cards, restoring.problem);
+        let drawn = cards.peek().saturating_sub(1);
+        cards.set(drawn);
+        if drawn == 0 {
+            problem.set(None);
+        }
+    });
+    let Restoring {
+        under_way, problem, ..
+    } = restoring;
     // Asked once: the browser says where it runs as the page opens.
     let accept = use_hook(backup_accept);
     let Backups {
@@ -160,7 +311,6 @@ pub fn BackupCard(
         inside_app,
         outgrows_device_backup,
         on_save,
-        on_restore,
     } = backups;
     let due = can_save && since >= BACKUP_DUE_AFTER;
     let last_day = last.and_then(day_of).map(|day| short_date(&day));
@@ -235,28 +385,7 @@ pub fn BackupCard(
                     max_bytes: BACKUP_MAX_BYTES,
                     icon: IconName::Upload,
                     label: "Restore a backup",
-                    on_choose: move |file: ChosenFile| {
-                        problem.set(None);
-                        under_way.set(Some(reading(&file)));
-                        spawn(async move {
-                            // A browser reads it on the page's own thread:
-                            // what the card says is shown first, with how
-                            // much room the browser says it has.
-                            #[cfg(feature = "web")]
-                            {
-                                if let Some(room) = room_for(file.size).await {
-                                    under_way.set(Some(format!("{} {room}", reading(&file))));
-                                }
-                                crate::time::sleep_ms(crate::time::POLL_MS).await;
-                            }
-                            let read = backup_in(file).await;
-                            under_way.set(None);
-                            match read {
-                                Ok(backup) => on_restore.call(backup),
-                                Err(why) => problem.set(Some(why)),
-                            }
-                        });
-                    },
+                    on_pick: move |file: PickedFile| restoring.start(ctx, file),
                 }
             }
             if let Some(under_way) = under_way() {

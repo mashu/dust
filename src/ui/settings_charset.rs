@@ -1178,18 +1178,26 @@ pub fn CharsetCard(
             // A word list has no level: every word is in from the start.
             if !words {
             div { class: "field-grid",
-                NumberField {
-                    label: if callsigns {
-                        format!("Callsign tier (1–{})", c.level_max)
-                    } else {
-                        format!("Level (1–{})", c.level_max)
-                    },
-                    id: "field-level",
-                    value: f64::from(c.level),
-                    min: 1.0,
-                    max: f64::from(c.level_max),
-                    step: 1.0,
-                    onchange: move |v| settings.write().set_active_level(whole(v)),
+                // A box of its own for each level, though they stand in one
+                // place: what is typed and not committed is the level of the
+                // set it was typed for, and goes with it when a set with a
+                // level of its own is chosen, rather than be shown, and
+                // committed, as that one's.
+                for axis in [c.mode.axis()] {
+                    NumberField {
+                        key: "{axis:?}",
+                        label: if callsigns {
+                            format!("Callsign tier (1–{})", c.level_max)
+                        } else {
+                            format!("Level (1–{})", c.level_max)
+                        },
+                        id: "field-level",
+                        value: f64::from(c.level),
+                        min: 1.0,
+                        max: f64::from(c.level_max),
+                        step: 1.0,
+                        onchange: move |v| settings.write().set_active_level(whole(v)),
+                    }
                 }
                 if c.mode == CharSetMode::Mixed {
                     NumberField {
@@ -1609,6 +1617,8 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
                 id: control_id("file", "word list"),
                 accept: ".txt,text/plain",
                 max_bytes: WORD_FILE_MAX_BYTES,
+                // A list saved as "Unicode" text is UTF-16.
+                by_mark: true,
                 icon: IconName::Upload,
                 label: "Load a text file",
                 on_choose: move |file| {

@@ -6,6 +6,10 @@ use std::rc::Rc;
 
 use crate::persist::record::Pending;
 
+/// How long a request is given, from asking to the last byte of its answer,
+/// before it is given up on: a sync waits on none longer.
+const ANSWER_MS: u32 = 120_000;
+
 /// A request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
@@ -71,17 +75,38 @@ pub fn default_http() -> Rc<dyn Http> {
 
 #[cfg(feature = "web")]
 mod web {
+    use std::cell::Cell;
+
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
 
     use super::*;
 
-    /// The browser's fetch.
+    /// The browser's fetch, given up on once it has taken too long, as a
+    /// request is elsewhere ([`ANSWER_MS`]).
     pub struct Fetch;
 
     impl Http for Fetch {
         fn send(&self, request: Request) -> Pending<Result<Response, String>> {
-            Box::pin(async move { fetch(request).await.map_err(|err| said(&err)) })
+            Box::pin(async move {
+                let stop = web_sys::AbortController::new().map_err(|err| said(&err))?;
+                let late = Rc::new(Cell::new(false));
+                // Cleared as it is dropped, once the answer is read.
+                let _deadline = {
+                    let (stop, late) = (stop.clone(), Rc::clone(&late));
+                    gloo_timers::callback::Timeout::new(ANSWER_MS, move || {
+                        late.set(true);
+                        stop.abort();
+                    })
+                };
+                fetch(request, &stop.signal()).await.map_err(|err| {
+                    if late.get() {
+                        "Google took too long to answer".to_string()
+                    } else {
+                        said(&err)
+                    }
+                })
+            })
         }
     }
 
@@ -96,10 +121,14 @@ mod web {
             )
     }
 
-    async fn fetch(request: Request) -> Result<Response, wasm_bindgen::JsValue> {
+    async fn fetch(
+        request: Request,
+        stop: &web_sys::AbortSignal,
+    ) -> Result<Response, wasm_bindgen::JsValue> {
         let window = web_sys::window().ok_or("no window")?;
         let init = web_sys::RequestInit::new();
         init.set_method(request.method);
+        init.set_signal(Some(stop));
         let headers = web_sys::Headers::new()?;
         for (name, value) in &request.headers {
             headers.set(name, value)?;
@@ -141,7 +170,7 @@ mod native {
             let config = ureq::Agent::config_builder()
                 // Every status is an answer, for the caller to read.
                 .http_status_as_error(false)
-                .timeout_global(Some(Duration::from_secs(120)))
+                .timeout_global(Some(Duration::from_millis(u64::from(ANSWER_MS))))
                 .build();
             Self {
                 agent: ureq::Agent::new_with_config(config),

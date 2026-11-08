@@ -40,6 +40,38 @@ pub const BACKUP_MAX_BYTES: u64 = 1_000_000_000;
 /// while: fifty megabytes, some seven thousand sessions.
 pub const BACKUP_LARGE_BYTES: u64 = 50_000_000;
 
+/// The longest a session in a backup may be and still be read: four
+/// megabytes. A session is some seven kilobytes, and the longest session
+/// of groups there can be, two hundred of twenty characters each timed,
+/// some a hundred; a contest run of an hour, worked at twenty QSOs a
+/// minute, far faster than anyone works, comes to a megabyte and a half
+/// with its log. One longer is left out unread.
+const SESSION_MAX_BYTES: usize = 4_000_000;
+
+/// How much of what the sessions in a backup hold that this build does
+/// not read is kept, in all, as JSON: sixteen megabytes, a kilobyte a
+/// session that a later build added over a history of sixteen thousand.
+/// Kept as it was read, to be written back with them, it takes many times
+/// as much memory as it does in the file, so a session that would take it
+/// past this is left out, as one that does not read is ([`each_session`]).
+const UNREAD_MAX_BYTES: usize = 16_000_000;
+
+/// How much of the logs of the contest runs in a backup is kept, in all,
+/// as JSON: sixteen megabytes. A run of an hour logs some eighty kilobytes
+/// worked at twenty QSOs a minute, far faster than anyone works, and some
+/// sixteen at 235 an hour, so this is two hundred runs of the one, or a
+/// thousand of the other. A log is kept whole, as it was read, whatever it
+/// holds ([`cw_core::ContestLog`]), and takes some twelve times as much
+/// memory as it does in the file, or more, so a run that would take it
+/// past this is left out, as a session that does not read is
+/// ([`each_session`]).
+const RUN_LOGS_MAX_BYTES: usize = 16_000_000;
+
+/// The longest the settings in a backup may be and still be read: a
+/// megabyte, far more than settings come to, a word list of two thousand
+/// words among them. Longer, they are read as settings that do not read.
+const SETTINGS_MAX_BYTES: usize = 1_000_000;
+
 /// What a backup holds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Backup {
@@ -50,6 +82,24 @@ pub struct Backup {
     pub settings: Option<TrainingSettings>,
     /// Oldest first.
     pub sessions: Vec<SessionResult>,
+    /// How many of its sessions this version could not read, and left out.
+    pub left_out: usize,
+}
+
+impl Backup {
+    /// What to say of the sessions in it this version could not read, and
+    /// left out, as it is restored: nothing, where there are none.
+    pub fn told_left_out(left_out: usize) -> Option<String> {
+        match left_out {
+            0 => None,
+            1 => Some(
+                "1 session in it could not be read by this version and was left out.".to_string(),
+            ),
+            count => Some(format!(
+                "{count} sessions in it could not be read by this version and were left out."
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -341,15 +391,17 @@ impl NotRestored {
 }
 
 /// A backup file as it is read: only what tells it is one, and each part
-/// left as it lies in the file until it is read on its own.
+/// left as it lies in the file until it is read on its own. Even the mark
+/// and the date are read only as whole numbers ([`whole_number`]): a list
+/// of a gigabyte in their place was built up whole first, many times over.
 #[derive(Deserialize)]
 struct OnDisk<'a> {
-    #[serde(rename = "dustBackup", default)]
-    mark: Option<serde_json::Value>,
-    #[serde(rename = "savedAt", default)]
-    saved_at: Option<serde_json::Value>,
+    #[serde(rename = "dustBackup", default, borrow)]
+    mark: Option<&'a RawValue>,
+    #[serde(rename = "savedAt", default, borrow)]
+    saved_at: Option<&'a RawValue>,
     /// Whatever it holds, `null` too: a backup with settings of any kind
-    /// takes them, as read ([`load_settings_from`]).
+    /// takes them, as read ([`settings_in`]).
     #[serde(default, borrow, deserialize_with = "present")]
     settings: Option<&'a RawValue>,
     #[serde(default, borrow)]
@@ -373,14 +425,22 @@ where
 /// back. It holds no settings, and none are taken from it.
 ///
 /// Only the sessions are held as they are read: each is read from where it
-/// lies in the file, and one that does not read is left out alone. A file
-/// of a gigabyte is read in about as much memory again.
+/// lies in the file, and one that does not read is left out alone. No part
+/// is read whole that is far longer than its kind ever is: settings longer
+/// than [`SETTINGS_MAX_BYTES`], or a session longer than
+/// [`SESSION_MAX_BYTES`]. And what of the sessions is held as it was read,
+/// to be written back with them, whatever it holds, is held only to a
+/// bound in all: what they hold that this build does not read up to
+/// [`UNREAD_MAX_BYTES`], and the logs of their contest runs up to
+/// [`RUN_LOGS_MAX_BYTES`]. So what a file takes in memory is what the
+/// sessions this build reads in it take, and a bounded part beside them,
+/// whatever else it holds.
 pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
     // A mark of the encoding, as an editor saving a file may put first, is
     // no part of what it holds.
     let json = raw.trim_start_matches(['\u{feff}', ' ', '\t', '\n', '\r']);
     if json.starts_with('[') {
-        let sessions = each_session(json).ok_or(NotRestored::NotABackup)?;
+        let (sessions, left_out) = each_session(json).ok_or(NotRestored::NotABackup)?;
         if sessions.is_empty() {
             return Err(NotRestored::NoSessions);
         }
@@ -388,47 +448,164 @@ pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
             saved_at: 0,
             settings: None,
             sessions,
+            left_out,
         });
     }
     if !json.starts_with('{') {
         return Err(NotRestored::NotABackup);
     }
     let file: OnDisk = serde_json::from_str(json).map_err(|_| NotRestored::NotABackup)?;
-    if !file.mark.as_ref().is_some_and(serde_json::Value::is_u64) {
+    if whole_number(file.mark).is_none() {
         return Err(NotRestored::NotABackup);
     }
-    let settings = file
-        .settings
-        .map(|settings| load_settings_from(settings.get()));
-    let sessions = file
+    let settings = file.settings.map(|settings| settings_in(settings.get()));
+    let (sessions, left_out) = file
         .sessions
         .and_then(|sessions| each_session(sessions.get()))
         .ok_or(NotRestored::Unreadable)?;
     Ok(Backup {
-        saved_at: file
-            .saved_at
-            .as_ref()
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        saved_at: whole_number(file.saved_at).unwrap_or(0),
         settings,
         sessions,
+        left_out,
     })
 }
 
+/// The whole number `raw`, a part of a backup as it lies in the file, is:
+/// none where it is anything else. A part longer than the longest whole
+/// number, twenty digits, is none without being read at all.
+fn whole_number(raw: Option<&RawValue>) -> Option<u64> {
+    let raw = raw?.get();
+    if raw.len() > 20 {
+        return None;
+    }
+    serde_json::from_str(raw).ok()
+}
+
+/// The settings `raw`, as they lie in a backup, read as the store reads its
+/// own ([`load_settings_from`]), where they are an object no longer than
+/// settings come to ([`SETTINGS_MAX_BYTES`]). Anything else is read as
+/// settings that do not read, as the store reads them, without being read
+/// at all: read whole, a list or an object of a gigabyte was built up many
+/// times over.
+fn settings_in(raw: &str) -> TrainingSettings {
+    if raw.starts_with('{') && raw.len() <= SETTINGS_MAX_BYTES {
+        load_settings_from(raw)
+    } else {
+        TrainingSettings::default().clamp()
+    }
+}
+
 /// Every session of `raw`, a JSON list, that reads, each read from where
-/// it lies, and scored as sessions score today: one that does not read is
-/// left out alone. None where `raw` is no list.
-fn each_session(raw: &str) -> Option<Vec<SessionResult>> {
-    let each: Vec<&RawValue> = serde_json::from_str(raw).ok()?;
-    Some(
-        each.into_iter()
-            .filter_map(|session| serde_json::from_str(session.get()).ok().map(scored))
-            .collect(),
-    )
+/// it lies as the list is read, and scored as sessions score today: one
+/// that does not read is left out alone, and nothing is held of it, and so
+/// is one far longer than any session ([`SESSION_MAX_BYTES`]), unread.
+///
+/// What a session holds that this build does not read is kept as it was
+/// read, to be written back with it, and so is a contest run's log, any
+/// JSON at all; and either takes many times as much memory as it does in
+/// the file. A session that would take what is kept of the one past
+/// [`UNREAD_MAX_BYTES`], in all, or of the other past
+/// [`RUN_LOGS_MAX_BYTES`], is left out too, rather than kept without it.
+/// Bounded a session at a time, a file of sixty sessions each of sixteen
+/// megabytes of keys no build reads kept a gigabyte of them; and with logs
+/// not counted at all, one of two hundred and fifty runs, each with a log
+/// of nearly four megabytes, kept as much.
+///
+/// None where `raw` is no list. Beside them, how many of its elements were
+/// left out.
+fn each_session(raw: &str) -> Option<(Vec<SessionResult>, usize)> {
+    use serde::Deserializer as _;
+    let mut list = serde_json::Deserializer::from_str(raw);
+    let read = (&mut list).deserialize_seq(EachSession).ok()?;
+    list.end().ok()?;
+    Some(read)
+}
+
+/// What reads a list of sessions an element at a time ([`each_session`]),
+/// so that a list holds no more memory than the sessions in it take: a
+/// file of a gigabyte of nothing but `0,` was a list of five hundred
+/// million elements held at once, some eight gigabytes, and the app was
+/// stopped for want of them.
+struct EachSession;
+
+impl<'de> serde::de::Visitor<'de> for EachSession {
+    type Value = (Vec<SessionResult>, usize);
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a list of sessions")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut list: A) -> Result<Self::Value, A::Error> {
+        let (mut sessions, mut left_out) = (Vec::new(), 0);
+        // What is kept so far of what they hold that this build does not
+        // read, and of their runs' logs, as JSON.
+        let (mut unread, mut logs) = (0, 0);
+        while let Some(session) = list.next_element::<&RawValue>()? {
+            let session = session.get();
+            let read = (session.len() <= SESSION_MAX_BYTES)
+                .then(|| serde_json::from_str::<SessionResult>(session).ok())
+                .flatten();
+            let read = read.map(|session| (unread_bytes(&session), log_bytes(&session), session));
+            match read {
+                Some((more, log, session))
+                    if unread + more <= UNREAD_MAX_BYTES && logs + log <= RUN_LOGS_MAX_BYTES =>
+                {
+                    unread += more;
+                    logs += log;
+                    sessions.push(scored(session));
+                }
+                _ => left_out += 1,
+            }
+        }
+        Ok((sessions, left_out))
+    }
+}
+
+/// How long what `session` holds that this build does not read is, as
+/// JSON: none where it holds nothing of the kind.
+fn unread_bytes(session: &SessionResult) -> usize {
+    let unread = &session.unread;
+    let mut counted = Counted(0);
+    for part in std::iter::once(&unread.session)
+        .chain(&unread.groups)
+        .chain(&unread.timings)
+        .filter(|part| !part.is_empty())
+    {
+        // Counting fails nowhere.
+        let _ = serde_json::to_writer(&mut counted, part);
+    }
+    counted.0
+}
+
+/// How long the log of `session`, a contest run, is, as JSON: none where it
+/// keeps none.
+fn log_bytes(session: &SessionResult) -> usize {
+    let mut counted = Counted(0);
+    if let Some(log) = &session.contest {
+        // Counting fails nowhere.
+        let _ = serde_json::to_writer(&mut counted, log);
+    }
+    counted.0
+}
+
+/// A writer that keeps nothing, and counts the bytes written to it.
+struct Counted(usize);
+
+impl Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// How Dust 0.16.2 read a backup, kept as it was: a backup this version
-/// writes must still restore there.
+/// writes must still restore there. It counted none of the sessions it
+/// left out.
 #[cfg(test)]
 pub fn read_backup_as_0_16_2(raw: &str) -> Result<Backup, NotRestored> {
     let file = match serde_json::from_str(raw) {
@@ -442,6 +619,7 @@ pub fn read_backup_as_0_16_2(raw: &str) -> Result<Backup, NotRestored> {
                 saved_at: 0,
                 settings: None,
                 sessions,
+                left_out: 0,
             });
         }
         _ => return Err(NotRestored::NotABackup),
@@ -463,6 +641,7 @@ pub fn read_backup_as_0_16_2(raw: &str) -> Result<Backup, NotRestored> {
             .unwrap_or(0),
         settings,
         sessions,
+        left_out: 0,
     })
 }
 
@@ -581,7 +760,9 @@ pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -
 
 /// `kept` filled in from `restored`, the same session, where `restored`
 /// holds what an older version dropped of it: none, where it holds nothing
-/// `kept` has not.
+/// `kept` has not. Times of a group `kept` holds in a shape this version
+/// cannot read, a later version's, give way to those it takes, which it
+/// can: only those are stored ([`cw_core::UnreadKeys`]).
 fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionResult> {
     if kept.contest.is_none() && restored.contest.is_some() {
         return Some(restored);
@@ -590,10 +771,18 @@ fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionR
         return None;
     }
     let mut now = kept.clone();
-    for (timing, restored) in now.group_timings.iter_mut().zip(restored.group_timings) {
-        if timing.char_times.is_none() {
+    let unread = &mut now.unread.timings;
+    let timings = now.group_timings.iter_mut().zip(restored.group_timings);
+    for (at, (timing, restored)) in timings.enumerate() {
+        if timing.char_times.is_none() && restored.char_times.is_some() {
             timing.char_times = restored.char_times;
+            if let Some(unread) = unread.get_mut(at) {
+                unread.remove("charTimes");
+            }
         }
+    }
+    if unread.iter().all(serde_json::Map::is_empty) {
+        unread.clear();
     }
     Some(now)
 }
@@ -637,7 +826,7 @@ pub fn sessions_since(sessions: &[SessionResult], last: Option<u64>) -> usize {
 mod tests {
     use super::*;
     use crate::history::StoredHistory;
-    use crate::persist::record::records_for_blob;
+    use crate::persist::record::{read_record, records_for_blob};
     use crate::persist::tests::session;
 
     fn at(timestamp: u64, date: &str) -> SessionResult {
@@ -855,6 +1044,43 @@ mod tests {
         assert!(again.filled.is_empty(), "its own kept");
     }
 
+    /// A session whose times a later version wrote in a shape this one
+    /// cannot read takes the times a backup holds of it that it can, and is
+    /// stored as it is held: with those times, the others let go of. Both
+    /// used to be written under one key, and the session filled in, stored
+    /// in place of the one it fills in, read as no session at all, in any
+    /// version.
+    #[test]
+    fn a_session_filled_in_over_times_it_could_not_read_reads_back() {
+        let times = |key: u32| cw_core::CharTimes {
+            ends: vec![300],
+            keys: vec![Some(key)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        };
+        let session = |kept: Option<u32>| {
+            let mut session =
+                crate::testing::stored_session("2026-10-10", &[("K", "K"), ("M", "M")]);
+            session.timestamp = 10;
+            session.group_timings[1].char_times = kept.map(times);
+            session
+        };
+        let mut later = serde_json::to_value(session(None)).expect("writes");
+        later["groupTimings"][1]["charTimes"] = serde_json::json!({ "at": [1, 2] });
+        let here = [read_record(&later.to_string()).expect("a later version's reads")];
+        assert_eq!(here[0].group_timings[1].char_times, None);
+        let merged = merge_sessions(&here, vec![session(Some(700))]);
+        let [fill] = &merged.filled[..] else {
+            panic!("filled in once: {merged:?}");
+        };
+        let was = RecordId::placed(10, "");
+        let record = Record::of(&fill.now, |json| RecordId::beside(was, json)).expect("writes");
+        let stored = read_record(&record.json).expect("reads back");
+        assert_eq!(stored.group_timings[1].char_times, Some(times(700)));
+        assert_eq!(stored, fill.now, "as it is held");
+    }
+
     /// A session and itself filled in are one session, whichever of them is
     /// held and whichever found, as a restore filled it in or its Undo put
     /// it back as it was. Sessions that hold anything else apart, or
@@ -939,7 +1165,9 @@ mod tests {
 
     /// A backup read a session at a time, from where each lies in the file,
     /// reads as a backup read whole did, every case above among them: what
-    /// is a backup, what is not, and what of a damaged one is kept.
+    /// is a backup, what is not, and what of a damaged one is kept. How
+    /// many of its sessions were left out is set aside: 0.16.2 counted
+    /// none.
     #[test]
     fn a_backup_read_where_it_lies_reads_as_one_read_whole() {
         let good = serde_json::to_string(&at(5, "2026-10-05")).unwrap();
@@ -971,14 +1199,165 @@ mod tests {
             format!(r#"[{good},{{"date":"broken"}}]"#),
             format!("  \n[{good}]"),
             format!(r#"{{"dustBackup":1,"sessions":[{good}]}} trailing"#),
+            // Lists of anything but sessions, long ones among them: read an
+            // element at a time, and none of it held.
+            format!("[{}]", ["0"; 100_000].join(",")),
+            format!(r#"[0,{good},[],{{}},"x",null,{good}]"#),
+            format!(
+                r#"{{"dustBackup":1,"sessions":[{}]}}"#,
+                ["0"; 100_000].join(",")
+            ),
+            format!(r#"{{"dustBackup":1,"sessions":[{good},0,{good}]}}"#),
+            format!("[{good},0"),
+            format!("[{good}]]"),
         ];
         for raw in &cases {
-            assert_eq!(read_backup(raw), read_backup_as_0_16_2(raw), "{raw}");
+            assert_eq!(
+                read_backup(raw).map(uncounted),
+                read_backup_as_0_16_2(raw),
+                "{raw}"
+            );
         }
         // And a mark of the encoding first, as an editor saving it may put,
         // which used to make it no backup at all.
         let marked = format!("\u{feff}{}", cases[0]);
         assert_eq!(read_backup(&marked), read_backup(&cases[0]));
+    }
+
+    /// A part of a backup far larger than any backup's is never read
+    /// whole: a mark or a date that is no number is none, whatever it
+    /// holds; settings longer than any are read as settings that do not
+    /// read; and a session longer than any is left out unread. Each was
+    /// read whole first, and what it held built up many times over, so a
+    /// file of a gigabyte of any of them stopped the app for want of
+    /// memory. Deeper than a value is ever built up, a date made the file
+    /// no backup at all.
+    #[test]
+    fn a_part_far_larger_than_any_backups_is_not_read_whole() {
+        let good = serde_json::to_string(&at(5, "2026-10-05")).unwrap();
+        let deep = format!("{}{}", "[".repeat(1_000), "]".repeat(1_000));
+        let raw = format!(r#"{{"dustBackup":1,"savedAt":{deep},"sessions":[{good}]}}"#);
+        let backup = read_backup(&raw).expect("a backup");
+        assert_eq!((backup.saved_at, backup.sessions.len()), (0, 1));
+        let raw = format!(r#"{{"dustBackup":{deep},"sessions":[{good}]}}"#);
+        assert_eq!(read_backup(&raw), Err(NotRestored::NotABackup));
+        let long = format!("[{}]", ["0"; 100_000].join(","));
+        let raw = format!(r#"{{"dustBackup":1,"savedAt":{long},"sessions":[{good}]}}"#);
+        assert_eq!(read_backup(&raw).expect("a backup").saved_at, 0);
+
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.level = 14;
+        let mut long = serde_json::to_value(&settings).unwrap();
+        long["later"] = "x".repeat(SETTINGS_MAX_BYTES).into();
+        let raw = format!(r#"{{"dustBackup":1,"settings":{long},"sessions":[{good}]}}"#);
+        assert_eq!(
+            read_backup(&raw).expect("a backup").settings,
+            Some(TrainingSettings::default().clamp())
+        );
+
+        let mut session = serde_json::to_value(at(6, "2026-10-06")).unwrap();
+        session["later"] = "x".repeat(SESSION_MAX_BYTES).into();
+        let raw = format!("[{good},{session}]");
+        let backup = read_backup(&raw).expect("a history");
+        let dates: Vec<&str> = backup.sessions.iter().map(|s| s.date.as_str()).collect();
+        assert_eq!(dates, ["2026-10-05"]);
+        assert_eq!(backup.left_out, 1);
+    }
+
+    /// What the sessions of a backup hold that this build does not read is
+    /// kept, to be written back with them, only up to a bound in all: past
+    /// it, a session that holds any is left out, as one too long to read
+    /// is, and one that holds none is read all the same. And a session of
+    /// five megabytes, far longer than any session or run comes to, is too
+    /// long to read. Each was bounded on its own, at sixteen megabytes, and
+    /// all of it kept: a file of sixty such kept a gigabyte of keys no
+    /// build reads, many times over in memory.
+    #[test]
+    fn what_sessions_hold_that_this_build_does_not_read_is_kept_to_a_bound() {
+        let holding = |day: u64, bytes: usize| {
+            let mut session = serde_json::to_value(at(day, &format!("2026-10-{day:02}"))).unwrap();
+            session["later"] = "x".repeat(bytes).into();
+            session.to_string()
+        };
+        // Five that fit the bound together, and a sixth that does not.
+        let share = UNREAD_MAX_BYTES / 5 - 100;
+        let mut list: Vec<String> = (1..=6).map(|day| holding(day, share)).collect();
+        list.push(serde_json::to_string(&at(7, "2026-10-07")).unwrap());
+        let backup = read_backup(&format!("[{}]", list.join(","))).expect("a history");
+        let days: Vec<u64> = backup.sessions.iter().map(|s| s.timestamp).collect();
+        assert_eq!(days, [1, 2, 3, 4, 5, 7]);
+        assert_eq!(backup.left_out, 1);
+        let kept = backup.sessions[0].unread.session["later"].as_str();
+        assert_eq!(kept.map(str::len), Some(share), "kept as it was");
+
+        let raw = format!("[{},{}]", holding(8, 5_000_000), holding(9, 1_000));
+        let backup = read_backup(&raw).expect("a history");
+        let days: Vec<u64> = backup.sessions.iter().map(|s| s.timestamp).collect();
+        assert_eq!((days, backup.left_out), (vec![9], 1));
+    }
+
+    /// The logs of the runs in a backup are kept, each whole as it was
+    /// read, only up to a bound in all: past it, a run is left out, as a
+    /// session too long to read is, and a session with no log is read all
+    /// the same. A log is any JSON, and was not counted: a file of some two
+    /// hundred and fifty runs, each with a log of nearly four megabytes,
+    /// kept a gigabyte of them, many times over in memory.
+    #[test]
+    fn the_logs_of_the_runs_in_a_backup_are_kept_to_a_bound() {
+        let run = |day: u64, bytes: usize| {
+            let mut run = serde_json::to_value(at(day, &format!("2026-10-{day:02}"))).unwrap();
+            run["contest"] = "x".repeat(bytes).into();
+            run.to_string()
+        };
+        // Five whose logs fit the bound together, and a sixth whose log
+        // does not.
+        let share = RUN_LOGS_MAX_BYTES / 5 - 100;
+        let mut list: Vec<String> = (1..=6).map(|day| run(day, share)).collect();
+        list.push(serde_json::to_string(&at(7, "2026-10-07")).unwrap());
+        let backup = read_backup(&format!("[{}]", list.join(","))).expect("a history");
+        assert_eq!(timestamps(&backup.sessions), [1, 2, 3, 4, 5, 7]);
+        assert_eq!(backup.left_out, 1);
+        let kept = backup.sessions[0].contest.as_ref();
+        let kept = kept.and_then(|log| log.0.as_str()).map(str::len);
+        assert_eq!(kept, Some(share), "kept as it was");
+    }
+
+    /// `backup` with none of its sessions counted as left out, as Dust
+    /// 0.16.2 counted none ([`read_backup_as_0_16_2`]).
+    fn uncounted(backup: Backup) -> Backup {
+        Backup {
+            left_out: 0,
+            ..backup
+        }
+    }
+
+    /// A backup says how many of its sessions this version could not read,
+    /// and left out: each element of its list that reads as no session,
+    /// whatever it holds. It said nothing of them, so a backup none of
+    /// whose sessions this version reads was read as one with none in it.
+    #[test]
+    fn a_backup_counts_the_sessions_it_leaves_out() {
+        let good = serde_json::to_string(&at(5, "2026-10-05")).unwrap();
+        let read =
+            |raw: &str| read_backup(raw).map(|backup| (backup.sessions.len(), backup.left_out));
+        let raw = format!(r#"{{"dustBackup":1,"sessions":[{good},{{"date":5}},0,{good}]}}"#);
+        assert_eq!(read(&raw), Ok((2, 2)));
+        assert_eq!(
+            read(r#"{"dustBackup":1,"sessions":[{"date":5}]}"#),
+            Ok((0, 1))
+        );
+        assert_eq!(read(&format!(r#"[{{"date":5}},{good}]"#)), Ok((1, 1)));
+        let whole = write_backup(&TrainingSettings::default(), &[at(1, "2026-10-01")], 7);
+        assert_eq!(read(&whole), Ok((1, 0)));
+        assert_eq!(Backup::told_left_out(0), None);
+        assert_eq!(
+            Backup::told_left_out(1).as_deref(),
+            Some("1 session in it could not be read by this version and was left out.")
+        );
+        assert_eq!(
+            Backup::told_left_out(2).as_deref(),
+            Some("2 sessions in it could not be read by this version and were left out.")
+        );
     }
 
     /// The backup `backup` comes to, written with `stored`, and what it

@@ -71,8 +71,15 @@ impl RecordId {
     /// `newest`, the newest record of the history: at its stamp, or just
     /// after the newest where a clock set back stamped it before that. It
     /// finished after every session there is, whatever the clock said.
+    ///
+    /// A newest at the last place there is, as a session stamped past any
+    /// clock is placed ([`Self::placed`]), has nothing after it: the session
+    /// goes at its stamp, so that every session after goes in the order it
+    /// finished rather than all at that place, in the order of their hashes.
     pub fn next(timestamp: u64, newest: Option<RecordId>, json: &str) -> Self {
-        let after = newest.map_or(0, |newest| newest.order.saturating_add(1));
+        let after = newest
+            .and_then(|newest| newest.order.checked_add(1))
+            .unwrap_or(0);
         Self {
             order: (timestamp.saturating_mul(1000)).max(after),
             nonce: fnv64(json.as_bytes()),
@@ -401,6 +408,23 @@ mod tests {
         assert_eq!(id.order, 9_000_000);
     }
 
+    /// A session stamped past any clock, as a damaged or hand-made backup
+    /// may hold one, is placed at the last place there is, and every
+    /// session finished after it goes where it finished, in the order it
+    /// finished. Each went to that last place too, after it, as nothing can
+    /// go after it, and from then on the history read in the order of what
+    /// the sessions held, not of when they finished.
+    #[test]
+    fn a_session_stamped_past_any_clock_leaves_the_order_after_it_alone() {
+        let past_any_clock = at(u64::MAX / 1000 + 1);
+        let last = RecordId::placed(past_any_clock.timestamp, &json(&past_any_clock));
+        assert_eq!(last.order, u64::MAX, "the last place there is");
+        let (first, second) = (at(1_000), at(2_000));
+        let one = RecordId::next(first.timestamp, Some(last), &json(&first));
+        let two = RecordId::next(second.timestamp, Some(last), &json(&second));
+        assert_eq!((one.order, two.order), (1_000_000, 2_000_000));
+    }
+
     /// A session from elsewhere falls where it finished: after what
     /// finished in the same millisecond here, before what finished after.
     #[test]
@@ -488,6 +512,25 @@ mod tests {
         );
         assert_eq!(read_record("{\"date\":\"nonsense\"}"), None);
         assert_eq!(read_record("[]"), None);
+    }
+
+    /// A record an older build stored with a score past all reason holds it
+    /// as null, and read as no session, it was left out of the history at
+    /// every read: it reads back now, scored as sessions score today.
+    #[test]
+    fn a_record_stored_with_a_null_score_reads_back_scored_as_today() {
+        let mut stored = session("2026-01-01");
+        stored.groups = vec![cw_core::GroupResult {
+            sent: "KMURE".into(),
+            received: "KMURE".into(),
+            correct: true,
+        }];
+        stored.group_timings = vec![cw_core::SessionTiming::default()];
+        let stored = scored(stored);
+        assert!(stored.score > 0.0);
+        let mut raw = serde_json::to_value(&stored).expect("a session writes");
+        raw["score"] = serde_json::Value::Null;
+        assert_eq!(read_record(&raw.to_string()), Some(stored));
     }
 
     /// Each notice says what happened and what to do, in plain words.

@@ -14,7 +14,7 @@ use crate::routes::Route;
 use crate::session_runtime::finish_run;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
-use crate::time::sleep_ms;
+use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest::RunAnnouncer;
 use crate::ui::notice::NoticeBanner;
 use crate::ui::paddle::use_paddle_keys;
@@ -311,7 +311,7 @@ pub fn App() -> Element {
 /// put out of sight. Settings that are stored already are not stored again:
 /// moving between screens writes nothing.
 fn use_stored_settings(ctx: AppCtx) {
-    let edits = use_hook(|| Rc::new(Cell::new(0u64)));
+    let edits = use_hook(|| Rc::new(Cell::new(EditWait::default())));
     use_page_hidden(APP_HIDDEN, move || store_settings_now(ctx));
     use_effect(move || {
         let AppCtx {
@@ -334,20 +334,46 @@ fn use_stored_settings(ctx: AppCtx) {
             }
         }
         // Whatever edit was still waiting, this one replaces it.
-        let edit = edits.get() + 1;
-        edits.set(edit);
-        if screen == Screen::Settings {
-            let edits = edits.clone();
-            spawn(async move {
-                sleep_ms(SETTINGS_SAVE_DELAY_MS).await;
-                if edits.get() == edit {
-                    ctx.store_settings();
-                }
-            });
-        } else {
+        let held = edits.get();
+        if screen != Screen::Settings {
+            edits.set(EditWait { due: None, ..held });
             ctx.store_settings();
+            return;
         }
+        edits.set(EditWait {
+            due: Some(mono_ms() + u64::from(SETTINGS_SAVE_DELAY_MS)),
+            waits: true,
+        });
+        if held.waits {
+            return;
+        }
+        let edits = edits.clone();
+        #[cfg(test)]
+        crate::testing::rendered("settings wait");
+        spawn(async move {
+            // Until the newest edit has been still a moment, unless it was
+            // stored at once meanwhile.
+            while let Some(due) = edits.get().due {
+                let now = mono_ms();
+                if now >= due {
+                    ctx.store_settings();
+                    break;
+                }
+                sleep_ms((due - now).try_into().unwrap_or(u32::MAX)).await;
+            }
+            edits.set(EditWait::default());
+        });
     });
+}
+
+/// An edit on the settings screen still to be stored: when it is, once the
+/// edits have been still a moment, and whether a wait for that is under
+/// way: one wait for every edit until it is stored, each edit putting it
+/// off.
+#[derive(Clone, Copy, Default)]
+struct EditWait {
+    due: Option<u64>,
+    waits: bool,
 }
 
 /// Store the settings at once, rather than once an edit on the settings
@@ -626,6 +652,28 @@ mod ui_tests {
             assert_eq!(ui.store.load_settings().band.steepness, 12.0);
             ui.advance(1_000).await;
             assert_eq!(saves(&ui), 2, "the waiting edit was stored twice");
+        });
+    }
+
+    /// A drag across a slider on the settings screen waits once to be
+    /// stored: each step of it moves the one wait on, rather than starting
+    /// a wait of its own, every one but the newest to come to nothing.
+    #[test]
+    fn a_drag_waits_once_to_be_stored() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            ui.open_disclosures();
+            ui.advance(1_000).await;
+            ui.take_renders("settings wait");
+            for step in 1..=20 {
+                ui.type_into("slider-rise-time", &format!("{}", 10 + step));
+                ui.advance(16).await;
+            }
+            assert_eq!(ui.store.settings_saves.get(), 0, "stored mid-drag");
+            assert_eq!(ui.stored_settings().await.band.steepness, 30.0);
+            assert_eq!(ui.store.settings_saves.get(), 1);
+            assert_eq!(ui.take_renders("settings wait"), 1);
         });
     }
 
@@ -2253,6 +2301,26 @@ mod ui_tests {
             ui.advance(crate::routes::BAND_SETTLE_MS).await;
             assert_eq!(follows(&recorder), before + 1, "one follow for the drag");
             assert_eq!(bands(&recorder).last(), Some(&band_with_width(490.0)));
+        });
+    }
+
+    /// A drag waits once for the band to follow it: each step of it moves
+    /// the one wait on, rather than starting a wait of its own, every one
+    /// but the newest to come to nothing.
+    #[test]
+    fn a_dragged_slider_waits_once_for_the_band() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            ui.advance(crate::routes::BAND_SETTLE_MS + 50).await;
+            let before = follows(&recorder);
+            ui.take_renders("band wait");
+            for step in 0..20 {
+                ui.type_into("slider-filter-width", &format!("{}", 300 + 10 * step));
+                ui.advance(16).await;
+            }
+            ui.advance(crate::routes::BAND_SETTLE_MS).await;
+            assert_eq!(follows(&recorder), before + 1, "one follow for the drag");
+            assert_eq!(ui.take_renders("band wait"), 1);
         });
     }
 

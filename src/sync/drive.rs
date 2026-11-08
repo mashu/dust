@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use serde::Deserialize;
 
-use super::auth::{Auth, AuthError};
+use super::auth::{Auth, AuthError, Counted};
 use super::http::{Http, Request, Response};
 use super::remote::{Remote, RemoteError, RemoteFile};
 use super::text::{query, random_hex};
@@ -28,20 +28,30 @@ const PAGE_SIZE: &str = "1000";
 /// The app data folder of the user signed in with `auth`.
 pub struct Drive {
     http: Rc<dyn Http>,
-    auth: Rc<dyn Auth>,
+    auth: Rc<Counted>,
 }
 
 impl Drive {
-    pub fn new(http: Rc<dyn Http>, auth: Rc<dyn Auth>) -> Rc<Self> {
+    pub fn new(http: Rc<dyn Http>, auth: Rc<Counted>) -> Rc<Self> {
         Rc::new(Self { http, auth })
     }
 
     /// Send the request `make` makes with a token, and read its answer: once
-    /// more with a fresh token where the one held was refused.
-    async fn send(&self, make: impl Fn(&str) -> Request) -> Result<Response, RemoteError> {
+    /// more with a fresh token where the one held was refused. Not with a
+    /// token got once the sign-in was forgotten since the request began,
+    /// as `began` counts it ([`Counted::forgotten`]): sync turned off, and
+    /// maybe on anew with another account, whose drive it must not reach.
+    async fn send(
+        &self,
+        began: u64,
+        make: impl Fn(&str) -> Request,
+    ) -> Result<Response, RemoteError> {
         let mut fresh = false;
         loop {
             let token = self.auth.token(fresh).await.map_err(signed_out)?;
+            if self.auth.forgotten() != began {
+                return Err(RemoteError::SignIn);
+            }
             let answer = self
                 .http
                 .send(make(&token))
@@ -182,6 +192,7 @@ fn multipart(name: &str, bytes: &[u8]) -> Option<(String, Vec<u8>)> {
 impl Remote for Rc<Drive> {
     fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
         let drive = Rc::clone(self);
+        let began = drive.auth.forgotten();
         Box::pin(async move {
             let mut files = Vec::new();
             let mut page: Option<String> = None;
@@ -196,7 +207,7 @@ impl Remote for Rc<Drive> {
                 }
                 let url = format!("{FILES}?{}", query(&asked));
                 let answer = drive
-                    .send(|token| {
+                    .send(began, |token| {
                         Request::new("GET", url.clone()).header("Authorization", bearer(token))
                     })
                     .await?;
@@ -220,10 +231,11 @@ impl Remote for Rc<Drive> {
 
     fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
         let drive = Rc::clone(self);
+        let began = drive.auth.forgotten();
         let url = format!("{FILES}/{}?alt=media", in_path(id));
         Box::pin(async move {
             let answer = drive
-                .send(|token| {
+                .send(began, |token| {
                     Request::new("GET", url.clone()).header("Authorization", bearer(token))
                 })
                 .await?;
@@ -233,6 +245,7 @@ impl Remote for Rc<Drive> {
 
     fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
         let drive = Rc::clone(self);
+        let began = drive.auth.forgotten();
         let name = name.to_string();
         Box::pin(async move {
             let (boundary, body) = multipart(&name, &bytes).ok_or_else(|| {
@@ -240,7 +253,7 @@ impl Remote for Rc<Drive> {
             })?;
             let url = format!("{UPLOAD}?uploadType=multipart&fields=id");
             let answer = drive
-                .send(|token| {
+                .send(began, |token| {
                     Request::new("POST", url.clone())
                         .header("Authorization", bearer(token))
                         .header(
@@ -259,10 +272,11 @@ impl Remote for Rc<Drive> {
 
     fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
         let drive = Rc::clone(self);
+        let began = drive.auth.forgotten();
         let url = format!("{UPLOAD}/{}?uploadType=media&fields=id", in_path(id));
         Box::pin(async move {
             drive
-                .send(|token| {
+                .send(began, |token| {
                     Request::new("PATCH", url.clone())
                         .header("Authorization", bearer(token))
                         .header("Content-Type", "application/octet-stream")
@@ -275,10 +289,11 @@ impl Remote for Rc<Drive> {
 
     fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
         let drive = Rc::clone(self);
+        let began = drive.auth.forgotten();
         let url = format!("{FILES}/{}", in_path(id));
         Box::pin(async move {
             drive
-                .send(|token| {
+                .send(began, |token| {
                     Request::new("DELETE", url.clone()).header("Authorization", bearer(token))
                 })
                 .await?;

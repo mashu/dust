@@ -43,17 +43,31 @@ pub struct SyncState {
     /// The packs read, by name.
     #[serde(default)]
     pub read: BTreeSet<String>,
+    /// The packs a later build wrote, by name, which a build of the layout
+    /// beside each could not read: fetched again only by a build of a
+    /// later layout ([`super::pack::PACK_LAYOUT`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub later: BTreeMap<String, u32>,
     /// What those packs put together say.
     #[serde(default, with = "drive_state")]
     pub drive: DriveState,
-    /// The deletions taken from the drive and made here, each with the
-    /// time of the drive's deletion ([`super::plan::Here::applied`]).
+    /// The deletions here the drive holds, each with the time of the
+    /// drive's deletion ([`super::plan::Here::applied`]): those taken from
+    /// the drive, and those made here by hand once the drive holds them.
+    /// Each until a sync finds its session here again, or put back here by
+    /// hand since the one before.
     #[serde(default, with = "times")]
     pub applied: BTreeMap<RecordId, u64>,
     /// The sessions put back here by hand since the last sync, and when
     /// ([`super::plan::Here::revived`]).
     #[serde(default, with = "times")]
     pub revived: BTreeMap<RecordId, u64>,
+    /// The deletions by hand a build before this one made here, and noted
+    /// nothing of in [`Self::applied`], have been looked for and noted:
+    /// those the drive held as deleted, sent from here or found there
+    /// already. Looked for once, at the first sync after an update.
+    #[serde(default)]
+    pub deletions_noted: bool,
     /// The settings as they were at the last sync, to tell what changed
     /// since: none before the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +98,18 @@ impl SyncState {
 
     pub fn written(&self) -> Option<String> {
         serde_json::to_string(self).ok()
+    }
+
+    /// When a change this device makes to the record `id` at `now`, by its
+    /// own clock, is stamped: a deletion by hand, or a putting back. At
+    /// `now`, or just after the latest deletion or putting back of it this
+    /// device knows the drive to hold, where that is later: the drive's
+    /// word on a record goes by which came last ([`super::plan`]), and a
+    /// change made after another is so the later, however far apart the
+    /// clocks of the devices that made them are.
+    pub fn stamp_change(&self, id: RecordId, now: u64) -> u64 {
+        let seen = self.drive.tombs.get(&id).max(self.drive.revives.get(&id));
+        seen.map_or(now, |&seen| now.max(seen.saturating_add(1)))
     }
 }
 
@@ -179,11 +205,13 @@ mod tests {
         );
         state.last = Some(5);
         state.read.insert("dust-p-1".into());
+        state.later.insert("dust-p-2".into(), 1);
         state.drive.puts.insert(id);
         state.drive.tombs.insert(id, 7);
         state.drive.revives.insert(id, 8);
         state.applied.insert(id, 7);
         state.revived.insert(id, 9);
+        state.deletions_noted = true;
         state.settings = Some(Map::from_iter([("numGroups".to_string(), Value::from(5))]));
         state.stamps.insert("numGroups".into(), 3);
         let written = state.written().expect("written");
@@ -208,5 +236,6 @@ mod tests {
             least,
             SyncState::new("d".into(), "k".into(), String::new(), None)
         );
+        assert!(!least.deletions_noted, "looked for at the next sync");
     }
 }

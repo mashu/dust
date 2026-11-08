@@ -13,12 +13,13 @@
 
 use cw_core::{
     ContestKind, ContestRules, ContestScore, Field, QsoCheck, QsoError, Ranking, RunErrors, RunQso,
-    RunSummary, SessionResult, board_place,
+    RunSummary, SessionResult, board_place_at,
 };
 use dioxus::prelude::*;
 
 use crate::state::SessionPick;
 use crate::ui::contest::LogRowView;
+use crate::ui::figures::History;
 use crate::ui::format::{counted, counted_in_words, minutes_seconds, short_date};
 use crate::ui::results::{PlaceBanner, place_line};
 use crate::ui::scores::{rating_label, rating_unit};
@@ -250,20 +251,27 @@ pub fn use_opened_run() -> Signal<Option<SessionPick>> {
 
 /// The results of the run `opened`, read again from `sessions`: only while
 /// it is still in the history. Back closes them, and the way back at the
-/// top is named `back_to`, for where it goes.
+/// top is named `back_to`, for where it goes. Where it stands on the board
+/// reads every run's log of its contest, so it is worked out once for the
+/// history ([`History::figure`]), not again each time the list is drawn.
 pub fn opened_results(
-    sessions: &[SessionResult],
+    sessions: &History,
     mut opened: Signal<Option<SessionPick>>,
     back_to: &'static str,
 ) -> Option<Element> {
     let pick = opened()?;
-    let result = sessions
-        .get(pick.index)
-        .filter(|session| session.timestamp == pick.timestamp)?;
+    let result = sessions.with(|all| {
+        all.get(pick.index)
+            .filter(|session| session.timestamp == pick.timestamp)
+            .cloned()
+    })?;
+    let place = *sessions.figure("board place", pick.index, |all| {
+        board_place_at(all, pick.index)
+    });
     Some(rsx! {
         ContestResults {
-            result: result.clone(),
-            place: board_place(sessions, result.timestamp),
+            result,
+            place,
             on_back: move |()| opened.set(None),
             back_to,
         }

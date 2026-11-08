@@ -56,6 +56,13 @@ thread_local! {
     /// How many times each figure of the history has been worked out since a
     /// test last looked, by name.
     static WORKED_OUT: std::cell::RefCell<Vec<(&'static str, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// A file chosen waits to be read until a test lets it be, as a large
+    /// one takes its time ([`Ui::hold_file_reads`]).
+    static FILE_READS_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The files, by name, whose read never ends once chosen, as a
+    /// browser's of a file moved after it was chosen never does
+    /// ([`Ui::never_finish_reading`]).
+    static FILES_NEVER_READ: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The page asks for the field with this id to have the cursor, by
@@ -94,6 +101,19 @@ pub fn rendered(component: &'static str) {
 /// reads its figures from one that works them out again.
 pub fn worked_out(figure: &'static str) {
     count(&WORKED_OUT, figure);
+}
+
+/// A file chosen, called `name`, is being read: on a computer or in a
+/// browser, for as long as it takes a file that size; here, for as long as
+/// a test holds file reads ([`Ui::hold_file_reads`]), and for good for a
+/// file whose read never ends ([`Ui::never_finish_reading`]).
+pub async fn reading_a_file(name: &str) {
+    if FILES_NEVER_READ.with_borrow(|never| never.iter().any(|held| held == name)) {
+        std::future::pending::<()>().await;
+    }
+    while FILE_READS_HELD.get() {
+        crate::time::sleep_ms(POLL_MS).await;
+    }
 }
 
 /// One more of `what` in `counts`.
@@ -685,6 +705,9 @@ pub struct PageKey {
     pub shift_key: bool,
     pub repeat: bool,
     pub is_composing: bool,
+    /// The key code, as browsers told a key by before `code`: 229 for a key
+    /// the input method took, and 0 here for any other.
+    pub key_code: u32,
 }
 
 impl PageKey {
@@ -746,6 +769,17 @@ impl PageKey {
     pub fn composing(self) -> Self {
         Self {
             is_composing: true,
+            ..self
+        }
+    }
+
+    /// The key that ends an input method's composition, as WebKit hands it
+    /// over: once the composition is over, so not as composing, but with
+    /// the key code of a key the input method took.
+    pub fn ending_composition(self) -> Self {
+        Self {
+            is_composing: false,
+            key_code: 229,
             ..self
         }
     }
@@ -935,6 +969,8 @@ impl Ui {
         FOCUS_ASKED.take();
         SCROLLS_ASKED.take();
         ELSEWHERE.take();
+        FILE_READS_HELD.set(false);
+        FILES_NEVER_READ.take();
         let mut ui = Self {
             dom,
             ids: Vec::new(),
@@ -1418,16 +1454,30 @@ impl Ui {
         self.fire("change", id, Self::form(value));
     }
 
-    /// Choose a file called `name` in the file input with this id, the way
-    /// the platform's picker hands one over. `size` is what the file says it
-    /// is, which a test can make larger than what it holds.
-    pub fn choose_file(&mut self, id: &str, name: &str, contents: &str, size: u64) {
+    /// Hold every file chosen from now on unread, as a large one takes its
+    /// time to read, or let them all be read once the clock moves on.
+    pub fn hold_file_reads(&mut self, held: bool) {
+        FILE_READS_HELD.set(held);
+    }
+
+    /// Never finish reading a file called `name` chosen from now on, as a
+    /// browser never finishes reading a file moved after it was chosen, or
+    /// a phone's file kept in the cloud while the phone is offline.
+    pub fn never_finish_reading(&mut self, name: &str) {
+        FILES_NEVER_READ.with_borrow_mut(|never| never.push(name.to_string()));
+    }
+
+    /// Choose a file called `name`, holding `contents`, text or any other
+    /// bytes, in the file input with this id, the way the platform's picker
+    /// hands one over. `size` is what the file says it is, which a test can
+    /// make larger than what it holds.
+    pub fn choose_file(&mut self, id: &str, name: &str, contents: impl AsRef<[u8]>, size: u64) {
         let file = dioxus::html::SerializedFileData {
             path: std::path::PathBuf::from(name),
             size,
             last_modified: 0,
             content_type: Some("text/plain".to_string()),
-            contents: Some(contents.as_bytes().to_vec().into()),
+            contents: Some(contents.as_ref().to_vec().into()),
         };
         let form = dioxus::html::SerializedFormData::new(
             String::new(),
@@ -1467,6 +1517,30 @@ impl Ui {
     /// whether the page left the repeat to do what it would.
     pub fn repeat_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) -> bool {
         self.key_down(id, key, code, dioxus::prelude::Modifiers::empty(), true)
+    }
+
+    /// Press `key` in the element `id` while an input method is composing
+    /// a character, as the Enter that ends a composition is pressed:
+    /// whether the page left the key to the input method.
+    pub fn press_key_composing(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) -> bool {
+        let pressed = dioxus::html::SerializedKeyboardData::new(
+            key,
+            code,
+            dioxus::prelude::Location::Standard,
+            false,
+            dioxus::prelude::Modifiers::empty(),
+            true,
+        );
+        self.fire("keydown", id, Box::new(pressed))
+    }
+
+    /// An input method ends a composition in the element `id`, as the
+    /// Enter that ends it does: in WebKit, before the page hears that Enter,
+    /// which it then hears as not composing.
+    pub fn end_composition(&mut self, id: &str) {
+        let ended: dioxus::html::SerializedCompositionData =
+            serde_json::from_value(serde_json::json!({ "data": "" })).expect("a composition's end");
+        self.fire("compositionend", id, Box::new(ended));
     }
 
     fn key_down(

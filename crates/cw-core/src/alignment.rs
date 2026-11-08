@@ -224,15 +224,17 @@ impl CopyTally {
         }
     }
 
-    /// Fold another tally into this one.
+    /// Fold another tally into this one. A tally read back from a save is
+    /// not trusted to be small: a count goes no higher than it can hold.
     pub fn merge(&mut self, other: &Self) {
         for (ch, counts) in &other.sent {
             let entry = self.sent.entry(*ch).or_default();
-            entry.correct += counts.correct;
-            entry.total += counts.total;
+            entry.correct = entry.correct.saturating_add(counts.correct);
+            entry.total = entry.total.saturating_add(counts.total);
         }
         for (ch, count) in &other.inserted {
-            *self.inserted.entry(*ch).or_default() += count;
+            let entry = self.inserted.entry(*ch).or_default();
+            *entry = entry.saturating_add(*count);
         }
     }
 
@@ -244,17 +246,19 @@ impl CopyTally {
     }
 
     /// The same, counting only the characters `keep` picks — one axis of a
-    /// mixed session. `None` when none of them came up at all.
+    /// mixed session. `None` when none of them came up at all. Added up
+    /// wide, so the counts of a tally read back from a save, however
+    /// large, never run past what the sum holds.
     pub fn accuracy_where(&self, keep: impl Fn(char) -> bool) -> Option<f64> {
-        let (mut correct, mut attempts) = (0u32, 0u32);
+        let (mut correct, mut attempts) = (0u64, 0u64);
         for (_, counts) in self.sent.iter().filter(|(ch, _)| keep(**ch)) {
-            correct += counts.correct;
-            attempts += counts.total;
+            correct += u64::from(counts.correct);
+            attempts += u64::from(counts.total);
         }
         for (_, count) in self.inserted.iter().filter(|(ch, _)| keep(**ch)) {
-            attempts += count;
+            attempts += u64::from(*count);
         }
-        (attempts > 0).then(|| f64::from(correct) / f64::from(attempts))
+        (attempts > 0).then(|| correct as f64 / attempts as f64)
     }
 }
 
@@ -469,6 +473,26 @@ mod tests {
                 total: 2
             }
         );
+    }
+
+    /// A tally read back from a save is not trusted to be small: merging
+    /// one, or reading its accuracy, panicked once its counts added up past
+    /// what a count holds.
+    #[test]
+    fn counts_past_what_a_count_holds_neither_panic_nor_wrap() {
+        let mut big = CopyTally::default();
+        let all = |correct| LetterAccuracy {
+            correct,
+            total: u32::MAX,
+        };
+        big.sent.insert('K', all(u32::MAX));
+        big.sent.insert('M', all(0));
+        big.inserted.insert('E', u32::MAX);
+        assert!((big.accuracy() - 1.0 / 3.0).abs() < 1e-9);
+        let mut merged = big.clone();
+        merged.merge(&big);
+        assert_eq!(merged.sent[&'K'], all(u32::MAX));
+        assert_eq!(merged.inserted[&'E'], u32::MAX);
     }
 
     #[test]

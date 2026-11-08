@@ -76,8 +76,11 @@ web-sys = { version = "0.3", optional = true, features = [
     "KeyboardEvent",
     "Node",
     "UiEvent",
-    # Sync: Google Drive asked over fetch, and the sign-in window's answer
-    # heard from the page Google sends it back to.
+    # Sync: Google Drive asked over fetch, given up on once it has taken too
+    # long, and the sign-in window's answer heard from the page Google sends
+    # it back to.
+    "AbortController",
+    "AbortSignal",
     "BroadcastChannel",
     "Headers",
     "Location",

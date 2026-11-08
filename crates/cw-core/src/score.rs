@@ -18,7 +18,7 @@
 //! its characters fast and the gaps between them long, so its speed is the
 //! two speeds together.
 
-use crate::alignment::edit_distance;
+use crate::alignment::align_group;
 use crate::morse::is_scored_char;
 use crate::session::{GroupResult, SessionTiming};
 
@@ -42,6 +42,11 @@ const TIME_COST_PER_DECADE: f64 = 0.25;
 const SLOWEST_KEEPS: f64 = 0.25;
 /// What each send of a group after the first leaves, as RufzXP's replay.
 const RESENT_KEEPS: f64 = 0.5;
+/// The most characters a group's misses are counted over, by their chances
+/// ([`expected_error_factor`]): longer than any group is sent
+/// ([`crate::GROUP_SIZE_MAX`]), and few enough that the ways its misses
+/// could fall stay a number.
+const MOST_CHARS_COUNTED: u32 = 64;
 
 /// The average answer of a session with none to average: a second a
 /// character.
@@ -91,15 +96,20 @@ pub fn speed_factor(wpm: f64) -> f64 {
     (wpm / REFERENCE_WPM).powi(2)
 }
 
-/// What is left after `errors`: a quarter for one, a ninth for two.
+/// What is left after `errors`: a quarter for one, a ninth for two. A count
+/// is not trusted to be small: at the most there can be, what is left is
+/// next to nothing, and stays so.
 pub fn error_factor(errors: u32) -> f64 {
-    1.0 / f64::from(errors + 1).powi(2)
+    1.0 / f64::from(errors.saturating_add(1)).powi(2)
 }
 
 /// What is left, on average, of a group of `chars` characters each missed
 /// at `miss_rate`: [`error_factor`] for every count of misses the group
-/// could have, by its chance. Nothing missed leaves it all.
+/// could have, by its chance. Nothing missed leaves it all. A length is not
+/// trusted to be small: a group past [`MOST_CHARS_COUNTED`] characters is
+/// worked out as one that long.
 pub fn expected_error_factor(chars: u32, miss_rate: f64) -> f64 {
+    let chars = chars.min(MOST_CHARS_COUNTED);
     let miss = if miss_rate.is_finite() {
         miss_rate.clamp(0.0, 1.0)
     } else {
@@ -127,9 +137,10 @@ pub fn time_factor(ms_per_char: f64) -> f64 {
 }
 
 /// What is left of a group heard `sends` times: half for each send after
-/// the first.
+/// the first. A count read back from a save is not trusted to be small:
+/// past 64 sends what is left is next to nothing, and stays so.
 pub fn repeat_factor(sends: u32) -> f64 {
-    RESENT_KEEPS.powi(sends.max(1) as i32 - 1)
+    RESENT_KEEPS.powi(sends.saturating_sub(1).min(64) as i32)
 }
 
 /// What a group earns.
@@ -154,23 +165,41 @@ pub fn alphabet_weight(effective_size: f64) -> f64 {
 }
 
 /// What a session earns: its groups' points added up, each character worth
-/// what it tells you from the alphabet the session drew on.
+/// what it tells you from the alphabet the session drew on. A total that
+/// comes to no number, from a save's speed past all reason, earns nothing:
+/// a score is written with the session, and one written as no number is
+/// never read back.
 pub fn session_points(copies: &[GroupCopy], effective_alphabet_size: f64) -> f64 {
     let points: f64 = copies.iter().map(group_points).sum();
     let score = points * alphabet_weight(effective_alphabet_size);
-    (score * 100.0).round() / 100.0
+    let score = (score * 100.0).round() / 100.0;
+    if score.is_finite() { score } else { 0.0 }
 }
 
 /// The characters missed, wrong or typed in excess, copying `sent` as
 /// `received`: what a group's points are cut for. Each is one edit of the
-/// fewest that turn one into the other.
+/// fewest that turn one into the other, as the copy's alignment reads it
+/// ([`align_group`]): a skip is the character whose place it holds,
+/// missed, and one that holds no character's place, past the group's end,
+/// is nothing. Without a skip, they are the fewest edits themselves.
 pub(crate) fn count_errors(sent: &str, received: &str) -> u32 {
     // A clean copy is the common case, and needs no table.
     if sent.eq_ignore_ascii_case(received) {
         0
     } else {
-        edit_distance(sent, received)
+        let missed = align_group(sent, received)
+            .into_iter()
+            .filter(|pair| !pair.matched)
+            .count();
+        u32::try_from(missed).unwrap_or(u32::MAX)
     }
+}
+
+/// Whether `received` copies the whole of `sent`: every character in its
+/// place and nothing added, as its errors are counted ([`count_errors`]).
+/// What a group is kept as copied right by.
+pub(crate) fn copied_whole(sent: &str, received: &str) -> bool {
+    count_errors(sent, received) == 0
 }
 
 /// The characters of `text` that are scored: what a group's points are for.
@@ -287,6 +316,30 @@ mod tests {
         );
     }
 
+    /// Errors are read as the alignment reads a copy: a skip is the
+    /// character whose place it holds, missed, and one that holds no
+    /// character's place, past the group's end, is nothing. It cost a
+    /// group whose every letter was right three quarters of its points.
+    /// Without a skip they are the fewest edits, as they always were.
+    #[test]
+    fn a_skip_is_an_error_only_where_it_stands_for_a_character() {
+        let errors = |sent, received| GroupCopy::of(sent, received, 20.0, 100.0, 1).errors;
+        assert_eq!(errors("KMRSU", "KMRSU_"), 0);
+        assert_eq!(errors("KMRSU", "KMRS_"), 1);
+        assert_eq!(errors("KMRSU", "K_R_U"), 2);
+        for (sent, received) in [
+            ("K5XYW", "K5XYZ"),
+            ("K5XY", "K5XYZ"),
+            ("K5ZYX", "K5XYZ"),
+            ("", "K5XYZ"),
+            ("KMRSU", ""),
+            ("kmrsu", "KMRSU"),
+        ] {
+            let fewest = crate::alignment::edit_distance(sent, received);
+            assert_eq!(errors(sent, received), fewest, "{sent} as {received}");
+        }
+    }
+
     /// A group of five at a tenth of its characters missed keeps on average
     /// what its chances of none, one, two or more misses leave; nothing
     /// missed keeps it all, everything missed what five misses leave.
@@ -330,6 +383,65 @@ mod tests {
         assert_eq!(repeat_factor(1), 1.0);
         assert_eq!(repeat_factor(2), 0.5);
         assert_eq!(repeat_factor(3), 0.25);
+    }
+
+    /// A count of sends read back from a save is not trusted to be small:
+    /// one of 2³¹ panicked working out the cut, and one just past it
+    /// multiplied the points up to infinity instead of halving them.
+    #[test]
+    fn a_send_count_past_all_reason_still_leaves_next_to_nothing() {
+        for sends in [1 << 31, (1 << 31) + 1, u32::MAX] {
+            let left = repeat_factor(sends);
+            assert!((0.0..1e-18).contains(&left), "{sends}: {left}");
+        }
+    }
+
+    /// Nor is a count of errors, a group's copy being a public value: one of
+    /// `u32::MAX` overflowed working out the cut, a panic where overflow is
+    /// checked and, where it is not, a cut to nothing that multiplied the
+    /// points up to infinity. It leaves next to nothing.
+    #[test]
+    fn an_error_count_past_all_reason_still_leaves_next_to_nothing() {
+        let left = error_factor(u32::MAX);
+        assert!((0.0..1e-18).contains(&left), "{left}");
+        let wild = GroupCopy {
+            errors: u32::MAX,
+            ..clean(5, 20.0)
+        };
+        assert!((0.0..1e-15).contains(&group_points(&wild)));
+    }
+
+    /// Nor is a group's length, for what a rate of misses leaves of it: a
+    /// group of two thousand characters came to no number, the ways its
+    /// misses could fall past what a float holds, and one of `u32::MAX`
+    /// took billions of steps to come to no number, or to overflow counting
+    /// its misses. A longer group keeps no more than a shorter one, worked
+    /// out at once.
+    #[test]
+    fn a_group_length_past_all_reason_still_works_out() {
+        for miss in [0.0, 0.01, 0.5, 1.0] {
+            let mut shorter = 1.0;
+            for chars in [5, 64, 65, 2_000, u32::MAX] {
+                let left = expected_error_factor(chars, miss);
+                assert!((0.0..=shorter).contains(&left), "{chars} at {miss}: {left}");
+                shorter = left;
+            }
+        }
+    }
+
+    /// A score has to be a number to be written and read back: a session
+    /// whose points come to no number, from a speed past all reason, scores
+    /// nothing.
+    #[test]
+    fn a_session_whose_points_are_no_number_scores_nothing() {
+        let wild = GroupCopy {
+            wpm: 1e200,
+            ..clean(5, 20.0)
+        };
+        assert_eq!(group_points(&wild), f64::INFINITY);
+        assert_eq!(session_points(&[clean(5, 20.0), wild], 26.0), 0.0);
+        let empty = GroupCopy { chars: 0, ..wild };
+        assert_eq!(session_points(&[empty], 26.0), 0.0);
     }
 
     /// A character from two Koch letters tells you a bit; one from the

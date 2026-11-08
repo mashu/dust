@@ -17,7 +17,7 @@ use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen};
 use crate::sync::ctx::SyncStatus;
-use crate::time::{local_date_string, mono_ms, sleep_ms};
+use crate::time::{mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
 use crate::ui::contest_results::NothingKept;
@@ -28,6 +28,7 @@ use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::sync::SyncView;
+use crate::ui::today::use_today;
 use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
 
 /// How long the settings have to stay still, while the band is being
@@ -40,6 +41,11 @@ pub(crate) const BAND_SETTLE_MS: u64 = 150;
 /// follows the settings as they stand this long after the first move it has
 /// not followed yet, so a long drag is still heard as it goes.
 pub(crate) const BAND_FOLLOW_MAX_MS: u64 = 600;
+
+/// Where Home, and Stats, keep their listeners for the page coming back
+/// into sight, to read the day again.
+const HOME_SHOWN: &str = "__dustHomeShown";
+const STATS_SHOWN: &str = "__dustStatsShown";
 
 /// The screen `screen` names.
 #[component]
@@ -90,8 +96,8 @@ fn HomeRoute() -> Element {
     // the app stored or deleted since is taken up as it opens.
     use_hook(move || ctx.take_up_changes());
     let history = use_history(ctx);
-    let today = local_date_string();
-    let practice = use_memo(use_reactive!(|today| Practice::of(&history(), &today)));
+    let today = use_today(HOME_SHOWN);
+    let practice = use_memo(move || Practice::of(&history(), &today.read()));
     let settings = ctx.settings.read();
     rsx! {
         Home {
@@ -178,11 +184,16 @@ fn use_preview_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
 /// While a screen with a session, a run or a stream a tap away is up, the
 /// prior the sampler starts from is built once it is drawn, and again
 /// whenever the history changes under it, rather than in the tap
-/// ([`AppCtx::warm_sampler`]).
+/// ([`AppCtx::warm_sampler`]). A change is one to its sessions
+/// ([`crate::history::StoredHistory::generation`]): what else is written
+/// of the history, as the store saying it took a session, changes none.
 fn use_warm_sampler(ctx: AppCtx) {
+    let generation = use_memo(move || ctx.sessions.read().generation());
     use_effect(move || {
-        // Read to build it again for every change of the history.
-        let _ = ctx.sessions.read();
+        // Read to build it again for every change of the sessions.
+        let _ = generation();
+        #[cfg(test)]
+        crate::testing::rendered("warm sampler");
         ctx.warm_sampler();
     });
 }
@@ -201,10 +212,13 @@ fn use_band_follow(ctx: AppCtx) {
         let previewing = ctx.preview.read().is_band();
         // Read to follow every move; the follow takes them as they stand.
         let settings = ctx.settings.read();
-        let turn = waiting.get().turn.wrapping_add(1);
+        let held = waiting.get();
         if !previewing {
             // A stopped preview has no band to follow the settings with.
-            waiting.set(Waiting { since: None, turn });
+            waiting.set(Waiting {
+                since: None,
+                ..held
+            });
             followed.borrow_mut().take();
             return;
         }
@@ -219,21 +233,35 @@ fn use_band_follow(ctx: AppCtx) {
             *followed.borrow_mut() = Some(clamped);
             return;
         }
+        // Each move puts the follow off, to the longest after the first.
         let now = mono_ms();
-        let since = waiting.get().since.unwrap_or(now);
+        let since = held.since.unwrap_or(now);
         waiting.set(Waiting {
             since: Some(since),
-            turn,
+            due: (now + BAND_SETTLE_MS).min(since + BAND_FOLLOW_MAX_MS),
+            waits: true,
         });
-        let due = (now + BAND_SETTLE_MS).min(since + BAND_FOLLOW_MAX_MS);
+        if held.waits {
+            return;
+        }
         let (waiting, followed) = (waiting.clone(), followed.clone());
+        #[cfg(test)]
+        crate::testing::rendered("band wait");
         spawn(async move {
-            sleep_ms(due.saturating_sub(now).try_into().unwrap_or(u32::MAX)).await;
-            // A newer move has a follow of its own coming, due no later.
-            if waiting.get().turn != turn || !ctx.preview.peek().is_band() {
+            // Until the follow is due, however far the moves meanwhile put
+            // it off.
+            loop {
+                let (due, now) = (waiting.get().due, mono_ms());
+                if now >= due {
+                    break;
+                }
+                sleep_ms((due - now).try_into().unwrap_or(u32::MAX)).await;
+            }
+            let held = waiting.replace(Waiting::default());
+            // Stopped meanwhile, the preview has no band to follow.
+            if held.since.is_none() || !ctx.preview.peek().is_band() {
                 return;
             }
-            waiting.set(Waiting { since: None, turn });
             let settings = ctx.settings.peek().clone().clamp();
             ctx.app().player.follow_band(&settings);
             *followed.borrow_mut() = Some(settings);
@@ -250,12 +278,14 @@ fn only_gains_moved(last: &TrainingSettings, now: &TrainingSettings) -> bool {
     gains_put_back == *last && now != last
 }
 
-/// The settings moves the band has still to follow: since when, and which
-/// was the newest, so only the follow for it brings the band in line.
+/// The settings moves the band has still to follow: since when, and when it
+/// follows them, with whether a wait for that is under way: one wait for
+/// every move until the band follows, each move putting it off.
 #[derive(Clone, Copy, Default)]
 struct Waiting {
     since: Option<u64>,
-    turn: u64,
+    due: u64,
+    waits: bool,
 }
 
 #[component]
@@ -266,10 +296,18 @@ fn StatsRoute() -> Element {
     // the app stored or deleted since taken up as it opens.
     use_hook(move || ctx.take_up_changes());
     let history = use_history(ctx);
+    // The Scores tab says how long ago the best was set, and the sync card
+    // when this device last synced: by the day as it is, past midnight too.
+    let today = use_today(STATS_SHOWN);
+    // Made once, as the sync card's are: the History tab, handed the same
+    // ones, is drawn again only for what it shows.
+    let on_save = use_callback(move |()| ctx.save_backup());
+    let sync = use_sync_view(ctx, today());
     rsx! {
         StatsView {
             settings: ctx.settings.read().clone(),
             sessions: history(),
+            today: today(),
             on_delete: move |picked: Vec<RecordId>| ctx.delete_sessions(&picked),
             backups: Backups {
                 last: *ctx.last_backup.read(),
@@ -277,30 +315,36 @@ fn StatsRoute() -> Element {
                 confirmed: ctx.app().store.confirms_backups(),
                 inside_app: ctx.app().store.backups_inside_app(),
                 outgrows_device_backup: ctx.app().store.outgrows_device_backup(),
-                on_save: EventHandler::new(move |()| ctx.save_backup()),
-                on_restore: EventHandler::new(move |backup| ctx.restore_backup(backup)),
+                on_save,
             },
-            sync: sync_view(ctx),
+            sync,
         }
     }
 }
 
-/// What the History tab's sync card shows and does: no card where this
-/// build cannot sync at all.
-fn sync_view(ctx: AppCtx) -> Option<SyncView> {
+/// What the History tab's sync card shows and does, on `today`: no card
+/// where this build cannot sync at all. What it does is made once, for as
+/// long as the screen is up.
+fn use_sync_view(ctx: AppCtx, today: String) -> Option<SyncView> {
+    let on_sign_in = use_callback(move |()| ctx.sync_sign_in());
+    let on_passphrase = use_callback(move |(passphrase, repeated)| {
+        ctx.sync_passphrase(passphrase, repeated);
+    });
+    let on_cancel = use_callback(move |()| ctx.sync_cancel());
+    let on_sync_now = use_callback(move |()| ctx.sync_now());
+    let on_turn_off = use_callback(move |and_copy| ctx.sync_turn_off(and_copy));
     let status = ctx.sync.status.read().clone();
     if status == SyncStatus::Unavailable(None) {
         return None;
     }
     Some(SyncView {
         status,
-        on_sign_in: EventHandler::new(move |()| ctx.sync_sign_in()),
-        on_passphrase: EventHandler::new(move |(passphrase, repeated)| {
-            ctx.sync_passphrase(passphrase, repeated);
-        }),
-        on_cancel: EventHandler::new(move |()| ctx.sync_cancel()),
-        on_sync_now: EventHandler::new(move |()| ctx.sync_now()),
-        on_turn_off: EventHandler::new(move |and_copy| ctx.sync_turn_off(and_copy)),
+        today,
+        on_sign_in,
+        on_passphrase,
+        on_cancel,
+        on_sync_now,
+        on_turn_off,
     })
 }
 
@@ -424,6 +468,9 @@ fn TrainingRoute() -> Element {
 #[component]
 fn ResultsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
+    // Where the session stands on the board reads the history, every run's
+    // log for a run: worked out once for it, not on every redraw.
+    let history = use_history(ctx);
     let on_again = use_callback(move |()| start_session(ctx));
     let on_home = use_callback(move |()| ctx.go_to(Screen::Home));
     // Stored at once, as a setting changed off the settings screen is.
@@ -431,12 +478,18 @@ fn ResultsRoute() -> Element {
         let mut settings = ctx.settings;
         settings.write().playback.lock_input_during_group_playback = false;
     });
-    let result = match ctx.result.read().clone() {
-        Some(Finished::Kept(result)) => *result,
+    let (result, kept) = match ctx.result.read().clone() {
+        Some(Finished::Kept(result, kept)) => (*result, kept),
         Some(Finished::NothingKept) => return rsx! { NothingKept { on_again, on_home } },
         None => return rsx! { p { class: "muted", "No result." } },
     };
-    let place = cw_core::board_place(&ctx.sessions.read(), result.timestamp);
+    // Found by its record, not by when it finished, which another session
+    // can share: no place where it is in no history.
+    let history = history();
+    let at = kept.and_then(|id| history.index_of(id));
+    let place = *history.figure("board place", at, |sessions| {
+        at.and_then(|index| cw_core::board_place_at(sessions, index))
+    });
     rsx! {
         ResultsView {
             result,
@@ -458,7 +511,110 @@ fn ResultsRoute() -> Element {
 mod tests {
     use super::*;
     use crate::state::AppState;
-    use crate::testing::{Ui, run, test_settings};
+    use crate::testing::{Ui, run, stored_session, test_settings};
+    use crate::ui::today::{DAY_LOOK_MS, days_after, pretend_today};
+
+    /// Home left up past midnight goes by the new day: its streak and its
+    /// calendar take it once the clock passes midnight, and as the page
+    /// comes back into sight. Home read the day only as it was drawn, and an
+    /// app left open overnight said the next morning that the day before's
+    /// practice was the day's, the streak safe.
+    #[test]
+    fn home_left_up_past_midnight_goes_by_the_new_day() {
+        run(|| async {
+            pretend_today("2026-09-02");
+            let sessions: Vec<_> = (1..=2)
+                .map(|day| {
+                    let mut session = stored_session(&format!("2026-09-0{day}"), &[("KM", "KM")]);
+                    session.timestamp = day * 86_400_000;
+                    session
+                })
+                .collect();
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &sessions);
+            assert!(
+                ui.has("2-day streak — today is in the bag."),
+                "{}",
+                ui.html()
+            );
+            pretend_today("2026-09-03");
+            tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
+            ui.advance(20).await;
+            assert!(
+                ui.has("2-day streak at risk — practice today to keep it alive."),
+                "{}",
+                ui.html()
+            );
+            pretend_today("2026-09-04");
+            ui.with_app(|_| crate::page_hidden::show_page());
+            assert!(
+                ui.has("Your 2-day streak ended — one session today starts the next one."),
+                "{}",
+                ui.html()
+            );
+        });
+    }
+
+    /// The Scores tab left up past midnight says how long ago the best was
+    /// set by the new day: once the clock passes midnight, and as the page
+    /// comes back into sight. It read the day only as it was drawn, and
+    /// went on saying a best set the day before was set today.
+    #[test]
+    fn the_scores_tab_left_up_past_midnight_goes_by_the_new_day() {
+        run(|| async {
+            let at = crate::time::now_ms();
+            let day = crate::ui::format::day_of(at).expect("a day");
+            pretend_today(&day);
+            let mut best = stored_session(&day, &[("KM", "KM"); 10]);
+            best.timestamp = at;
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &[best]);
+            ui.click("nav-stats");
+            ui.click("seg-scores");
+            assert!(ui.has(" · today<"), "{}", ui.html());
+            pretend_today(&days_after(&day, 1));
+            tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
+            ui.advance(20).await;
+            assert!(ui.has(" · yesterday<"), "{}", ui.html());
+            pretend_today(&days_after(&day, 2));
+            ui.with_app(|_| crate::page_hidden::show_page());
+            assert!(ui.has(" · 2 days ago<"), "{}", ui.html());
+        });
+    }
+
+    /// The sync card left up past midnight says when this device last
+    /// synced by the new day: once the clock passes midnight, and as the
+    /// page comes back into sight. It read the clock only as it was drawn,
+    /// and went on saying a sync made the day before was made today.
+    #[test]
+    fn the_sync_card_left_up_past_midnight_goes_by_the_new_day() {
+        run(|| async {
+            let at = crate::time::now_ms();
+            let day = crate::ui::format::day_of(at).expect("a day");
+            pretend_today(&day);
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.with_app(|ctx| {
+                let mut status = ctx.sync.status;
+                status.set(SyncStatus::On {
+                    last: Some(at),
+                    syncing: false,
+                    problem: None,
+                    needs_sign_in: false,
+                });
+            });
+            ui.click("nav-stats");
+            ui.click("seg-history");
+            let time = crate::ui::format::clock(at).expect("a time");
+            assert!(ui.has(&format!("Synced today at {time}")), "{}", ui.html());
+            pretend_today(&days_after(&day, 1));
+            tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
+            ui.advance(20).await;
+            let yesterday = format!("Synced yesterday at {time}");
+            assert!(ui.has(&yesterday), "{}", ui.html());
+            pretend_today(&days_after(&day, 2));
+            ui.with_app(|_| crate::page_hidden::show_page());
+            let before = format!("Synced {} at {time}", crate::ui::format::short_date(&day));
+            assert!(ui.has(&before), "{}", ui.html());
+        });
+    }
 
     /// A screen with nothing behind it yet: the moment between starting a
     /// session and its first group, or a results screen with nothing to show.
@@ -504,6 +660,96 @@ mod tests {
                 },
             );
             assert!(ui.has("No result."));
+        });
+    }
+
+    /// The results of a session just finished work out where it stands on
+    /// the board once for the history: drawn again for a setting moved, or
+    /// for the store saying it took the session, they find it worked out;
+    /// another session kept is another history, and it is worked out again.
+    #[test]
+    fn a_sessions_results_work_out_their_place_once() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
+            ui.advance(200).await;
+            assert!(ui.take_worked_out("board place") >= 1);
+            ui.with_app(|ctx| {
+                let mut settings = ctx.settings;
+                settings.write().band.master_volume = 0.5;
+            });
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let first = sessions.peek().id_at(0).expect("the session kept");
+                sessions.write().mark_saved(first);
+            });
+            assert_eq!(ui.screen(), "results");
+            assert_eq!(ui.take_worked_out("board place"), 0);
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let another = crate::testing::stored_session("2026-10-01", &[("KM", "KM")]);
+                sessions.write().push(another);
+            });
+            assert_eq!(ui.take_worked_out("board place"), 1);
+        });
+    }
+
+    /// The results of a session just finished place it as it stands on the
+    /// board, though another in the history finished at the same moment, as
+    /// two devices' sessions can once synced: it is found by its record,
+    /// not by when it finished. It was handed the place of the first in the
+    /// history to finish then.
+    #[test]
+    fn a_sessions_results_place_it_beside_another_finished_at_the_same_moment() {
+        run(|| async {
+            let at = crate::time::now_ms();
+            let mut best = stored_session("2026-10-01", &[("KM", "KM"); 10]);
+            best.timestamp = at;
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &[best]);
+            let copied: Vec<_> = [("KM", "KM"); 5]
+                .into_iter()
+                .chain([("KM", "MK"); 5])
+                .collect();
+            let mut worse = stored_session("2026-10-01", &copied);
+            worse.timestamp = at;
+            ui.with_app(|ctx| crate::session_runtime::keep_and_show(ctx, worse));
+            assert_eq!(ui.screen(), "results");
+            assert!(ui.has("2nd best of your 2 Koch sessions"), "{}", ui.html());
+        });
+    }
+
+    /// The store saying it took a session writes the history and changes
+    /// none of its sessions: the sampler's prior is not looked at again for
+    /// it, every session keyed, as it is for a session added. It was, on
+    /// every screen a session or a run is a tap away from, for every word
+    /// the store sent.
+    #[test]
+    fn a_history_written_with_no_session_changed_warms_no_sampler() {
+        run(|| async {
+            let first = stored_session("2026-10-01", &[("KM", "KM")]);
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &[first]);
+            ui.advance(100).await;
+            ui.take_renders("warm sampler");
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let first = sessions.peek().id_at(0).expect("the session kept");
+                sessions.write().mark_saved(first);
+            });
+            ui.advance(100).await;
+            assert_eq!(ui.take_renders("warm sampler"), 0);
+            ui.with_app(|ctx| {
+                let mut sessions = ctx.sessions;
+                let another = stored_session("2026-10-02", &[("KM", "KM")]);
+                sessions.write().push(another);
+            });
+            ui.advance(100).await;
+            assert_eq!(ui.take_renders("warm sampler"), 1);
         });
     }
 

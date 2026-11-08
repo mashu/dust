@@ -350,6 +350,32 @@ fn trying_another_character_set_costs_no_level() {
     });
 }
 
+/// A level typed and not committed is the level of the character set it
+/// was typed for. Another chosen meanwhile, as a tap can while a phone
+/// keeps the box focused, shows its own level in the box, and the box left
+/// after takes nothing to it: the text typed went with the set it was
+/// typed for. The box kept it, showed it as the other set's, and committed
+/// it to that set once it was left.
+#[test]
+fn a_level_typed_for_one_character_set_is_not_another_ones() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 6;
+        settings.curriculum.digits_level = 2;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        ui.type_into("field-level", "9");
+        ui.click("seg-digits");
+        assert_eq!(value_of(&ui, "field-level"), "2", "the Digits level");
+        let shown = value_of(&ui, "field-level");
+        ui.commit("field-level", &shown);
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.digits_level, 2);
+        assert_eq!(stored.curriculum.level, 6);
+    });
+}
+
 /// The unlock order can be emptied and typed out again. It is only read
 /// once it is committed, so an empty box is not refilled with LCWO's order
 /// under the cursor, and typing LCWO's order back is LCWO again.
@@ -1017,6 +1043,63 @@ fn a_text_file_loads_as_the_words() {
         assert_eq!(
             ui.stored_settings().await.curriculum.word_list,
             ["CQ", "DE", "TEST"]
+        );
+    });
+}
+
+/// A text file saved as UTF-16, as Windows' Notepad and Excel save
+/// "Unicode" text, loads as the words on a computer, as in a browser: its
+/// byte order mark says how it is written, little-endian or big. So does
+/// one in UTF-8 that starts with its own mark. A computer read a word list
+/// as UTF-8 whatever its mark, and said one in UTF-16 could not be read as
+/// text.
+#[test]
+fn a_text_file_saved_as_utf16_loads_as_the_words() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        let words = "cq\r\nde\r\ntest\r\n";
+        let utf16 = |mark: [u8; 2], unit: fn(u16) -> [u8; 2]| -> Vec<u8> {
+            mark.into_iter()
+                .chain(words.encode_utf16().flat_map(unit))
+                .collect()
+        };
+        let marked: Vec<u8> = [0xef, 0xbb, 0xbf]
+            .into_iter()
+            .chain(words.bytes())
+            .collect();
+        for (name, file) in [
+            ("little.txt", utf16([0xff, 0xfe], u16::to_le_bytes)),
+            ("big.txt", utf16([0xfe, 0xff], u16::to_be_bytes)),
+            ("marked.txt", marked),
+        ] {
+            ui.commit("field-word-list", "PARIS");
+            ui.choose_file("file-word-list", name, &file, file.len() as u64);
+            ui.advance(20).await;
+            assert_eq!(word_report(&ui), format!("{name}: 3 words"));
+            assert_eq!(value_of(&ui, "field-word-list"), "CQ\nDE\nTEST");
+        }
+    });
+}
+
+/// A text file chosen while another is still read takes its place: the
+/// other, done reading after it, is left unread as the words, which are the
+/// newer file's. Handed on last, the older was taken in its place.
+#[test]
+fn a_text_file_chosen_while_another_is_read_takes_its_place() {
+    run(|| async {
+        let (mut ui, _recorder) = on_words();
+        let (first, second) = ("CQ\nDE\n", "TEST\nQRL\nQTH\n");
+        ui.hold_file_reads(true);
+        ui.choose_file("file-word-list", "first.txt", first, first.len() as u64);
+        ui.hold_file_reads(false);
+        ui.choose_file("file-word-list", "second.txt", second, second.len() as u64);
+        assert_eq!(word_report(&ui), "second.txt: 3 words");
+        ui.advance(100).await;
+        assert_eq!(word_report(&ui), "second.txt: 3 words");
+        assert_eq!(value_of(&ui, "field-word-list"), "TEST\nQRL\nQTH");
+        assert_eq!(
+            ui.stored_settings().await.curriculum.word_list,
+            ["TEST", "QRL", "QTH"]
         );
     });
 }

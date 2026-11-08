@@ -2610,32 +2610,53 @@ impl<S: CallSource> ContestMachine<S> {
     /// or signs having heard it from you, and this one never took, was
     /// typed for that one, and of this one you had nothing.
     fn settle_frozen(&mut self, index: usize) {
-        let Some((had, _)) = &self.stations[index].heard.call_frozen else {
-            return;
-        };
-        if had.is_empty() || self.style != RunStyle::Pileup {
-            return;
+        let crossed = self.stations[index]
+            .heard
+            .call_frozen
+            .as_ref()
+            .is_some_and(|(had, _)| self.taken_by_another(index, had));
+        if crossed && let Some((had, _)) = &mut self.stations[index].heard.call_frozen {
+            had.clear();
+        }
+    }
+
+    /// Station `index`'s Call field as last read while you worked it
+    /// ([`Self::note_typed`]), settled as its copy is made: in a pile-up, a
+    /// call another station took from you for its own, whenever it did, or
+    /// signs having heard it from you, and this one never took, was typed
+    /// for that one, as the next caller's call, or a slip of it, read before
+    /// it went out is; and this one keeps the call you last sent it.
+    fn settle_typed(&mut self, index: usize) {
+        if self.taken_by_another(index, &self.stations[index].heard.typed.text) {
+            let heard = &mut self.stations[index].heard;
+            heard.typed = heard.typed.as_copy(&heard.call_sent);
+        }
+    }
+
+    /// Whether `call`, a copy of station `index`, is in a pile-up a call
+    /// another station took from you for its own (the call you last sent
+    /// that station, or first sent it with your exchange, or its own call
+    /// once it had heard one from you), when this one never took it and it
+    /// is not this one's own: one typed for that station.
+    fn taken_by_another(&self, index: usize, call: &str) -> bool {
+        if call.is_empty() || self.style != RunStyle::Pileup {
+            return false;
         }
         let took = |heard: &Heard| {
-            heard.call_sent == *had
+            heard.call_sent == call
                 || heard
                     .first_call
                     .as_ref()
-                    .is_some_and(|(first, _)| first.text == *had)
+                    .is_some_and(|(first, _)| first.text == call)
         };
         let station = &self.stations[index];
-        let own = took(&station.heard) || station.caller.call.text == *had;
+        let own = took(&station.heard) || station.caller.call.text == call;
         let theirs = self.stations.iter().enumerate().any(|(other, station)| {
             other != index
                 && (took(&station.heard)
-                    || (station.heard.engaged && station.caller.call.text == *had))
+                    || (station.heard.engaged && station.caller.call.text == call))
         });
-        if theirs
-            && !own
-            && let Some((had, _)) = &mut self.stations[index].heard.call_frozen
-        {
-            had.clear();
-        }
+        theirs && !own
     }
 
     /// With Show copy on, what each station sent in `air`, the whole of it,
@@ -3448,7 +3469,10 @@ impl<S: CallSource> ContestMachine<S> {
     /// the character a splice before sent again, from where it is
     /// ([`Self::going_on_from`]). One carried on from an earlier turn whose
     /// rest has not reached the ear yet goes on as it was: it began before,
-    /// and the player's lead is no gap in it. A
+    /// and the player's lead is no gap in it. No other send that has not
+    /// reached the ear goes on, though counted: one the browser skipped
+    /// ahead of the ear ([`Self::missed`]) never began, and is heard no
+    /// more than one that went out under your message. A
     /// station goes on with one send: a later one, counted as begun before
     /// a retry of the sound moved the ear back, is no second voice of it.
     /// A send some of which went out under your message, the receiver
@@ -3468,10 +3492,12 @@ impl<S: CallSource> ContestMachine<S> {
         let mut going_on = BTreeSet::new();
         callers
             .zip(air.replies.iter().zip(&air.counted))
-            .filter_map(|((segment, whole), ((reply, says), counted))| {
+            .enumerate()
+            .filter_map(|(place, ((segment, whole), ((reply, says), counted)))| {
                 let start = heard_run + whole_ms(segment.start_sec);
                 let end = heard_run + whole_ms(segment.end_sec);
-                if start >= run_now && *counted != Counted::Nothing {
+                let rest = place < air.carried;
+                if start >= run_now && rest && *counted != Counted::Nothing {
                     return Some(Overlapping {
                         reply: reply.clone(),
                         says: *says,
@@ -3828,7 +3854,7 @@ impl<S: CallSource> ContestMachine<S> {
         let keyed_from = unheard.as_ref().map_or(0, |unheard| unheard.from);
         let parts: Vec<MessagePart> = air.parts.iter().map(|(part, _)| part.clone()).collect();
         let sent_by = air.sent_by(run_ms);
-        let carried = self.cut(air, run_ms, false, &mut effects);
+        let mut carried = self.cut(air, run_ms, false, &mut effects);
         // What is carried is the tail of the parts; the rest went out whole.
         let sent = parts.len() - carried.parts.len();
         let unheard =
@@ -3836,6 +3862,10 @@ impl<S: CallSource> ContestMachine<S> {
         if let Some(unheard) = unheard {
             let from = unheard.from.min(sent);
             self.unhear(unheard, &parts[from..sent], run_ms);
+            // A caller the message brought went with it: nothing of what it
+            // was sending goes on.
+            let stations = self.stations.len();
+            carried.callers.retain(|over| over.reply.station < stations);
         }
         for (at, (part, _)) in carried.parts.iter().enumerate() {
             if sent + at < keyed_from {
@@ -4616,14 +4646,16 @@ impl<S: CallSource> ContestMachine<S> {
 
     /// Station `index`'s QSO ended unlogged: one call group, copied as the
     /// call first sent with your exchange, as a logged QSO keeps it, or
-    /// else as the Call field last read while you worked it
-    /// ([`Self::note_typed`]), timed as last sent; and a miss for each
-    /// field, heard or not, as a QSO logged before its exchange came has.
-    /// Walking away pays no better than finishing, and hides no copy.
+    /// else as the Call field last read while you worked it, unless another
+    /// station took that call from you for its own ([`Self::settle_typed`]),
+    /// timed as last sent; and a miss for each field, heard or not, as a
+    /// QSO logged before its exchange came has. Walking away pays no better
+    /// than finishing, and hides no copy.
     fn lose(&mut self, index: usize, run_ms: u64) {
         let nr = self.serial_sent();
         let (rules, side) = (self.rules, self.side);
         self.settle_frozen(index);
+        self.settle_typed(index);
         let station = &mut self.stations[index];
         station.heard.recorded = true;
         let exchange = station.caller.exchange(rules, side, run_ms).to_vec();
@@ -6536,6 +6568,74 @@ mod tests {
         logged.apply(ContestEvent::FinishNow);
         let (_, run) = self::result(&logged);
         assert_eq!(run.qsos.len(), 1, "logged once, and not lost as well");
+    }
+
+    /// A caller's send the browser skipped before it reached the ear
+    /// ([`ContestEvent::TurnMissed`] reaching past the ear) never began: it
+    /// counts as unheard, but it is no rest still going on. Esc on the CQ
+    /// that brought the caller takes the caller back with the message, so
+    /// nothing of its send goes on past the Esc; the run goes on, and the
+    /// next CQ brings a caller again. It used to go on as a caller still
+    /// sending, after the station it belonged to was gone, and the run
+    /// panicked looking it up.
+    #[test]
+    fn a_send_skipped_before_it_began_never_goes_on_past_esc() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let cq = runtime.playing_id().expect("the first CQ on the air");
+        assert_eq!(replies(runtime.last_turn()), ["K5XYZ"]);
+        runtime.now = 500;
+        runtime.apply(ContestEvent::TurnMissed {
+            id: cq,
+            from_sec: 0.0,
+            until_sec: 60.0,
+        });
+        runtime.now = 1_000;
+        let effects = runtime.key(OpKey::StopTx, "", "");
+        assert!(effects.contains(&ContestEffect::StopAudio), "{effects:?}");
+        assert!(
+            played(&effects).is_none_or(|turn| replies(turn).is_empty()),
+            "the caller went with the CQ that brought it: {effects:?}"
+        );
+        runtime.key(OpKey::Cq, "", "");
+        runtime.finish_turn();
+        assert_eq!(replies(runtime.last_turn()).len(), 1);
+    }
+
+    /// Keyed over instead, a send skipped before it began goes on no more
+    /// than one that had not begun at all: none of it is carried into the
+    /// next turn, to be sent again from its start under your message. A
+    /// caller's send carried over a key starts the turn, under yours; a
+    /// reply to it comes after.
+    #[test]
+    fn a_send_skipped_before_it_began_is_not_carried_over_a_key() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let cq = runtime.playing_id().expect("the first CQ on the air");
+        let skipped = runtime
+            .last_turn()
+            .segments
+            .iter()
+            .find(|segment| segment.who.is_caller())
+            .expect("the caller's send")
+            .clone();
+        runtime.now = 500;
+        assert!(
+            whole_ms(skipped.start_sec) > runtime.now,
+            "the call starts after the key: {skipped:?}"
+        );
+        runtime.apply(ContestEvent::TurnMissed {
+            id: cq,
+            from_sec: 0.0,
+            until_sec: 60.0,
+        });
+        let effects = runtime.key(OpKey::Cq, "", "");
+        let next = played(&effects).expect("a CQ keyed over the first");
+        assert!(
+            !next
+                .segments
+                .iter()
+                .any(|segment| segment.who.is_caller() && segment.start_sec <= 0.0),
+            "nothing is sent again from its start under your CQ: {next:?}"
+        );
     }
 
     fn paused_by_sound(runtime: &Runtime<ScriptCalls>) -> bool {
@@ -10950,6 +11050,66 @@ mod tests {
         let copies = copies(&result);
         let k5xyz = copies.iter().find(|(sent, _)| *sent == "K5XYZ");
         assert_eq!(k5xyz, Some(&("K5XYZ", "K5XYZ")), "{copies:?}");
+    }
+
+    /// A slip of the next caller's call read as a copy of the station you
+    /// work, at a key that sends no call, while no station had taken it:
+    /// once the next caller takes it as close, it was typed for that one,
+    /// and the station you left keeps the call you sent it, whether the key
+    /// was a wipe, a `?` or a log that cannot log yet.
+    #[test]
+    fn a_station_left_with_a_slip_read_before_it_went_out_keeps_the_call_you_sent_it() {
+        for key in [OpKey::Wipe, OpKey::Again, OpKey::LogOnly] {
+            let mut runtime = pileup(&["K5XYZ", "W7ABC"], 2, 2);
+            runtime.finish_turn();
+            runtime.key(OpKey::HisCall, "K5XYZ", "");
+            runtime.finish_turn();
+            runtime.key(key, "W7ABD", "");
+            runtime.finish_turn();
+            assert_eq!(runtime.machine.working, Some(0), "{key:?}");
+            assert_eq!(
+                runtime.machine.stations[0].heard.typed.text, "W7ABD",
+                "{key:?}: nobody had taken the slip yet"
+            );
+            runtime.key(OpKey::Esm, "W7ABD", "");
+            assert_eq!(runtime.machine.working, Some(1), "W7ABC takes the slip");
+            runtime.finish_turn();
+            let lost = runtime.machine.nil_and_lost_copies();
+            runtime.apply(ContestEvent::FinishNow);
+            assert_eq!(runtime.machine.crossed_since(&lost), [], "{key:?}");
+            let (result, _) = result(&runtime);
+            let copies = copies(&result);
+            let k5xyz = copies.iter().find(|(sent, _)| *sent == "K5XYZ");
+            assert_eq!(k5xyz, Some(&("K5XYZ", "K5XYZ")), "{key:?}: {copies:?}");
+        }
+    }
+
+    /// The same, the station sent a slip of its call that it took as close:
+    /// it keeps that slip, the call you last sent it, not its own call,
+    /// which would be a clean copy you never made, nor the reading the next
+    /// caller took.
+    #[test]
+    fn a_station_left_with_a_slip_read_keeps_the_slip_you_sent_it() {
+        let mut runtime = pileup(&["K5XYZ", "W7ABC"], 2, 2);
+        runtime.finish_turn();
+        runtime.key(OpKey::HisCall, "K5XYA", "");
+        runtime.finish_turn();
+        assert_eq!(
+            runtime.machine.stations[0].heard.call_sent, "K5XYA",
+            "taken as close"
+        );
+        runtime.key(OpKey::Wipe, "W7ABD", "");
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "W7ABD", "");
+        assert_eq!(runtime.machine.working, Some(1), "W7ABC takes the slip");
+        runtime.finish_turn();
+        let lost = runtime.machine.nil_and_lost_copies();
+        runtime.apply(ContestEvent::FinishNow);
+        assert_eq!(runtime.machine.crossed_since(&lost), []);
+        let (result, _) = result(&runtime);
+        let copies = copies(&result);
+        let k5xyz = copies.iter().find(|(sent, _)| *sent == "K5XYZ");
+        assert_eq!(k5xyz, Some(&("K5XYZ", "K5XYA")), "{copies:?}");
     }
 
     /// A reading of the station you work is checked against the stations

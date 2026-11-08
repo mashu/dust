@@ -17,11 +17,13 @@ fn take_asked() -> Vec<String> {
     ASKED.with(|asked| std::mem::take(&mut *asked.borrow_mut()))
 }
 
-/// The card on `status`, its every move noted.
+/// The card on `status`, on the day it is where the test runs, its every
+/// move noted.
 #[component]
 fn Card(status: SyncStatus) -> Element {
     let view = SyncView {
         status,
+        today: crate::time::local_date_string(),
         on_sign_in: EventHandler::new(|()| asked("sign in".into())),
         on_passphrase: EventHandler::new(|(typed, again): (String, Option<String>)| {
             asked(format!("passphrase {typed:?} {again:?}"));
@@ -166,6 +168,7 @@ fn the_card_says_what_is_under_way() {
 fn Stats(status: SyncStatus, history: bool) -> Element {
     let view = SyncView {
         status,
+        today: crate::time::local_date_string(),
         on_sign_in: EventHandler::new(|()| {}),
         on_passphrase: EventHandler::new(|_: (String, Option<String>)| {}),
         on_cancel: EventHandler::new(|()| {}),
@@ -218,12 +221,33 @@ fn synced_the_history_is_every_devices() {
 #[test]
 fn when_it_synced_is_said_plainly() {
     let now = crate::time::now_ms();
-    assert_eq!(synced_when(None, now), "Not synced yet");
-    assert!(synced_when(Some(now), now).starts_with("Synced today at "));
-    assert!(synced_when(Some(now - 86_400_000), now).starts_with("Synced yesterday at "));
-    let long_ago = synced_when(Some(now - 20 * 86_400_000), now);
+    let today = day_of(now).expect("a day");
+    assert_eq!(synced_when(None, &today), "Not synced yet");
+    assert!(synced_when(Some(now), &today).starts_with("Synced today at "));
+    assert!(synced_when(Some(now - 86_400_000), &today).starts_with("Synced yesterday at "));
+    let long_ago = synced_when(Some(now - 20 * 86_400_000), &today);
     assert!(
         long_ago.starts_with("Synced ") && long_ago.contains(" at "),
         "{long_ago}"
     );
+}
+
+/// A sync made on a day later than the one the screen keeps is said to be
+/// made today: when this device last synced is read off its own clock, and
+/// the day the screen keeps can lag behind that clock a while, as on a
+/// computer woken from sleep past midnight, whose timers do not count the
+/// time asleep ([`crate::ui::today::DAY_LOOK_MS`]). Such a sync was told
+/// by its full date, as one made long ago is.
+#[test]
+fn a_sync_made_on_a_day_the_screen_has_yet_to_read_is_said_to_be_today() {
+    let now = crate::time::now_ms();
+    let today = day_of(now).expect("a day");
+    let today = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").expect("a day");
+    for lag in [1, 2] {
+        let kept = (today - chrono::Days::new(lag))
+            .format("%Y-%m-%d")
+            .to_string();
+        let said = synced_when(Some(now), &kept);
+        assert!(said.starts_with("Synced today at "), "{kept}: {said}");
+    }
 }

@@ -64,6 +64,52 @@ const navigator = {};
 window.document = document;
 window.navigator = navigator;
 
+// The page's history, as far as the app's Back goes: each entry's state,
+// and the one the page is on. Going back or forward through it tells the
+// window a moment after, as a browser does, and never as it is asked.
+class History {
+  #states = [null];
+  #at = 0;
+
+  get state() {
+    return this.#states[this.#at];
+  }
+
+  get length() {
+    return this.#states.length;
+  }
+
+  pushState(state) {
+    this.#states.splice(this.#at + 1, Infinity, state);
+    this.#at += 1;
+  }
+
+  replaceState(state) {
+    this.#states[this.#at] = state;
+  }
+
+  back() {
+    this.go(-1);
+  }
+
+  forward() {
+    this.go(1);
+  }
+
+  go(delta) {
+    const to = this.#at + delta;
+    if (to < 0 || to >= this.#states.length) {
+      return;
+    }
+    this.#at = to;
+    const state = this.state;
+    setImmediate(() => window.dispatchEvent({ type: "popstate", state }));
+  }
+}
+const history = new History();
+window.history = history;
+globalThis.history = history;
+
 const AsyncFunction = (async () => {}).constructor;
 let heard = null;
 const failures = [];

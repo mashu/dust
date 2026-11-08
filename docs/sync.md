@@ -57,7 +57,25 @@ A record the drive says is deleted (its latest deletion later than its
 latest putting back) is deleted here. A session put back here by Undo, or
 by a restore, after a deletion the drive holds is sent as *put back*, so
 that the deletion does not take it again; a device that let it go takes it
-back. Missing is never deleted: a record is let go only for a deletion.
+back, and so does a device that deleted it by hand, whose deletion the
+drive holds then, sent from it or made on another device as well, rather
+than send it again. Deleted by hand again after it is put back here, it is
+a deletion by hand as any other, whatever was noted of the one before. A
+putting back as late as a deletion stands, here as in the drive.
+Missing is never deleted: a record is let go only for a deletion.
+A deletion or a putting back is stamped when it is made, or just after the
+latest of the record the device knows the drive to hold, where that is
+later (`SyncState::stamp_change`): one made after another is the later,
+however far apart the devices' clocks are. One made while a sync is under
+way is stamped again as it ends, after what that sync read and sent.
+
+One session can be two records: a backup restored on one device names each
+session where it finished (`RecordId::placed`), while the device it came
+from named each as it kept it. A record to take that is alike in everything
+to one this device holds under another name is its twin: the smaller name
+is kept on every device, and the other let go everywhere, as a deletion
+sent only once the one kept is in the drive. Two records of a session that
+differ, as one a restore filled in, are both kept.
 
 What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads
@@ -82,9 +100,12 @@ everything else a device uses (`src/sync/settings.rs`, `Using`):
 Each device writes only its own file of them, every key with when it was
 last changed. A device merging takes the newest of each key from every file
 and its own, so a change made on one device and another made on another
-both come through, and no device writes over another's file. A device
-joining a sync takes what the drive holds, as a restore takes a backup's
-settings, and adds nothing of its own until it changes something.
+both come through, and no device writes over another's file. A change is
+stamped after the newest stamp of its key the device has taken up, so one
+made after another is the newer, however far apart the devices' clocks
+are. A device joining a sync takes what the drive holds, as a restore takes
+a backup's settings, and adds nothing of its own until it changes
+something.
 
 All that stays each device's own: when it last saved a backup file, which
 is a file on that device, and a session or run it has under way, which is
@@ -98,7 +119,8 @@ stored, and synced, once it ends.
 - **Keyring**: the data key sealed under a key stretched from the
   passphrase with **Argon2id** (19 MiB, 2 passes, 1 lane: OWASP's first
   choice), with a random salt. The stretch is written in the keyring, so a
-  later build can stretch harder.
+  later build can stretch harder, up to 256 MiB and 16 passes: a keyring
+  asking for more is not opened, as the stretch runs on the app's thread.
 - **Sealing**: **XChaCha20-Poly1305**, a fresh random 192-bit nonce for
   every file, the file's name bound in as associated data, so no file can
   stand in for another. Packs are deflated first.
@@ -164,9 +186,17 @@ opens Google's window only for a tap. The corner is never shown over a
 session or a run, and takes no tap but that one.
 
 Turning sync off on one device forgets the key and the sign-in there; the
-copy stays for the other devices. Turning it off with the copy deletes every
-file of Dust's from the folder, the keyring first, and every other device
-then finds it gone, says so, and turns sync off too.
+copy stays for the other devices. Another tab or window of the app on that
+device, which keeps what sync keeps in the same place, finds it gone as it
+next syncs, or keeps what it keeps, and turns sync off too, saying so. One
+that finds there instead what another tab or window kept as it turned sync
+on anew turns off as well, saying so, rather than write its own over it:
+opened again, it syncs as that one does. Neither clears anything from the
+store, nor does a tab or window that finds the store so as sync is turned
+off in it, by hand or as the copy is gone from the drive. Turning it off
+with the copy deletes every file of Dust's from the folder, the keyring
+first, and every other device then finds it gone, says so, and turns sync
+off too.
 
 ## Setting up
 

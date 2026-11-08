@@ -52,6 +52,7 @@ pub(super) const HISTORY_BUDGET: usize = 3_000_000;
 /// settle a session stamped ahead of the clock for themselves
 /// ([`crate::time::as_shown`]).
 pub(super) fn read_history(raw: &str) -> Option<ReadHistory> {
+    let raw = super::unmarked(raw);
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
     let (sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {
@@ -609,10 +610,13 @@ impl<S: Aside> BlobHistory<S> {
         }
     }
 
-    /// The whole history, by record.
+    /// The whole history, by record. What it held is noted as seen only
+    /// where it could be read: a history held is still to take up.
     pub(super) fn load(&self) -> HistoryLoad {
         let sessions = self.current();
-        self.seen.set(Some(self.look()));
+        if !self.held.get() {
+            self.seen.set(Some(self.look()));
+        }
         HistoryLoad {
             sessions: sessions
                 .into_iter()
@@ -631,8 +635,18 @@ impl<S: Aside> BlobHistory<S> {
     /// out for another of its key is not remembered as deleted at all. A
     /// session deleted is not stored again unless the change undoes its
     /// deletion.
+    ///
+    /// What it leaves is noted as seen only where nothing changed since
+    /// this copy last looked: the history it writes holds whatever another
+    /// copy stored meanwhile, which is still to take up.
+    ///
+    /// The history is read out of the store once: what tells whether it
+    /// changed is what the change is made to, and what it leaves is what
+    /// was written, which reads back the same.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
-        let mut held = self.current();
+        let stored = self.shelf.get(self.keys.history);
+        let looked = self.look_at(stored.as_ref().ok().and_then(Option::as_deref));
+        let mut held = self.current_from(stored);
         if self.held.get() {
             return HistorySaved::Held;
         }
@@ -722,8 +736,13 @@ impl<S: Aside> BlobHistory<S> {
         }
         let ids: Vec<RecordId> = held.iter().map(|(record, _)| record.id).collect();
         let sessions: Vec<SessionResult> = held.into_iter().map(|(_, session)| session).collect();
+        let mut written = None;
         let saved = store_newest_that_fit(&sessions, self.budget, |raw| {
-            self.shelf.set(self.keys.history, raw)
+            let took = self.shelf.set(self.keys.history, raw);
+            if took {
+                written = Some(raw.to_owned());
+            }
+            took
         });
         if saved.kept().is_none() {
             if remembered {
@@ -734,7 +753,9 @@ impl<S: Aside> BlobHistory<S> {
         if forgotten {
             self.save_deleted(&deleted);
         }
-        self.seen.set(Some(self.look()));
+        if self.seen.get() == Some(looked) {
+            self.seen.set(Some(self.look_at(written.as_deref())));
+        }
         match saved {
             HistorySaved::Squeezed { kept, runs, .. } => HistorySaved::Squeezed {
                 kept,
@@ -747,11 +768,15 @@ impl<S: Aside> BlobHistory<S> {
         }
     }
 
-    /// Every record there is: none where the history cannot be read.
+    /// Every record there is: none where the history cannot be read. What
+    /// it held is noted as seen only once it is listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
         let held = self.current();
+        if self.held.get() {
+            return None;
+        }
         self.seen.set(Some(self.look()));
-        (!self.held.get()).then(|| held.into_iter().map(|(record, _)| record.id).collect())
+        Some(held.into_iter().map(|(record, _)| record.id).collect())
     }
 
     /// Every record there is, as the history holds it, in order: what a
@@ -786,9 +811,11 @@ impl<S: Aside> BlobHistory<S> {
     }
 
     /// Whether the history or its deletions changed since last looked at.
+    /// Nothing is noted: a change is told of each time it is asked, until a
+    /// look that lists the history takes it up ([`Self::listing`]), so one
+    /// whose look could not list it is told of again.
     pub(super) fn changed(&self) -> bool {
-        let now = self.look();
-        self.seen.replace(Some(now)) != Some(now)
+        self.seen.get() != Some(self.look())
     }
 
     /// What reads set aside, not yet told of: taken.
@@ -798,9 +825,17 @@ impl<S: Aside> BlobHistory<S> {
 
     /// What the history and its deletions hold, as one hash.
     fn look(&self) -> u64 {
-        let held = |key| self.shelf.get(key).ok().flatten().unwrap_or_default();
-        let both = format!("{}\n{}", held(self.keys.history), held(self.keys.deleted));
-        record::fnv64(both.as_bytes())
+        let history = self.shelf.get(self.keys.history).ok().flatten();
+        self.look_at(history.as_deref())
+    }
+
+    /// What the history and its deletions hold, as one hash, the history
+    /// holding `history`, as read out of the store or written to it: none
+    /// where there is none to read.
+    fn look_at(&self, history: Option<&str>) -> u64 {
+        let deleted = self.shelf.get(self.keys.deleted).ok().flatten();
+        let (history, deleted) = (history.unwrap_or_default(), deleted.unwrap_or_default());
+        record::fnv64(format!("{history}\n{deleted}").as_bytes())
     }
 
     /// The deletions remembered: none, where they cannot be read, which
@@ -834,8 +869,14 @@ impl<S: Aside> BlobHistory<S> {
     /// aside; where it cannot be, the history is held, and only what reads
     /// of it comes back.
     fn current(&self) -> Vec<(Record, SessionResult)> {
+        self.current_from(self.shelf.get(self.keys.history))
+    }
+
+    /// The history as it is stored, `stored` being what the store gave of
+    /// it, as [`Self::current`] reads it.
+    fn current_from(&self, stored: Result<Option<String>, ()>) -> Vec<(Record, SessionResult)> {
         self.held.set(false);
-        let raw = match self.shelf.get(self.keys.history) {
+        let raw = match stored {
             Ok(Some(raw)) => raw,
             Ok(None) => return Vec::new(),
             Err(()) => {
@@ -932,6 +973,8 @@ mod tests {
         held: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
         room: std::cell::Cell<usize>,
         unreadable: std::cell::Cell<bool>,
+        /// How many times each key was read.
+        reads: std::cell::RefCell<std::collections::BTreeMap<String, usize>>,
     }
 
     impl Shelf {
@@ -940,9 +983,15 @@ mod tests {
                 held: Default::default(),
                 room: std::cell::Cell::new(room),
                 unreadable: Default::default(),
+                reads: Default::default(),
             };
             shelf.set("history", "[]");
             shelf
+        }
+
+        /// How many times `key` was read since this was last asked.
+        fn reads_of(&self, key: &str) -> usize {
+            self.reads.borrow_mut().remove(key).unwrap_or(0)
         }
 
         /// What is set aside, by key.
@@ -964,6 +1013,7 @@ mod tests {
         }
 
         fn get(&self, key: &str) -> Result<Option<String>, ()> {
+            *self.reads.borrow_mut().entry(key.into()).or_default() += 1;
             if self.unreadable.get() {
                 return Err(());
             }
@@ -1376,6 +1426,106 @@ mod tests {
         assert_eq!(whole.listing(), Some(vec![one.id, two.id]));
         assert_eq!(shelf.get("deleted").unwrap().as_deref(), Some("[]"));
         assert!(whole.forgotten(&[one.id]).is_empty());
+    }
+
+    /// A change another tab made to the history kept whole is still to
+    /// take up after a look that could not list it, however often it is
+    /// asked of, until a look that can takes it up. Asking noted it as
+    /// seen, and so did a listing that found the history held, so the
+    /// session the other tab stored never showed here until another change.
+    #[test]
+    fn a_change_is_still_to_take_up_after_a_listing_that_failed() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let (here, there) = (whole_on(&shelf), whole_on(&shelf));
+        here.load();
+        there.load();
+        let theirs = next_after(&finished(1_000), None);
+        there.apply(&HistoryChange {
+            put: vec![theirs.clone()],
+            ..HistoryChange::default()
+        });
+        assert!(here.changed(), "theirs, to take up");
+        assert!(here.changed(), "still, until it is");
+        // Beside it, a session that does not read, and no room to set it
+        // aside: the history is held, and listed by no look.
+        let stored = shelf.get("history").unwrap().unwrap();
+        let with_unread = stored.replacen('[', r#"[{"date":5},"#, 1);
+        shelf.set("history", &with_unread);
+        shelf.room.set(with_unread.len());
+        assert_eq!(here.listing(), None);
+        shelf.room.set(usize::MAX);
+        assert!(here.changed(), "still to take up");
+        assert_eq!(here.listing(), Some(vec![theirs.id]));
+        assert!(!here.changed(), "taken up");
+    }
+
+    /// A change of this tab's own, made after another tab changed the
+    /// history kept whole, leaves the other's change still to take up: the
+    /// history it writes holds what the other stored, which this tab has
+    /// yet to show. Noted as seen with its own, the other's session never
+    /// showed here until another change.
+    #[test]
+    fn a_change_another_tab_made_first_is_taken_up_after_ones_own() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let (here, there) = (whole_on(&shelf), whole_on(&shelf));
+        here.load();
+        there.load();
+        let theirs = next_after(&finished(1_000), None);
+        there.apply(&HistoryChange {
+            put: vec![theirs.clone()],
+            ..HistoryChange::default()
+        });
+        let ours = next_after(&finished(2_000), None);
+        here.apply(&HistoryChange {
+            put: vec![ours.clone()],
+            ..HistoryChange::default()
+        });
+        assert!(here.changed(), "theirs, to take up");
+        assert_eq!(here.listing(), Some(vec![theirs.id, ours.id]));
+        assert!(!here.changed(), "taken up");
+        let more = next_after(&finished(3_000), Some(ours.id));
+        here.apply(&HistoryChange {
+            put: vec![more],
+            ..HistoryChange::default()
+        });
+        assert!(!here.changed(), "its own change");
+        assert!(there.changed());
+    }
+
+    /// A change to the history kept whole reads it out of the store once,
+    /// and notes what it writes as seen, deletions remembered beside it
+    /// among them. It was read whole three times a change: to tell whether
+    /// another tab had changed it, to make the change to, and to note what
+    /// was written as seen.
+    #[test]
+    fn a_change_to_a_history_kept_whole_reads_it_once() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let whole = whole_on(&shelf);
+        whole.load();
+        let first = finished(1_000);
+        let one = next_after(&first, None);
+        let two = next_after(&finished(2_000), Some(one.id));
+        let changes = [
+            HistoryChange {
+                put: vec![one.clone()],
+                ..HistoryChange::default()
+            },
+            HistoryChange {
+                put: vec![two],
+                ..HistoryChange::default()
+            },
+            HistoryChange {
+                forget: vec![(one.id, Deleted::of(&first, 7))],
+                ..HistoryChange::default()
+            },
+        ];
+        for change in &changes {
+            shelf.reads_of("history");
+            assert!(whole.apply(change).kept().is_some(), "{change:?}");
+            assert_eq!(shelf.reads_of("history"), 1, "{change:?}");
+            assert!(!whole.changed(), "its own change, seen: {change:?}");
+        }
+        assert_eq!(kept_whole(&shelf), [2_000]);
     }
 
     /// A session stored where it finished, as a restore stores it, keeps

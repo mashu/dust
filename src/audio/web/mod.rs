@@ -364,10 +364,14 @@ impl MorseBackend for MorsePlayer {
     /// Around the receiver — its filter and AGC are for what you copy, not
     /// for the sidetone of the key in your hand — and around the volume, as
     /// it comes at the level it is heard at, but through the limiter: added
-    /// after it, a squeeze on top of a crash squared off.
-    fn set_live_tone(&mut self, tone: ToneRequest) {
+    /// after it, a squeeze on top of a crash squared off. A context closed
+    /// plays nothing, whatever nodes it is given.
+    fn set_live_tone(&mut self, tone: ToneRequest) -> Result<(), String> {
         self.resume_from_gesture();
-        let _ = self.sidetone.set(&self.ctx, &self.chain.sidetone_in, tone);
+        if self.ctx.state() == AudioContextState::Closed {
+            return Err("Audio is unavailable.".into());
+        }
+        self.sidetone.set(&self.ctx, &self.chain.sidetone_in, tone)
     }
 }
 

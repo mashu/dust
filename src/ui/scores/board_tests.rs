@@ -24,6 +24,7 @@ fn board(sessions: Vec<SessionResult>) -> Ui {
         ScoresTab,
         ScoresTabProps {
             sessions: sessions.into(),
+            today: crate::time::local_date_string(),
         },
     )
 }
@@ -81,6 +82,85 @@ fn a_row_marks_its_session_on_the_timeline() {
     // A finger does not point.
     ui.point_at("board-4", "touch", (0.0, 0.0), (0.0, 0.0));
     assert!(ui.has("1st</span> · 90.0 a group"));
+}
+
+/// Two sessions set at the same moment, which a history can hold, are two
+/// rows: each drawn again on its own, and each marked alone, on the board
+/// and on the timeline. Keyed and marked by when they were set, the two
+/// shared a key, which a redraw cannot tell apart, and pointing at one
+/// marked both.
+#[test]
+fn two_sessions_set_at_one_moment_are_two_rows() {
+    let mut ui = board(vec![koch(1, 30.0), koch(2, 90.0), koch(2, 50.0)]);
+    assert_eq!(ui.controls("board-").len(), 3);
+    ui.point_at("board-2", "mouse", (0.0, 0.0), (0.0, 0.0));
+    assert!(ui.input_tag("board-2").contains("focused"));
+    assert!(
+        !ui.input_tag("board-1").contains("focused"),
+        "{}",
+        ui.input_tag("board-1")
+    );
+    assert!(ui.has("2nd</span> · 50.0 a group"), "{}", ui.html());
+    ui.point_away("board-2");
+    ui.click("board-1");
+    assert!(ui.input_tag("board-1").contains("pinned"));
+    assert!(!ui.input_tag("board-2").contains("focused"));
+    assert!(ui.has("1st</span> · 90.0 a group"));
+}
+
+/// A row tapped stays marked on a board that holds its session, and on one
+/// that does not, the best is marked, on the timeline and beneath it, until
+/// the board that holds it is shown again. The timeline used to mark
+/// nothing, and say nothing under it, for a row of another board.
+#[test]
+fn a_row_tapped_on_another_board_leaves_the_best_marked() {
+    let mut ui = board(vec![
+        koch(1, 30.0),
+        run_of(2, 90.0, CharSetMode::Callsign),
+        koch(3, 50.0),
+    ]);
+    ui.click("board-3");
+    assert!(ui.has("3rd</span> · 30.0 a group"));
+    ui.click("pill-koch");
+    assert!(
+        ui.input_tag("board-2").contains("pinned"),
+        "on this board too"
+    );
+    assert!(ui.has("2nd</span> · 30.0 a group"));
+    ui.click("pill-all-modes");
+    ui.click("board-1");
+    assert!(ui.has("1st</span> · 90.0 a group"));
+    ui.click("pill-koch");
+    assert!(ui.input_tag("board-1").contains("focused"), "{}", ui.html());
+    assert!(ui.has("1st</span> · 50.0 a group"), "{}", ui.html());
+    assert!(ui.has("timeline-mark") && ui.has("timeline-guide"));
+    ui.click("pill-all-modes");
+    assert!(ui.input_tag("board-1").contains("pinned"));
+}
+
+/// A row pointed at as the board changes under it goes with no word that
+/// the mouse left it, and leaves a row tapped marked where the board holds
+/// it, on the timeline and beneath it. The row pointed at was marked over
+/// the one tapped whether this board held it or not, so with it gone the
+/// best was marked, not the row tapped.
+#[test]
+fn a_row_pointed_at_as_its_board_goes_leaves_the_tapped_row_marked() {
+    let mut ui = board(vec![
+        koch(1, 30.0),
+        run_of(2, 90.0, CharSetMode::Callsign),
+        koch(3, 50.0),
+    ]);
+    ui.click("board-3");
+    ui.point_at("board-1", "mouse", (0.0, 0.0), (0.0, 0.0));
+    assert!(ui.has("1st</span> · 90.0 a group"));
+    // Chosen from the keyboard: the mouse never leaves the row.
+    ui.click("pill-koch");
+    assert!(ui.has("2nd</span> · 30.0 a group"), "{}", ui.html());
+    let tapped = ui.input_tag("board-2");
+    assert!(
+        tapped.contains("focused") && tapped.contains("pinned"),
+        "{tapped}"
+    );
 }
 
 /// Pointing at a row redraws the rows it moves between, the mark and what

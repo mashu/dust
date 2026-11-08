@@ -16,6 +16,7 @@
 //!
 //! Nothing here is sent anywhere but to Google.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 #[cfg(any(feature = "web", test))]
@@ -73,6 +74,56 @@ pub trait Auth {
     fn keep(&self, _kept: Option<String>) {}
     /// Forget every token held here.
     fn forget(&self);
+}
+
+/// A sign-in that counts the times it is forgotten, as sync is turned off:
+/// what a request to the drive goes by, so that one begun before asks
+/// nothing more with a token got since, which may be of another account
+/// signed in after it ([`super::drive::Drive`]).
+pub struct Counted {
+    auth: Rc<dyn Auth>,
+    forgotten: Cell<u64>,
+}
+
+impl Counted {
+    pub fn of(auth: Rc<dyn Auth>) -> Rc<Self> {
+        Rc::new(Self {
+            auth,
+            forgotten: Cell::new(0),
+        })
+    }
+
+    /// How many times it has been forgotten.
+    pub fn forgotten(&self) -> u64 {
+        self.forgotten.get()
+    }
+}
+
+impl Auth for Counted {
+    fn token(&self, fresh: bool) -> Pending<Result<String, AuthError>> {
+        self.auth.token(fresh)
+    }
+
+    fn sign_in(&self) -> Pending<Result<(), AuthError>> {
+        self.auth.sign_in()
+    }
+
+    fn cancel(&self) {
+        self.auth.cancel();
+    }
+
+    fn kept(&self) -> Option<String> {
+        self.auth.kept()
+    }
+
+    fn keep(&self, kept: Option<String>) {
+        self.auth.keep(kept);
+    }
+
+    fn forget(&self) {
+        self.forgotten.set(self.forgotten.get() + 1);
+        self.auth.forget();
+    }
 }
 
 /// What `oauth.html` was sent, as the browser's sign-in reads it: the

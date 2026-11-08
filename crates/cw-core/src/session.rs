@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use crate::alignment::{CopyTally, LetterAccuracy};
+use crate::alignment::{CopyTally, LetterAccuracy, SKIPPED};
 use crate::auto_level::judged_copy;
 use crate::contest::{CONTEST_MARK, ContestLog, PauseWhy};
 use crate::level::LEVEL_MIN;
@@ -16,7 +16,7 @@ use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
 use crate::sampling::length_floor;
 use crate::score::{
     GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
-    compute_average_response_ms, copy_speed, session_points,
+    compute_average_response_ms, copied_whole, copy_speed, session_points,
 };
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
 
@@ -889,7 +889,7 @@ impl GroupSession {
             .map(|group| GroupResult {
                 sent: group.sent.clone(),
                 received: group.input.clone(),
-                correct: group.sent == group.input,
+                correct: copied_whole(&group.sent, &group.input),
             })
             .collect();
         let avg_response_ms = compute_average_response_ms(&groups, &timings);
@@ -1106,6 +1106,14 @@ pub struct SessionResult {
 /// build carries the new one along: the new name is to be read as the old
 /// one's successor, not as an alias of it, which serde refuses to read
 /// twice.
+///
+/// Only keys of the session itself, of a group or of a group's timing are
+/// kept. A key a later build adds inside a value this build reads whole,
+/// such as a timing's `"charTimes"` or an entry of `"letterAccuracy"`, is
+/// dropped the first time this build writes the session back. So what a
+/// later build adds about a group's times goes beside `"charTimes"`, as a
+/// key of the timing, never inside it. Keeping keys inside those values
+/// too would cost every read of the history a second look at each of them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UnreadKeys {
     /// The session's own.
@@ -1113,6 +1121,9 @@ pub struct UnreadKeys {
     /// Each group's, by its place; none at all where no group has any.
     pub groups: Vec<Map<String, Value>>,
     /// Each timing's, by its place; none at all where no timing has any.
+    /// Among them, under its own key, a value a timing held that this build
+    /// could not read under a key it reads leniently, which reads as none:
+    /// written back only while the timing holds no value of its own there.
     pub timings: Vec<Map<String, Value>>,
 }
 
@@ -1164,11 +1175,56 @@ struct SessionOnDisk<'a> {
 /// A part of a session as it is written, and what it held that this build
 /// does not read.
 #[derive(Serialize)]
+#[serde(bound = "T: Serialize + Part")]
 struct WithUnread<'a, T> {
     #[serde(flatten)]
     known: &'a T,
     #[serde(flatten)]
-    unread: &'a Map<String, Value>,
+    unread: Unread<'a, T>,
+}
+
+/// What `part` held that this build does not read, as it is written beside
+/// it: all of it, but for a key the part holds a value of its own under
+/// ([`Part::holds`]).
+struct Unread<'a, T> {
+    part: &'a T,
+    keys: &'a Map<String, Value>,
+}
+
+impl<T: Part> Serialize for Unread<'_, T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.keys.iter().filter(|(key, _)| !self.part.holds(key)))
+    }
+}
+
+/// A group or a group's timing, as what it held that this build does not
+/// read is written beside it.
+trait Part {
+    /// Whether the part holds a value of its own under `key`. A value this
+    /// build could not read under a key it reads leniently is kept with
+    /// what it does not read ([`ReadTiming`]) while the part holds none
+    /// there, and gives way to the part's own once it does, as times a
+    /// restore fills in: the value this build reads is what is written, and
+    /// read back. Written both, the key would be read twice, and the session
+    /// not at all.
+    fn holds(&self, key: &str) -> bool;
+}
+
+impl Part for GroupResult {
+    /// A group reads no key leniently.
+    fn holds(&self, _: &str) -> bool {
+        false
+    }
+}
+
+impl Part for SessionTiming {
+    fn holds(&self, key: &str) -> bool {
+        match key {
+            "charTimes" => self.char_times.is_some(),
+            "untimed" => self.untimed.is_some(),
+            _ => false,
+        }
+    }
 }
 
 /// Each of `parts`, with what it held that this build does not read: by
@@ -1183,7 +1239,10 @@ fn with_unread<'a, T>(
         .enumerate()
         .map(|(at, known)| WithUnread {
             known,
-            unread: unread.get(at).unwrap_or(none),
+            unread: Unread {
+                part: known,
+                keys: unread.get(at).unwrap_or(none),
+            },
         })
         .collect()
 }
@@ -1225,12 +1284,15 @@ struct StoredSession {
     date: String,
     timestamp: u64,
     groups: Vec<ReadWithUnread<GroupResult>>,
-    group_timings: Vec<ReadWithUnread<SessionTiming>>,
+    group_timings: Vec<ReadTiming>,
     accuracy: f64,
     #[serde(flatten)]
     tally: CopyTally,
     avg_response_ms: f64,
     total_chars: u32,
+    /// Worked out again as a session is read ([`SessionResult::points`]),
+    /// so a save with none to read is no session lost ([`lenient_score`]).
+    #[serde(default, deserialize_with = "lenient_score")]
     score: f64,
     /// Saves from the first versions called it the Koch level.
     #[serde(alias = "kochLevel", default = "session_level_default")]
@@ -1255,6 +1317,13 @@ struct StoredSession {
     unread: Map<String, Value>,
 }
 
+/// A session's score as a save holds it, read so that one that is no
+/// number reads as none: as JSON writes a score that came to no number,
+/// `null`, which older builds wrote for a save past all reason.
+fn lenient_score<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// A part of a session as it is read, and what it holds that this build
 /// does not read.
 #[derive(Deserialize)]
@@ -1263,6 +1332,67 @@ struct ReadWithUnread<T> {
     known: T,
     #[serde(flatten)]
     unread: Map<String, Value>,
+}
+
+/// A group's timing as it is read: what this build reads of it, and what
+/// it holds that this build does not ([`ReadWithUnread`]). A value this
+/// build cannot read under a key it reads leniently, a later build's reason
+/// for a group going untimed, say, reads as none, as it does wherever a
+/// timing is read ([`lenient_untimed`], [`lenient_char_times`]), and is kept
+/// with what is not read, so that it is written back as it was, unless the
+/// timing holds a value of its own there by then ([`Part::holds`]).
+#[derive(Deserialize)]
+struct ReadTiming {
+    /// Read ahead of the rest, which then finds none of them.
+    #[serde(flatten)]
+    lenient: LenientKeys,
+    #[serde(flatten)]
+    known: SessionTiming,
+    #[serde(flatten)]
+    unread: Map<String, Value>,
+}
+
+/// The keys of a timing read leniently, each as it was read.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LenientKeys {
+    #[serde(default)]
+    char_times: Option<Lenient<CharTimes>>,
+    #[serde(default)]
+    untimed: Option<Lenient<Untimed>>,
+}
+
+/// A value read as a `T` where it reads as one, and as it was where not.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Lenient<T> {
+    Known(T),
+    Other(Value),
+}
+
+impl From<ReadTiming> for ReadWithUnread<SessionTiming> {
+    fn from(timing: ReadTiming) -> Self {
+        let ReadTiming {
+            lenient,
+            mut known,
+            mut unread,
+        } = timing;
+        match lenient.char_times {
+            Some(Lenient::Known(times)) => known.char_times = Some(times),
+            Some(Lenient::Other(raw)) => {
+                unread.insert("charTimes".to_string(), raw);
+            }
+            None => {}
+        }
+        match lenient.untimed {
+            Some(Lenient::Known(why)) => known.untimed = Some(why),
+            Some(Lenient::Other(raw)) => {
+                unread.insert("untimed".to_string(), raw);
+            }
+            None => {}
+        }
+        Self { known, unread }
+    }
 }
 
 /// The parts read, and what each held that this build does not read but
@@ -1287,14 +1417,22 @@ fn split_unread<T>(
 
 impl From<StoredSession> for SessionResult {
     /// A contest run is known by its log, or by its mark once a build that
-    /// knew no contests has saved it without the log.
+    /// knew no contests has saved it without the log. A group answered with
+    /// a skip that holds no character's place, kept by a build that took it
+    /// for an error, is copied whole, as it is scored ([`copied_whole`]).
     fn from(stored: StoredSession) -> Self {
         let run = stored.contest.is_some() || stored.alphabet_fingerprint.starts_with(CONTEST_MARK);
         let mut unread = stored.unread;
         unread.retain(|key, _| !RETIRED_SESSION_KEYS.contains(&key.as_str()));
-        let (groups, unread_groups) = split_unread(stored.groups, &[]);
-        let (group_timings, unread_timings) =
-            split_unread(stored.group_timings, RETIRED_TIMING_KEYS);
+        let (mut groups, unread_groups) = split_unread(stored.groups, &[]);
+        for group in groups
+            .iter_mut()
+            .filter(|group| !group.correct && group.received.contains(SKIPPED))
+        {
+            group.correct = copied_whole(&group.sent, &group.received);
+        }
+        let timings = stored.group_timings.into_iter().map(Into::into).collect();
+        let (group_timings, unread_timings) = split_unread(timings, RETIRED_TIMING_KEYS);
         Self {
             date: stored.date,
             timestamp: stored.timestamp,
@@ -1603,12 +1741,95 @@ mod tests {
         );
     }
 
+    /// Every stored session is scored again as it is read, and a save is
+    /// not trusted to hold sane counts and speeds. A count of sends of 2³¹
+    /// panicked there, and one just past it, or a speed past all reason,
+    /// made the score infinite: written as null, which no save read back,
+    /// so the session dropped out of the history.
+    #[test]
+    fn a_stored_session_past_all_reason_scores_and_reads_back() {
+        let today = copied_at(30.0, 1);
+        for (sends, wpm) in [(1u64 << 31, 30.0), ((1 << 31) + 1, 30.0), (1, 1e200)] {
+            let mut json = serde_json::to_value(&today).expect("serializes");
+            for timing in json["groupTimings"].as_array_mut().expect("timings") {
+                timing["sends"] = serde_json::json!(sends);
+                timing["charWpm"] = serde_json::json!(wpm);
+                timing["effectiveWpm"] = serde_json::json!(wpm);
+            }
+            let mut read: SessionResult = serde_json::from_value(json).expect("a save reads");
+            read.score = read.points();
+            let case = format!("{sends} sends at {wpm} WPM: {}", read.score);
+            assert!(read.score.is_finite(), "{case}");
+            let written = serde_json::to_string(&read).expect("writes");
+            let again: SessionResult = serde_json::from_str(&written).expect(&case);
+            assert_eq!(again.score, read.score, "{case}");
+        }
+    }
+
+    /// A save an older build wrote with a score past all reason holds it as
+    /// null, as JSON writes a number it cannot, and it never read back, so
+    /// the session stayed out of the history however often it was read
+    /// again. Its score is worked out again as it is read, so a save with
+    /// no score to read, null or left out, reads as any other.
+    #[test]
+    fn a_session_stored_with_no_score_reads_back() {
+        let today = copied_at(30.0, 1);
+        let mut json = serde_json::to_value(&today).expect("serializes");
+        json["score"] = serde_json::Value::Null;
+        let read: SessionResult = serde_json::from_value(json.clone()).expect("a null score reads");
+        assert_eq!(read.groups, today.groups);
+        assert_eq!(read.points(), today.score);
+        json.as_object_mut().expect("a session").remove("score");
+        let read: SessionResult = serde_json::from_value(json).expect("no score reads");
+        assert_eq!(read.points(), today.score);
+    }
+
     #[test]
     fn an_empty_answer_is_scored_wrong() {
         let result = result(&answered(TrainingSettings::default(), &[("KM", "", 400)]));
         assert_eq!(result.groups.len(), 1);
         assert!(!result.groups[0].correct);
         assert!(result.accuracy < 0.01);
+    }
+
+    /// A skip past a group's end holds no character's place: its alignment
+    /// reads it as nothing, and now so does the rest. Space after the last
+    /// letter, which the box takes, left the group at 100% but scored as an
+    /// error, a quarter of its points, and kept as not copied whole, so the
+    /// history counted it among the groups missed.
+    #[test]
+    fn a_skip_past_the_end_of_a_group_is_no_error() {
+        let copied = |typed: &str| {
+            result(&answered(
+                TrainingSettings::default(),
+                &[("KMRSU", typed, 400)],
+            ))
+        };
+        let (clean, skipped) = (copied("KMRSU"), copied("KMRSU "));
+        assert_eq!(skipped.groups[0].received, "KMRSU");
+        let skipped = copied(&format!("KMRSU{}", crate::SKIPPED));
+        assert_eq!(skipped.accuracy, 1.0);
+        assert!(skipped.groups[0].correct);
+        assert_eq!(skipped.score, clean.score);
+        // One that holds a letter's place is that letter missed.
+        let missed = copied(&format!("KMRS{}", crate::SKIPPED));
+        assert!(!missed.groups[0].correct);
+        assert!(missed.score < clean.score / 3.0);
+    }
+
+    /// A group kept by an earlier build with a skip past its end, and so
+    /// as not copied whole, reads as copied whole, as it is now scored.
+    #[test]
+    fn a_group_kept_with_a_skip_past_its_end_reads_as_copied_whole() {
+        let session = answered(
+            TrainingSettings::default(),
+            &[("KMRSU", "KMRSU_", 400), ("KMRSU", "K_RSU_", 400)],
+        );
+        let mut json = serde_json::to_value(result(&session)).expect("serializes");
+        json["groups"][0]["correct"] = serde_json::json!(false);
+        let read: SessionResult = serde_json::from_value(json).expect("a save reads");
+        assert!(read.groups[0].correct);
+        assert!(!read.groups[1].correct);
     }
 
     /// Answers typed while the group is still being sent used to be timed at
@@ -2203,6 +2424,184 @@ mod tests {
         older["groupTimings"][1]["typedAlong"] = serde_json::json!(true);
         let read: SessionResult = serde_json::from_value(older).unwrap();
         assert_eq!(read.unread, UnreadKeys::default());
+    }
+
+    /// A value under a key this build reads that it cannot read, a later
+    /// build's reason for a group going untimed or a shape of its times of
+    /// its own, reads as none, never as a session lost, and is written back
+    /// as it was, as any key this build does not read is. It used to be
+    /// dropped as the session was read, and so lost from the history once
+    /// the session was written again, by a restore or a sync.
+    #[test]
+    fn a_value_a_later_build_wrote_under_a_known_key_is_written_back_as_it_was() {
+        let mut written = SessionResult::empty_for_test();
+        written.groups = vec![GroupResult::default(); 2];
+        written.group_timings = vec![SessionTiming::default(); 2];
+        let mut later = serde_json::to_value(&written).unwrap();
+        later["groupTimings"][0]["untimed"] = serde_json::json!("cutShort");
+        later["groupTimings"][1]["charTimes"] = serde_json::json!({ "at": [1, 2] });
+        let read: SessionResult = serde_json::from_value(later.clone()).unwrap();
+        assert_eq!(read.group_timings, written.group_timings, "read as none");
+        assert_eq!(serde_json::to_value(&read).unwrap(), later);
+        let again: SessionResult =
+            serde_json::from_value(serde_json::to_value(&read).unwrap()).unwrap();
+        assert_eq!(again, read, "the same, read again");
+    }
+
+    /// A value this build could not read under a key a timing reads
+    /// leniently goes back as it was only while the timing holds none of its
+    /// own there: once it does, as a restore fills in times an older build
+    /// dropped, its own is written in the other's place, and read back. Both
+    /// used to be written, the key twice, and the session was read as no
+    /// session at all, by this build or any other.
+    #[test]
+    fn a_timings_own_value_is_written_in_place_of_one_it_could_not_read() {
+        let mut written = SessionResult::empty_for_test();
+        written.groups = vec![GroupResult::default(); 2];
+        written.group_timings = vec![SessionTiming::default(); 2];
+        let mut later = serde_json::to_value(&written).unwrap();
+        later["groupTimings"][0]["charTimes"] = serde_json::json!({ "at": [1, 2] });
+        later["groupTimings"][1]["untimed"] = serde_json::json!("cutShort");
+        let mut read: SessionResult = serde_json::from_value(later).unwrap();
+        read.group_timings[0].char_times = Some(CharTimes {
+            ends: vec![300],
+            keys: vec![Some(550)],
+            corrected: Vec::new(),
+            latency_ms: 40,
+            box_open: true,
+        });
+        read.group_timings[1].untimed = Some(Untimed::Paused);
+        // Written as text, as a store writes it: read back as a map, a key
+        // written twice would be read once.
+        let text = serde_json::to_string(&read).unwrap();
+        let back: SessionResult = serde_json::from_str(&text).expect("reads back");
+        assert_eq!(back.group_timings, read.group_timings);
+        assert_eq!(back.unread, UnreadKeys::default(), "the other let go of");
+    }
+
+    /// The keys `T`, a struct, reads, as its reader names them.
+    fn keys_read<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
+        /// Asks a reader for the keys it reads, and gives none of them.
+        struct Keys;
+
+        /// What [`Keys`] was asked to read.
+        #[derive(Debug)]
+        struct Asked(&'static [&'static str]);
+
+        impl std::fmt::Display for Asked {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(formatter, "asked for {:?}", self.0)
+            }
+        }
+
+        impl std::error::Error for Asked {}
+
+        impl serde::de::Error for Asked {
+            fn custom<M: std::fmt::Display>(_: M) -> Self {
+                Self(&[])
+            }
+        }
+
+        impl<'de> Deserializer<'de> for Keys {
+            type Error = Asked;
+
+            fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Asked> {
+                Err(Asked(&[]))
+            }
+
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                keys: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Asked> {
+                Err(Asked(keys))
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+                bytes byte_buf option unit unit_struct newtype_struct seq tuple
+                tuple_struct map enum identifier ignored_any
+            }
+        }
+
+        T::deserialize(Keys).err().map_or(&[], |asked| asked.0)
+    }
+
+    /// Under every key a group or its timing reads leniently, a value this
+    /// build could not read is kept as it was read, and gives way to the
+    /// part's own once it holds one, as a restore fills in times: the key
+    /// is written once, and the session reads back. Every key each part
+    /// reads is tried, a key read leniently later among them, with a value
+    /// of its own set below. The keys read leniently were each named again
+    /// where a part is written ([`Part::holds`]), and one left out there
+    /// would have been written twice, the session read as no session at
+    /// all, in any build.
+    #[test]
+    fn a_value_kept_under_any_key_read_leniently_gives_way_to_the_parts_own() {
+        // A value of its own under every key each part reads.
+        let group = GroupResult {
+            sent: "KM".into(),
+            received: "KN".into(),
+            correct: false,
+        };
+        let timing = SessionTiming {
+            time_to_complete_ms: 1_200.0,
+            char_wpm: Some(26.0),
+            effective_wpm: Some(20.0),
+            sends: 2,
+            char_times: Some(CharTimes {
+                ends: vec![300],
+                keys: vec![Some(550)],
+                corrected: vec![0],
+                latency_ms: 40,
+                box_open: true,
+            }),
+            untimed: Some(Untimed::Paused),
+        };
+        let mut own = SessionResult::empty_for_test();
+        own.groups = vec![group];
+        own.group_timings = vec![timing];
+        let written = serde_json::to_value(&own).unwrap();
+        let parts = [
+            ("groups", keys_read::<GroupResult>()),
+            ("groupTimings", keys_read::<SessionTiming>()),
+        ];
+        let unreadable = serde_json::json!({ "shape": ["of", "a", "later", "build"] });
+        let mut lenient = Vec::new();
+        for (part, keys) in parts {
+            assert!(!keys.is_empty(), "the keys {part} reads");
+            for key in keys {
+                let held = written[part][0].get(key);
+                assert!(held.is_some(), "a value of its own under {part} {key}");
+            }
+            for key in keys {
+                let mut later = written.clone();
+                later[part][0][key] = unreadable.clone();
+                // Read strictly, the key makes no session at all of it.
+                let Ok(mut read) = serde_json::from_value::<SessionResult>(later) else {
+                    continue;
+                };
+                lenient.push(*key);
+                let unread = &read.unread;
+                let kept = if part == "groups" {
+                    &unread.groups
+                } else {
+                    &unread.timings
+                };
+                let kept = kept.first().and_then(|kept| kept.get(*key));
+                assert_eq!(kept, Some(&unreadable), "{part} {key}: kept as read");
+                read.groups.clone_from(&own.groups);
+                read.group_timings.clone_from(&own.group_timings);
+                // Written as text, as a store writes it: read back as a map,
+                // a key written twice would be read once.
+                let text = serde_json::to_string(&read).unwrap();
+                let back: SessionResult = serde_json::from_str(&text)
+                    .unwrap_or_else(|err| panic!("{part} {key} written twice: {err}"));
+                assert_eq!(back, own, "{part} {key}: its own, the other let go of");
+            }
+        }
+        assert_eq!(lenient, ["charTimes", "untimed"]);
     }
 
     /// With adaptive group size drawing the lengths, a group is sent long on

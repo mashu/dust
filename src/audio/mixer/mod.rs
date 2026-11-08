@@ -536,12 +536,11 @@ impl Mixer {
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
             // A sample that is not a number would stay in the high-pass for
-            // good and silence everything after it.
-            let into = background + heard;
-            let received = self
-                .audio
-                .process(if into.is_finite() { into } else { 0.0 });
-            let out = received * self.gate + send.dry;
+            // good and silence everything after it. Each is kept out on its
+            // own, the band's and the send's apart, so a send gone wrong is
+            // silence alone and the band plays on under it.
+            let received = self.audio.process(finite(background) + finite(heard));
+            let out = received * self.gate + finite(send.dry);
             *slot += (out * now.volume) as f32;
         }
         self.audio.settle();
@@ -553,6 +552,11 @@ impl Mixer {
             send.settle(latency + self.late_len + out.len());
         }
     }
+}
+
+/// `sample`, or silence where it is not a number.
+fn finite(sample: f64) -> f64 {
+    if sample.is_finite() { sample } else { 0.0 }
 }
 
 /// How much room the send's look-ahead is given at `sample_rate`: natively,

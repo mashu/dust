@@ -51,8 +51,11 @@ pub struct WordList {
 
 impl WordList {
     /// Read a list. Words are split at any white space, so one to a line
-    /// reads as it should, and so do several to a line.
+    /// reads as it should, and so do several to a line. A mark of the
+    /// encoding, as an editor saving a file may put first, is no part of
+    /// it.
     pub fn read(text: &str) -> Self {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         Self::from_words(text.split_whitespace())
     }
 
@@ -117,12 +120,24 @@ impl TrainingSettings {
     }
 
     /// The characters the words are made of, each once, in the order they
-    /// first come.
+    /// first come: one look at each character of the list, as a draw of a
+    /// word reads them for every word it draws.
     pub fn word_characters(&self) -> Vec<char> {
         let mut characters = Vec::new();
+        // Morse's characters are ASCII: a bit for each marks those seen.
+        let mut seen = 0u128;
         for word in self.words() {
             for ch in word.chars() {
-                if !characters.contains(&ch) {
+                let first = match u32::from(ch) {
+                    code @ 0..128 => {
+                        let bit = 1u128 << code;
+                        let first = seen & bit == 0;
+                        seen |= bit;
+                        first
+                    }
+                    _ => !characters.contains(&ch),
+                };
+                if first {
                     characters.push(ch);
                 }
             }
@@ -151,6 +166,18 @@ mod tests {
         let list = WordList::read("cq\r\nDE\n\n  73 \nqth\n");
         assert_eq!(list.words, ["CQ", "DE", "73", "QTH"]);
         assert_eq!(list.left_out(), 0);
+    }
+
+    /// A file an editor saved with a byte order mark first reads as one
+    /// without: the mark is no part of what it holds. It used to be read as
+    /// part of the first word, which Morse then had no code for, so the
+    /// first word was left out, and a list of one word read as nothing.
+    #[test]
+    fn a_list_saved_with_a_byte_order_mark_reads_as_one_without() {
+        let list = WordList::read("\u{feff}cq\r\nDE\r\n");
+        assert_eq!(list.words, ["CQ", "DE"]);
+        assert_eq!(list.left_out(), 0);
+        assert_eq!(WordList::read("\u{feff}QRL").words, ["QRL"]);
     }
 
     /// Several to a line, tabs, a file without a final newline: all words.
@@ -276,5 +303,14 @@ mod tests {
             settings.word_characters(),
             ['P', 'A', 'R', 'I', 'S', 'C', 'O', 'D', 'E', 'X']
         );
+    }
+
+    /// Each character comes once, where it first comes, however often the
+    /// words repeat it, and whatever it is, Morse's ASCII or not.
+    #[test]
+    fn the_characters_of_the_words_come_once_each_in_their_first_order() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.word_list = ["ABBA", "CAB", "ÉÉA", "C/"].map(String::from).to_vec();
+        assert_eq!(settings.word_characters(), ['A', 'B', 'C', 'É', '/']);
     }
 }

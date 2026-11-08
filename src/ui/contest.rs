@@ -14,7 +14,9 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::contest_runtime::{change_speed, focus_field, pause_run, press_key, resume_run, tick};
+use crate::contest_runtime::{
+    change_speed, focus_field, pause_run, press_key, resume_run, tick, typed_len_max,
+};
 use crate::page_hidden::{RUN_HIDDEN, use_page_hidden};
 use crate::session_runtime::{abort_run, finish_run};
 use crate::state::AppCtx;
@@ -23,7 +25,7 @@ use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
 use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow, TOUCH_BUILD};
+use crate::ui::training::{ANSWER_INPUT_MODE, InputMethod, Keypad, PadKey, PadRow, TOUCH_BUILD};
 use crate::ui::widgets::{
     Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool, keep_focus,
 };
@@ -488,6 +490,7 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
     let entry = ctx.entry;
     let shown = entry.shown(field);
     let (id, _) = field_name(field);
+    let input_method = InputMethod::use_field();
     rsx! {
         input {
             id,
@@ -500,6 +503,7 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
             spellcheck: false,
             enterkeyhint: "send",
             inputmode: ANSWER_INPUT_MODE,
+            maxlength: "{typed_len_max(field)}",
             lang: "zxx",
             oninput: move |e| {
                 // The key's moment, before anything else is done with it.
@@ -519,7 +523,14 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
                 }
                 entry.set_focus(field);
             },
+            oncompositionend: move |_| input_method.ended(),
             onkeydown: move |e| {
+                // An input method composing a character has its own Enter,
+                // which ends the composition, and its own Space: the run's
+                // keys pass them by as well.
+                if input_method.has(&e) {
+                    return;
+                }
                 // Enter, or Enter with the Command key, which the run's keys
                 // pass by; held with Shift, Ctrl or Alt it logs without
                 // sending, which the run's keys hear on the page. Held
@@ -2126,6 +2137,107 @@ mod tests {
             assert_eq!(script, &focus_end_script(field), "{field}: at its end");
         }
         (typed, given.into_iter().map(|(field, _)| field).collect())
+    }
+
+    /// While an input method composes a character in a field, Enter and
+    /// Space are its own: the Enter that ends the composition sends nothing,
+    /// and a Space it takes moves no cursor. Once it is done, Enter sends
+    /// again. Each used to be the run's, the Enter keying a message.
+    #[test]
+    fn keys_an_input_method_composes_with_are_its_own() {
+        run(|| async {
+            let (mut ui, recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            let starts = recorder.starts().len();
+            let left = ui.press_key_composing("field-call", Key::Enter, Code::Enter);
+            assert!(left, "the input method's Enter");
+            assert_eq!(recorder.starts().len(), starts, "nothing sent");
+            ui.take_focused();
+            let space = Key::Character(" ".into());
+            let left = ui.press_key_composing("field-call", space, Code::Space);
+            assert!(left, "the input method's Space");
+            assert!(ui.take_focused().is_empty());
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
+            ui.press_enter("field-call");
+            assert_eq!(
+                recorder.starts().len(),
+                starts + 1,
+                "your call and exchange"
+            );
+        });
+    }
+
+    /// Where the webview hands over the Enter that ends a composition once
+    /// the composition is over, not as composing, as WebKit's does on a Mac
+    /// and an iPhone, an Enter at the moment one ends in a field is the
+    /// input method's all the same, and keys nothing; the next sends. It
+    /// keyed your call and exchange on the air.
+    #[test]
+    fn the_enter_that_ends_a_composition_in_a_field_sends_nothing() {
+        run(|| async {
+            let (mut ui, recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            let starts = recorder.starts().len();
+            ui.end_composition("field-call");
+            ui.press_enter("field-call");
+            assert_eq!(recorder.starts().len(), starts, "nothing sent");
+            ui.press_enter("field-call");
+            assert_eq!(
+                recorder.starts().len(),
+                starts + 1,
+                "your call and exchange"
+            );
+        });
+    }
+
+    /// So is the Space that ends a composition there, a candidate chosen or
+    /// a syllable finished: at the moment one ends in a field, it moves no
+    /// cursor; the next takes it on to Exchange. It took the cursor on
+    /// mid-call.
+    #[test]
+    fn the_space_that_ends_a_composition_in_a_field_moves_no_cursor() {
+        run(|| async {
+            let (mut ui, _recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            ui.end_composition("field-call");
+            let (typed, moved) = press_space(&mut ui, "field-call");
+            assert!(typed, "the input method's Space");
+            assert!(moved.is_empty(), "{moved:?}");
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
+            let (_, moved) = press_space(&mut ui, "field-call");
+            assert_eq!(moved, ["field-exchange"]);
+        });
+    }
+
+    /// Each field takes no more than a call or an exchange is typed with: it
+    /// says so to the page, and a page pasted in all the same is cut there
+    /// and drawn as it is kept. His then sends a call's length, not hours
+    /// of Morse.
+    #[test]
+    fn the_fields_take_no_more_than_a_call_or_an_exchange() {
+        run(|| async {
+            let (mut ui, recorder, _call) = first_caller().await;
+            for (id, field) in [
+                ("field-call", EntryField::Call),
+                ("field-exchange", EntryField::Exchange),
+            ] {
+                let most = typed_len_max(field);
+                let tag = ui.input_tag(id);
+                assert!(tag.contains(&format!("maxlength=\"{most}\"")), "{tag}");
+                ui.type_into(id, &"K".repeat(100_000));
+                let kept = ui.with_app(|ctx| ctx.entry.shown(field));
+                assert_eq!(kept, "K".repeat(most), "{id}");
+                let tag = ui.input_tag(id);
+                assert!(tag.contains(&format!("value=\"{kept}\"")), "{tag}");
+            }
+            ui.with_app(|ctx| press_key(ctx, OpKey::HisCall));
+            let sent = recorder
+                .starts()
+                .last()
+                .map(|start| start.transcript.text.clone());
+            let call = "K".repeat(typed_len_max(EntryField::Call));
+            assert_eq!(sent, Some(call));
+        });
     }
 
     /// Space in the Call field moves on to Exchange, as a call has no

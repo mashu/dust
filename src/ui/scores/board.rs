@@ -1,7 +1,8 @@
 use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode, Ranking};
 use dioxus::prelude::*;
 
-use super::{Medal, focus, mode_label, rating_label, run_rule, speed};
+use super::{Marked, Medal, focus, mode_label, pick, rating_label, run_rule, speed};
+use crate::state::SessionPick;
 use crate::ui::format::day_and_clock;
 use crate::ui::help;
 use crate::ui::stats_detail::ASSISTED;
@@ -81,20 +82,21 @@ fn detail(entry: &BoardEntry) -> String {
 /// a mouse marks it on the timeline for as long as it stays; a tap keeps it
 /// marked until the same row is tapped again. An assisted run is on no
 /// timeline, so its row marks nothing. A row is drawn again only when it
-/// is marked or let go.
+/// is marked or let go. Each row is its session ([`pick`]): two set at the
+/// same moment are two rows, each marked alone.
 #[component]
 pub(super) fn BoardList(
     board: Vec<BoardEntry>,
     /// The whole runs it holds that had Show copy on, newest first.
     assisted: Vec<BoardEntry>,
-    /// When the best was set, marked while no row is.
-    best_at: u64,
-    /// The row pointed at, else the row tapped.
-    marked: Memo<Option<u64>>,
+    /// The best, marked while no row is.
+    best: Option<SessionPick>,
+    /// The rows pointed at and tapped.
+    marked: Memo<Marked>,
     /// The row a mouse is pointing at.
-    hovered: Signal<Option<u64>>,
+    hovered: Signal<Option<SessionPick>>,
     /// The row tapped to keep marked.
-    pinned: Signal<Option<u64>>,
+    pinned: Signal<Option<SessionPick>>,
     /// The board is of every mode, so each row says which it was.
     show_mode: bool,
     /// What it ranks by.
@@ -109,12 +111,15 @@ pub(super) fn BoardList(
     let runs_only = board.iter().chain(&assisted).all(is_run);
     let runs_among_others = !runs_only && board.iter().any(is_run);
     let note = ranked_by(ranking, runs_only);
+    let focus = focus(marked, best, |at| {
+        board.iter().any(|entry| pick(entry) == at)
+    });
+    let tapped = pinned();
     let (mut rows, mut greyed) = (board, assisted);
     if !show_all() {
         rows.truncate(BOARD_TOP);
         greyed.truncate(BOARD_TOP - rows.len());
     }
-    let (focus, tapped) = (focus(marked, best_at), pinned());
     rsx! {
         div { class: "card stack-sm",
             CardHead {
@@ -132,9 +137,9 @@ pub(super) fn BoardList(
             div { class: "board-list",
                 for entry in rows {
                     BoardRow {
-                        key: "{entry.timestamp}",
-                        focused: entry.timestamp == focus,
-                        pinned: tapped == Some(entry.timestamp),
+                        key: "{entry.index}",
+                        focused: focus == Some(pick(&entry)),
+                        pinned: tapped == Some(pick(&entry)),
                         entry,
                         hovered,
                         tapped: pinned,
@@ -144,7 +149,7 @@ pub(super) fn BoardList(
                 }
                 for entry in greyed {
                     div {
-                        key: "{entry.timestamp}",
+                        key: "{entry.index}",
                         class: "board-row assisted",
                         span { class: "board-place",
                             span { class: "board-number unplaced", aria_label: "Not placed", "—" }
@@ -188,9 +193,9 @@ fn BoardRow(
     /// It was tapped to stay marked.
     pinned: bool,
     /// The row a mouse is pointing at.
-    hovered: Signal<Option<u64>>,
+    hovered: Signal<Option<SessionPick>>,
     /// The row tapped to keep marked.
-    tapped: Signal<Option<u64>>,
+    tapped: Signal<Option<SessionPick>>,
     /// The board is of every mode, so the row says which it was.
     show_mode: bool,
     /// What the board ranks by.
@@ -199,7 +204,7 @@ fn BoardRow(
     #[cfg(test)]
     crate::testing::rendered("BoardRow");
     let (mut hovered, mut tapped) = (hovered, tapped);
-    let at = entry.timestamp;
+    let at = pick(&entry);
     let class = match (focused, pinned) {
         (_, true) => "board-row focused pinned",
         (true, false) => "board-row focused",

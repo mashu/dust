@@ -25,7 +25,7 @@ use crate::persist::record::RecordId;
 /// What every pack's name starts with: the rest is at random.
 pub const PACK_PREFIX: &str = "dust-p-";
 /// The layout of a pack.
-const PACK_LAYOUT: u32 = 1;
+pub const PACK_LAYOUT: u32 = 1;
 /// The most a pack holds of sessions as they are written, before it is
 /// packed: four megabytes, under the five Drive takes in one upload
 /// however little it packs.
@@ -107,22 +107,37 @@ pub fn seal_pack(keys: &Keys, name: &str, pack: &Pack) -> Option<Vec<u8>> {
     keys.seal(name, &packer.finish().ok()?)
 }
 
-/// The pack `sealed`, found in the drive as `name`: none where it is no
-/// pack this key sealed, or none this build reads.
-pub fn open_pack(keys: &Keys, name: &str, sealed: &[u8]) -> Option<Pack> {
-    let packed = keys.open(name, sealed)?;
+/// Why a pack found in the drive was not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unopened {
+    /// It is no pack this key sealed under its name, or it was changed
+    /// since: damaged, say. It opens no better the next time.
+    Damaged,
+    /// It opened, but holds no pack this build reads: one a later build
+    /// wrote, which this one reads once updated.
+    Later,
+}
+
+/// The pack `sealed`, found in the drive as `name`, or why not.
+pub fn open_pack(keys: &Keys, name: &str, sealed: &[u8]) -> Result<Pack, Unopened> {
+    let packed = keys.open(name, sealed).ok_or(Unopened::Damaged)?;
     let mut json = Vec::new();
     DeflateDecoder::new(packed.as_slice())
         .take(UNPACKED_MAX)
         .read_to_end(&mut json)
-        .ok()?;
-    let pack: Pack = serde_json::from_slice(&json).ok()?;
-    (pack.dust_pack == PACK_LAYOUT).then_some(pack)
+        .map_err(|_| Unopened::Later)?;
+    let pack: Pack = serde_json::from_slice(&json).map_err(|_| Unopened::Later)?;
+    if pack.dust_pack == PACK_LAYOUT {
+        Ok(pack)
+    } else {
+        Err(Unopened::Later)
+    }
 }
 
 /// What one sync sends, in as many packs as it takes to keep each to its
-/// size ([`PACK_BYTES`]): the deletions and sessions put back go in the
-/// first, being small. None where there is nothing to send.
+/// size ([`PACK_BYTES`]): the deletions go in the first, being small, and
+/// the sessions put back and the records fill it and those after it. None
+/// where there is nothing to send.
 pub fn packs_of(
     device: &str,
     at: u64,
@@ -136,16 +151,26 @@ pub fn packs_of(
         at,
         ..Pack::default()
     };
-    let mut packs = Vec::new();
-    let mut pack = Pack {
-        forget,
-        revive,
-        ..fresh()
+    // A pack holding a session already is full where `size` more would
+    // take it past its size: one larger than a pack still goes, alone.
+    let full = |pack: &Pack, bytes: usize, size: usize| {
+        !(pack.put.is_empty() && pack.revive.is_empty()) && bytes + size > PACK_BYTES
     };
-    let mut bytes: usize = pack.revive.iter().map(|revive| revive.s.len()).sum();
+    let mut packs = Vec::new();
+    let mut pack = Pack { forget, ..fresh() };
+    let mut bytes: usize = 0;
+    for one in revive {
+        let size = one.id.len() + one.s.len();
+        if full(&pack, bytes, size) {
+            packs.push(std::mem::replace(&mut pack, fresh()));
+            bytes = 0;
+        }
+        bytes += size;
+        pack.revive.push(one);
+    }
     for one in put {
         let size = one.id.len() + one.s.len();
-        if !pack.put.is_empty() && bytes + size > PACK_BYTES {
+        if full(&pack, bytes, size) {
             packs.push(std::mem::replace(&mut pack, fresh()));
             bytes = 0;
         }
@@ -208,10 +233,16 @@ mod tests {
             }],
         };
         let sealed = seal_pack(&keys, &name, &pack).expect("sealed");
-        assert_eq!(open_pack(&keys, &name, &sealed), Some(pack.clone()));
+        assert_eq!(open_pack(&keys, &name, &sealed), Ok(pack.clone()));
         assert!(!sealed.windows(5).any(|w| w == b"KMURE"));
-        assert_eq!(open_pack(&keys, "dust-p-other", &sealed), None);
-        assert_eq!(open_pack(&self::keys(), &name, &sealed), None);
+        assert_eq!(
+            open_pack(&keys, "dust-p-other", &sealed),
+            Err(Unopened::Damaged)
+        );
+        assert_eq!(
+            open_pack(&self::keys(), &name, &sealed),
+            Err(Unopened::Damaged)
+        );
         assert_eq!(
             pack.put[0].record_id(),
             Some(RecordId { order: 5, nonce: 9 })
@@ -224,13 +255,16 @@ mod tests {
             .record_id(),
             None
         );
-        // A pack of another layout, sealed as well as any, is not read.
+        // A pack of another layout, sealed as well as any, is not read, and
+        // is no damaged one.
         let later = Pack {
             dust_pack: 2,
             ..pack
         };
         let sealed = seal_pack(&keys, &name, &later).expect("sealed");
-        assert_eq!(open_pack(&keys, &name, &sealed), None);
+        assert_eq!(open_pack(&keys, &name, &sealed), Err(Unopened::Later));
+        let unpacked = keys.seal(&name, b"not deflated").expect("sealed");
+        assert_eq!(open_pack(&keys, &name, &unpacked), Err(Unopened::Later));
     }
 
     /// What a later build adds to a pack is passed over, and the rest read.
@@ -280,6 +314,42 @@ mod tests {
         assert_eq!(packs.len(), 2);
         // Deletions alone are a pack.
         assert_eq!(packs_of("d", 1, Vec::new(), forget, Vec::new()).len(), 1);
+    }
+
+    /// Sessions put back go in packs of no more than their size too, every
+    /// one once, in order: a long history deleted and put back by Undo is
+    /// sent, and not in one pack past what Drive takes.
+    #[test]
+    fn sessions_put_back_go_in_packs_of_their_size() {
+        let revive: Vec<Revive> = (0..25)
+            .map(|n| {
+                let one = put(n, 400_000);
+                Revive {
+                    id: one.id,
+                    at: 9,
+                    s: one.s,
+                }
+            })
+            .collect();
+        let forget = vec![Forget {
+            id: put(99, 0).id,
+            at: 3,
+        }];
+        let packs = packs_of("d", 1, vec![put(50, 10)], forget.clone(), revive.clone());
+        assert!(packs.len() >= 3, "{}", packs.len());
+        assert_eq!(packs[0].forget, forget);
+        for pack in &packs {
+            let bytes: usize = pack
+                .put
+                .iter()
+                .map(|p| p.id.len() + p.s.len())
+                .chain(pack.revive.iter().map(|r| r.id.len() + r.s.len()))
+                .sum();
+            assert!(bytes <= PACK_BYTES, "{bytes}");
+        }
+        let all: Vec<Revive> = packs.iter().flat_map(|pack| pack.revive.clone()).collect();
+        assert_eq!(all, revive);
+        assert_eq!(packs.iter().map(|pack| pack.put.len()).sum::<usize>(), 1);
     }
 
     /// A sealed pack is a fraction of what it holds: sessions are JSON, and

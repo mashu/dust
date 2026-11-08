@@ -12,8 +12,9 @@
 //!
 //! This device's side is the store's: the records it lists, those of them
 //! it deleted by hand ([`crate::persist::Store::forgotten`]), and two notes
-//! sync keeps of its own ([`super::state::SyncState`]): the deletions it
-//! took from the drive, and the sessions put back here by hand since the
+//! sync keeps of its own ([`super::state::SyncState`]): the deletions here
+//! the drive holds, those it took from the drive and those made here by
+//! hand that it holds, and the sessions put back here by hand since the
 //! last sync. A record the store does not list is never deleted on that
 //! account alone: missing is never deleted.
 
@@ -64,7 +65,6 @@ impl DriveState {
     }
 
     /// The drive holds `id`, and does not say it is deleted.
-    #[cfg(test)]
     pub fn alive(&self, id: RecordId) -> bool {
         (self.puts.contains(&id) || self.revives.contains_key(&id)) && !self.deleted(id)
     }
@@ -91,11 +91,15 @@ fn latest(times: &mut BTreeMap<RecordId, u64>, id: RecordId, at: u64) {
 pub struct Here<'a> {
     /// Every record the store lists.
     pub listed: &'a BTreeSet<RecordId>,
-    /// Of the records the drive holds alive and the store does not list,
-    /// those it deleted by hand.
+    /// Of the records the drive holds and the store does not list, those it
+    /// deleted by hand: of those the drive holds alive, and of those it
+    /// deleted since the last sync, or since this device put them back by
+    /// hand.
     pub forgotten: &'a BTreeSet<RecordId>,
-    /// The deletions taken from the drive and made here, each with the
-    /// time of the drive's deletion it took.
+    /// The deletions here the drive holds, each with the time of the
+    /// drive's deletion: those taken from the drive and made here, and
+    /// those made here by hand once the drive holds them, sent from here or
+    /// made on another device as well.
     pub applied: &'a BTreeMap<RecordId, u64>,
     /// The sessions put back here by hand since the last sync, and when.
     pub revived: &'a BTreeMap<RecordId, u64>,
@@ -117,6 +121,10 @@ pub struct Plan {
     /// Records the drive holds that this device deleted by hand: to send
     /// the deletion of.
     pub send_deleted: Vec<RecordId>,
+    /// Records this device deleted by hand that the drive deleted as well,
+    /// each with when the drive deleted it: nothing to send, and the
+    /// deletion noted here as one taken from the drive.
+    pub deleted_too: Vec<(RecordId, u64)>,
     /// Records the drive deleted that this device put back by hand since,
     /// each with when: to send that they are back.
     pub send_back: Vec<(RecordId, u64)>,
@@ -149,8 +157,9 @@ pub fn plan(drive: &DriveState, here: Here) -> Plan {
         if drive.deleted(id) {
             let tomb = drive.tombs[&id];
             match here.revived.get(&id) {
-                // Put back here after the drive's latest deletion of it.
-                Some(&at) if at > tomb => plan.send_back.push((id, at)),
+                // Put back here no earlier than the drive's latest deletion
+                // of it: as late, it stands, as the drive reads the two.
+                Some(&at) if at >= tomb => plan.send_back.push((id, at)),
                 _ => plan.let_go.push((id, tomb)),
             }
         } else if !drive.puts.contains(&id) && !drive.revives.contains_key(&id) {
@@ -166,15 +175,24 @@ pub fn plan(drive: &DriveState, here: Here) -> Plan {
             continue;
         }
         // Deleted here: as the drive deleted it, and the drive has put it
-        // back since; or by hand, which the drive is to hear of.
+        // back since, as late as that deletion or later; or by hand, which
+        // the drive is to hear of.
         let put_back_since = here
             .applied
             .get(&id)
-            .is_some_and(|&took| drive.revives.get(&id).is_some_and(|&back| back > took));
+            .is_some_and(|&took| drive.revives.get(&id).is_some_and(|&back| back >= took));
         if put_back_since {
             plan.take_back.push(id);
         } else if !here.applied.contains_key(&id) {
             plan.send_deleted.push(id);
+        }
+    }
+    // Deleted here by hand, and in the drive as well, by another device
+    // say: the drive's deletion is this device's word on it too, and a
+    // putting back as late or later brings it back here as for one let go.
+    for &id in here.forgotten {
+        if drive.deleted(id) && !here.listed.contains(&id) && !here.applied.contains_key(&id) {
+            plan.deleted_too.push((id, drive.tombs[&id]));
         }
     }
     plan
@@ -347,6 +365,27 @@ mod tests {
         assert!(here.plan(&there).send_back.is_empty());
     }
 
+    /// A putting back as late as the drive's latest deletion stands, as the
+    /// drive itself reads the two: one made here is sent as back, and one
+    /// the drive holds as late as the deletion this device took brings the
+    /// session back. Each used to let the session go here, though the drive
+    /// says it is there.
+    #[test]
+    fn a_putting_back_as_late_as_a_deletion_stands() {
+        let there = drive(&[pack(&[1], &[(1, 50)], &[])]);
+        let mut here = Side::listing(&[1]);
+        here.revived = times(&[(1, 50)]);
+        assert_eq!(here.plan(&there).send_back, [(id(1), 50)]);
+        assert!(here.plan(&there).let_go.is_empty());
+
+        let there = drive(&[pack(&[1], &[(1, 50)], &[(1, 50)])]);
+        assert!(there.alive(id(1)), "the drive's word");
+        let mut here = Side::listing(&[]);
+        here.forgotten = ids(&[1]);
+        here.applied = times(&[(1, 50)]);
+        assert_eq!(here.plan(&there).take_back, [id(1)]);
+    }
+
     /// A session the drive put back after the deletion this device took
     /// from it comes back here; one this device deleted by hand, whatever
     /// the drive says, is sent as deleted.
@@ -361,6 +400,28 @@ mod tests {
         assert_eq!(here.plan(&there).send_deleted, [id(1)]);
         // Never had here: taken.
         assert_eq!(Side::listing(&[]).plan(&there).take, [id(1)]);
+    }
+
+    /// A session deleted here by hand that the drive deleted as well has
+    /// nothing to send, and is noted with the drive's deletion: noted, the
+    /// drive putting it back after brings it back here.
+    #[test]
+    fn a_session_deleted_here_and_in_the_drive_is_noted_as_the_drives() {
+        let there = drive(&[pack(&[1], &[(1, 50)], &[])]);
+        let mut here = Side::listing(&[]);
+        here.forgotten = ids(&[1]);
+        let plan = here.plan(&there);
+        assert_eq!(plan.deleted_too, [(id(1), 50)]);
+        assert!(!plan.sends());
+        here.applied = times(&[(1, 50)]);
+        let again = here.plan(&there);
+        assert!(
+            again.is_empty() && again.deleted_too.is_empty(),
+            "noted once"
+        );
+
+        let there = drive(&[pack(&[1], &[(1, 50)], &[(1, 60)])]);
+        assert_eq!(here.plan(&there).take_back, [id(1)]);
     }
 
     /// Two devices that each sync until neither has anything to do end up

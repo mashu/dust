@@ -557,6 +557,33 @@ fn a_stopped_send_leaves_the_band_as_it_was() {
     );
 }
 
+/// A send gone wrong, its samples not numbers, is silence alone: the band
+/// plays on under it as loud as it was. A sample that is not a number is
+/// kept out of the receiver's high-pass, where it would stay for good; the
+/// band's sample used to be kept out with it, and the band went silent for
+/// as long as the send played.
+#[test]
+fn a_send_gone_wrong_leaves_the_band_playing() {
+    let settings = hiss();
+    let seconds = |s: f64| (s * f64::from(SR)) as usize;
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.set_band(Some(band(&settings, 7)), &mut swept);
+    render(&mut mixer, seconds(1.0));
+    let before = render(&mut mixer, seconds(0.5));
+    let voice = resolve_station(&settings, &mut SplitMix64::new(5));
+    let mut plan = plan_transmission(&Transmission::alone("TTTTTTTTTT", voice), &settings);
+    for event in &mut plan.wanted.events {
+        event.frequency_hz = f64::NAN;
+    }
+    let filter = FilterDesign::from_settings(&settings);
+    mixer.start(SendVoice::new(&plan, &filter, None, SR, 0.0), &mut swept);
+    let during = render(&mut mixer, seconds(0.5));
+    assert!(during.iter().all(|s| s.is_finite()));
+    let level = db(power(&during) / power(&before));
+    assert!(level.abs() < 1.0, "the band was {level:.2} dB off");
+}
+
 /// Until an output has called back, how far behind it the speaker is is
 /// not known; once heard it is kept, until the output is another one.
 #[test]

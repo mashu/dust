@@ -46,6 +46,9 @@
 
 mod prefixes;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::contest::data::counted::FIELD_DAY_DX;
 use crate::rng::{Rng, SplitMix64};
 use prefixes::{CONTINENT_PREFIXES, COUNTRIES, PREFIXES, ZONE_PREFIXES};
@@ -596,18 +599,60 @@ pub(crate) fn pick_weighted<'t, T>(table: &'t [(T, f64)], rng: &mut impl Rng) ->
     table.last().map(|(item, _)| item)
 }
 
-/// A prefix of a shape the tier allows, of a country `countries` admits, as
+/// A prefix of a shape `tier` allows, of a country `countries` admits, as
 /// often as real calls carry it with a suffix of a length the tier allows,
 /// the countries evened out by `balance` ([`even_out`]).
 fn pick_prefix(
-    tier: &Tier,
+    tier: u32,
     countries: Countries,
     balance: f64,
     rng: &mut impl Rng,
 ) -> &'static Prefix {
-    let usable = even_out(usable_prefixes(tier, countries), balance);
+    let usable = weighed_prefixes(tier, countries, balance);
     // Every tier has US calls to draw, so this is only ever a fallback.
     pick_weighted(&usable, rng).copied().unwrap_or(&PREFIXES[0])
+}
+
+/// How many weighed prefix tables [`weighed_prefixes`] keeps on a thread:
+/// enough for a draw that goes back and forth between two kinds of caller,
+/// as Field Day's and POTA's do, and a preview or two beside it.
+const WEIGHED_KEPT: usize = 4;
+
+#[cfg(test)]
+thread_local! {
+    /// How many prefix tables [`weighed_prefixes`] has weighed on this
+    /// thread, for a test to count what a batch of calls costs.
+    static WEIGHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// What a prefix is drawn from at `tier`, for `countries` and `balance`:
+/// [`usable_prefixes`] evened out ([`even_out`]). The same for the same
+/// three every time, so kept for the last few asked for on this thread
+/// rather than worked out afresh for every call: a group's candidates are
+/// drawn alike, and the Stats screen's sampling draws thousands at once.
+fn weighed_prefixes(tier: u32, countries: Countries, balance: f64) -> Rc<[(&'static Prefix, f64)]> {
+    /// The tier, the countries and the balance's bits a table is kept by.
+    type Key = (u32, Countries, u64);
+    type Weighed = Rc<[(&'static Prefix, f64)]>;
+    thread_local! {
+        static KEPT: RefCell<Vec<(Key, Weighed)>> = const { RefCell::new(Vec::new()) };
+    }
+    let tier = tier.clamp(CALLSIGN_TIER_MIN, CALLSIGN_TIER_MAX);
+    let key = (tier, countries, balance.to_bits());
+    KEPT.with_borrow_mut(|kept| {
+        if let Some(at) = kept.iter().position(|(held, _)| *held == key) {
+            let found = kept.remove(at);
+            let weighed = Rc::clone(&found.1);
+            kept.insert(0, found);
+            return weighed;
+        }
+        #[cfg(test)]
+        WEIGHED.set(WEIGHED.get() + 1);
+        let weighed: Weighed = even_out(usable_prefixes(tier_at(tier), countries), balance).into();
+        kept.insert(0, (key, Rc::clone(&weighed)));
+        kept.truncate(WEIGHED_KEPT);
+        weighed
+    })
 }
 
 /// The prefixes of a shape the tier allows, of a country `countries`
@@ -705,9 +750,9 @@ const AREA_DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9
 /// (`VP2WYP`): `country_of` places that nowhere, and the call keeps the
 /// country of the table's entry it was drawn from.
 pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> GeneratedCall {
-    let tier = tier_at(tier);
     let countries = spec.countries.for_one_call(&spec, rng);
     let prefix = pick_prefix(tier, countries, spec.country_balance, rng);
+    let tier = tier_at(tier);
     let digit = separator(prefix, rng);
     let mut call = GeneratedCall {
         text: format!("{}{digit}", prefix.prefix),
@@ -2272,6 +2317,35 @@ mod tests {
             0.0,
             "a contest sounds as a real band does"
         );
+    }
+
+    /// Calls drawn alike weigh their prefixes once, not once a call: the
+    /// Stats screen's sampling draws six thousand calls, and weighing some
+    /// 450 prefixes for each, their countries evened out, held the screen
+    /// for a quarter of a second. What is kept is what weighing gives, for
+    /// every tier, countries and balance, however many are asked for in
+    /// turn.
+    #[test]
+    fn calls_drawn_alike_weigh_their_prefixes_once() {
+        let spec = CallSpec::default().with_balance(0.37);
+        let mut rng = SplitMix64::new(3);
+        WEIGHED.set(0);
+        for _ in 0..1_000 {
+            generate_call(5, spec, &mut rng);
+        }
+        assert!(WEIGHED.get() <= 1, "weighed {} times", WEIGHED.get());
+        let weighed = |table: &[(&Prefix, f64)]| -> Vec<(&str, u64)> {
+            table.iter().map(|(p, w)| (p.prefix, w.to_bits())).collect()
+        };
+        for _ in 0..2 {
+            for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+                for (countries, balance) in [(Countries::Any, 0.5), (Countries::WVe, 0.0)] {
+                    let kept = weighed_prefixes(tier, countries, balance);
+                    let fresh = even_out(usable_prefixes(tier_at(tier), countries), balance);
+                    assert_eq!(weighed(&kept), weighed(&fresh), "tier {tier}");
+                }
+            }
+        }
     }
 
     /// A full balance gives every country the tier can send the same share,

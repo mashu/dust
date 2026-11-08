@@ -116,6 +116,23 @@ fn the_page_tells_a_held_key_once() {
     assert!(heard[3].sent.is_empty() && !heard[3].prevented);
 }
 
+/// So is the key that ends a composition, which WebKit, in Safari, on an
+/// iPhone and on a Mac, hands over once the composition is over, not as
+/// composing, but with the key code of a key the input method took: each
+/// of the run's keys pressed so is passed by, left to the input method. A
+/// `.`, `,` or `+` that ended one sent TU and logged the QSO mid-word, and
+/// a `;` sent their call and your exchange.
+#[test]
+fn the_page_passes_by_the_key_that_ends_a_composition() {
+    let presses: Vec<(PageKey, Option<RunAction>)> = each_key()
+        .into_iter()
+        .map(|(press, _)| (press.ending_composition(), None))
+        .collect();
+    for by_place in [true, false] {
+        tells_the_run(by_place, &presses);
+    }
+}
+
 /// What is not the run's is passed by: a key held with the Command key, or
 /// with Ctrl but Enter, Shift with anything but a character, Alt with
 /// anything but the letters it takes, a letter alone, Enter alone, Space

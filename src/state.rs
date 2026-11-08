@@ -2,7 +2,7 @@
 //! shares.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -180,7 +180,8 @@ pub struct AppCtx {
     /// The sessions deleted last, each by its record, for Undo to put back
     /// exactly where it was.
     trash: Signal<Vec<(RecordId, SessionResult)>>,
-    /// What the last restore changed, for Undo to put back.
+    /// What the last restore changed, for Undo to put back, until another
+    /// restore is asked for ([`Self::undo_restore`]).
     before_restore: Signal<Option<Restored>>,
     /// The settings card reset last, and the settings before it, for Undo
     /// to put back.
@@ -194,12 +195,26 @@ pub struct AppCtx {
     /// This copy's mark, as it was written last, while it holds one
     /// ([`Store::mark_open`]).
     mark: CopyValue<Option<OpenSession>>,
+    /// What the marks of sessions cut off carried, taken from the store as
+    /// they were told of, until the history holds it: this copy's mark
+    /// holds it meanwhile, as nothing else does ([`Self::tell_of_cut_off`]).
+    cut_off_carried: CopyValue<Vec<SessionResult>>,
     /// A try at storing what the store has yet to take is waiting
     /// ([`RETRY_MS`]).
     retrying: CopyValue<bool>,
     /// The settings could not be stored, and the user has been told: not
     /// again until they have been stored since.
     settings_unsaved: CopyValue<bool>,
+    /// The records the store listed and could not read, that a restore was
+    /// refused for already: one still unread at a later restore is taken
+    /// as one that cannot be read at all ([`Self::restore_backup`]).
+    restore_refused_for: CopyValue<BTreeSet<RecordId>>,
+    /// A restore, or the Undo of one, is under way: from its being asked
+    /// for until what became of it has been told ([`Self::restore_backup`]).
+    restore_under_way: CopyValue<bool>,
+    /// The restores asked for while another, or an Undo, was under way,
+    /// each made in turn once the one before it is over.
+    restores_waiting: CopyValue<VecDeque<Backup>>,
     /// Sync with the user's own Google Drive, where it is on
     /// ([`crate::sync::ctx`]).
     pub sync: SyncCtx,
@@ -262,8 +277,12 @@ impl AppCtx {
                 before_starter_words: Signal::new(None),
                 stored_settings,
                 mark: CopyValue::new(None),
+                cut_off_carried: CopyValue::new(Vec::new()),
                 retrying: CopyValue::new(false),
                 settings_unsaved: CopyValue::new(false),
+                restore_refused_for: CopyValue::new(BTreeSet::new()),
+                restore_under_way: CopyValue::new(false),
+                restores_waiting: CopyValue::new(VecDeque::new()),
                 sync,
                 app: CopyValue::new(app),
             };
@@ -320,31 +339,47 @@ impl AppCtx {
     }
 
     /// The session or run that had the app is over, and kept as its mark
-    /// holds it: the mark stays as it is until the store has taken it
+    /// holds it: the mark stays, over, until the store has taken it
     /// ([`Self::settle_mark`]). Should the app stop first, or the store have
-    /// no room for it, the next launch keeps it from the mark.
+    /// no room for it, the next launch keeps it from the mark, and knows it
+    /// was ended and kept rather than cut off. Over only here, a page
+    /// closed under a browser's database, which answers only later, left a
+    /// mark that said its session still ran.
     pub fn mark_kept(self) {
-        let mut mark = self.mark;
-        if let Some(open) = mark.write().as_mut() {
-            open.over = true;
-        }
+        let Some(mut open) = self.mark.peek().clone() else {
+            return;
+        };
+        open.over = true;
+        self.write_mark(open);
     }
 
     /// Write this copy's mark as `open` says, carrying every session the
-    /// store has yet to take but the one it holds so far; or, once its
-    /// session or run is over and nothing is left to carry, take it away.
+    /// store has yet to take but the one it holds so far, and what the
+    /// marks of sessions cut off carried that the history has yet to hold
+    /// ([`Self::cut_off_carried`]); or, once its session or run is over and
+    /// nothing is left to carry, take it away.
     fn write_mark(self, mut open: OpenSession) {
         let own = open
             .so_far
             .as_ref()
             .map(|so_far| SessionKey::of(&so_far.result));
-        open.unstored = self
+        let mut unstored: Vec<SessionResult> = self
             .sessions
             .peek()
             .unsaved_sessions()
             .filter(|session| own.as_ref() != Some(&SessionKey::of(session)))
             .cloned()
             .collect();
+        let mut keys: HashSet<SessionKey> = unstored.iter().map(SessionKey::of).collect();
+        keys.extend(own);
+        unstored.extend(
+            self.cut_off_carried
+                .peek()
+                .iter()
+                .filter(|session| keys.insert(SessionKey::of(session)))
+                .cloned(),
+        );
+        open.unstored = unstored;
         let store = self.app().store;
         let mut mark = self.mark;
         if open.over && open.so_far.is_none() && open.unstored.is_empty() {
@@ -360,7 +395,8 @@ impl AppCtx {
     /// a change to the history: a session over and stored, or deleted, is
     /// held by its mark no more, a mark left with nothing to carry goes, and
     /// one short of a session the store has yet to take carries it, should
-    /// the app stop before the store takes it. With no mark held, one is
+    /// the app stop before the store takes it, and so does one short of
+    /// what a mark of a session cut off carried. With no mark held, one is
     /// made for that: a session cut off and kept, say, whose own mark was
     /// taken as it was told of.
     fn settle_mark(self) {
@@ -368,6 +404,7 @@ impl AppCtx {
             .sessions
             .peek()
             .unsaved_sessions()
+            .chain(self.cut_off_carried.peek().iter())
             .map(SessionKey::of)
             .collect();
         let held = self.mark.peek().clone();
@@ -411,6 +448,17 @@ impl AppCtx {
     /// store has looked: at once on a computer or a phone, a moment later
     /// in a browser. What each had done by then is kept, as Exit would have
     /// kept it, and what each carried that the store had yet to take.
+    ///
+    /// What the store holds is taken up first: a copy that stored what its
+    /// mark carries, and stopped before its mark went, kept it already,
+    /// though a copy open all along may not have taken it up yet. Told of
+    /// as kept, it is not stored a second time.
+    ///
+    /// The marks are taken from the store as they are told of, so what
+    /// they carry is held with this copy's mark at once, before the store
+    /// is taken up, which on a computer or a phone is a look on a thread of
+    /// its own, and in a browser a moment later still: until the history
+    /// holds it ([`keep_cut_off`]), nothing else does.
     pub fn tell_of_cut_off(self) {
         // This copy's own mark, which it holds still, is no other copy's
         // cut off, whatever a store says of it.
@@ -422,11 +470,76 @@ impl AppCtx {
         dioxus::core::spawn_forever(async move {
             let mut cut = looking.await;
             cut.retain(|cut| !matches!(cut, CutOff::Marked(open) if Some(open.started_at) == own));
-            if let Some(newest) = CutOff::newest(cut.iter().cloned()) {
-                notices.write().push(Notice::CutOff(newest));
+            if cut.is_empty() {
+                return;
             }
-            keep_cut_off(self, cut).await;
+            self.carry_cut_off(&cut);
+            // Kept whether or not the store could be listed: its marks are
+            // taken from it already, so what they carry is kept here or
+            // nowhere. Stored twice at worst, never lost.
+            self.sync_with_store(move |_listed| {
+                let told = {
+                    let history = self.sessions.peek();
+                    CutOff::newest(
+                        cut.iter()
+                            .filter(|cut| !kept_already(cut, &history))
+                            .cloned(),
+                    )
+                };
+                if let Some(newest) = told {
+                    notices.write().push(Notice::CutOff(newest));
+                }
+                spawn_forever(keep_cut_off(self, cut));
+            });
         });
+    }
+
+    /// Hold what `cut`, the marks of sessions cut off, carry, that the
+    /// history does not hold, with this copy's mark, until the history
+    /// holds it or lets it go ([`Self::let_go_of_carried`]).
+    fn carry_cut_off(self, cut: &[CutOff]) {
+        let mut carried = self.cut_off_carried;
+        {
+            let history = self.sessions.peek();
+            let mut held = carried.write();
+            let mut keys: HashSet<SessionKey> = held.iter().map(SessionKey::of).collect();
+            let sessions = cut
+                .iter()
+                .filter_map(CutOff::so_far)
+                .map(|so_far| &so_far.result)
+                .chain(cut.iter().flat_map(CutOff::unstored));
+            for session in sessions {
+                let key = SessionKey::of(session);
+                if !history.has_key(&key) && keys.insert(key) {
+                    held.push(session.clone());
+                }
+            }
+        }
+        self.settle_mark();
+    }
+
+    /// What `cut`, the marks of sessions cut off, carried is held by the
+    /// history now, or let go: this copy's mark holds it no longer for
+    /// their sake ([`Self::carry_cut_off`]).
+    pub fn let_go_of_carried(self, cut: &[CutOff]) {
+        let keys: HashSet<SessionKey> = cut
+            .iter()
+            .filter_map(CutOff::so_far)
+            .map(|so_far| &so_far.result)
+            .chain(cut.iter().flat_map(CutOff::unstored))
+            .map(SessionKey::of)
+            .collect();
+        let mut carried = self.cut_off_carried;
+        let held = carried
+            .peek()
+            .iter()
+            .any(|session| keys.contains(&SessionKey::of(session)));
+        if held {
+            carried
+                .write()
+                .retain(|session| !keys.contains(&SessionKey::of(session)));
+            self.settle_mark();
+        }
     }
 
     /// Tell of whatever reading the store has set aside since it was last
@@ -563,23 +676,30 @@ impl AppCtx {
     }
 
     /// Bring the history and the settings here in line with the store's,
-    /// then do `then`: at once wherever the store answers at once, as every
-    /// store but a browser's database does.
+    /// then do `then`, told whether the store could be listed, and where it
+    /// could, which of the records it listed that were not here could not
+    /// be read: at once wherever the store answers at once, as every store
+    /// but a browser's database does.
     ///
     /// Whatever another tab, window or copy of the app stored or deleted
     /// since this one last looked is taken up: each record listed that is
     /// not here is read and put in its place, and each here that is no
     /// longer listed goes, if it was deleted by hand. One missing for any
     /// other reason is stored again: missing is never deleted. What is here
-    /// and not stored yet is left as it is, to be stored. The settings are
-    /// merged as [`Self::store_settings`] merges them, writing nothing.
+    /// and not stored yet is left as it is, to be stored. A record this
+    /// build could not read that is no longer listed is no longer held for
+    /// one stored ([`StoredHistory::unread`]). The settings are merged as
+    /// [`Self::store_settings`] merges them, writing nothing.
     ///
     /// A restore and a backup go by what the store holds, not by what this
     /// copy last saw of it: a restore merged with a history another copy
     /// has since deleted from takes a session it brings back for one
     /// already here, and a backup of an old copy's history leaves out what
-    /// was stored since, though it counts as backed up.
-    fn sync_with_store(self, then: impl FnOnce() + 'static) {
+    /// was stored since, though it counts as backed up. Where the store
+    /// cannot be listed, nothing is taken up, and `then` is told so (none);
+    /// a record listed that could not be read is not taken up either, and
+    /// `then` is told of it.
+    fn sync_with_store(self, then: impl FnOnce(Option<Vec<RecordId>>) + 'static) {
         let store = self.app().store;
         let settings_read = store.read_settings();
         self.tell_of_set_aside();
@@ -617,6 +737,7 @@ impl AppCtx {
                 .filter(|id| !unsaved.contains(id))
                 .copied()
                 .collect();
+            let unread_gone: Vec<RecordId> = unread.difference(&there).copied().collect();
             let read = if new.is_empty() {
                 Vec::new()
             } else {
@@ -631,13 +752,20 @@ impl AppCtx {
                 read,
                 missing,
                 forgotten,
+                unread_gone,
             })
         });
         settle_or_spawn(looking, move |looked| {
-            if let Some(looked) = looked {
+            let unread = looked.map(|looked| {
+                let unread = looked
+                    .read
+                    .iter()
+                    .filter_map(|record| record.as_ref().err().copied())
+                    .collect();
                 self.take_up(looked);
-            }
-            then();
+                unread
+            });
+            then(unread);
         });
     }
 
@@ -647,9 +775,17 @@ impl AppCtx {
             read,
             missing,
             forgotten,
+            unread_gone,
         } = looked;
         let forgotten: HashSet<RecordId> = forgotten.into_iter().collect();
         let mut sessions = self.sessions;
+        let gone = {
+            let history = sessions.peek();
+            unread_gone.iter().any(|id| history.unread().contains(id))
+        };
+        if gone {
+            sessions.write().forget_unread(&unread_gone);
+        }
         let changes = {
             let history = sessions.peek();
             read.iter().any(|record| match record {
@@ -716,7 +852,7 @@ impl AppCtx {
     /// Take up what the store holds now, whatever it says of having
     /// changed: as sync has just changed it ([`crate::sync::ctx`]).
     pub(crate) fn take_up_store(self) {
-        self.sync_with_store(|| {});
+        self.sync_with_store(|_| {});
     }
 
     /// Take up whatever another tab, window or copy of the app stored or
@@ -725,7 +861,7 @@ impl AppCtx {
     /// the page comes back into sight.
     pub fn take_up_changes(self) {
         if self.app().store.history_changed() {
-            self.sync_with_store(|| {});
+            self.sync_with_store(|_| {});
         }
     }
 
@@ -857,22 +993,28 @@ impl AppCtx {
     }
 
     /// Add `session`, just finished here, to the history, after every
-    /// session in it, and store it, then do `then` with what became of it.
-    /// It is kept here until the store has taken it, and carried by this
-    /// copy's mark meanwhile.
-    pub fn keep_finished(self, session: SessionResult, then: impl FnOnce(HistorySaved) + 'static) {
+    /// session in it, and store it, then do `then` with what became of it;
+    /// and hand back the record it is kept under, if it could be written
+    /// down. It is kept here until the store has taken it, and carried by
+    /// this copy's mark meanwhile.
+    pub fn keep_finished(
+        self,
+        session: SessionResult,
+        then: impl FnOnce(HistorySaved) + 'static,
+    ) -> Option<RecordId> {
         let mut sessions = self.sessions;
         let newest = sessions.peek().newest_id();
         let Some(record) = Record::of(&session, |json| {
             RecordId::next(session.timestamp, newest, json)
         }) else {
             then(HistorySaved::Failed("it could not be written down.".into()));
-            return;
+            return None;
         };
+        let id = record.id;
         {
             let mut history = sessions.write();
-            history.insert(record.id, session);
-            history.mark_unsaved(record.id);
+            history.insert(id, session);
+            history.mark_unsaved(id);
         }
         self.change_history(
             HistoryChange {
@@ -881,6 +1023,7 @@ impl AppCtx {
             },
             then,
         );
+        Some(id)
     }
 
     /// Add `kept`, sessions from elsewhere, each as it is to be stored and
@@ -907,6 +1050,24 @@ impl AppCtx {
             self.settle_mark();
         }
         held
+    }
+
+    /// Let go of `gone`, sessions held from elsewhere
+    /// ([`Self::hold_from_elsewhere`]) that the store says were deleted by
+    /// hand under the records they would be stored as: out of the history,
+    /// and out of this copy's mark.
+    pub fn let_go_of_held(self, gone: &HashSet<RecordId>) {
+        if gone.is_empty() {
+            return;
+        }
+        let mut sessions = self.sessions;
+        {
+            let mut history = sessions.write();
+            for id in gone {
+                history.remove(*id);
+            }
+        }
+        self.settle_mark();
     }
 
     /// Store `held`, sessions held here until the store takes them
@@ -1054,7 +1215,7 @@ impl AppCtx {
     /// what the app shows, as it did before stores were read a session at
     /// a time. It is how the sessions only the app holds are kept safe.
     pub fn save_backup(self) {
-        self.sync_with_store(move || self.save_backup_now());
+        self.sync_with_store(move |_| self.save_backup_now());
     }
 
     fn save_backup_now(self) {
@@ -1123,18 +1284,187 @@ impl AppCtx {
     /// Put back what `backup` holds: every session of it not already here,
     /// and its settings, level and all, where it holds any, but for this
     /// device's own ([`TrainingSettings::keep_device_settings`]). Until
-    /// another restore, Undo puts both back as they were. A store that
-    /// cannot take the history leaves everything as it was and says why.
+    /// another restore is asked for, Undo puts both back as they were
+    /// ([`Self::undo_restore`]). A store that cannot take the history
+    /// leaves everything as it was and says why, and so does one that
+    /// cannot be listed for now: merged with what this copy last saw of the
+    /// history, the backup would bring back, a second time, a session
+    /// another copy stored since. So does one that lists a record it cannot
+    /// read for now, the first time a restore finds it so: one still unread
+    /// at a later restore is taken as one that cannot be read at all, and
+    /// refuses no restore again. A session of the backup that a record
+    /// stored here may hold, though this build cannot read it, is looked at
+    /// first ([`Self::restore_beside`]).
     ///
     /// Each session it adds is a record where it finished
     /// ([`RecordId::placed`]), so two copies restoring one backup store it
     /// once; one it fills in is a record in its place
     /// ([`RecordId::beside`]), the one it fills in deleted.
+    ///
+    /// One at a time: a restore asked for while another is under way, as a
+    /// store that takes a moment to list or change the history leaves one,
+    /// or while the Undo of one is, is made once that is over, merged with
+    /// the history it left. Merged with a history short of what the other
+    /// brings back, it would take that for its own, and its Undo take it
+    /// back as well; merged with one that still holds what the Undo takes
+    /// back, it would take that for sessions already here, and the Undo
+    /// delete them.
     pub fn restore_backup(self, backup: Backup) {
-        self.sync_with_store(move || self.restore_now(backup));
+        // The last restore asked for: the one before it is undone no more,
+        // and its message, while it is up, offers no Undo that would do
+        // nothing.
+        let mut before_restore = self.before_restore;
+        if before_restore.peek().is_some() {
+            before_restore.set(None);
+            self.toasts.withdraw(ToastAction::UndoRestore);
+        }
+        let mut under_way = self.restore_under_way;
+        if *under_way.peek() {
+            let mut waiting = self.restores_waiting;
+            waiting.write().push_back(backup);
+            return;
+        }
+        under_way.set(true);
+        self.sync_with_store(move |unread| match unread {
+            Some(unread) => self.restore_beside(backup, unread),
+            None => self.restore_refused(match why_not_stored(&HistorySaved::Held) {
+                Some(why) => format!("Nothing was restored: {why}."),
+                None => "Nothing was restored.".into(),
+            }),
+        });
     }
 
-    fn restore_now(self, backup: Backup) {
+    /// Restore `backup` ([`Self::restore_backup`]), the store looked at,
+    /// `unread` being the records it listed and could not read.
+    ///
+    /// Each record here this build could not read, as the app opened or as
+    /// a look found it, that is named for when a session of the backup not
+    /// here finished is read again first, as that session may be its own:
+    /// - one that reads now, as one a moment's failure kept from being read
+    ///   does, is taken up, the backup's session merged with it, and the
+    ///   user told;
+    /// - one that holds a session this build cannot read, as a later build
+    ///   stores one, leaves out each session of the backup that finished
+    ///   when, and on the day, it says its own did, and the user is told:
+    ///   merged with a history short of it, the backup would store that
+    ///   session a second time, beside the record a later build shows;
+    /// - one that holds no session at all, damaged, or that still cannot be
+    ///   read, as it could not before, leaves the backup's session to be
+    ///   restored beside it: no build may ever read it, and the backup may
+    ///   hold the only copy of that session there is.
+    ///
+    /// What a record says is taken at its word: one damaged so that it is
+    /// JSON still, saying when and on what day its session finished, leaves
+    /// the backup's session out as a later build's would. A record is named
+    /// for when its session finished, but for one a clock set back placed
+    /// after the newest ([`RecordId::next`]), which is not read again here.
+    /// And what the app told of unread records as it opened is not taken
+    /// back where one reads now.
+    fn restore_beside(self, backup: Backup, unread: Vec<RecordId>) {
+        let again: Vec<RecordId> = {
+            let history = self.sessions.peek();
+            let finished: HashSet<u64> = backup
+                .sessions
+                .iter()
+                .filter(|session| !history.has_key(&SessionKey::of(session)))
+                .map(|session| session.timestamp)
+                .collect();
+            history
+                .unread()
+                .iter()
+                .filter(|id| finished.contains(&(id.order / 1000)))
+                .copied()
+                .collect()
+        };
+        if again.is_empty() {
+            self.restore_unless_unread(backup, unread, Beside::default());
+            return;
+        }
+        let reading = self.app().store.read_records(again);
+        settle_or_spawn(reading, move |read| {
+            let mut beside = Beside::default();
+            let mut reads_now = Vec::new();
+            // One that still cannot be read is left as it is, as damaged.
+            for record in read.into_iter().flatten() {
+                match read_record(&record.json) {
+                    Some(session) => reads_now.push((record.id, session)),
+                    None => beside.later.extend(finished_as(&record.json)),
+                }
+            }
+            beside.read_now = reads_now.len();
+            if !reads_now.is_empty() {
+                let mut sessions = self.sessions;
+                let mut history = sessions.write();
+                for (id, session) in reads_now {
+                    history.read_after_all(id, session);
+                }
+            }
+            self.restore_unless_unread(backup, unread, beside);
+        });
+    }
+
+    /// Restore `backup` as `beside` says ([`Self::restore_beside`]), unless
+    /// the store listed a record it could not read for now, `unread`, that
+    /// no restore was refused for yet: that refuses this one, and the user
+    /// is told why, and that asking again goes ahead.
+    fn restore_unless_unread(self, backup: Backup, unread: Vec<RecordId>, beside: Beside) {
+        let mut refused_for = self.restore_refused_for;
+        let new: Vec<RecordId> = unread
+            .into_iter()
+            .filter(|id| !refused_for.peek().contains(id))
+            .collect();
+        if new.is_empty() {
+            self.restore_now(backup, beside);
+        } else {
+            refused_for.write().extend(new);
+            self.restore_refused(
+                "Nothing was restored: a session stored here could not be read just now, and the backup could store it a second time. Restore it again to go ahead all the same.".into(),
+            );
+        }
+    }
+
+    /// Nothing is restored, and the user is told so, `said`
+    /// ([`Self::restore_backup`]).
+    fn restore_refused(self, said: String) {
+        self.toasts.show(said);
+        self.restore_over();
+    }
+
+    /// Whether a restore, or the Undo of one, is under way
+    /// ([`Self::restore_backup`]).
+    pub fn restore_under_way(self) -> bool {
+        *self.restore_under_way.peek()
+    }
+
+    /// The restore under way, or the Undo of one, is over, what became of
+    /// it told: the next restore asked for meanwhile is made next, in a
+    /// task of its own, and is under way until then, so that one asked for
+    /// in between waits behind it. What became of a change is told of as
+    /// soon as the store answers, before it is taken up here
+    /// ([`Self::change_history`]): what rode along with it marked stored,
+    /// and what the store let go for room gone. Made then and there, the
+    /// next would be merged with a history that still holds what the store
+    /// let go, and take it for a session lost in passing, to be stored
+    /// again.
+    fn restore_over(self) {
+        let mut under_way = self.restore_under_way;
+        let mut waiting = self.restores_waiting;
+        let next = waiting.write().pop_front();
+        let Some(next) = next else {
+            under_way.set(false);
+            return;
+        };
+        spawn_forever(async move {
+            under_way.set(false);
+            self.restore_backup(next);
+        });
+    }
+
+    /// Restore `backup` ([`Self::restore_backup`]), as `beside` says: each
+    /// session of it that a record stored here, which this build cannot
+    /// read, says it holds is left out, where the history holds none like
+    /// it ([`Self::restore_beside`]).
+    fn restore_now(self, backup: Backup, beside: Beside) {
         // As of when it was saved, or now, if a clock set ahead says later.
         let saved_at = backup.saved_at.min(now_ms());
         let at = now_ms();
@@ -1143,17 +1473,28 @@ impl AppCtx {
             restore: true,
             ..HistoryChange::default()
         };
-        let (backed_up, merged, filled_ids) = {
+        let (backed_up, merged, filled_ids, beside_unread) = {
             let history = self.sessions.peek();
             let backed_up = covers_up_to(&backup.sessions, &history, saved_at);
-            let merged = merge_sessions(&history, backup.sessions);
+            let (sessions, left_beside): (Vec<SessionResult>, Vec<SessionResult>) =
+                backup.sessions.into_iter().partition(|session| {
+                    let key = SessionKey::of(session);
+                    !beside.later.contains(&key) || history.has_key(&key)
+                });
+            // Each session once, however often the backup holds it.
+            let beside_unread = left_beside
+                .iter()
+                .map(SessionKey::of)
+                .collect::<HashSet<_>>()
+                .len();
+            let merged = merge_sessions(&history, sessions);
             // Each it fills in by its record, where it is now.
             let filled_ids: Vec<Option<RecordId>> = merged
                 .filled
                 .iter()
                 .map(|fill| history.id_at(fill.at))
                 .collect();
-            (backed_up, merged, filled_ids)
+            (backed_up, merged, filled_ids, beside_unread)
         };
         let mut added = Vec::new();
         for session in merged.added {
@@ -1194,6 +1535,7 @@ impl AppCtx {
         }
         let restored_at = backup.saved_at;
         let restored_settings = backup.settings;
+        let left_out = backup.left_out;
         self.change_history(change, move |saved| {
             self.restored(
                 saved,
@@ -1201,22 +1543,30 @@ impl AppCtx {
                     added,
                     filled,
                     brought,
+                    left_out,
+                    beside_unread,
+                    read_now: beside.read_now,
                     backed_up,
                     saved_at,
                     restored_at,
                     settings: restored_settings,
                 },
             );
+            self.restore_over();
         });
     }
 
     /// What a restore comes to, once the store has said what became of it
-    /// ([`Self::restore_backup`]).
+    /// ([`Self::restore_backup`]): its Undo offered, unless another restore
+    /// was asked for while it was under way.
     fn restored(self, saved: HistorySaved, restoring: Restoring) {
         let Restoring {
             added,
             filled,
             brought,
+            left_out,
+            beside_unread,
+            read_now,
             backed_up,
             saved_at,
             restored_at,
@@ -1287,11 +1637,14 @@ impl AppCtx {
             from
         };
         let (added_count, filled_count) = (added.len(), filled.len());
+        // Every session in it was here already: it brought none, and left
+        // none out, which may not be here.
+        let all_here = !brought && left_out == 0 && beside_unread == 0 && read_now == 0;
         let mut text = match (added_count, filled_count, with_settings) {
-            (0, 0, true) if !brought => {
+            (0, 0, true) if all_here => {
                 format!("Restored your settings{from}. Every session in it was already here.")
             }
-            (0, 0, false) if !brought => "Every session in it was already here.".into(),
+            (0, 0, false) if all_here => "Every session in it was already here.".into(),
             (0, 0, true) => format!("Restored your settings{from}."),
             (0, 0, false) => format!("Restored no sessions{from}."),
             (0, _, true) => format!(
@@ -1313,16 +1666,31 @@ impl AppCtx {
                 counted(added_count, "session")
             ),
         };
+        if let Some(told) = Backup::told_left_out(left_out) {
+            text = format!("{text} {told}");
+        }
+        if let Some(told) = told_beside_unread(beside_unread) {
+            text = format!("{text} {told}");
+        }
+        if let Some(told) = told_read_now(read_now) {
+            text = format!("{text} {told}");
+        }
         if let Some(problem) = saved.problem() {
             text = format!("{text} {problem}");
         }
-        let mut before_restore = self.before_restore;
-        before_restore.set(Some(Restored {
-            added,
-            filled,
-            settings: before,
-        }));
-        self.toasts.show_with(text, ToastAction::UndoRestore);
+        // A restore asked for while this one was under way, and waiting
+        // for it, is the last one asked for: this one is undone no more.
+        if self.restores_waiting.peek().is_empty() {
+            let mut before_restore = self.before_restore;
+            before_restore.set(Some(Restored {
+                added,
+                filled,
+                settings: before,
+            }));
+            self.toasts.show_with(text, ToastAction::UndoRestore);
+        } else {
+            self.toasts.show(text);
+        }
     }
 
     /// Put the history and settings back as they were before the last
@@ -1330,11 +1698,23 @@ impl AppCtx {
     /// under the record it had. Whatever else the history took up since,
     /// here or in another copy of the app, stays: only what the restore
     /// changed, and is here still, is undone.
+    ///
+    /// Only until another restore is asked for ([`Self::restore_backup`]):
+    /// from then on there is nothing to undo, and an Undo clicked while
+    /// that one is under way, its message still up, does nothing. The
+    /// restore asked for is merged with a history that holds what this
+    /// would take back, and takes it for sessions already here: undone
+    /// beneath it, or once it is made, they would be lost, though the
+    /// backup it restores holds them. And an Undo is under way as a
+    /// restore is, until the store has said what became of it: a restore
+    /// asked for meanwhile waits for it.
     pub fn undo_restore(self) {
         let mut before_restore = self.before_restore;
         let Some(restored) = before_restore.write().take() else {
             return;
         };
+        let mut under_way = self.restore_under_way;
+        under_way.set(true);
         let at = now_ms();
         let mut change = HistoryChange::default();
         let (mut gone, mut back) = (Vec::new(), Vec::new());
@@ -1366,8 +1746,13 @@ impl AppCtx {
         let (mut sessions, toasts) = (self.sessions, self.toasts);
         self.change_history(change, move |saved| {
             if let Some(why) = why_not_stored(&saved) {
-                before_restore.set(Some(restored));
+                // Still to undo, unless another restore was asked for
+                // meanwhile.
+                if self.restores_waiting.peek().is_empty() {
+                    before_restore.set(Some(restored));
+                }
                 toasts.show(format!("The restore could not be undone: {why}."));
+                self.restore_over();
                 return;
             }
             {
@@ -1386,6 +1771,7 @@ impl AppCtx {
                 let mut settings = self.settings;
                 settings.set(before);
             }
+            self.restore_over();
         });
     }
 
@@ -1502,6 +1888,9 @@ struct Looked {
     missing: Vec<RecordId>,
     /// Of those, the ones deleted by hand.
     forgotten: Vec<RecordId>,
+    /// Each record here this build could not read that was no longer
+    /// listed.
+    unread_gone: Vec<RecordId>,
 }
 
 /// A restore on its way to the store ([`AppCtx::restored`]).
@@ -1510,6 +1899,15 @@ struct Restoring {
     filled: Vec<FilledIn>,
     /// Whether the backup held anything the history did not.
     brought: bool,
+    /// How many of its sessions this version could not read, and left out.
+    left_out: usize,
+    /// How many of its sessions it left out, as records stored here that
+    /// this build cannot read say they hold them
+    /// ([`AppCtx::restore_beside`]).
+    beside_unread: usize,
+    /// How many records here that could not be read before read now, and
+    /// were taken up ([`AppCtx::restore_beside`]).
+    read_now: usize,
     /// Whether it holds everything that had finished here by then.
     backed_up: bool,
     /// When it was saved, as the backup mark counts it.
@@ -1540,6 +1938,62 @@ struct FilledIn {
     was: SessionResult,
 }
 
+/// What a restore found of the records here that this build could not read
+/// ([`AppCtx::restore_beside`]).
+#[derive(Default)]
+struct Beside {
+    /// The sessions records here that this build cannot read say they
+    /// hold: those of the backup are left out.
+    later: HashSet<SessionKey>,
+    /// How many records here that could not be read before read now.
+    read_now: usize,
+}
+
+/// When, and on what day, the session a record holds says it finished,
+/// where the record is JSON that says so, though this build cannot read it
+/// as a session: one a later build stored, most likely
+/// ([`AppCtx::restore_beside`]). A damaged record says nothing, but for
+/// one damaged so that it is JSON still and says both.
+fn finished_as(json: &str) -> Option<SessionKey> {
+    #[derive(serde::Deserialize)]
+    struct Finished {
+        timestamp: u64,
+        date: String,
+    }
+    serde_json::from_str::<Finished>(json)
+        .ok()
+        .map(|finished| SessionKey::new(finished.timestamp, finished.date))
+}
+
+/// What to say of the sessions of a backup a restore left out, `count` of
+/// them, as records stored here that this build cannot read say they hold
+/// them ([`AppCtx::restore_beside`]): nothing, where there are none.
+fn told_beside_unread(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some(
+            "1 session in it was left out as stored here already: a record from the same moment is one this version cannot read, perhaps that session saved by a newer Dust, which shows it."
+                .to_string(),
+        ),
+        count => Some(format!(
+            "{count} sessions in it were left out as stored here already: records from the same moments are ones this version cannot read, perhaps those sessions saved by a newer Dust, which shows them."
+        )),
+    }
+}
+
+/// What to say of the records here that could not be read before, `count`
+/// of them, that a restore found it could read now, and took up
+/// ([`AppCtx::restore_beside`]): nothing, where there are none.
+fn told_read_now(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("1 session stored here that could not be read before reads now.".to_string()),
+        count => Some(format!(
+            "{count} sessions stored here that could not be read before read now."
+        )),
+    }
+}
+
 /// Whether `backup`, saved at `saved_at`, holds every one of `here` that
 /// had finished by then: only then is all there was backed up as of it.
 fn covers_up_to(backup: &[SessionResult], here: &[SessionResult], saved_at: u64) -> bool {
@@ -1547,6 +2001,23 @@ fn covers_up_to(backup: &[SessionResult], here: &[SessionResult], saved_at: u64)
     here.iter()
         .filter(|session| session.timestamp <= saved_at)
         .all(|session| held.contains(&SessionKey::of(session)))
+}
+
+/// Whether `cut` is a mark of a session or run ended and kept, every
+/// session it carries held by `history` already: left behind only for want
+/// of the store's word that it had taken them, as a page closed under a
+/// browser's database leaves it. Nothing of it was cut off, nor lost.
+fn kept_already(cut: &CutOff, history: &StoredHistory) -> bool {
+    let CutOff::Marked(open) = cut else {
+        return false;
+    };
+    open.over
+        && open
+            .so_far
+            .iter()
+            .map(|so_far| &so_far.result)
+            .chain(&open.unstored)
+            .all(|session| history.has_key(&SessionKey::of(session)))
 }
 
 /// Why a change to the history was not stored at all, in words that fit
@@ -1585,7 +2056,11 @@ pub enum Notice {
 /// One value, so the screen can never show both.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Finished {
-    Kept(Box<SessionResult>),
+    /// Kept, with the record it is kept under in the history, by which its
+    /// place there and on the board is found, as two sessions can finish at
+    /// one moment: none where it could not be written down, and so is in
+    /// no history.
+    Kept(Box<SessionResult>, Option<RecordId>),
     /// A run that worked nobody, so nothing was kept.
     NothingKept,
 }
@@ -1595,7 +2070,7 @@ impl Finished {
     /// The session kept, if one was.
     pub fn kept(self) -> Option<SessionResult> {
         match self {
-            Self::Kept(result) => Some(*result),
+            Self::Kept(result, _) => Some(*result),
             Self::NothingKept => None,
         }
     }
@@ -1715,6 +2190,19 @@ impl Toasts {
         self.0.cloned()
     }
 
+    /// The message up, where it offers `action`, offers it no more: what it
+    /// says stays up, with nothing to do about it.
+    pub fn withdraw(self, action: ToastAction) {
+        let mut shown = self.0;
+        let offers = shown
+            .peek()
+            .as_ref()
+            .is_some_and(|toast| toast.action == Some(action));
+        if offers && let Some(toast) = shown.write().as_mut() {
+            toast.action = None;
+        }
+    }
+
     /// Take `toast` down, unless a newer one has taken its place.
     pub fn dismiss(self, toast: &Toast) {
         let mut shown = self.0;
@@ -1787,7 +2275,7 @@ mod tests {
         /// Take up what the store holds, as a screen that shows the history
         /// does as it opens.
         fn sync(&self) {
-            self.act(|ctx| ctx.sync_with_store(|| {}));
+            self.act(|ctx| ctx.sync_with_store(|_| {}));
         }
 
         /// The days of the sessions this copy shows.
@@ -1960,6 +2448,7 @@ mod tests {
                 saved_at: 0,
                 settings: Some(TrainingSettings::default()),
                 sessions: vec![day(1), day(2)],
+                left_out: 0,
             })
         });
         b.finish(day(8));
@@ -2070,6 +2559,7 @@ mod tests {
                 saved_at: 0,
                 settings: Some(TrainingSettings::default()),
                 sessions: vec![day(1), day(2)],
+                left_out: 0,
             })
         });
         assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
@@ -2108,17 +2598,187 @@ mod tests {
     #[test]
     fn two_tabs_restoring_one_backup_store_each_session_once() {
         let store = holding([3]);
-        let (a, b) = (Tab::on(&store), Tab::on(&store));
-        // Neither can see what the other stored as it restores.
-        store.unlistable.set(true);
+        let (mut a, mut b) = (Tab::on(&store), Tab::on(&store));
+        // Neither can see what the other stored as it restores: both are
+        // asked for before either is made, as a browser's database makes
+        // each a moment after it is asked for.
+        store.deferred.set(true);
         restore(&a, [1, 2]);
         restore(&b, [1, 2]);
-        store.unlistable.set(false);
+        store.deferred.set(false);
+        store.settle();
+        a.pump();
+        b.pump();
         assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
         a.sync();
         b.sync();
         assert_eq!(a.shown(), [1, 2, 3]);
         assert_eq!(b.shown(), [1, 2, 3]);
+    }
+
+    /// A restore asked for while another is under way, as a browser's
+    /// database makes the first a moment after it is asked for, waits for
+    /// it, and is merged with the history it restored: it says what it
+    /// brought itself, and its Undo takes back that alone. Merged with a
+    /// history short of the first's sessions, it took them for its own,
+    /// said it restored them, and its Undo deleted them as well.
+    #[test]
+    fn a_restore_asked_for_while_another_is_under_way_waits_for_it() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        store.deferred.set(true);
+        restore(&a, [1, 2]);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(store.waiting(), 1, "the second waits for the first");
+        store.settle();
+        a.pump();
+        assert_eq!(store.waiting(), 1, "then it is made");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 5]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        store.deferred.set(false);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
+        assert_eq!(a.shown(), [1, 2, 5]);
+    }
+
+    /// A restore's message offers its Undo no more once another restore is
+    /// asked for, though it stays up while the other is under way: the
+    /// Undo would undo nothing, and a click on it did nothing, without a
+    /// word.
+    #[test]
+    fn a_restores_undo_is_taken_off_its_message_as_another_is_asked_for() {
+        let store = holding([5]);
+        let a = Tab::on(&store);
+        restore(&a, [1]);
+        assert_eq!(
+            a.toast().and_then(|toast| toast.action),
+            Some(ToastAction::UndoRestore)
+        );
+        store.deferred.set(true);
+        restore(&a, [1]);
+        let toast = a.toast().expect("still up");
+        assert_eq!(toast.text, "Restored 1 session and your settings.");
+        assert_eq!(toast.action, None, "nothing to undo");
+    }
+
+    /// A restore asked for while the Undo of the one before it is under
+    /// way, as a browser's database makes the Undo a moment after it is
+    /// asked for, waits for it, and is merged with the history the Undo
+    /// left: what both hold is restored. Merged with a history that still
+    /// held it, it took those sessions for ones already here, and the Undo
+    /// deleted them: lost, though the backup restored holds them.
+    #[test]
+    fn a_restore_asked_for_while_an_undo_is_under_way_waits_for_it() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        restore(&a, [1, 2]);
+        store.deferred.set(true);
+        a.act(AppCtx::undo_restore);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(store.waiting(), 1, "the restore waits for the Undo");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [5], "undone");
+        assert_eq!(store.waiting(), 1, "then the restore is made");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 5]);
+        assert_eq!(a.shown(), [1, 2, 3, 5]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 3 sessions and your settings."
+        );
+    }
+
+    /// The Undo of a restore, its message still up, undoes nothing once
+    /// another restore is asked for: that one is merged with a history
+    /// that holds what the Undo would take back, and takes those sessions
+    /// for ones already here. Undone beneath it, they were deleted, lost
+    /// though the backup under way holds them. Its own Undo takes back
+    /// what it brought, and no more.
+    #[test]
+    fn an_undo_clicked_while_another_restore_is_under_way_does_nothing() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        restore(&a, [1, 2]);
+        store.deferred.set(true);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(store.waiting(), 1, "the second under way");
+        a.act(AppCtx::undo_restore);
+        assert_eq!(store.waiting(), 1, "nothing undone");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 5]);
+        assert_eq!(a.shown(), [1, 2, 3, 5]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        store.deferred.set(false);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
+        assert_eq!(a.shown(), [1, 2, 5]);
+    }
+
+    /// A restore made while another, asked for after it, waits its turn
+    /// offers no Undo: the one waiting is the last restore asked for, and
+    /// is made at once, merged with what this one brought back. An Undo of
+    /// this one beneath it deleted what both hold.
+    #[test]
+    fn a_restore_made_while_another_waits_offers_no_undo() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        store.deferred.set(true);
+        restore(&a, [1, 2]);
+        restore(&a, [1, 2]);
+        store.settle();
+        a.pump();
+        assert_eq!(store.waiting(), 1, "the second under way");
+        let told = a.toast().expect("told");
+        assert_eq!(told.text, "Restored 2 sessions and your settings.");
+        assert_eq!(told.action, None);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(store.waiting(), 1, "nothing undone");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
+        assert_eq!(a.shown(), [1, 2, 5]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored your settings. Every session in it was already here."
+        );
+    }
+
+    /// A restore waiting for another is made once what became of the
+    /// other's change has been taken up whole: a session the store let go
+    /// for room, as a browser's page storage lets the oldest go, is gone
+    /// from the history it is merged with, not taken for one lost in
+    /// passing and stored again. It was made as soon as the other was told
+    /// of, before the session let go had gone from here, and the store was
+    /// asked to keep it twice more.
+    #[test]
+    fn a_restore_waiting_for_another_is_made_once_that_ones_change_is_taken_up() {
+        let store = holding([3, 4, 5]);
+        store.page_room.set(Some(3));
+        let mut a = Tab::on(&store);
+        store.deferred.set(true);
+        restore(&a, [6]);
+        restore(&a, [7]);
+        store.settle();
+        a.pump();
+        assert_eq!(a.shown(), [4, 5, 6], "3 let go for room");
+        assert_eq!(store.waiting(), 1, "the second restore, and nothing else");
+        let writes = store.record_writes.get();
+        store.settle();
+        a.pump();
+        assert_eq!(store.record_writes.get(), writes + 1, "7 alone");
+        assert_eq!(days(&store.load_sessions()), [5, 6, 7]);
+        assert_eq!(a.shown(), [5, 6, 7]);
     }
 
     /// A restore takes the backup's settings whole, over what another tab
@@ -2139,6 +2799,7 @@ mod tests {
                 saved_at: 0,
                 settings: Some(backup.clone()),
                 sessions: Vec::new(),
+                left_out: 0,
             });
             ctx.store_settings();
         });
@@ -2161,6 +2822,7 @@ mod tests {
             saved_at: stamp(20),
             settings: Some(TrainingSettings::default()),
             sessions,
+            left_out: 0,
         };
         a.act(|ctx| ctx.restore_backup(from_elsewhere(vec![day(15)])));
         assert_eq!(store.last_backup(), None);
@@ -2305,6 +2967,7 @@ mod tests {
                 saved_at: 0,
                 settings: None,
                 sessions: vec![day(1)],
+                left_out: 0,
             })
         });
         assert_eq!(days(&store.load_sessions()), [1, 3]);
@@ -2338,6 +3001,7 @@ mod tests {
                 saved_at: crate::time::now_ms() + year,
                 settings: None,
                 sessions: vec![day(1)],
+                left_out: 0,
             })
         });
         let marked = store.last_backup().expect("marked");
@@ -2357,6 +3021,7 @@ mod tests {
                 saved_at: stamp(20),
                 settings: Some(TrainingSettings::default()),
                 sessions: vec![day(1), day(2)],
+                left_out: 0,
             })
         });
         assert_eq!(store.last_backup(), Some(stamp(30)));
@@ -2371,8 +3036,303 @@ mod tests {
                 saved_at: 0,
                 settings: Some(TrainingSettings::default()),
                 sessions,
+                left_out: 0,
             })
         });
+    }
+
+    /// A restore asked for while the store cannot be listed restores
+    /// nothing, and says why: merged with what this tab last saw of the
+    /// history, it took a session another tab stored since for one the
+    /// backup brings back, and stored it a second time, under the name a
+    /// restore gives it. Once the store can be listed, the restore brings
+    /// back what is missing, each session once.
+    #[test]
+    fn a_restore_while_the_store_cannot_be_listed_stores_nothing_twice() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(2));
+        store.unlistable.set(true);
+        restore(&a, [1, 2, 3]);
+        store.unlistable.set(false);
+        assert_eq!(days(&store.load_sessions()), [1, 2], "nothing restored");
+        assert!(
+            a.toast()
+                .is_some_and(|toast| toast.text.starts_with("Nothing was restored:")),
+            "{:?}",
+            a.toast()
+        );
+        assert_eq!(a.shown(), [1]);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3], "each once");
+        assert_eq!(a.shown(), [1, 2, 3]);
+    }
+
+    /// A restore asked for while a session another tab stored, listed by
+    /// the store, cannot be read for a moment restores nothing either, and
+    /// says why: merged with a history short of it, the backup brought it
+    /// back a second time. Asked for again, once it reads, the restore
+    /// brings back what is missing, each session once. One that still
+    /// cannot be read is taken as one that cannot be read at all, and
+    /// refuses no restore a second time.
+    #[test]
+    fn a_restore_while_a_listed_session_cannot_be_read_stores_nothing_twice() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(2));
+        store.held_open.borrow_mut().insert(b.id_of(2));
+        restore(&a, [1, 2, 3]);
+        assert!(
+            a.toast()
+                .is_some_and(|toast| toast.text.starts_with("Nothing was restored:")),
+            "{:?}",
+            a.toast()
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2], "nothing restored");
+        store.held_open.borrow_mut().clear();
+        restore(&a, [1, 2, 3]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3], "each once");
+        assert_eq!(a.shown(), [1, 2, 3]);
+
+        b.finish(day(4));
+        store.held_open.borrow_mut().insert(b.id_of(4));
+        restore(&a, [5]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4], "refused once");
+        restore(&a, [5]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4, 5]);
+    }
+
+    /// What a later build stores of a session finished on day 2, in a form
+    /// this build cannot read.
+    fn day_2_as_a_later_build_stores_it() -> String {
+        format!(
+            r#"{{"date":"2026-10-02","timestamp":{},"by":"a later build"}}"#,
+            stamp(2)
+        )
+    }
+
+    /// What a restore says of `count` sessions it left out beside a later
+    /// build's records.
+    fn left_beside(count: usize) -> String {
+        super::told_beside_unread(count).expect("some left out")
+    }
+
+    /// A restore leaves out the backup's session from the moment of a
+    /// record stored here that this build cannot read, where the record
+    /// says it holds a session that finished then, on the same day, as a
+    /// later build stores one: a later build reads it, and would show that
+    /// session twice. The user is told, and the record is left as it is,
+    /// however often the restore is asked for. The backup stored each such
+    /// session a second time, beside its record.
+    #[test]
+    fn a_restore_stores_nothing_twice_beside_a_session_a_later_build_stored() {
+        let store = holding([1]);
+        let later = day_2_as_a_later_build_stores_it();
+        let unread = store.plant_unreadable_at(stamp(2), &later);
+        let a = Tab::on(&store);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            format!("Restored 1 session and your settings. {}", left_beside(1))
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 3]);
+        assert_eq!(store.record(unread), Some(later), "left as it is");
+        restore(&a, [2]);
+        assert_eq!(days(&store.load_sessions()), [1, 3], "however often");
+        assert_eq!(a.shown(), [1, 3]);
+    }
+
+    /// So does one that a later build stored after this copy opened, which
+    /// the restore's own look finds and cannot read.
+    #[test]
+    fn a_restore_stores_nothing_twice_beside_a_session_a_later_build_stored_since_it_opened() {
+        let store = holding([1]);
+        let a = Tab::on(&store);
+        let later = day_2_as_a_later_build_stores_it();
+        let unread = store.plant_unreadable_at(stamp(2), &later);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(days(&store.load_sessions()), [1, 3]);
+        assert_eq!(store.record(unread), Some(later));
+        assert!(a.act(|ctx| ctx.sessions.peek().unread().contains(&unread)));
+    }
+
+    /// A backup that holds such a session twice, as one made of a history
+    /// that had stored it twice does, is told of as leaving out one.
+    #[test]
+    fn a_session_left_out_beside_a_later_builds_record_is_told_of_once() {
+        let store = holding([1]);
+        store.plant_unreadable_at(stamp(2), &day_2_as_a_later_build_stores_it());
+        let a = Tab::on(&store);
+        restore(&a, [1, 2, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            format!("Restored 1 session and your settings. {}", left_beside(1))
+        );
+    }
+
+    /// A later build's record from the same moment that says its session
+    /// finished on another day holds another session: the backup's is
+    /// brought back.
+    #[test]
+    fn a_restore_brings_back_a_session_a_later_builds_record_of_another_day_is_not() {
+        let store = holding([1]);
+        let other_day = format!(
+            r#"{{"date":"2026-10-03","timestamp":{},"by":"a later build"}}"#,
+            stamp(2)
+        );
+        store.plant_unreadable_at(stamp(2), &other_day);
+        let a = Tab::on(&store);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+    }
+
+    /// A restore brings back the backup's session from the moment of a
+    /// record stored here that holds no session at all, damaged: no build
+    /// reads that record, and the backup may hold the only copy of its
+    /// session there is. The record is left as it is.
+    #[test]
+    fn a_restore_brings_back_a_session_whose_record_here_is_damaged() {
+        let store = holding([1]);
+        let damaged = store.plant_unreadable_at(stamp(2), "{ damaged");
+        let a = Tab::on(&store);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 2 sessions and your settings."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        assert_eq!(store.record(damaged).as_deref(), Some("{ damaged"));
+    }
+
+    /// So does one damaged so that it is JSON still, but says no moment its
+    /// session finished at.
+    #[test]
+    fn a_restore_brings_back_a_session_whose_record_here_is_json_saying_no_moment() {
+        let store = holding([1]);
+        let raw = r#"{"date":"2026-10-02","timestamp":null}"#;
+        let damaged = store.plant_unreadable_at(stamp(2), raw);
+        let a = Tab::on(&store);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 2 sessions and your settings."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        assert_eq!(store.record(damaged).as_deref(), Some(raw));
+    }
+
+    /// So does a record file whose bytes are no text at all, as damage on a
+    /// disk leaves one: it cannot be read now as it could not as the app
+    /// opened, and refuses no restore. It was read again, and refused the
+    /// first restore at every launch.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_restore_brings_back_a_session_whose_file_here_is_no_text() {
+        let dir = TempDir::new("restore-beside-no-text");
+        let first = Tab::on_store(crate::persist::files_at(&dir.0));
+        first.finish(day(1));
+        let damaged = RecordId {
+            order: stamp(2) * 1000,
+            nonce: 7,
+        };
+        std::fs::write(
+            dir.0
+                .join("history")
+                .join("sessions")
+                .join(format!("{damaged}.json")),
+            [0xff_u8, 0xfe, 0x00, 0x80],
+        )
+        .expect("written");
+        let a = Tab::on_store(crate::persist::files_at(&dir.0));
+        assert!(a.act(|ctx| ctx.sessions.peek().unread().contains(&damaged)));
+        restore(&a, [1, 2]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        assert_eq!(a.shown(), [1, 2]);
+    }
+
+    /// A record that could not be read as the app opened, and still cannot
+    /// be read at all, as a file another program holds open for good, is
+    /// taken as one no build may ever read: the backup's session from its
+    /// moment is brought back beside it at once.
+    #[test]
+    fn a_record_unread_as_the_app_opened_and_unread_still_refuses_no_restore() {
+        let store = holding([1]);
+        let unread = store.plant_unreadable_at(stamp(2), &day_2_as_a_later_build_stores_it());
+        let a = Tab::on(&store);
+        store.held_open.borrow_mut().insert(unread);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 2 sessions and your settings."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+    }
+
+    /// A record that could not be read as the app opened, and reads now, is
+    /// taken up by a restore whose backup holds a session from its moment,
+    /// and the backup's session is merged with it: stored once, under the
+    /// record's own name, and the user told. It stayed unread until the app
+    /// opened again, and the backup stored its session a second time,
+    /// beside it.
+    #[test]
+    fn a_restore_takes_up_a_record_unread_as_the_app_opened_that_reads_now() {
+        let store = holding([1]);
+        let unread = store.plant_unreadable_at(stamp(2), "{ cut short");
+        let a = Tab::on(&store);
+        assert_eq!(a.shown(), [1]);
+        store.mend(unread, &serde_json::to_string(&day(2)).expect("writes"));
+        restore(&a, [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings. 1 session stored here that could not be read before reads now."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3], "each once");
+        assert_eq!(a.shown(), [1, 2, 3]);
+        assert_eq!(a.id_of(2), unread, "under its own name");
+    }
+
+    /// A record this build could not read, deleted in another copy of the
+    /// app, is no longer held as stored once a look finds it gone: a
+    /// restore whose backup holds a session from its moment brings that
+    /// session back at once.
+    #[test]
+    fn a_record_unread_here_and_gone_since_refuses_no_restore() {
+        let store = holding([1]);
+        let unread = store.plant_unreadable_at(stamp(2), &day_2_as_a_later_build_stores_it());
+        let a = Tab::on(&store);
+        store.lose(unread);
+        restore(&a, [2]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        assert_eq!(days(&store.load_sessions()), [1, 2]);
+        assert!(a.act(|ctx| ctx.sessions.peek().unread().is_empty()));
+    }
+
+    /// A restore that reads such a record again from a store that answers a
+    /// moment later, as a browser's database does, is under way until it
+    /// is made: one asked for meanwhile waits its turn, and both are made.
+    #[test]
+    fn a_restore_asked_for_while_another_reads_a_record_again_waits_for_it() {
+        let store = holding([1]);
+        store.plant_unreadable_at(stamp(2), &day_2_as_a_later_build_stores_it());
+        let mut a = Tab::on(&store);
+        store.reads_later.set(true);
+        restore(&a, [1, 2, 3]);
+        restore(&a, [4]);
+        assert_eq!(store.reads_waiting(), 1, "the first reads");
+        assert_eq!(days(&store.load_sessions()), [1], "neither made yet");
+        store.answer_reads();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 3, 4], "each made");
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
     }
 
     /// A store that takes no change leaves a restore, and its Undo, undone,
@@ -2459,6 +3419,35 @@ mod tests {
         assert_eq!(days(&store.load_sessions()), [3]);
     }
 
+    /// A restore says how many of the backup's sessions this version could
+    /// not read, and left out, and never that every session in it was here
+    /// already: those it left out may not be. A backup none of whose
+    /// sessions it could read was said to hold only what was here.
+    #[test]
+    fn a_restore_tells_of_the_sessions_it_could_not_read() {
+        let store = holding([1]);
+        let a = Tab::on(&store);
+        let settings = serde_json::to_string(&TrainingSettings::default()).unwrap();
+        let here = serde_json::to_string(&day(1)).unwrap();
+        let raw = format!(
+            r#"{{"dustBackup":1,"settings":{settings},"sessions":[{here},{{"date":5}},{{"date":6}}]}}"#
+        );
+        let backup = crate::persist::backup::read_backup(&raw).expect("a backup");
+        a.act(|ctx| ctx.restore_backup(backup));
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored your settings. 2 sessions in it could not be read by this version and were left out."
+        );
+        let raw = r#"{"dustBackup":1,"sessions":[{"date":5}]}"#;
+        let backup = crate::persist::backup::read_backup(raw).expect("a backup");
+        a.act(|ctx| ctx.restore_backup(backup));
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored no sessions. 1 session in it could not be read by this version and was left out."
+        );
+        assert_eq!(days(&store.load_sessions()), [1]);
+    }
+
     /// A session a restore filled in goes back as it was on Undo, among
     /// whatever another tab did meanwhile; one filled in already by another
     /// tab's restore stays filled in.
@@ -2479,6 +3468,7 @@ mod tests {
                     saved_at: 0,
                     settings: Some(TrainingSettings::default()),
                     sessions: vec![run(true)],
+                    left_out: 0,
                 })
             })
         };
@@ -2528,6 +3518,7 @@ mod tests {
                 saved_at: 0,
                 settings: None,
                 sessions: vec![run(true)],
+                left_out: 0,
             })
         });
         assert_eq!(a.toast().expect("told").text, "Filled in 1 session.");
@@ -2726,6 +3717,182 @@ mod tests {
         let toast = tab.toast().expect("told");
         assert_eq!(toast.text, "1 session deleted");
         assert_eq!(Tab::on_store(crate::persist::files_at(&dir.0)).shown(), [2]);
+    }
+
+    /// A session kept as the app stops, which the store took before the app
+    /// heard that it had, as a page closed under a browser's database leaves
+    /// it: the next launch finds its mark over and its session stored, and
+    /// tells of nothing cut off. Its mark used to say it still ran, so the
+    /// next launch told of a session cut off, Dust closed while it ran. One
+    /// the store had not taken is kept from its mark, and told of as kept.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_session_kept_as_the_app_stopped_is_not_told_of_as_cut_off() {
+        let dir = TempDir::new("kept-as-it-stopped");
+        let tab = Tab::on_store(crate::persist::files_on_worker_at(&dir.0));
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(1),
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.finish(day(1));
+        // The store has it, and the app stops before it hears so.
+        tab.act(|ctx| ctx.app().store.flush_history());
+        drop(tab);
+
+        let mut next = Tab::on_store(crate::persist::files_at(&dir.0));
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert_eq!(next.shown(), [1]);
+        assert_eq!(next.notices(), [], "nothing was cut off");
+
+        // Stopped before the store had it: kept from its mark, and told of.
+        let lost = TempDir::new("kept-from-its-mark");
+        let store = crate::persist::files_at(&lost.0);
+        let tab = Tab::on_store(store);
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(2),
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.act(AppCtx::mark_kept);
+        drop(tab);
+        let mut next = Tab::on_store(crate::persist::files_at(&lost.0));
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert_eq!(next.shown(), [2], "kept from its mark");
+        assert!(
+            matches!(&next.notices()[..], [Notice::CutOff(CutOff::Marked(open))] if open.over),
+            "told of as kept: {:?}",
+            next.notices()
+        );
+    }
+
+    /// Leave in `store` the mark of a copy of the app that kept `session`
+    /// as it stopped, before the store had it.
+    fn cut_off_keeping(store: &Rc<MemoryStore>, session: SessionResult) {
+        let tab = Tab::on(store);
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: session,
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.act(AppCtx::mark_kept);
+    }
+
+    /// A session cut off is held by this copy's mark as soon as it is
+    /// kept, before the store has said whether it was deleted by hand: its
+    /// own mark was taken from the store as it was told of, so the app
+    /// stopping while the store answered lost it for good. One the store
+    /// says was deleted goes again, from the history and from the mark.
+    #[test]
+    fn a_session_cut_off_is_held_while_the_store_looks_for_its_deletion() {
+        let store = Rc::new(MemoryStore::default());
+        cut_off_keeping(&store, day(2));
+        store.forgotten_later.set(true);
+        let mut next = Tab::on(&store);
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        let held = |store: &MemoryStore| {
+            store
+                .open()
+                .map(|open| days(&open.unstored))
+                .unwrap_or_default()
+        };
+        assert_eq!(held(&store), [2], "held by this copy's mark");
+        assert_eq!(next.shown(), [2]);
+        store.answer_forgotten();
+        next.pump();
+        assert_eq!(days(&store.load_sessions()), [2]);
+        assert_eq!(store.open(), None, "stored, so no longer marked");
+
+        // Deleted by hand under the record it would be stored as.
+        let mut gone = day(3);
+        gone.score = gone.points();
+        let record =
+            Record::of(&gone, |json| RecordId::placed(gone.timestamp, json)).expect("a record");
+        let forget = HistoryChange {
+            forget: vec![(record.id, Deleted::of(&gone, 7))],
+            ..HistoryChange::default()
+        };
+        let mut pending = Store::change_history(&*store, forget);
+        let mut asked = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut asked).is_ready());
+        cut_off_keeping(&store, day(3));
+        let mut next = Tab::on(&store);
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert_eq!(held(&store), [3], "held while the store looks");
+        store.answer_forgotten();
+        next.pump();
+        assert_eq!(next.shown(), [2], "deleted by hand, it goes");
+        assert_eq!(days(&store.load_sessions()), [2]);
+        assert_eq!(store.open(), None, "nor held");
+    }
+
+    /// A session cut off is held by this copy's mark as soon as the mark
+    /// that carried it is taken from the store, while what the store holds
+    /// is taken up first: that look, made on a thread of its own on a
+    /// computer or a phone, and a moment later in a browser, came before
+    /// anything held the session, and the app stopping meanwhile lost it
+    /// for good.
+    #[test]
+    fn a_session_cut_off_is_held_while_the_store_is_taken_up() {
+        let store = holding([1]);
+        cut_off_keeping(&store, day(2));
+        let mut next = Tab::on(&store);
+        // The look at the store waits on whether the session lost from
+        // under it was deleted by hand.
+        store.lose(next.id_of(1));
+        store.forgotten_later.set(true);
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        let held = store
+            .open()
+            .map(|open| days(&open.unstored))
+            .unwrap_or_default();
+        assert_eq!(held, [2], "held by this copy's mark meanwhile");
+        store.answer_forgotten();
+        next.pump();
+        store.answer_forgotten();
+        next.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2]);
+        assert_eq!(next.shown(), [1, 2]);
+        assert_eq!(store.open(), None, "stored, so no longer marked");
+    }
+
+    /// A session another copy of the app kept, which the store took before
+    /// that copy stopped, its mark left behind, is stored once: a copy open
+    /// all along, that has yet to take it up, takes it up as it finds the
+    /// mark, and tells of nothing cut off. It used to look only at what it
+    /// held itself, store the session again under a record of its own, and
+    /// show it twice.
+    #[test]
+    fn a_session_another_copy_stored_as_it_stopped_is_stored_once() {
+        let store = Rc::new(MemoryStore::default());
+        let (a, mut b) = (Tab::on(&store), Tab::on(&store));
+        let open = a.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(1),
+            settings: None,
+        };
+        a.act(|ctx| ctx.mark_so_far(&open, so_far));
+        // The store takes it, and the copy stops before it hears so.
+        store.deferred.set(true);
+        a.finish(day(1));
+        store.settle();
+        drop(a);
+        store.deferred.set(false);
+        assert_eq!(days(&store.load_sessions()), [1]);
+
+        b.act(|ctx| ctx.mark_running(false));
+        b.pump();
+        assert_eq!(days(&store.load_sessions()), [1], "stored once");
+        assert_eq!(b.shown(), [1]);
+        assert_eq!(b.notices(), [], "kept, not cut off");
     }
 
     /// The one backup file saved in `folder`, read.

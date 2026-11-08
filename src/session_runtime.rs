@@ -754,7 +754,9 @@ fn finish_session(ctx: AppCtx) -> bool {
 }
 
 /// Store what finishing a session did to its level's run, and move the
-/// level if the run earned it, saying so. What it said, if anything.
+/// level if the run earned it, saying so. A change the level has moved
+/// away from since is not made, and nothing is said of it
+/// ([`apply_auto_level`]). What it said, if anything.
 fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
     let AppCtx {
         mut settings,
@@ -766,20 +768,16 @@ fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
         CountersUpdate::Keep(key, counters) => store.save_auto_counters(key, *counters),
         CountersUpdate::Clear(keys) => store.clear_auto_counters(keys),
     }
-    let message = done
-        .change
-        .as_ref()
-        .map(crate::ui::auto_level::change_message);
-    if let Some(change) = &done.change {
-        // Onto the settings as they are now, not as the session started
-        // with them, so the level is all it moves. Stored by the app's
-        // settings effect.
-        apply_auto_level(&mut settings.write(), change);
+    let change = done.change.as_ref()?;
+    // Onto the settings as they are now, not as the session started with
+    // them, so the level is all it moves. Stored by the app's settings
+    // effect.
+    if !apply_auto_level(&mut settings.write(), change) {
+        return None;
     }
-    if let Some(message) = &message {
-        toasts.show(message.clone());
-    }
-    message
+    let message = crate::ui::auto_level::change_message(change);
+    toasts.show(message.clone());
+    Some(message)
 }
 
 /// Keep what the sessions and runs the app stopped under, `cut`, had done
@@ -824,31 +822,44 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
         }
     }
     if kept.is_empty() {
+        ctx.let_go_of_carried(&cut);
         return;
     }
-    let ids = kept.iter().map(|(record, ..)| record.id).collect();
-    let gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
-    kept.retain(|(record, ..)| !gone.contains(&record.id));
-    if kept.is_empty() {
-        return;
-    }
-    // In the history, and held with this copy's mark, before any level is
-    // moved by them, and the levels moved before they are stored: the app
-    // stopping from here on keeps each once, its level counted once.
-    let mut judged = Vec::new();
-    let mut put = Vec::new();
-    for (record, result, settings) in kept {
-        if let Some(settings) = settings {
-            judged.push((record.id, result.clone(), settings));
-        }
-        put.push((record, result));
-    }
+    // In the history, and held with this copy's mark as sessions the store
+    // has yet to take, before the store is asked anything: the marks they
+    // came from were taken from it as they were told of, and this copy's
+    // mark has held what they carried since only for their sake
+    // ([`AppCtx::let_go_of_carried`]).
+    let put = kept
+        .iter()
+        .map(|(record, result, _)| (record.clone(), result.clone()))
+        .collect();
     let held = ctx.hold_from_elsewhere(put);
+    ctx.let_go_of_carried(&cut);
     if held.is_empty() {
         return;
     }
-    for (id, result, settings) in judged {
-        if held.iter().all(|record| record.id != id) {
+    // One deleted by hand under the record it would be stored as is let
+    // go again, and so is one deleted here meanwhile.
+    let ids = held.iter().map(|record| record.id).collect();
+    let gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
+    ctx.let_go_of_held(&gone);
+    let held: Vec<Record> = {
+        let history = ctx.sessions.peek();
+        held.into_iter()
+            .filter(|record| !gone.contains(&record.id) && history.index_of(record.id).is_some())
+            .collect()
+    };
+    if held.is_empty() {
+        return;
+    }
+    // The levels moved by them before they are stored: the app stopping
+    // from here on keeps each once, its level counted once.
+    for (record, result, settings) in kept {
+        let Some(settings) = settings else {
+            continue;
+        };
+        if held.iter().all(|held| held.id != record.id) {
             continue;
         }
         let run = store.load_auto_counters(&CountersKey::of(&settings));
@@ -865,9 +876,10 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
 }
 
 /// Add `finished` to the history, store it, and show it on the results
-/// screen: a session of groups and a contest run alike. Its mark stays, as
-/// it holds it, until the store has taken it, so the app stopping before
-/// then, or a store with no room for it, still keeps it.
+/// screen, with the record it is found by there: a session of groups and a
+/// contest run alike. Its mark stays, as it holds it, until the store has
+/// taken it, so the app stopping before then, or a store with no room for
+/// it, still keeps it.
 pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     let AppCtx {
         mut screen,
@@ -877,7 +889,7 @@ pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     } = ctx;
     ctx.mark_kept();
     let store = ctx.app().store;
-    ctx.keep_finished(finished.clone(), move |saved| {
+    let kept = ctx.keep_finished(finished.clone(), move |saved| {
         // A browser may clear its store to make room; there is now
         // something in it worth asking it to keep.
         store.ask_to_keep();
@@ -886,7 +898,7 @@ pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
             notices.write().push(Notice::History(problem));
         }
     });
-    result.set(Some(Finished::Kept(Box::new(finished))));
+    result.set(Some(Finished::Kept(Box::new(finished), kept)));
     screen.set(Screen::Results);
     // Again starts from a history one session longer.
     ctx.warm_sampler();
@@ -2829,6 +2841,58 @@ mod tests {
             let progress = crate::persist::auto_progress(&*h.store, &settings).expect("progress");
             assert_eq!(progress.above_count, 1);
             assert_eq!(progress.above_target, 5);
+        });
+    }
+
+    /// A session the app stopped under is settled at the next launch, on
+    /// the settings as they are by then, and its level may have moved
+    /// since, by hand, in another window or by sync. The change it earned
+    /// is then not put in, and nothing says it was: a rise from 1 to 2,
+    /// settled after the level went to 8, said "Level increased to 2" and
+    /// left it at 8. The run of the level as it is now goes on untouched.
+    #[test]
+    fn a_change_the_level_has_moved_away_from_is_not_told_of() {
+        /// A session that earns a rise at level 1, cut off, and settled at a
+        /// launch whose level is `level`: what it says, where it leaves the
+        /// level, and the run of the level as it was at the launch.
+        async fn settled(level: u32) -> (Option<String>, u32, AutoLevelCounters) {
+            let mut judged_by = test_settings();
+            judged_by.auto_level.auto_adjust_level = true;
+            judged_by.auto_level.auto_adjust_above_threshold_count = 1;
+            judged_by.auto_level.auto_adjust_threshold = 50.0;
+            let mut now = judged_by.clone();
+            now.curriculum.level = level;
+            let mut h = Harness::with_settings(now.clone());
+            let run_now = AutoLevelCounters { above: 0, below: 2 };
+            h.store.save_auto_counters(&CountersKey::of(&now), run_now);
+            let mut result = crate::testing::stored_session("2026-10-02", &[("KM", "KM")]);
+            result.timestamp = now_ms() - 60_000;
+            let cut = CutOff::Marked(OpenSession {
+                so_far: Some(Box::new(SoFar {
+                    result,
+                    settings: Some(judged_by),
+                })),
+                ..OpenSession::starting(false, now_ms() - 120_000)
+            });
+            let ctx = h.ctx;
+            h.in_app(|| spawn(keep_cut_off(ctx, vec![cut])));
+            h.advance(20).await;
+            assert_eq!(h.ctx.sessions.peek().len(), 1, "kept");
+            let kept_run = h.store.load_auto_counters(&CountersKey::of(&now));
+            (h.toast(), h.ctx.settings.peek().curriculum.level, kept_run)
+        }
+        run(|| async {
+            let (said, level, _) = settled(1).await;
+            assert!(
+                said.as_deref()
+                    .is_some_and(|said| said.starts_with("Level increased to 2")),
+                "{said:?}"
+            );
+            assert_eq!(level, 2);
+            let (said, level, kept_run) = settled(8).await;
+            assert_eq!(said, None, "nothing said of a change not made");
+            assert_eq!(level, 8, "left where it is");
+            assert_eq!(kept_run, AutoLevelCounters { above: 0, below: 2 });
         });
     }
 

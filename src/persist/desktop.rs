@@ -15,7 +15,7 @@ use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
-    over_stored, read_settings_from,
+    over_stored, read_settings_from, unmarked,
 };
 
 const THEME: &str = "theme.txt";
@@ -184,48 +184,39 @@ impl DesktopStore {
     /// Every counter stored that can be read, by what it counts.
     fn load_all_counters(&self) -> Counters {
         fs::read(self.root.join(COUNTERS))
-            .map(|raw| read_counters(&raw).0)
+            .map(|raw| read_counters(&raw))
             .unwrap_or_default()
     }
 
-    /// Change the stored counters, read afresh just before they are
-    /// written, so that what another copy of the app stored meanwhile is
-    /// kept. Counters that cannot be read are set aside beside the file
-    /// first rather than written over; a file there that cannot be read at
-    /// all, or set aside, is left as it is.
-    fn update_counters(&self, change: impl FnOnce(&mut Counters)) {
-        let (mut all, mut stored) = match fs::read(self.root.join(COUNTERS)) {
-            Ok(raw) => {
-                let (all, whole) = read_counters(&raw);
-                if !whole && let Err(err) = self.write(&aside_name(&self.root, "auto_adjust"), &raw)
-                {
-                    eprintln!(
-                        "could not set aside auto-level counters that could not be read: {err}"
-                    );
-                    return;
+    /// Change the stored counters, each as it is stored, read afresh just
+    /// before they are written, so that what another copy of the app stored
+    /// meanwhile is kept, and so is a counter this build cannot read, one a
+    /// later build wrote in a shape of its own, until it is cleared. A file
+    /// that holds no counters at all is set aside beside it first rather
+    /// than written over; one that cannot be read, or set aside, is left as
+    /// it is.
+    fn update_counters(&self, change: impl FnOnce(&mut StoredCounters)) {
+        let mut stored = match fs::read(self.root.join(COUNTERS)) {
+            Ok(raw) => match stored_counters(&raw) {
+                Some(stored) => stored,
+                None => {
+                    if let Err(err) = self.write(&aside_name(&self.root, "auto_adjust"), &raw) {
+                        eprintln!(
+                            "could not set aside auto-level counters that could not be read: {err}"
+                        );
+                        return;
+                    }
+                    StoredCounters::new()
                 }
-                let stored: serde_json::Map<String, serde_json::Value> =
-                    serde_json::from_slice(&raw).unwrap_or_default();
-                (all, stored)
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                (Counters::new(), serde_json::Map::new())
-            }
+            },
+            Err(err) if err.kind() == io::ErrorKind::NotFound => StoredCounters::new(),
             Err(err) => {
                 eprintln!("could not read the auto-level counters: {err}");
                 return;
             }
         };
-        change(&mut all);
-        // Each over what it held, so what a later build added to it stays.
-        let written: serde_json::Map<String, serde_json::Value> = all
-            .into_iter()
-            .filter_map(|(key, counters)| {
-                let value = over_stored(serde_json::to_value(counters).ok()?, stored.remove(&key));
-                Some((key, value))
-            })
-            .collect();
-        if let Ok(raw) = serde_json::to_vec_pretty(&written) {
+        change(&mut stored);
+        if let Ok(raw) = serde_json::to_vec_pretty(&stored) {
             let _ = self.write(COUNTERS, &raw);
         }
     }
@@ -256,6 +247,47 @@ fn sync_dir_for(root: &Path) -> PathBuf {
         }
     }
     root.to_path_buf()
+}
+
+/// Write `name` in `dir` whole or not at all, as [`write_whole`] does, for
+/// the user alone to read: what sync keeps holds the key to the synced copy
+/// and the sign-in. The file is the user's alone before anything is written
+/// in it.
+fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let tmp = temporary(dir, name);
+    let written = (|| {
+        let mut file = private_file(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, dir.join(name))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written?;
+    sync_dir(dir)
+}
+
+/// The file at `path`, made empty, that the user alone can read and write:
+/// one already there is made so too.
+#[cfg(unix)]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// Elsewhere, as any other file is made.
+#[cfg(not(unix))]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    fs::File::create(path)
 }
 
 /// Move a file in `root` that cannot be read, `stem`.json at `path`, out of
@@ -316,19 +348,28 @@ fn aside_name(dir: &Path, stem: &str) -> String {
 /// The auto-level counters, by what each counts ([`CountersKey`]).
 type Counters = std::collections::BTreeMap<String, AutoLevelCounters>;
 
-/// Stored counters, each that can still be read, and whether every one
-/// could: one bad entry costs that one alone.
-fn read_counters(raw: &[u8]) -> (Counters, bool) {
-    let Ok(serde_json::Value::Object(stored)) = serde_json::from_slice(raw) else {
-        return (Counters::new(), false);
-    };
-    let count = stored.len();
-    let read: Counters = stored
+/// The auto-level counters as they are stored, by what each counts, each
+/// as it was written.
+type StoredCounters = serde_json::Map<String, serde_json::Value>;
+
+/// The counters `raw` holds, each as it was written: none where it holds
+/// no counters at all.
+fn stored_counters(raw: &[u8]) -> Option<StoredCounters> {
+    let raw = unmarked(std::str::from_utf8(raw).ok()?);
+    match serde_json::from_str(raw) {
+        Ok(serde_json::Value::Object(stored)) => Some(stored),
+        _ => None,
+    }
+}
+
+/// Stored counters, each that can still be read: one bad entry costs that
+/// one alone.
+fn read_counters(raw: &[u8]) -> Counters {
+    stored_counters(raw)
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
-        .collect();
-    let whole = read.len() == count;
-    (read, whole)
+        .collect()
 }
 
 /// Write `name` in `dir` whole or not at all.
@@ -461,9 +502,35 @@ pub(super) fn free_name(folder: &Path, name: &str) -> String {
 }
 
 /// Make a rename in `dir` as durable as the data it names.
+///
+/// A filesystem that flushes no folder at all, as a virtual machine's
+/// shared folder or some network mounts flush none, says so (`EINVAL`,
+/// `ENOTSUP`): the rename is then as durable as it can be made there, and
+/// the write stands, as SQLite and PostgreSQL take it. Any other failure is
+/// one.
 #[cfg(unix)]
 pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
-    fs::File::open(dir)?.sync_all()
+    match fs::File::open(dir)?.sync_all() {
+        Err(err) if flushes_no_folder(&err) => Ok(()),
+        synced => synced,
+    }
+}
+
+/// Whether `err`, from flushing a folder, says its filesystem flushes no
+/// folder at all: `EINVAL`, or `ENOTSUP` (with `EOPNOTSUPP`, where that is
+/// another number), which std gives no kind of its own.
+#[cfg(unix)]
+fn flushes_no_folder(err: &io::Error) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const NOT_SUPPORTED: &[i32] = &[95];
+    #[cfg(target_vendor = "apple")]
+    const NOT_SUPPORTED: &[i32] = &[45, 102];
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    const NOT_SUPPORTED: &[i32] = &[];
+    err.kind() == io::ErrorKind::InvalidInput
+        || err
+            .raw_os_error()
+            .is_some_and(|code| NOT_SUPPORTED.contains(&code))
 }
 
 /// Windows cannot open a directory to flush it; its renames are journalled.
@@ -555,15 +622,20 @@ impl Store for DesktopStore {
     }
 
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters) {
-        self.update_counters(|all| {
-            all.insert(key.as_str().to_string(), counters);
+        let Ok(written) = serde_json::to_value(counters) else {
+            return;
+        };
+        self.update_counters(|stored| {
+            // Over what it held, so what a later build added to it stays.
+            let held = stored.remove(key.as_str());
+            stored.insert(key.as_str().to_string(), over_stored(written, held));
         });
     }
 
     fn clear_auto_counters(&self, keys: &[CountersKey]) {
-        self.update_counters(|all| {
+        self.update_counters(|stored| {
             for key in keys {
-                all.remove(key.as_str());
+                stored.remove(key.as_str());
             }
         });
     }
@@ -693,12 +765,19 @@ impl Store for DesktopStore {
         fs::read_to_string(self.sync_dir.join(SYNC)).ok()
     }
 
+    fn sync_cleared(&self) -> bool {
+        matches!(
+            fs::metadata(self.sync_dir.join(SYNC)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound
+        )
+    }
+
     fn save_sync(&self, state: Option<&str>) -> Result<(), String> {
         let path = self.sync_dir.join(SYNC);
         match state {
             Some(state) => {
                 fs::create_dir_all(&self.sync_dir).map_err(|err| err.to_string())?;
-                write_whole(&self.sync_dir, SYNC, state.as_bytes()).map_err(|err| err.to_string())
+                write_private(&self.sync_dir, SYNC, state.as_bytes()).map_err(|err| err.to_string())
             }
             None => match fs::remove_file(&path) {
                 Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err.to_string()),
@@ -1344,7 +1423,8 @@ pub(super) mod tests {
 
     /// A counters file that cannot be read is set aside before the next
     /// count is written, not written over by a file holding that count
-    /// alone; one unreadable entry costs that one alone.
+    /// alone; one unreadable entry costs that one alone, and stays in the
+    /// file as it was, with nothing to set aside.
     #[test]
     fn unreadable_counters_are_set_aside_rather_than_written_over() {
         let (dir, store) = store("counters-unreadable");
@@ -1368,9 +1448,48 @@ pub(super) mod tests {
             store.load_auto_counters(&counted[0].0),
             AutoLevelCounters::default()
         );
-        let mut kept = counters_set_aside(&dir);
-        kept.sort();
-        assert_eq!(kept, ["{ not json".to_string(), damaged]);
+        let held: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.0.join(COUNTERS)).unwrap()).unwrap();
+        assert_eq!(held[counted[0].0.as_str()], "nonsense", "as it was");
+        assert_eq!(counters_set_aside(&dir), ["{ not json"]);
+    }
+
+    /// Counters a later build wrote in a shape of its own, which this build
+    /// cannot read, stay in the file as they were while this build counts
+    /// and clears others, and go only when they are cleared themselves.
+    /// Each write kept only the counters this build could read, and the
+    /// later build's were gone from the file it reads.
+    #[test]
+    fn counters_this_build_cannot_read_stay_through_a_write() {
+        let (dir, store) = store("counters-later-shape");
+        fs::create_dir_all(&dir.0).unwrap();
+        let counted = counted_at([3, 4, 5]);
+        let later = serde_json::json!({ "runs": [[1, 0], [0, 1]], "v": 2 });
+        let held = serde_json::json!({ counted[0].0.as_str(): later });
+        fs::write(dir.0.join(COUNTERS), serde_json::to_vec(&held).unwrap()).unwrap();
+        let stored = || -> serde_json::Value {
+            serde_json::from_slice(&fs::read(dir.0.join(COUNTERS)).unwrap()).unwrap()
+        };
+        store.save_auto_counters(&counted[1].0, counted[1].1);
+        store.clear_auto_counters(std::slice::from_ref(&counted[2].0));
+        assert_eq!(stored()[counted[0].0.as_str()], later, "as it was written");
+        assert_eq!(store.load_auto_counters(&counted[1].0), counted[1].1);
+        assert_eq!(
+            store.load_auto_counters(&counted[0].0),
+            AutoLevelCounters::default(),
+            "not read here"
+        );
+        assert!(
+            counters_set_aside(&dir).is_empty(),
+            "nothing lost to set aside"
+        );
+        store.clear_auto_counters(std::slice::from_ref(&counted[0].0));
+        assert_eq!(
+            stored().get(counted[0].0.as_str()),
+            None,
+            "cleared, it goes"
+        );
+        assert_eq!(store.load_auto_counters(&counted[1].0), counted[1].1);
     }
 
     /// Two copies of the app counting at once each keep the other's
@@ -1442,6 +1561,78 @@ pub(super) mod tests {
         assert_eq!(held["laterKey"], "kept");
         assert_eq!(stored(&store).len(), 2);
         assert_eq!(fs::read_to_string(dir.0.join(SESSIONS)).unwrap(), whole);
+    }
+
+    /// A folder on a filesystem that flushes no folder at all, as a virtual
+    /// machine's shared folder (vboxsf) or some network mounts flush none,
+    /// is as durable as it can be made once what was renamed in it is: no
+    /// failed write. Every session written to such a folder was told of as
+    /// not saved, and tried again for as long as the app ran, and the move
+    /// to records was put off at every launch. `/proc` says what such a
+    /// filesystem says, `EINVAL`. A folder that cannot be flushed for any
+    /// other reason still fails the write.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_its_filesystem_cannot_flush_fails_no_write() {
+        let Ok(proc) = fs::File::open("/proc") else {
+            eprintln!("skipped: there is no /proc to flush");
+            return;
+        };
+        assert_eq!(
+            proc.sync_all().map_err(|err| err.kind()),
+            Err(io::ErrorKind::InvalidInput),
+            "flushed by nothing"
+        );
+        assert!(sync_dir(Path::new("/proc")).is_ok());
+        let dir = TempDir::new("flush-none");
+        assert!(sync_dir(&dir.0.join("not there")).is_err());
+    }
+
+    /// A file an editor saved with a byte order mark first, as some editors
+    /// save every file, reads as the same file without one: the settings,
+    /// the history an older build keeps whole, and the counters. Each was
+    /// taken for a file that does not read and set aside: the settings
+    /// went back to their defaults, the history was moved with none of its
+    /// sessions, and the counters began again.
+    #[test]
+    fn a_file_saved_with_a_byte_order_mark_reads_as_one_without() {
+        let (dir, store) = store("byte-order-mark");
+        fs::create_dir_all(&dir.0).unwrap();
+        let marked = |raw: Vec<u8>| [b"\xef\xbb\xbf".to_vec(), raw].concat();
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.num_groups = 9;
+        let settings = settings.clamp();
+        let pretty = serde_json::to_vec_pretty(&settings).unwrap();
+        fs::write(dir.0.join(SETTINGS), marked(pretty)).unwrap();
+        let whole = [
+            session("2026-09-01"),
+            SessionResult {
+                timestamp: 2,
+                ..session("2026-09-02")
+            },
+        ];
+        let kept = serde_json::to_vec(&whole).unwrap();
+        fs::write(dir.0.join(SESSIONS), marked(kept)).unwrap();
+        let counted = counted_at([3]);
+        let counters = serde_json::json!({ counted[0].0.as_str(): counted[0].1 });
+        let counters = serde_json::to_vec(&counters).unwrap();
+        fs::write(dir.0.join(COUNTERS), marked(counters)).unwrap();
+        assert_eq!(store.load_settings(), settings);
+        let dates: Vec<String> = stored(&store)
+            .into_iter()
+            .map(|session| session.date)
+            .collect();
+        assert_eq!(dates, ["2026-09-01", "2026-09-02"]);
+        assert_eq!(store.load_auto_counters(&counted[0].0), counted[0].1);
+        let more = counted_at([4]);
+        store.save_auto_counters(&more[0].0, more[0].1);
+        assert_eq!(store.load_auto_counters(&counted[0].0), counted[0].1);
+        assert!(store.take_set_aside().is_empty());
+        let aside: Vec<String> = files(&dir)
+            .into_iter()
+            .filter(|name| name.contains(".unreadable-"))
+            .collect();
+        assert!(aside.is_empty(), "{aside:?}");
     }
 
     #[test]
@@ -1759,7 +1950,13 @@ pub(super) mod tests {
         let read = read_backup(&written).expect("a backup");
         assert_eq!(read.sessions.len(), 1, "once, and what this build reads");
         assert_eq!(read.sessions[0].date, first.date);
-        assert_eq!(read_backup_as_0_16_2(&written), Ok(read));
+        assert_eq!(read.left_out, 1, "and what it does not, counted");
+        // As 0.16.2 read it, which counted none it left out.
+        let uncounted = crate::persist::backup::Backup {
+            left_out: 0,
+            ..read
+        };
+        assert_eq!(read_backup_as_0_16_2(&written), Ok(uncounted));
     }
 
     /// A history whose folder cannot be listed saves no backup of its own,
@@ -1990,6 +2187,37 @@ pub(super) mod tests {
             android_files_dir_of(10, "dev.dust.morse"),
             PathBuf::from("/data/user/10/dev.dust.morse/files")
         );
+    }
+
+    /// What sync keeps, the key to the synced copy and the sign-in, is the
+    /// user's alone to read, whatever the folder's other files are; and so
+    /// is one an earlier build left open to every user, once written again.
+    #[cfg(unix)]
+    #[test]
+    fn what_sync_keeps_is_for_the_user_alone_to_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, store) = store("sync-kept");
+        let mode = || {
+            fs::metadata(dir.0.join(SYNC))
+                .expect("kept")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        store.save_sync(Some(r#"{"key":"secret"}"#)).expect("saved");
+        assert_eq!(mode(), 0o600, "{:o}", mode());
+        assert_eq!(store.load_sync().as_deref(), Some(r#"{"key":"secret"}"#));
+        fs::set_permissions(dir.0.join(SYNC), fs::Permissions::from_mode(0o644)).unwrap();
+        store.save_sync(Some("{}")).expect("saved");
+        assert_eq!(mode(), 0o600, "{:o}", mode());
+        assert_eq!(store.load_sync().as_deref(), Some("{}"));
+        assert!(
+            files(&dir).iter().all(|name| !name.ends_with(".tmp")),
+            "{:?}",
+            files(&dir)
+        );
+        store.save_sync(None).expect("cleared");
+        assert_eq!(store.load_sync(), None);
     }
 
     /// On Android, a history past 20 MB is about to outgrow Android's own

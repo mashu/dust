@@ -37,10 +37,14 @@ const TURN_OFF: &str = "Turning sync off here forgets the key and the sign-in on
      What this device holds stays, and so does the copy in your Drive, for your other devices. \
      Deleting the copy too stops sync on every device; what each holds stays.";
 
-/// What the card needs of sync.
+/// What the card needs of sync, and the day it is.
 #[derive(Clone, PartialEq)]
 pub struct SyncView {
     pub status: SyncStatus,
+    /// The day it is where you are, which the card says when this device
+    /// last synced by: as the screen keeps it, past midnight too
+    /// ([`crate::ui::today::use_today`]).
+    pub today: String,
     /// Sign in to Google: to turn sync on, or to sync again.
     pub on_sign_in: EventHandler<()>,
     /// The passphrase, and for a new one, the same again.
@@ -51,15 +55,21 @@ pub struct SyncView {
     pub on_turn_off: EventHandler<bool>,
 }
 
-/// When this device last synced, as the card's head says it.
-fn synced_when(last: Option<u64>, now: u64) -> String {
+/// When this device last synced, as the card's head says it on `today`.
+/// A sync on a day later than `today` was made today: when it was made is
+/// read off this device's own clock, and the day the screen keeps can lag
+/// behind that clock a while, as on a computer woken from sleep past
+/// midnight, whose timers do not count the time asleep
+/// ([`crate::ui::today::DAY_LOOK_MS`]).
+fn synced_when(last: Option<u64>, today: &str) -> String {
     let Some(last) = last else {
         return "Not synced yet".into();
     };
-    let (Some(day), Some(today), Some(time)) = (day_of(last), day_of(now), clock(last)) else {
+    let (Some(day), Some(time)) = (day_of(last), clock(last)) else {
         return "Synced".into();
     };
-    match ago(&day, &today) {
+    let when = ago(&day, today).or_else(|| ago(today, &day).map(|_| "today".to_string()));
+    match when {
         Some(when) if when == "today" || when == "yesterday" => format!("Synced {when} at {time}"),
         _ => format!("Synced {} at {time}", short_date(&day)),
     }
@@ -72,6 +82,7 @@ pub fn SyncCard(view: SyncView) -> Element {
     let mut confirming = use_signal(|| false);
     let SyncView {
         status,
+        today,
         on_sign_in,
         on_passphrase,
         on_cancel,
@@ -86,7 +97,7 @@ pub fn SyncCard(view: SyncView) -> Element {
         SyncStatus::Passphrase { new: false, .. } => "Enter your passphrase".into(),
         SyncStatus::Unlocking => "Unlocking".into(),
         SyncStatus::On { syncing: true, .. } => "Syncing…".into(),
-        SyncStatus::On { last, .. } => synced_when(*last, crate::time::now_ms()),
+        SyncStatus::On { last, .. } => synced_when(*last, &today),
         SyncStatus::TurningOff => "Turning off".into(),
     };
     let problem = match &status {
