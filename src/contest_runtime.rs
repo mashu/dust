@@ -18,6 +18,7 @@ use cw_core::{
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
+use crate::page::control_id;
 use crate::persist::{OpenSession, SoFar};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
@@ -442,7 +443,7 @@ pub fn resume_run(ctx: AppCtx) {
     // part way down it, the run bar and the fields above the screen's top:
     // the run carries on from its top, as every screen opens. Pausing
     // scrolls nothing, so nothing moves under the finger that paused.
-    crate::app::scroll_to_top();
+    crate::page::scroll_to_top();
 }
 
 /// The run screen's clock ticked. A tick long after the one before is time
@@ -690,13 +691,22 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     });
 }
 
+/// A field's id, and what it is called.
+pub fn field_name(field: EntryField) -> (String, &'static str) {
+    let label = match field {
+        EntryField::Call => "Call",
+        EntryField::Exchange => "Exchange",
+    };
+    (control_id("field", label), label)
+}
+
 /// Move the cursor to `field`, on the page and for the paddles: to the end
 /// of what it holds, with nothing selected, so the next key goes after it
 /// and ⌫ takes its last character.
 pub fn focus_field(ctx: AppCtx, field: EntryField) {
     ctx.entry.set_focus(field);
-    let (id, _) = crate::ui::contest::field_name(field);
-    let script = crate::ui::widgets::focus_end_script(&id);
+    let (id, _) = field_name(field);
+    let script = crate::page::focus_end_script(&id);
     // Tests have no page to run it on: the harness looks for the field.
     #[cfg(test)]
     crate::testing::ask_focus(&id, &script);

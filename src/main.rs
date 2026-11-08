@@ -25,6 +25,7 @@ mod keep_awake;
 mod linux_webview;
 #[cfg(feature = "desktop")]
 mod menus;
+mod page;
 mod page_closed;
 mod page_hidden;
 mod persist;

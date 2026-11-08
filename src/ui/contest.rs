@@ -15,7 +15,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{
-    change_speed, focus_field, pause_run, press_key, resume_run, tick, typed_len_max,
+    change_speed, field_name, focus_field, pause_run, press_key, resume_run, tick, typed_len_max,
 };
 use crate::format::{counted, minutes_seconds};
 use crate::page_hidden::{RUN_HIDDEN, use_page_hidden};
@@ -593,15 +593,6 @@ fn field_space(ctx: AppCtx) {
     }
 }
 
-/// A field's id, and what it is called.
-pub fn field_name(field: EntryField) -> (String, &'static str) {
-    let label = match field {
-        EntryField::Call => "Call",
-        EntryField::Exchange => "Exchange",
-    };
-    (control_id("field", label), label)
-}
-
 /// What the exchange reads as: each field read, a token a later one of its
 /// kind replaced, and what cannot be read, which Enter will not send.
 #[component]
@@ -1058,9 +1049,9 @@ fn use_pause_when_hidden(ctx: AppCtx) {
 mod tests {
     use super::*;
     use crate::audio::fake::Recorder;
+    use crate::page::focus_end_script;
     use crate::persist::Store;
     use crate::testing::{Ui, contest_settings, run};
-    use crate::ui::widgets::focus_end_script;
     use cw_core::{QsoCheck, QsoError, RunClock};
 
     /// The text of the first element whose class list starts with `class`,

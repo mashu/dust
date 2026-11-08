@@ -296,7 +296,7 @@ no settings saves mid-run. Four things change:
   paused page is shorter, so a phone scrolled down to Pause was left part
   way down it, and the run carried on with its header, clock and run bar
   above the screen's top. Pausing scrolls nothing, so nothing moves under
-  the finger that paused (`scroll_to_top`, `src/app.rs`, from
+  the finger that paused (`scroll_to_top`, `src/page.rs`, from
   `resume_run`).
 
 ## 3. Contest catalogue
@@ -1276,7 +1276,7 @@ key that sends nothing reads no other caller's call into it (9.1).
   is one the reading would drop. Moving, it types nothing, and the cursor
   lands at the end of the field it goes to with nothing selected, so ⌫
   takes the call's last character at once; every move of the run's cursor
-  does so (`focus_end_script`, `src/ui/widgets.rs`), and the app's tests
+  does so (`focus_end_script`, `src/page.rs`), and the app's tests
   see the script that moved it. The keypad's `␣ Space` follows the same
   rule, from one place (`space_goes_to`, `src/ui/contest.rs`), as the key
   bar's Space and the hint do, and as built (5b) the paddles' word space.
@@ -3761,7 +3761,7 @@ through one entry point, `press_key`, which calls `paddle.finish_letter()`
 `AnswerOutbox::use_entry` lends it), `lease.wake()` and
 `entry.snapshot()`, then dispatches `Key`. `run_effects` handles
 `ClearFields` and `Focus` through `ctx.entry` and the focus script
-(`focus_end_script`, `widgets.rs`, beside the group boxes' `focus_script`);
+(`focus_end_script`, `page.rs`, beside the group boxes' `focus_script`);
 `Announce` sets
 `ctx.announced` once nothing is on the air, held until then; the one
 polite region that speaks it sits in the app's frame, so what the run
