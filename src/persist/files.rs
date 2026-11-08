@@ -103,6 +103,9 @@ const WRITERS: usize = 8;
 /// megabytes, at some seven kilobytes a session, however long the history.
 const BACKUP_PART: usize = 256;
 
+/// The thread the history's files are read and written on.
+pub(super) const THREAD: &str = "dust-history";
+
 /// The history as files under one folder.
 pub(super) struct HistoryFiles {
     /// The store's folder, where an older build keeps the history whole.
@@ -254,7 +257,7 @@ impl HistoryFiles {
     }
 
     /// From here on the files are the worker's: looked at and written on
-    /// its thread alone ([`super::worker::THREAD`]).
+    /// its thread alone ([`THREAD`]).
     pub(super) fn keep_to_worker(&mut self) {
         self.on_worker = true;
     }
@@ -264,10 +267,10 @@ impl HistoryFiles {
     /// that reaches them is one the app's taps wait on.
     fn on_its_thread(&self) {
         debug_assert!(
-            !self.on_worker || thread::current().name() == Some(super::worker::THREAD),
+            !self.on_worker || thread::current().name() == Some(THREAD),
             "the history's files were reached from {:?}, not from {}",
             thread::current().name(),
-            super::worker::THREAD
+            THREAD
         );
     }
 
