@@ -35,7 +35,7 @@ use super::message::MessagePart;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
-use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord, tells_speed};
+use super::record::{ContestRun, LAYOUT, LOGGED, LOST, NIL, QsoRecord, tells_speed};
 use super::score::rate_at;
 use super::source::CallSource;
 use super::turn::{
@@ -4472,11 +4472,6 @@ impl<S: CallSource> ContestMachine<S> {
         };
         Entry {
             record: QsoRecord {
-                t: run_ms,
-                h: heard.first.unwrap_or(run_ms).min(run_ms),
-                g: u32::try_from(groups.len()).unwrap_or(u32::MAX),
-                nr,
-                k: String::new(),
                 c: station.caller.call.country.to_string(),
                 lp: QsoRecord::place_of(&logged.call),
                 l,
@@ -4484,6 +4479,7 @@ impl<S: CallSource> ContestMachine<S> {
                 s,
                 sc: if again { sent.call } else { String::new() },
                 a: heard.asked(),
+                ..QsoRecord::ended(LOGGED, run_ms, heard.first, groups.len(), nr)
             },
             row: Some(Row {
                 call: logged.call.clone(),
@@ -4594,12 +4590,6 @@ impl<S: CallSource> ContestMachine<S> {
         };
         Entry {
             record: QsoRecord {
-                t: run_ms,
-                h: first.unwrap_or(run_ms).min(run_ms),
-                g: u32::try_from(groups.len()).unwrap_or(u32::MAX),
-                nr,
-                k: NIL.to_string(),
-                c: String::new(),
                 lp: QsoRecord::place_of(&logged.call),
                 l: rules
                     .copied(side)
@@ -4616,11 +4606,10 @@ impl<S: CallSource> ContestMachine<S> {
                 } else {
                     String::new()
                 },
-                s: Vec::new(),
-                sc: String::new(),
                 // No QSO with the station it is against: nothing asked of
                 // it was for this one.
                 a: 0,
+                ..QsoRecord::ended(NIL, run_ms, first, groups.len(), nr)
             },
             row: Some(Row {
                 call: logged.call.clone(),
@@ -4661,18 +4650,9 @@ impl<S: CallSource> ContestMachine<S> {
         groups.extend(misses(&exchange, &exch_voice));
         self.entries.push(Entry {
             record: QsoRecord {
-                t: run_ms,
-                h: heard.first.unwrap_or(run_ms).min(run_ms),
-                g: u32::try_from(groups.len()).unwrap_or(u32::MAX),
-                nr,
-                k: LOST.to_string(),
                 c: station.caller.call.country.to_string(),
-                lp: Vec::new(),
-                l: Vec::new(),
-                lc: String::new(),
-                s: Vec::new(),
-                sc: String::new(),
                 a: heard.asked(),
+                ..QsoRecord::ended(LOST, run_ms, heard.first, groups.len(), nr)
             },
             groups,
             row: None,
