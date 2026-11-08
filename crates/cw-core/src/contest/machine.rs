@@ -38,7 +38,7 @@ use super::exchange::Field;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
-use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
+use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord, tells_speed};
 use super::rules::{ContestRules, FAREWELLS, Fill, GREETING_HOUR, Side, greeting};
 use super::score::rate_at;
 use super::turn::{
@@ -53,23 +53,10 @@ use crate::mono::whole_ms;
 use crate::recognition::{CharTimes, Keys};
 use crate::rng::{Rng, SplitMix64};
 use crate::score::MIN_RESPONSE_MS_PER_CHAR;
-use crate::session::{Answered, GroupResult, MonoMs, SessionResult, SessionTiming};
+use crate::session::{Answered, GroupResult, MonoMs, PauseWhy, SessionResult, SessionTiming};
 use crate::settings::{STATIONS_MAX, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
-use crate::speed::tells_speed;
 use crate::timing::CharSpan;
 use crate::timing::{SEND_RELEASE_SEC, StationVoice};
-
-/// Why a run, or a session of groups, is paused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PauseWhy {
-    /// You paused it: a run with its Pause or the system's Back, a session
-    /// of groups, which has no Pause of its own, with Back.
-    You,
-    /// The page was hidden or the phone locked. It never resumes by itself.
-    Hidden,
-    /// The sound failed after every retry.
-    Sound,
-}
 
 /// Where a run is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

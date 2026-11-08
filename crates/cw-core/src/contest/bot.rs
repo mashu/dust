@@ -16,11 +16,11 @@
 use std::collections::VecDeque;
 
 use super::exchange::{CUT_599, ENN};
-use super::machine::{ContestEffect, ContestEvent, ContestMachine, OpKey, PauseWhy};
+use super::machine::{ContestEffect, ContestEvent, ContestMachine, OpKey};
 use super::turn::{Sender, Turn, plan_turn};
 use super::{CallSource, Field, Fields};
 use crate::callsign::parse_callsign;
-use crate::session::MonoMs;
+use crate::session::{MonoMs, PauseWhy};
 use crate::settings::{CharSetMode, TrainingSettings};
 
 #[cfg(test)]

@@ -9,7 +9,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::alignment::{CopyTally, LetterAccuracy, SKIPPED, judged_copy};
-use crate::contest::{CONTEST_MARK, ContestLog, PauseWhy};
 use crate::level::LEVEL_MIN;
 use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
 use crate::sampling::length_floor;
@@ -154,6 +153,18 @@ struct Completed {
     /// When the latest send heard to its end had ended by then, if one had:
     /// what the answer is timed from.
     after: Option<MonoMs>,
+}
+
+/// Why a run, or a session of groups, is paused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PauseWhy {
+    /// You paused it: a run with its Pause or the system's Back, a session
+    /// of groups, which has no Pause of its own, with Back.
+    You,
+    /// The page was hidden or the phone locked. It never resumes by itself.
+    Hidden,
+    /// The sound failed after every retry.
+    Sound,
 }
 
 /// Where a session is. Every phase that is about a group names it.
@@ -1041,6 +1052,22 @@ fn session_mode_legacy() -> CharSetMode {
 fn session_wpm_default() -> f64 {
     18.0
 }
+
+/// What a run's alphabet fingerprint starts with: `contest:wpx`. A build
+/// older than contest mode drops the log on its next save but keeps the
+/// fingerprint, so the mark is what still makes the run a run after that.
+pub(crate) const CONTEST_MARK: &str = "contest:";
+
+/// A run's log, exactly as it was read.
+///
+/// Kept as plain JSON rather than parsed into a struct, because a struct
+/// that reads any layout leniently cannot write a newer layout back
+/// unchanged: a field it does not know would be lost, a renamed one
+/// defaulted. Held as a value, a log written by a later version goes back to
+/// disk as it came, whatever this version makes of it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContestLog(pub serde_json::Value);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(from = "StoredSession")]

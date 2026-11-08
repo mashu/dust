@@ -48,7 +48,7 @@ use crate::belief::{
     range_of, sessions_in_order,
 };
 use crate::callsign::parse_callsign;
-use crate::contest::{Field, GroupCopy};
+use crate::contest::tells_speed;
 use crate::rng::Rng;
 use crate::score::copy_speed;
 use crate::session::SessionResult;
@@ -204,15 +204,6 @@ fn by_character(sent: &str, (right, counted): (u32, u32)) -> (f64, f64) {
 fn as_whole((right, counted): (u32, u32)) -> (f64, f64) {
     let share = f64::from(right) / f64::from(counted.max(1));
     (share, 1.0 - share)
-}
-
-/// Whether a contest run's group says how fast you copy: a call or a number
-/// (NR, ZN) does, a field from a short list does not, being half guessed.
-pub(crate) fn tells_speed(copy: GroupCopy) -> bool {
-    matches!(
-        copy,
-        GroupCopy::Call | GroupCopy::Field(Field::Nr | Field::Zn)
-    )
 }
 
 /// Which of `session`'s groups say how fast you copy: every one of a group

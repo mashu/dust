@@ -63,15 +63,15 @@ pub use exchange::{
 };
 pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
-    PauseWhy, RowStatus, ShownText,
+    RowStatus, ShownText,
 };
 pub use odds::{CallerOdds, Odd, OddsCard};
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub use place::filter_capacity;
 #[cfg(test)]
 pub(crate) use record::LAYOUT;
-pub(crate) use record::{CONTEST_MARK, GroupCopy};
-pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
+pub(crate) use record::tells_speed;
+pub use record::{ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use rules::{
     CallerStyles, ContestRules, FAREWELLS, Fill, Form, GREETING_HOUR, Multiplier, PerSide, Points,
     STYLE_EVEN, Scoring, Side, Sides, Styles, corner_shares, greeting, into_shape, shape_corners,
@@ -80,6 +80,8 @@ pub use rules::{
 pub use score::{ContestScore, MyStation, Placed, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};
 pub use turn::{Fade, MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
+
+pub use crate::session::{ContestLog, PauseWhy};
 
 /// Run time is kept in milliseconds; rates and contests are told in minutes
 /// and hours.
