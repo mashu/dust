@@ -1482,6 +1482,19 @@ impl SessionResult {
     /// What the session earns ([`crate::score`]): every group's points,
     /// added up. Worked out from what is stored, so a session saved before
     /// speed counted can be scored the same way as one finished today.
+    ///
+    /// Each group is scored at its own copy speed, worked out apart from
+    /// [`Self::group_speed`], which the speed belief and auto level read,
+    /// because the two differ for older saves and one rule for both would
+    /// change them: what they score, or how they move the speed belief and
+    /// auto level. A group timed without its own effective speed is spaced
+    /// here as the session was, its effective speed scaled with its
+    /// character speed (25 WPM characters in a 20/20 session score at 25
+    /// WPM, where `group_speed` reads 22.4), which can move the last bit
+    /// even where the scaling is by one; and a group with no timing at all
+    /// is left out of the points, where `group_speed` reads it at the
+    /// session's speed. Wherever a group's effective speed was kept, the
+    /// two agree.
     pub fn points(&self) -> f64 {
         let sent: Vec<&str> = self.groups.iter().map(|g| g.sent.as_str()).collect();
         let copies: Vec<GroupCopy> = self
@@ -1509,6 +1522,22 @@ impl SessionResult {
             })
             .collect();
         session_points(&copies, calculate_effective_alphabet_size(&sent))
+    }
+
+    /// The copy speed group `index` was sent at, in WPM: its own where it
+    /// was measured, the session's otherwise. What the speed belief and
+    /// auto level read a group's speed by; [`Self::points`] keeps its own
+    /// rule for older saves.
+    pub(crate) fn group_speed(&self, index: usize) -> f64 {
+        let timing = self.group_timings.get(index);
+        copy_speed(
+            timing
+                .and_then(|timing| timing.char_wpm)
+                .unwrap_or(self.char_wpm),
+            timing
+                .and_then(|timing| timing.effective_wpm)
+                .unwrap_or(self.effective_wpm),
+        )
     }
 
     /// How each character sent was copied. Sessions saved before that was

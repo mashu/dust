@@ -495,15 +495,8 @@ fn session_evidence(
         if !counts {
             continue;
         }
-        let timing = session.group_timings.get(index);
-        let char_wpm = timing
-            .and_then(|timing| timing.char_wpm)
-            .unwrap_or(session.char_wpm);
-        let effective_wpm = timing
-            .and_then(|timing| timing.effective_wpm)
-            .unwrap_or(session.effective_wpm);
         if let Some((hits, misses)) = evidence(&group.sent, &group.received) {
-            let copy = copy_speed(char_wpm, effective_wpm);
+            let copy = session.group_speed(index);
             tally.add(speed_bin(copy.ln()), hits, misses);
             if copy.is_finite() {
                 speeds.push(copy.clamp(grid_speed(0), grid_speed(SPEED_POINTS - 1)));
