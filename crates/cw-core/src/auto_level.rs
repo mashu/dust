@@ -35,7 +35,6 @@
 use std::borrow::Cow;
 
 use crate::alignment::{CopyTally, judged_copy};
-use crate::score::copy_speed;
 use crate::session::{GroupResult, GroupSession, SessionResult};
 use crate::settings::{
     ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, CharSetMode, LevelAxis, MixedAutoLevelAxis,
@@ -196,20 +195,6 @@ fn judged_tally<'a>(result: &'a SessionResult, settings: &TrainingSettings) -> C
     Cow::Owned(judged_groups(&result.groups, settings))
 }
 
-/// The copy speed group `index` of `result` was sent at, in WPM: its own
-/// where it was measured, the session's otherwise.
-fn group_speed(result: &SessionResult, index: usize) -> f64 {
-    let timing = result.group_timings.get(index);
-    copy_speed(
-        timing
-            .and_then(|timing| timing.char_wpm)
-            .unwrap_or(result.char_wpm),
-        timing
-            .and_then(|timing| timing.effective_wpm)
-            .unwrap_or(result.effective_wpm),
-    )
-}
-
 /// What the groups of `result` sent at an end of the speed range say, as
 /// auto level judges them: those whose copy speed, in log speed, `at_end`
 /// takes as at it. None when they are too few to be a session's worth.
@@ -222,7 +207,7 @@ fn judged_at_end(
         .groups
         .iter()
         .enumerate()
-        .filter(|(index, _)| at_end(group_speed(result, *index).ln()))
+        .filter(|(index, _)| at_end(result.group_speed(*index).ln()))
         .map(|(_, group)| group)
         .collect();
     a_sessions_worth(groups.len(), settings).then(|| judged_groups(groups, settings))

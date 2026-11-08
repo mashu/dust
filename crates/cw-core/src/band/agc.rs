@@ -33,6 +33,7 @@
 //! leaves the floor sagging for most of a second after every crash. Real
 //! receivers do neither.
 
+use super::delay::DelayLine;
 use super::dsp::db_to_gain;
 use crate::settings::AgcDecay;
 
@@ -217,18 +218,12 @@ pub struct Agc {
     power: f64,
     smoothing: f64,
     /// The loudest peak of this stretch of [`AGC_PEAK_HOLD_SEC`] and of the
-    /// one before it, and how long this one has left.
-    peak: f64,
-    last_peak: f64,
-    peak_left: u32,
-    peak_hold: u32,
+    /// one before it.
+    peaks: TwoWindow,
     /// The loudest crest of this stretch as long as the look-ahead and of the
-    /// one before it, and how long this one has left: everything still
-    /// waiting to be played is in one of the two.
-    crest: f64,
-    last_crest: f64,
-    crest_left: u32,
-    crest_hold: u32,
+    /// one before it: everything still waiting to be played is in one of the
+    /// two.
+    crests: TwoWindow,
     /// Samples the detector has stood above the knee without a break.
     above: u32,
     qualify: u32,
@@ -244,12 +239,9 @@ pub struct Agc {
     /// hang: what is weaker in it is that signal's own tail, not another.
     holding_run: bool,
     /// Where the strongest weaker signal heard in this stretch of a hang
-    /// and in the one before wants the gain, one with none, and how long
-    /// this stretch has left: what the gain recovers to once the hang has
-    /// run out.
-    weaker: f64,
-    last_weaker: f64,
-    weaker_left: u32,
+    /// and in the one before wants the gain, one with none: what the gain
+    /// recovers to once the hang has run out.
+    weakers: TwoWindow,
     /// How much higher than the holding signal's gain a signal's own gain
     /// has to be for it to be another, weaker signal
     /// ([`AGC_OTHER_SIGNAL_DB`]).
@@ -265,8 +257,7 @@ pub struct Agc {
     limit_release: f64,
     ceiling_attack: f64,
     /// The band, waiting out the look-ahead.
-    delay: Vec<f64>,
-    delay_at: usize,
+    delay: DelayLine<f64>,
 }
 
 impl Agc {
@@ -284,14 +275,8 @@ impl Agc {
             ceiling_level: knee * db_to_gain(AGC_CEILING_DB),
             power: 0.0,
             smoothing: coefficient(AGC_DETECTOR_SEC),
-            peak: 0.0,
-            last_peak: 0.0,
-            peak_left: samples(AGC_PEAK_HOLD_SEC),
-            peak_hold: samples(AGC_PEAK_HOLD_SEC),
-            crest: 0.0,
-            last_crest: 0.0,
-            crest_left: lookahead as u32,
-            crest_hold: lookahead as u32,
+            peaks: TwoWindow::new(samples(AGC_PEAK_HOLD_SEC), 0.0),
+            crests: TwoWindow::new(lookahead as u32, 0.0),
             above: 0,
             qualify: samples(AGC_QUALIFY_SEC),
             hang: samples(hang),
@@ -300,9 +285,7 @@ impl Agc {
             holder: 1.0,
             holder_follow: coefficient(AGC_HOLD_FOLLOW_SEC),
             holding_run: false,
-            weaker: 1.0,
-            last_weaker: 1.0,
-            weaker_left: samples(hang),
+            weakers: TwoWindow::new(samples(hang), 1.0),
             other: db_to_gain(AGC_OTHER_SIGNAL_DB),
             limited: 1.0,
             ceiling: 1.0,
@@ -313,8 +296,7 @@ impl Agc {
             limit_release: coefficient(AGC_LIMIT_RELEASE_SEC),
             ceiling_attack: coefficient(AGC_CEILING_ATTACK_SEC),
             // Allocated here, once: the audio callback only ever writes into it.
-            delay: vec![0.0; lookahead],
-            delay_at: 0,
+            delay: DelayLine::new(lookahead),
         }
     }
 
@@ -337,8 +319,7 @@ impl Agc {
     /// through at one.
     pub fn process(&mut self, heard: f64, send: f64) -> f64 {
         let gain = self.next_gain(heard + send);
-        let due = std::mem::replace(&mut self.delay[self.delay_at], heard);
-        self.delay_at = (self.delay_at + 1) % self.delay.len();
+        let due = self.delay.push(heard);
         due * gain
     }
 
@@ -379,22 +360,12 @@ impl Agc {
         } else {
             0.0
         };
-        self.peak = self.peak.max(magnitude);
-        self.peak_left -= 1;
-        let recent = self.peak.max(self.last_peak);
-        if self.peak_left == 0 {
-            self.last_peak = self.peak;
-            self.peak = 0.0;
-            self.peak_left = self.peak_hold;
-        }
-        self.crest = self.crest.max(magnitude);
-        self.crest_left -= 1;
-        let coming = self.crest.max(self.last_crest);
-        if self.crest_left == 0 {
-            self.last_crest = self.crest;
-            self.crest = 0.0;
-            self.crest_left = self.crest_hold;
-        }
+        self.peaks.louder(magnitude);
+        let recent = self.peaks.loudest();
+        self.peaks.step();
+        self.crests.louder(magnitude);
+        let coming = self.crests.loudest();
+        self.crests.step();
 
         // The hang: only a level that has stood above the knee long enough to
         // be a signal sets it or keeps it, and only the signal holding it, or
@@ -433,9 +404,9 @@ impl Agc {
             self.held = closer_in_db(self.held, wanted, rate);
         } else {
             if signal && !self.holding_run {
-                self.weaker = self.weaker.min(wanted);
+                self.weakers.lower(wanted);
             }
-            let weaker = self.weaker.min(self.last_weaker);
+            let weaker = self.weakers.lowest();
             if self.hang_left > 0 {
                 self.hang_left -= 1;
             } else if self.held < weaker {
@@ -447,12 +418,7 @@ impl Agc {
                 }
             }
         }
-        self.weaker_left -= 1;
-        if self.weaker_left == 0 {
-            self.last_weaker = self.weaker;
-            self.weaker = 1.0;
-            self.weaker_left = self.hang;
-        }
+        self.weakers.step();
 
         // The ceiling, on the crests still waiting to be played, at the gain
         // the law is on its way to: by the time a station's first crests are
@@ -509,12 +475,8 @@ impl Agc {
             return false;
         }
         self.power = previous.power;
-        self.peak = previous.peak;
-        self.last_peak = previous.last_peak;
-        self.peak_left = previous.peak_left.clamp(1, self.peak_hold);
-        self.crest = previous.crest;
-        self.last_crest = previous.last_crest;
-        self.crest_left = previous.crest_left.clamp(1, self.crest_hold);
+        self.peaks.carry_on_from(&previous.peaks, |peak| peak);
+        self.crests.carry_on_from(&previous.crests, |crest| crest);
         self.above = previous.above;
         self.hang_left = previous.hang_left.min(self.hang);
         let moved = (self.knee / previous.knee).powf(AGC_SLOPE);
@@ -529,9 +491,7 @@ impl Agc {
         self.held = rewanted(previous.held);
         self.holder = rewanted(previous.holder);
         self.holding_run = previous.holding_run;
-        self.weaker = rewanted(previous.weaker);
-        self.last_weaker = rewanted(previous.last_weaker);
-        self.weaker_left = previous.weaker_left.clamp(1, self.hang);
+        self.weakers.carry_on_from(&previous.weakers, rewanted);
         self.limited = previous.limited;
         self.ceiling = previous.ceiling;
         self.gain = previous.gain;
@@ -548,6 +508,78 @@ impl Agc {
         } else {
             1.0
         }
+    }
+}
+
+/// The most or the least of what was recorded in this stretch of `hold`
+/// samples and in the one before it, as the AGC keeps its peaks, its crests
+/// and its weaker signals: whatever was recorded in the last `hold` samples
+/// is in one of the two. Each window keeps only the louder ([`Self::louder`])
+/// or only the lower ([`Self::lower`]) of what it is given.
+#[derive(Clone)]
+struct TwoWindow {
+    /// What this stretch has recorded, and what the one before it did.
+    this: f64,
+    last: f64,
+    /// How many samples this stretch has left, and how many a stretch has.
+    left: u32,
+    hold: u32,
+    /// What a stretch with nothing recorded holds.
+    none: f64,
+}
+
+impl TwoWindow {
+    /// Stretches of `hold` samples, which is one at least, with nothing
+    /// recorded in either.
+    fn new(hold: u32, none: f64) -> Self {
+        Self {
+            this: none,
+            last: none,
+            left: hold,
+            hold,
+            none,
+        }
+    }
+
+    /// `value` recorded in this stretch, which keeps the louder.
+    fn louder(&mut self, value: f64) {
+        self.this = self.this.max(value);
+    }
+
+    /// `value` recorded in this stretch, which keeps the lower.
+    fn lower(&mut self, value: f64) {
+        self.this = self.this.min(value);
+    }
+
+    /// The loudest recorded in the two stretches.
+    fn loudest(&self) -> f64 {
+        self.this.max(self.last)
+    }
+
+    /// The lowest recorded in the two stretches.
+    fn lowest(&self) -> f64 {
+        self.this.min(self.last)
+    }
+
+    /// One sample on, after this one's is recorded and read: a stretch that
+    /// has run out becomes the one before, and a new one starts with nothing
+    /// recorded.
+    fn step(&mut self) {
+        self.left -= 1;
+        if self.left == 0 {
+            self.last = self.this;
+            self.this = self.none;
+            self.left = self.hold;
+        }
+    }
+
+    /// Pick up where `previous` left off: what its two stretches recorded,
+    /// each through `map`, and what its present one has left, kept within
+    /// this one's own `hold`.
+    fn carry_on_from(&mut self, previous: &Self, map: impl Fn(f64) -> f64) {
+        self.this = map(previous.this);
+        self.last = map(previous.last);
+        self.left = previous.left.clamp(1, self.hold);
     }
 }
 

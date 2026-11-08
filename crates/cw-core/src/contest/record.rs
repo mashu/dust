@@ -34,6 +34,7 @@ const ASSISTED_MARK: &str = ":a";
 pub(crate) const LAYOUT: u32 = 1;
 
 /// A QSO's kind, as `k` keeps it: logged is empty.
+pub(super) const LOGGED: &str = "";
 pub(super) const LOST: &str = "lost";
 pub(super) const NIL: &str = "nil";
 
@@ -135,6 +136,28 @@ fn is_zero(n: &u32) -> bool {
 }
 
 impl QsoRecord {
+    /// What every QSO keeps, for one of kind `kind` ([`LOGGED`], [`NIL`] or
+    /// [`LOST`]) that ended at `t`, in run time, its station first heard at
+    /// `first`, or when it ended if never, and never later; owning `groups`
+    /// of the session's groups, as many as a `u32` counts; and sent your
+    /// serial `nr`. The rest is left empty, for each kind to fill in.
+    pub(super) fn ended(kind: &str, t: u64, first: Option<u64>, groups: usize, nr: u32) -> Self {
+        Self {
+            t,
+            h: first.unwrap_or(t).min(t),
+            g: u32::try_from(groups).unwrap_or(u32::MAX),
+            nr,
+            k: kind.to_string(),
+            c: String::new(),
+            lp: Vec::new(),
+            l: Vec::new(),
+            lc: String::new(),
+            s: Vec::new(),
+            sc: String::new(),
+            a: 0,
+        }
+    }
+
     /// What [`Self::lp`] keeps of where `call`, logged, places its station.
     pub(crate) fn place_of(call: &str) -> Vec<String> {
         let placed = Placed::of(call);
