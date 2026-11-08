@@ -21,8 +21,7 @@ use crate::state::SessionPick;
 use crate::ui::contest::LogRowView;
 use crate::ui::figures::History;
 use crate::ui::format::{counted, counted_in_words, minutes_seconds, short_date};
-use crate::ui::results::{PlaceBanner, place_line};
-use crate::ui::scores::{rating_label, rating_unit};
+use crate::ui::standing::{PlaceBanner, place_line, rating_label, rating_unit};
 use crate::ui::widgets::{CardHead, Icon, IconName, ScoreRing, control_id};
 
 /// What the results of a run with Show copy on say of it.

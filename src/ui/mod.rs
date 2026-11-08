@@ -37,6 +37,7 @@ pub mod scores;
 pub mod settings;
 pub mod settings_charset;
 pub mod settings_station;
+pub mod standing;
 pub mod stats;
 pub mod stats_detail;
 pub mod sync;
