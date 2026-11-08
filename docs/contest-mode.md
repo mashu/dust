@@ -3808,7 +3808,7 @@ contest speed evidence, `tells_speed`, `whole_evidence`);
 (`Qsb::flutter`, 5a); `keyer/clock.rs` (the word gap the paddles' field
 space keys, 5b); `soak.rs`, `lib.rs` (the contest soak; exports).
 
-**New in the app:** `src/contest_runtime.rs` (`LiveContest`, start,
+**New in the app:** `src/contest_runtime.rs` (`LiveContest`'s methods, start,
 dispatch, effects, `play_turn`, finish, the heartbeat check);
 `src/ui/contest.rs` (run bar, hint, air line, fields, key bar, log, paused
 panel, the pause on a hidden page, whose visibility listener and minimise
@@ -3818,8 +3818,9 @@ sight, for the run and for Hear a QSO, 2c); `src/ui/hear_qso.rs` (the dialogue o
 Hear a QSO, 2c); `src/ui/scores/runs.rs` (the Runs card, as built 4b);
 `scripts/contest-data.py` (counted shares).
 
-**Changed in the app:** `src/session_runtime.rs` (`Live::{Groups, Contest}`,
-`start_session` routing, `finish_run`, `abort_run`);
+**Changed in the app:** `src/session_runtime.rs` (`start_session` routing,
+`finish_run`, `abort_run`); `src/state/live.rs` (`Live::{Groups, Contest}`,
+`LiveSession` and `LiveContest`, whose methods stay in the runtimes);
 `src/state.rs` (`contest: Signal<Option<ContestView>>`, `entry: ContestEntry`,
 `session_running`, the restore message); `src/routes.rs` (Training and
 Results branches); `src/app.rs`, `src/ui/tour.rs` (Exit and Discard,
