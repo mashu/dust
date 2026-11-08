@@ -11,11 +11,11 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use super::check::{QsoCheck, QsoError, QsoText, check_qso};
-use super::exchange::Field;
-use super::rules::{ContestRules, Side};
 use super::score::{ContestScore, MyStation, Placed, Rates, ScoredQso, contest_score};
-use super::{ContestKind, RunStyle};
 use crate::alignment::CopyTally;
+use crate::rulebook::exchange::Field;
+use crate::rulebook::rules::{ContestRules, Side};
+use crate::rulebook::{ContestKind, RunStyle};
 use crate::score::calculate_total_chars;
 use crate::session::{
     CONTEST_MARK, ContestLog, GroupResult, SessionResult, SessionTiming,

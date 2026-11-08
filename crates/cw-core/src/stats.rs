@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use crate::alignment::align_group;
 use crate::belief::{EstimatePoint, sessions_faded};
 use crate::board::BOARD_MIN_GROUPS;
-use crate::contest::{ContestKind, StoredLog};
+use crate::contest::StoredLog;
 use crate::morse::LCWO_SEQUENCE;
 use crate::numeric::median;
 use crate::recognition::{
     CopyTime, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Recognition, RecognitionBands,
     copied_after, copy_times, recognise,
 };
+use crate::rulebook::ContestKind;
 use crate::sampling::{
     CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
     belief_for, beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,

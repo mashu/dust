@@ -37,10 +37,6 @@ mod score;
 mod source;
 mod turn;
 
-pub(crate) use crate::rulebook::{data, exchange, odds, rules, serial};
-
-use crate::rulebook::{MS_PER_HOUR, MS_PER_MINUTE};
-
 pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 #[cfg(test)]
 pub(crate) use caller::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};

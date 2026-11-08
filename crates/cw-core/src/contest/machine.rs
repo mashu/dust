@@ -28,24 +28,19 @@ use std::collections::BTreeSet;
 use super::caller::{CallMatch, Caller, CallerState, Likeness, Says, exchange_at, match_call};
 use super::check::{QsoCheck, QsoText, check_qso};
 use super::clock::RunClock;
-use super::data::places::home_country;
-use super::data::zones::home_continent;
 use super::esm::{
     EntryField, Fields, QsoState, call_copied, esm, loggable, message_text, unheard_hint,
 };
-use super::exchange::Field;
 use super::message::MessagePart;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord, tells_speed};
-use super::rules::{ContestRules, FAREWELLS, Fill, GREETING_HOUR, Sender, Side, greeting};
 use super::score::rate_at;
 use super::source::CallSource;
 use super::turn::{
     Fade, Segment, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
 };
-use super::{CallerHabits, MS_PER_MINUTE, RunStyle};
 use crate::alignment::CopyTally;
 use crate::band::Qsb;
 use crate::callsign::parse_callsign;
@@ -53,6 +48,13 @@ use crate::machine::COUNTDOWN_STEP_MS;
 use crate::mono::whole_ms;
 use crate::recognition::{CharTimes, Keys};
 use crate::rng::{Rng, SplitMix64};
+use crate::rulebook::data::places::home_country;
+use crate::rulebook::data::zones::home_continent;
+use crate::rulebook::exchange::Field;
+use crate::rulebook::rules::{
+    ContestRules, FAREWELLS, Fill, GREETING_HOUR, Sender, Side, greeting,
+};
+use crate::rulebook::{CallerHabits, MS_PER_MINUTE, RunStyle};
 use crate::score::MIN_RESPONSE_MS_PER_CHAR;
 use crate::session::{Answered, GroupResult, MonoMs, PauseWhy, SessionResult, SessionTiming};
 use crate::settings::{STATIONS_MAX, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
@@ -5073,9 +5075,9 @@ mod tests {
         Habit, ScriptCalls, default_run_settings, run_settings, work,
     };
     use crate::contest::bot::{Copied, Operator, Runtime, copy_of};
-    use crate::contest::exchange::read_number;
-    use crate::contest::rules::RULES;
     use crate::contest::turn::{plan_turn, sending_sec};
+    use crate::rulebook::exchange::read_number;
+    use crate::rulebook::rules::RULES;
     use crate::sampling::Sampler;
     use crate::timing::ToneEvent;
 

@@ -4,8 +4,8 @@
 //! Typing is never corrected as you type: the text stays as typed, and is
 //! read on every edit. The reading is what is checked and logged.
 
-use super::exchange::Field;
-use super::rules::{ContestRules, Side};
+use crate::rulebook::exchange::Field;
+use crate::rulebook::rules::{ContestRules, Side};
 
 /// The Call field's text as a call: upper case, letters, digits, `/` and the
 /// `?` that asks for a part, and nothing else, spaces included.

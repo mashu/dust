@@ -21,12 +21,12 @@
 //! field text, for the key's label and the hint.
 
 use super::caller::{CallMatch, match_call};
-use super::exchange::Field;
 use super::message::MessagePart;
 use super::parse::{ExchangeState, normalize_call, parse_exchange};
-use super::rules::{ContestRules, Fill, Side};
 use crate::callsign::parse_callsign;
 use crate::recognition::{KeyLog, Keys};
+use crate::rulebook::exchange::Field;
+use crate::rulebook::rules::{ContestRules, Fill, Side};
 use crate::session::MonoMs;
 
 /// What Enter needs to know of the QSO in progress.

@@ -18,8 +18,8 @@
 
 use std::sync::Arc;
 
-use super::rules::Sender;
 use crate::band::{FADE_STEP_SEC, Qsb, SOFT_LIMIT_KNEE};
+use crate::rulebook::rules::Sender;
 use crate::session::MonoMs;
 use crate::settings::{
     ContestSettings, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, TrainingSettings, VOLUME_MAX,
