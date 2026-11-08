@@ -1,3 +1,4 @@
+pub mod app_widgets;
 pub mod auto_level;
 pub mod backup;
 pub mod band;

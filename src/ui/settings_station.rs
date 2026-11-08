@@ -13,9 +13,10 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::ui::app_widgets::TextField;
 use crate::ui::help;
 use crate::ui::widgets::{
-    CardHead, IconName, NumberField, SectionReset, TextDraft, TextField, control_id, whole,
+    CardHead, IconName, NumberField, SectionReset, TextDraft, control_id, whole,
 };
 
 /// What the callsign, name, state, zone and power fields are called, and so
