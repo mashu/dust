@@ -3,7 +3,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::format::{counted, long_date, month_name};
+use crate::format::{counted, long_date, month_name, percent};
 use crate::ui::elsewhere::{DAY_CARD, use_click_elsewhere};
 use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
@@ -157,7 +157,7 @@ fn day_summary(label: &str, cell: &HeatmapCell) -> String {
         counted(cell.sessions, "session")
     );
     if let Some(accuracy) = cell.avg_accuracy {
-        text.push_str(&format!(", {:.0}% accuracy", accuracy * 100.0));
+        text.push_str(&format!(", {} accuracy", percent(accuracy)));
     }
     text
 }

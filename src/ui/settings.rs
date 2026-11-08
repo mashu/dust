@@ -296,14 +296,14 @@ impl SessionShape {
 /// group size adapts; of the characters right, if speed does.
 fn aim_note(aim: Aim, groups: bool, chars: bool) -> String {
     let label = aim_label(aim);
-    let whole = aim.groups_whole() * 100.0;
-    let right = aim.chars_right() * 100.0;
+    let whole = percent(aim.groups_whole());
+    let right = percent(aim.chars_right());
     match (groups, chars) {
         (true, true) => format!(
-            "{label} aims for {whole:.0}% of groups copied whole and {right:.0}% of characters right."
+            "{label} aims for {whole} of groups copied whole and {right} of characters right."
         ),
-        (false, true) => format!("{label} aims for {right:.0}% of characters right."),
-        _ => format!("{label} aims for {whole:.0}% of groups copied whole."),
+        (false, true) => format!("{label} aims for {right} of characters right."),
+        _ => format!("{label} aims for {whole} of groups copied whole."),
     }
 }
 

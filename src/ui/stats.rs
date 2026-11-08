@@ -5,7 +5,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::format::counted;
+use crate::format::{counted, percent};
 use crate::persist::record::RecordId;
 use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
@@ -326,7 +326,7 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: History) -> Element {
             unit: "WPM",
             decimals: 0,
             colour: "var(--good)",
-            meaning: format!("{:.0}% of characters right", aim.chars_right() * 100.0),
+            meaning: format!("{} of characters right", percent(aim.chars_right())),
             help: help::copy_speed(aim.chars_right()),
             steering: (now && adapts_speed(&settings)).then(|| aim_label(aim)),
             off,
