@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::session::MonoMs;
+use crate::mono::MonoMs;
 
 /// The longest a recognition or copy time says: a character typed later
 /// than this after it sounded, or after the key before it, is timed as

@@ -22,6 +22,7 @@ mod keyer;
 mod learner_sim;
 mod level;
 mod machine;
+mod mono;
 mod morse;
 mod numeric;
 mod pool;
@@ -91,6 +92,7 @@ pub use keyer::{
 pub use machine::{
     AUTO_CONFIRM_DELAY_MS, AnswerClose, GroupSource, SessionEffect, SessionEvent, SessionMachine,
 };
+pub use mono::MonoMs;
 pub use morse::{MAX_DIGITS_LEVEL, morse_for};
 pub use pool::{
     compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
@@ -108,8 +110,8 @@ pub use sampling::{
 };
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
-    Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, MonoMs, SendStart,
-    SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys, Untimed,
+    Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, SendStart, SessionId,
+    SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys, Untimed,
     answer_length_matches, settle_clock_ahead,
 };
 pub use settings::{

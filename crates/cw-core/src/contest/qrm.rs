@@ -16,8 +16,8 @@ use super::rules::{ContestRules, Side};
 use super::turn::{Fade, Segment, Sender, sending_sec};
 use crate::band::{FADE_OFFSET_MAX_SEC, Qsb};
 use crate::callsign::generate_call;
+use crate::mono::whole_ms;
 use crate::rng::{Rng, SplitMix64};
-use crate::session::whole_ms;
 use crate::settings::{LevelAxis, TrainingSettings};
 use crate::timing::{StationVoice, resolve_station};
 
