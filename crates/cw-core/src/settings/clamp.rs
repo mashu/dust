@@ -129,7 +129,7 @@ impl TrainingSettings {
         // not vary, or one this build does not know, keeps none, and one as
         // on the air is not kept.
         k.caller_styles.retain(|name, choice| {
-            let Some(kind) = crate::contest::ContestKind::from_name(name) else {
+            let Some(kind) = crate::rulebook::ContestKind::from_name(name) else {
                 return false;
             };
             let rules = kind.rules();

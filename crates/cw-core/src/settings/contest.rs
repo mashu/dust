@@ -17,7 +17,8 @@ use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_can
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{CallerHabits, CallerOdds, ContestKind, Field, RunStyle, Side, TuCall};
+use crate::contest::{CallerOdds, Field, Side};
+use crate::rulebook::{CallerHabits, ContestKind, RunStyle, TuCall};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;

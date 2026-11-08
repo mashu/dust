@@ -27,6 +27,7 @@ mod morse;
 mod numeric;
 mod recognition;
 mod rng;
+mod rulebook;
 mod sampling;
 mod score;
 mod sequences;

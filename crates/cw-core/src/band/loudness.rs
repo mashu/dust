@@ -20,7 +20,7 @@ use super::filter::{FilterDesign, ReceiverFilter};
 use super::knee::agc_knee;
 use super::memo::{Exact, LastAnswer};
 use super::output::SOFT_LIMIT_KNEE;
-use crate::contest::RunStyle;
+use crate::rulebook::RunStyle;
 use crate::settings::{
     AgcDecay, CharSetMode, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, STATIONS_MAX, STATIONS_MIN,
     STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, WPM_MAX, WPM_MIN,
