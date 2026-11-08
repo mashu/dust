@@ -74,12 +74,12 @@ pub(crate) use record::tells_speed;
 pub use record::{ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use rules::{
     CallerStyles, ContestRules, FAREWELLS, Fill, Form, GREETING_HOUR, Multiplier, PerSide, Points,
-    STYLE_EVEN, Scoring, Side, Sides, Styles, corner_shares, greeting, into_shape, shape_corners,
-    shares_without, toggle_corner,
+    STYLE_EVEN, Scoring, Sender, Side, Sides, Styles, corner_shares, greeting, into_shape,
+    shape_corners, shares_without, toggle_corner,
 };
 pub use score::{ContestScore, MyStation, Placed, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};
-pub use turn::{Fade, MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
+pub use turn::{Fade, MONITOR_LEVEL, Segment, Turn, plan_turn};
 
 pub use crate::session::{ContestLog, PauseWhy};
 

@@ -4,7 +4,6 @@
 use super::data::places::{DX, fold_labrador, in_us_or_canada, w_ve};
 use super::exchange::{self, Field, cut_power, cut_serial, cut_zone};
 use super::serial::{SPRINT_SERIALS, SerialFit, WPX_SERIALS};
-use super::turn::Sender;
 use super::{ContestKind, TuCall};
 use crate::callsign::{CallSpec, Countries};
 
@@ -927,6 +926,25 @@ pub struct CallerStyles {
 /// How you sign off in a TU that holds a farewell: `73`, and now and then
 /// `73 44`, as often as you set ([`super::CallerOdds::farewell_44`]).
 pub const FAREWELLS: [&str; 2] = ["73", "73 44"];
+
+/// Who sends a segment of a turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sender {
+    You,
+    /// A caller, by its number in the run.
+    Caller(u32),
+    /// A station on your frequency that is not calling you, heard through
+    /// the receiver as a caller is: the QRM of rough habits (§5.6 of the
+    /// design). It never answers, and is no caller and no part of a QSO.
+    Qrm,
+}
+
+impl Sender {
+    /// Whether it is a caller: a station that may answer you.
+    pub fn is_caller(self) -> bool {
+        matches!(self, Self::Caller(_))
+    }
+}
 
 impl Scoring {
     /// Whether anything multiplies the points, on either side: all but

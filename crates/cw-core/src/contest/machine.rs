@@ -39,10 +39,10 @@ use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::qrm::Qrm;
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord, tells_speed};
-use super::rules::{ContestRules, FAREWELLS, Fill, GREETING_HOUR, Side, greeting};
+use super::rules::{ContestRules, FAREWELLS, Fill, GREETING_HOUR, Sender, Side, greeting};
 use super::score::rate_at;
 use super::turn::{
-    Fade, Segment, Sender, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
+    Fade, Segment, Turn, char_spans, sending_sec, sounding_at, word_gap_sec, your_voice,
 };
 use super::{CallSource, CallerHabits, MS_PER_MINUTE, RunStyle};
 use crate::alignment::CopyTally;

@@ -17,9 +17,7 @@ use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_can
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{
-    CallerHabits, CallerOdds, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall,
-};
+use crate::contest::{CallerHabits, CallerOdds, ContestKind, Field, RunStyle, Side, TuCall};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -32,7 +30,7 @@ pub const MY_WPM_MAX: u32 = WPM_MAX as u32;
 
 /// How loud you hear your own messages, in decibels from the loudest, as
 /// MorseRunner's self-monitor level is set (`MonLevel`, -60 to 0 dB): at the
-/// top, [`MONITOR_LEVEL`]; at the bottom, nothing at all.
+/// top, [`crate::MONITOR_LEVEL`]; at the bottom, nothing at all.
 pub const MY_SENDING_MAX_DB: i32 = 0;
 pub const MY_SENDING_OFF_DB: i32 = -60;
 
@@ -155,7 +153,7 @@ pub struct ContestSettings {
     #[serde(deserialize_with = "forgiving_wpm")]
     pub my_wpm: u32,
     /// How loud you hear your own messages, in decibels from the loudest,
-    /// [`MONITOR_LEVEL`]; [`MY_SENDING_OFF_DB`] is silent. Set on the Tone
+    /// [`crate::MONITOR_LEVEL`]; [`MY_SENDING_OFF_DB`] is silent. Set on the Tone
     /// and volume card.
     #[serde(deserialize_with = "forgiving_sending")]
     pub my_sending_db: i32,
@@ -378,17 +376,6 @@ impl ContestSettings {
         {
             self.caller_styles.remove(kind.name());
         }
-    }
-
-    /// How loud your own messages play, as a peak of full scale: the
-    /// monitor's level, [`MONITOR_LEVEL`], turned down by your sending's
-    /// decibels, and nothing at all at [`MY_SENDING_OFF_DB`].
-    pub fn sending_level(&self) -> f64 {
-        if self.my_sending_db <= MY_SENDING_OFF_DB {
-            return 0.0;
-        }
-        let db = f64::from(self.my_sending_db.min(MY_SENDING_MAX_DB));
-        MONITOR_LEVEL * 10f64.powf(db / 20.0)
     }
 
     /// How long a run lasts at most, in minutes: what it was set to, or the
@@ -816,6 +803,7 @@ pub(super) fn clean_call(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contest::MONITOR_LEVEL;
     use crate::settings::{RangeSetting, SettingsSection};
 
     #[test]

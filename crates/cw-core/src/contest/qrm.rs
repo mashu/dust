@@ -12,8 +12,8 @@
 //! draws as it always has.
 
 use super::place::place_qrm;
-use super::rules::{ContestRules, Side};
-use super::turn::{Fade, Segment, Sender, sending_sec};
+use super::rules::{ContestRules, Sender, Side};
+use super::turn::{Fade, Segment, sending_sec};
 use crate::band::{FADE_OFFSET_MAX_SEC, Qsb};
 use crate::callsign::generate_call;
 use crate::mono::whole_ms;
