@@ -123,7 +123,7 @@ pub struct ContestSettings {
     /// the contest card, with the run style.
     pub contest_tu_call: TuCall,
     /// How callers reply in each contest whose callers vary
-    /// ([`crate::contest::ContestRules::varies`]), by the contest's name:
+    /// ([`crate::rulebook::ContestRules::varies`]), by the contest's name:
     /// where you put the knob in its shape of replies and which you turned
     /// off. A contest left out is as heard on the air. Set on the contest
     /// card.

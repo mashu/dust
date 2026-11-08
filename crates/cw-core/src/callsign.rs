@@ -77,7 +77,7 @@ const ABROAD_SHARE: f64 = 0.12;
 /// The same two shares in a contest. The tiers send portables and stations
 /// abroad often, because they are what is being practised there; a contest's
 /// callers are mostly at home, as on a real band: until a run sets them
-/// ([`crate::contest::CallerOdds`]).
+/// ([`crate::rulebook::CallerOdds`]).
 pub(crate) const CONTEST_PORTABLE_SHARE: f64 = 0.04;
 pub(crate) const CONTEST_ABROAD_SHARE: f64 = 0.03;
 
