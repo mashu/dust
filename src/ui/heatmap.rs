@@ -3,8 +3,8 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::{counted, long_date, month_name};
 use crate::ui::elsewhere::{DAY_CARD, use_click_elsewhere};
-use crate::ui::format::{counted, long_date, month_name};
 use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
 

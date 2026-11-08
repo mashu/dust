@@ -6,6 +6,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::counted;
 use crate::persist::backup::sessions_since;
 use crate::persist::record::RecordId;
 use crate::state::SessionPick;
@@ -15,7 +16,6 @@ use crate::ui::confusion::confusions_card;
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::figures::History;
 use crate::ui::forecast::{group_length_card, speed_card};
-use crate::ui::format::counted;
 use crate::ui::sampling::NextUpCard;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::sync::{SyncCard, SyncView};

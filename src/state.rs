@@ -15,6 +15,7 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
+use crate::format::{counted, day_of, short_date};
 use crate::history::{StoredHistory, settle_or_spawn};
 use crate::persist::backup::{
     Backup, BackupFile, Filled, NotSaved, backup_name, filled_in, merge_sessions,
@@ -28,7 +29,6 @@ use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live, keep_cut_off};
 use crate::sync::ctx::SyncCtx;
 use crate::time::{POLL_MS, now_ms, sleep_ms};
-use crate::ui::format::{counted, day_of, short_date};
 
 /// How long after the store last refused what the app has yet to store it
 /// is tried again, while anything waits: the page coming back into sight,

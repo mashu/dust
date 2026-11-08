@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::ui::format::ordinal;
+use crate::format::ordinal;
 
 /// A medal for the first three places: gold, silver and bronze, with the
 /// place on it.

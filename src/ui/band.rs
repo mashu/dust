@@ -8,7 +8,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::ui::format::counted;
+use crate::format::counted;
 use crate::ui::help;
 use crate::ui::odds::{OddSlider, OddsFold, OddsGroup};
 use crate::ui::widgets::{

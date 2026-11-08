@@ -27,10 +27,10 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::short_date;
 use crate::state::SessionPick;
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::figures::History;
-use crate::ui::format::short_date;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 use best::BestCard;

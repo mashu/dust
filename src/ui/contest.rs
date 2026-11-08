@@ -17,13 +17,13 @@ use dioxus::prelude::*;
 use crate::contest_runtime::{
     change_speed, focus_field, pause_run, press_key, resume_run, tick, typed_len_max,
 };
+use crate::format::{counted, minutes_seconds};
 use crate::page_hidden::{RUN_HIDDEN, use_page_hidden};
 use crate::session_runtime::{abort_run, finish_run};
 use crate::state::AppCtx;
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
 use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
-use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::training::{ANSWER_INPUT_MODE, InputMethod, Keypad, PadKey, PadRow, TOUCH_BUILD};
 use crate::ui::widgets::{

@@ -2,9 +2,9 @@ use cw_core::{BoardEntry, FORM_SESSIONS, PER_SESSION_UP_TO, Ranking, TimelinePoi
 use dioxus::prelude::*;
 
 use super::{Marked, focus, pick, rating_said, what_it_was};
+use crate::format::{clock, counted, ordinal, short_date};
 use crate::state::SessionPick;
 use crate::ui::chart::path;
-use crate::ui::format::{clock, counted, ordinal, short_date};
 use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName};
 

@@ -4,9 +4,9 @@
 
 use dioxus::prelude::*;
 
+use crate::format::{clock, counted, day_of, short_date};
 use crate::persist::{CutOff, SetAside};
 use crate::state::{AppCtx, Notice};
-use crate::ui::format::{clock, counted, day_of, short_date};
 use crate::ui::today::use_today;
 use crate::ui::widgets::{Icon, IconName, control_id};
 

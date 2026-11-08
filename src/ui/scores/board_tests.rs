@@ -2,8 +2,8 @@
 //! of mode, and what an empty board says.
 
 use super::*;
+use crate::format::ordinal;
 use crate::testing::{Ui, assisted, stored_run, stored_session};
-use crate::ui::format::ordinal;
 
 /// A session of ten groups of five on the `day`th of October 2026, that
 /// earned `per_group` each.

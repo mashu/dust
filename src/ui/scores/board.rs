@@ -2,8 +2,8 @@ use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode, Ranking};
 use dioxus::prelude::*;
 
 use super::{Marked, Medal, focus, mode_label, pick, rating_label, run_rule, speed};
+use crate::format::day_and_clock;
 use crate::state::SessionPick;
-use crate::ui::format::day_and_clock;
 use crate::ui::help;
 use crate::ui::stats_detail::ASSISTED;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};

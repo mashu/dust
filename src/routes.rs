@@ -562,7 +562,7 @@ mod tests {
     fn the_scores_tab_left_up_past_midnight_goes_by_the_new_day() {
         run(|| async {
             let at = crate::time::now_ms();
-            let day = crate::ui::format::day_of(at).expect("a day");
+            let day = crate::format::day_of(at).expect("a day");
             pretend_today(&day);
             let mut best = stored_session(&day, &[("KM", "KM"); 10]);
             best.timestamp = at;
@@ -588,7 +588,7 @@ mod tests {
     fn the_sync_card_left_up_past_midnight_goes_by_the_new_day() {
         run(|| async {
             let at = crate::time::now_ms();
-            let day = crate::ui::format::day_of(at).expect("a day");
+            let day = crate::format::day_of(at).expect("a day");
             pretend_today(&day);
             let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
             ui.with_app(|ctx| {
@@ -602,7 +602,7 @@ mod tests {
             });
             ui.click("nav-stats");
             ui.click("seg-history");
-            let time = crate::ui::format::clock(at).expect("a time");
+            let time = crate::format::clock(at).expect("a time");
             assert!(ui.has(&format!("Synced today at {time}")), "{}", ui.html());
             pretend_today(&days_after(&day, 1));
             tokio::time::advance(std::time::Duration::from_millis(DAY_LOOK_MS.into())).await;
@@ -611,7 +611,7 @@ mod tests {
             assert!(ui.has(&yesterday), "{}", ui.html());
             pretend_today(&days_after(&day, 2));
             ui.with_app(|_| crate::page_hidden::show_page());
-            let before = format!("Synced {} at {time}", crate::ui::format::short_date(&day));
+            let before = format!("Synced {} at {time}", crate::format::short_date(&day));
             assert!(ui.has(&before), "{}", ui.html());
         });
     }

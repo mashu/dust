@@ -1,8 +1,8 @@
 use cw_core::{BOARD_MIN_GROUPS, CharSetMode, SessionResult};
 use dioxus::prelude::*;
 
+use crate::format::ordinal;
 use crate::ui::contest_results::ContestResults;
-use crate::ui::format::ordinal;
 use crate::ui::scores::{Medal, mode_noun, per_group_label};
 use crate::ui::widgets::{CardHead, GroupResultRow, Icon, IconName, ScoreRing, control_id};
 

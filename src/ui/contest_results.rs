@@ -17,10 +17,10 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::{counted, counted_in_words, minutes_seconds, short_date};
 use crate::state::SessionPick;
 use crate::ui::contest::LogRowView;
 use crate::ui::figures::History;
-use crate::ui::format::{counted, counted_in_words, minutes_seconds, short_date};
 use crate::ui::results::{PlaceBanner, place_line};
 use crate::ui::scores::{rating_label, rating_unit};
 use crate::ui::widgets::{CardHead, Icon, IconName, ScoreRing, control_id};

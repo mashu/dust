@@ -8,12 +8,12 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::format::counted;
 use crate::persist::record::RecordId;
 use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
 use crate::ui::figures::History;
-use crate::ui::format::counted;
 use crate::ui::help;
 use crate::ui::letters::LettersTab;
 use crate::ui::scores::ScoresTab;

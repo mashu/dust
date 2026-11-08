@@ -808,7 +808,7 @@ impl AppCtx {
 /// over, if any: those that would not open, damaged perhaps, and those a
 /// later build wrote, which an update here reads.
 fn passed_over(synced: &Synced) -> Option<String> {
-    let files = |count: usize| crate::ui::format::counted(count, "file");
+    let files = |count: usize| crate::format::counted(count, "file");
     let were = |count: usize| if count == 1 { "was" } else { "were" };
     let damaged = (synced.unreadable > 0).then(|| {
         format!(

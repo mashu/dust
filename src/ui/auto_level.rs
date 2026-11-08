@@ -1,7 +1,7 @@
 use cw_core::{AutoLevelChange, AutoLevelProgress, LevelAxis, MixedAutoLevelAxis};
 use dioxus::prelude::*;
 
-use crate::ui::format::counted;
+use crate::format::counted;
 use crate::ui::widgets::{CardHead, IconName};
 
 /// A percentage as the level's messages give it: whole, or to a tenth where
