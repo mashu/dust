@@ -19,7 +19,7 @@ use super::settings::{
     SETTINGS_PREFIX, SettingsFile, StampedSettings, Using, merge, stamp, stamps_of, taken,
 };
 use super::state::SyncState;
-use crate::persist::record::{HistoryChange, Record, RecordId, read_record};
+use crate::persist::record::{HistoryChange, Pending, Record, RecordId, read_record};
 use crate::persist::{Deleted, Store};
 
 /// What turning sync on found in the drive.
@@ -265,7 +265,8 @@ pub async fn sync_once(
     here: &TrainingSettings,
     now: u64,
 ) -> Result<Synced, SyncFailed> {
-    sync_once_with(store, remote, state, here, now, &BTreeSet::new, &|_| {}).await
+    let keep = |_: &SyncState| crate::persist::record::done(());
+    sync_once_with(store, remote, state, here, now, &BTreeSet::new, &keep).await
 }
 
 /// Sync the history in `store` and the settings `here` with the drive
@@ -287,8 +288,9 @@ pub async fn sync_once(
 ///
 /// `keep` keeps `state` as it stands, which the caller does in any case as
 /// the sync ends: it is asked as a pack holding deletions by hand goes,
-/// once they are noted against it ([`send_pack`]), so that an app stopped
-/// before the sync ends knows of the pack all the same.
+/// once they are noted against it ([`send_pack`]), and the pack goes once
+/// it is kept, so that an app stopped before the sync ends knows of the
+/// pack all the same.
 pub async fn sync_once_with(
     store: &dyn Store,
     remote: &dyn Remote,
@@ -296,7 +298,7 @@ pub async fn sync_once_with(
     here: &TrainingSettings,
     now: u64,
     put_back_since: &dyn Fn() -> BTreeSet<RecordId>,
-    keep: &dyn Fn(&SyncState),
+    keep: &dyn Fn(&SyncState) -> Pending<()>,
 ) -> Result<Synced, SyncFailed> {
     let key = DataKey::from_hex(&state.key).ok_or(SyncFailed::NoKey)?;
     let keys = Keys::of(&key);
@@ -327,7 +329,10 @@ pub async fn sync_once_with(
     // is stamped again after what the drive holds of its record, as one
     // noted now would be. One noted once this device knew the drive keeps
     // its stamp: stamped again, it would beat a later deletion made
-    // elsewhere.
+    // elsewhere. Yet one a copy of the app noted under a sync another copy
+    // has since turned off, and kept for the next, is stamped again here
+    // all the same, however long ago it was noted: a deletion made
+    // elsewhere after it loses to it.
     if state.read.is_empty() {
         for (&id, at) in &mut state.revived {
             *at = drive.stamp_change(id, *at);
@@ -722,7 +727,7 @@ async fn send_pack(
     state: &mut SyncState,
     pack: &Pack,
     by_hand: &BTreeSet<RecordId>,
-    keep: &dyn Fn(&SyncState),
+    keep: &dyn Fn(&SyncState) -> Pending<()>,
 ) -> Result<(), SyncFailed> {
     let name =
         pack_name().ok_or_else(|| SyncFailed::Store("this device could not name a file".into()))?;
@@ -736,7 +741,7 @@ async fn send_pack(
         .collect();
     if !deletions.is_empty() {
         state.unanswered.insert(name.clone(), deletions);
-        keep(state);
+        keep(state).await;
     }
     remote.create(&name, sealed).await?;
     state

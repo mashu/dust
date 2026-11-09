@@ -102,7 +102,8 @@ thread_local! {
     /// and been refused for it ([`LOOPING`]), as the one opened in its place
     /// does at once on a device whose every stream falls into one as it
     /// opens: none is opened on this thread until the while is out
-    /// ([`MorsePlayer::refuse_while_looping`]).
+    /// ([`MorsePlayer::refuse_while_looping`]), or that stream comes out of
+    /// its loop ([`MorsePlayer::forget_a_loop_recovered_from`]).
     static LOOPED_AGAIN: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -122,7 +123,9 @@ pub struct MorsePlayer {
     opened_at: Instant,
     fade_origin_sec: f64,
     /// When the device last refused to open, or a stream opened in place of
-    /// one in a loop of errors fell into one of its own, and why.
+    /// one in a loop of errors fell into one of its own, and why: the
+    /// stream's refusal goes as the stream comes out of its loop
+    /// ([`MorsePlayer::forget_a_loop_recovered_from`]).
     refused: Option<(Instant, String)>,
     /// When the system's default output was last asked after.
     default_asked: Option<Instant>,
@@ -381,8 +384,10 @@ impl MorsePlayer {
     /// ([`DROP_WAITS_ON_WORKER`]), and the stream opened in its place can
     /// fall into a loop of its own at once. One that has, sooner than that,
     /// is said to have refused, and why, and no other stream is opened
-    /// until the while is out ([`LOOPED_AGAIN`]).
+    /// until the while is out ([`LOOPED_AGAIN`]), unless it comes out of its
+    /// loop first ([`MorsePlayer::forget_a_loop_recovered_from`]).
     fn fail_a_looping_stream(&mut self) -> Result<(), String> {
+        self.forget_a_loop_recovered_from();
         let Some(open) = &self.stream else {
             return Ok(());
         };
@@ -403,16 +408,39 @@ impl MorsePlayer {
         Ok(())
     }
 
+    /// Let go of the refusal of a stream that fell into a loop of errors
+    /// ([`MorsePlayer::fail_a_looping_stream`]) once its worker has come
+    /// out of the loop, called again since ([`Heartbeat::beat`]) and not
+    /// broken: it plays, and is the output again, and the device is not one
+    /// whose every stream falls into a loop ([`LOOPED_AGAIN`]). The refusal
+    /// used to stand for the while whatever the stream did meanwhile, the
+    /// sidetone and a slider move refused on a stream that played. One that
+    /// is no stream's, refused as a stream was to be opened
+    /// ([`MorsePlayer::refuse_while_looping`]), stands: while there is a
+    /// stream, a refusal for a loop is that stream's, any opened since
+    /// having let go of it ([`MorsePlayer::open`]).
+    fn forget_a_loop_recovered_from(&mut self) {
+        let recovered = self
+            .stream
+            .as_ref()
+            .is_some_and(|open| !open.heartbeat.looping() && !open.failed.load(Ordering::Acquire));
+        if recovered && self.refused.as_ref().is_some_and(|(_, why)| why == LOOPING) {
+            self.refused = None;
+            LOOPED_AGAIN.set(false);
+        }
+    }
+
     /// Refuse to open a stream, saying why ([`LOOPING`]), on a device whose
     /// every stream falls into a loop of errors as it opens: once a stream
     /// opened since one in a loop was taken for broken has fallen into a
     /// loop of its own ([`LOOPED_AGAIN`]), until a [`REOPEN_AFTER`] is out
-    /// since that one was, whichever player asks, a player built afresh as
-    /// it is made included. Every stream opened on such a device leaves its
-    /// worker looping for good once it is let go of
-    /// ([`DROP_WAITS_ON_WORKER`]), and a send that fails is tried again on
-    /// a player built afresh ([`crate::player`]): one that opened a stream
-    /// as it was made left one more worker behind on every try.
+    /// since that one was, or that stream comes out of its loop, whichever
+    /// player asks, a player built afresh as it is made included. Every
+    /// stream opened on such a device leaves its worker looping for good
+    /// once it is let go of ([`DROP_WAITS_ON_WORKER`]), and a send that
+    /// fails is tried again on a player built afresh ([`crate::player`]):
+    /// one that opened a stream as it was made left one more worker behind
+    /// on every try.
     fn refuse_while_looping(&mut self) -> Result<(), String> {
         let looping = LOOPED_AGAIN.get()
             && LOOP_FAILED_AT
@@ -461,9 +489,13 @@ impl MorsePlayer {
 
     /// [`MorsePlayer::ensure_output`], unless the device refused a moment
     /// ago: a squeeze of the paddle or a slider being dragged would otherwise
-    /// probe it again on every event. Why the output is not open, if it is
-    /// not: what it said as it refused, a moment ago or now.
+    /// probe it again on every event. A stream refused for a loop of errors
+    /// is refused no more once it has come out of it
+    /// ([`MorsePlayer::forget_a_loop_recovered_from`]). Why the output is
+    /// not open, if it is not: what it said as it refused, a moment ago or
+    /// now.
     fn ensure_output_unless_refused(&mut self) -> Result<(), String> {
+        self.forget_a_loop_recovered_from();
         if let Some((at, why)) = &self.refused
             && at.elapsed() < REOPEN_AFTER
         {
@@ -1665,6 +1697,115 @@ mod device_tests {
             .expect("a while on, it opens one");
         assert!(rebuilt.stream.is_some(), "a while on, it opens one");
         rebuilt.shutdown();
+    }
+
+    /// `player`'s stream falls into a loop of errors and is opened again in
+    /// its place, and the one opened falls into a loop of its own within the
+    /// while: what the sidetone is then told.
+    fn looped_again(player: &mut MorsePlayer) -> Result<(), String> {
+        fall_into_a_loop(player.stream.as_ref().expect("open"));
+        player
+            .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
+            .expect("opened again in its place");
+        fall_into_a_loop(player.stream.as_ref().expect("opened again"));
+        player.set_live_tone(ToneRequest::new(false, 600.0, 0.2))
+    }
+
+    /// `open`'s worker comes out of its loop of errors ([`fall_into_a_loop`])
+    /// and asks for buffers again, as one does once an underrun it was
+    /// caught in passes.
+    fn come_out_of_the_loop(open: &OpenStream) {
+        open.retired.store(false, Ordering::Release);
+        let called = Instant::now() + Duration::from_secs(5);
+        while open.heartbeat.looping() {
+            assert!(Instant::now() < called, "called again");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A stream refused for falling into a loop of errors as soon as it was
+    /// opened in place of another is the output again as soon as its worker
+    /// comes out of the loop and calls back: the sidetone is told it is
+    /// there, on that stream, the device not probed for it, and a player
+    /// built afresh within the while opens one, the device's streams not
+    /// all falling into a loop. The refusal used to stand for the second
+    /// the device is given after a loop, whatever the stream did meanwhile:
+    /// the sidetone, and a slider move, were refused on a stream that
+    /// played, and a player built afresh opened none.
+    #[test]
+    fn a_stream_refused_for_a_loop_of_errors_is_the_output_again_once_called_again() {
+        PROBES.set(0);
+        let Some(mut player) = opened(MorsePlayer::probing(counted_probe, false)) else {
+            return;
+        };
+        let began = Instant::now();
+        let refused = looped_again(&mut player);
+        let open = player.stream.as_ref().expect("kept while refused");
+        come_out_of_the_loop(open);
+        let came_back = Arc::clone(&open.heartbeat);
+        let probes = PROBES.get();
+        let toned = player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+        let kept =
+            (player.stream.as_ref()).is_some_and(|open| Arc::ptr_eq(&open.heartbeat, &came_back));
+        let probed = PROBES.get() > probes;
+        player.shutdown();
+        drop(player);
+        let afresh = opened(MorsePlayer::probing(counted_probe, false));
+        if began.elapsed() < REOPEN_AFTER {
+            assert_eq!(refused, Err(LOOPING.to_string()), "refused while it loops");
+            assert_eq!(toned, Ok(()), "called again, it is the output");
+            assert!(kept && !probed, "on the stream that came out of its loop");
+            assert!(
+                afresh
+                    .as_ref()
+                    .is_some_and(|afresh| afresh.stream.is_some()),
+                "a player built afresh opened none"
+            );
+        }
+        if let Some(mut afresh) = afresh {
+            afresh.shutdown();
+        }
+    }
+
+    /// A send finds a stream that came out of its loop of errors as the
+    /// sidetone does: it plays on that stream, and the device is no longer
+    /// taken for one whose every stream falls into a loop, so a player built
+    /// afresh within the while, as the send is tried again on one should it
+    /// fail after all, opens a stream. It used to open none until the while
+    /// was out, the send on the stream that played notwithstanding.
+    #[test]
+    fn a_send_on_a_stream_out_of_its_loop_of_errors_lets_a_player_built_afresh_open_one() {
+        let Some(mut player) = opened(MorsePlayer::probing(counted_probe, false)) else {
+            return;
+        };
+        let began = Instant::now();
+        let refused = looped_again(&mut player);
+        let open = player.stream.as_ref().expect("kept while refused");
+        come_out_of_the_loop(open);
+        let came_back = Arc::clone(&open.heartbeat);
+        let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
+        let sent =
+            crate::audio::start_send(&mut player, &Transmission::alone("K", voice), &settings())
+                .map(|_| ());
+        let kept =
+            (player.stream.as_ref()).is_some_and(|open| Arc::ptr_eq(&open.heartbeat, &came_back));
+        player.shutdown();
+        drop(player);
+        let afresh = opened(MorsePlayer::probing(counted_probe, false));
+        if began.elapsed() < REOPEN_AFTER {
+            assert_eq!(refused, Err(LOOPING.to_string()), "refused while it loops");
+            assert_eq!(sent, Ok(()), "the send plays");
+            assert!(kept, "on the stream that came out of its loop");
+            assert!(
+                afresh
+                    .as_ref()
+                    .is_some_and(|afresh| afresh.stream.is_some()),
+                "a player built afresh opened none"
+            );
+        }
+        if let Some(mut afresh) = afresh {
+            afresh.shutdown();
+        }
     }
 
     #[test]

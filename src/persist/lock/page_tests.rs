@@ -126,3 +126,43 @@ dioxus.send(await two.tryLock("dust_sync_run"));"#,
     assert_eq!(sent[0], json!("function"), "let go of, as no one waited");
     assert_eq!(sent[1], json!(false), "still held by the tab that has it");
 }
+
+/// Another tab's word on what sync keeps is heard: a `storage` event for
+/// `dust_sync`, which the browser fires in every other tab of the site as
+/// one writes it, ends the wait, and so does one for every key at once, as
+/// `localStorage.clear()` fires; one for another key does not. A page with
+/// no such events never ends it.
+#[test]
+fn another_tabs_word_on_what_sync_keeps_is_heard() {
+    let Some(sent) = on_page(
+        r#"const target = new EventTarget();
+const tab = glue({ target });
+const told = (key) => {
+  const event = new Event("storage");
+  Object.defineProperty(event, "key", { value: key });
+  target.dispatchEvent(event);
+};
+let heard = 0;
+tab.heard().then(() => { heard += 1; });
+told("dust_settings");
+await settle();
+dioxus.send(heard);
+told("dust_sync");
+await settle();
+dioxus.send(heard);
+tab.heard().then(() => { heard += 1; });
+told(null);
+await settle();
+dioxus.send(heard);
+let never = true;
+glue({ target: {} }).heard().then(() => { never = false; });
+await settle();
+dioxus.send(never);"#,
+    ) else {
+        return;
+    };
+    assert_eq!(sent[0], json!(0), "another key's word is none of sync's");
+    assert_eq!(sent[1], json!(1), "heard");
+    assert_eq!(sent[2], json!(2), "every key cleared, this one among them");
+    assert_eq!(sent[3], json!(true), "no word where no events come");
+}

@@ -5,10 +5,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use super::*;
-use crate::persist::Deleted;
 use crate::persist::memory::MemoryStore;
 use crate::persist::record::{HistoryChange, Pending, Record, RecordId};
 use crate::persist::tests::at;
+use crate::persist::{Deleted, Lock};
 use crate::sync::drive::fake::FakeAuth;
 use crate::sync::pack::{Pack, pack_name, seal_pack};
 use crate::sync::remote::{MemoryRemote, RemoteFile};
@@ -218,6 +218,68 @@ impl Remote for Held {
     }
 }
 
+/// A folder whose requests asked while a test holds it shut answer only
+/// once the test opens it, while those asked once it is no longer shut
+/// answer at once, as `remote` does: one request under way for long, and
+/// others answered beside it.
+struct Gated {
+    remote: Rc<MemoryRemote>,
+    shut: Rc<Cell<bool>>,
+    opened: Rc<Cell<bool>>,
+}
+
+impl Gated {
+    fn of(remote: &Rc<MemoryRemote>) -> Rc<Self> {
+        Rc::new(Self {
+            remote: Rc::clone(remote),
+            shut: Rc::new(Cell::new(false)),
+            opened: Rc::new(Cell::new(false)),
+        })
+    }
+
+    /// What `asked` of the folder comes to: once the test opens it, where
+    /// it was asked while the folder was shut.
+    fn ask<T: 'static>(
+        &self,
+        asked: impl FnOnce(&MemoryRemote) -> Pending<T> + 'static,
+    ) -> Pending<T> {
+        let remote = Rc::clone(&self.remote);
+        let (waits, opened) = (self.shut.get(), Rc::clone(&self.opened));
+        Box::pin(async move {
+            while waits && !opened.get() {
+                sleep_ms(POLL_MS).await;
+            }
+            asked(&remote).await
+        })
+    }
+}
+
+impl Remote for Gated {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        self.ask(|remote| remote.list())
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        let id = id.to_string();
+        self.ask(move |remote| remote.get(&id))
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        let name = name.to_string();
+        self.ask(move |remote| remote.create(&name, bytes))
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        let id = id.to_string();
+        self.ask(move |remote| remote.update(&id, bytes))
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        let id = id.to_string();
+        self.ask(move |remote| remote.delete(&id))
+    }
+}
+
 fn status(harness: &Harness) -> SyncStatus {
     harness.in_app(|| harness.ctx.sync.status.peek().clone())
 }
@@ -225,13 +287,11 @@ fn status(harness: &Harness) -> SyncStatus {
 /// Another copy of the app on the harness's store, a tab or a window, as
 /// it opens: linked to `remote` through a sign-in of its own.
 fn another_copy(harness: &Harness, remote: &Rc<MemoryRemote>) -> AppCtx {
-    let copy =
-        harness.in_app(|| AppCtx::new(harness.app.clone(), Default::default(), Default::default()));
-    let link = Link {
-        auth: FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
-        remote: Rc::clone(remote) as Rc<dyn Remote>,
-    };
-    harness.in_app(|| copy.link_sync(link))
+    another_copy_through(
+        harness,
+        Rc::clone(remote) as Rc<dyn Remote>,
+        FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
+    )
 }
 
 /// What the app holds of the history, by stamp.
@@ -1482,6 +1542,48 @@ fn a_sync_ended_here_clears_nothing_another_copy_kept() {
     });
 }
 
+/// A sync turned on here that the store never took, the store refusing it
+/// as it was turned on, is kept as its sync ends, over another sync turned
+/// on in another copy of the app meanwhile, as the one last chosen here, as
+/// a copy keeping its whole state kept it: this copy never takes the other
+/// copy's sync for its own.
+#[test]
+fn a_sync_the_store_never_took_is_kept_whole_as_it_ends() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        harness.store.sync_refused.set(true);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        harness.store.sync_refused.set(false);
+        let ours = device_of(&harness, ctx);
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| window.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        let theirs = kept_device(&harness);
+        assert!(theirs.is_some() && theirs != ours, "the other copy's kept");
+
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert_eq!(kept_device(&harness), ours, "this copy's, kept whole");
+        assert_eq!(device_of(&harness, ctx), ours, "still its own");
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+    });
+}
+
+/// The device of the sync `ctx`, a copy of the app, holds, if it is on.
+fn device_of(harness: &Harness, ctx: AppCtx) -> Option<String> {
+    harness.in_app(|| {
+        ctx.sync
+            .state
+            .peek()
+            .as_ref()
+            .map(|state| state.device.clone())
+    })
+}
+
 /// The device of the sync the store keeps, if it keeps one.
 fn kept_device(harness: &Harness) -> Option<String> {
     let kept = harness.store.sync.borrow().clone()?;
@@ -1583,6 +1685,42 @@ fn a_sign_in_made_while_it_syncs_is_the_one_kept() {
         let kept = harness.store.sync.borrow().clone().expect("kept");
         let state = SyncState::read(&kept).expect("reads");
         assert_eq!(state.sign_in.as_deref(), Some("kept 2"));
+    });
+}
+
+/// Signed in again where the store would not take what sync keeps at once,
+/// as a full disk will not, the new sign-in is the one the next sync keeps,
+/// and the one signed in with still: it is a change made here, which the
+/// store has yet to take, though the sync begins from this copy's state,
+/// which holds it. That sync, as it ended, used to take the store's older
+/// sign-in for the one to keep, write it, and sign in with it, dropping the
+/// token just got, often as the old one was turned down.
+#[test]
+fn a_sign_in_the_store_would_not_take_at_once_is_kept_by_the_next_sync() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        assert_eq!(kept_state(&harness).sign_in.as_deref(), Some("kept"));
+        held.hold(true);
+        harness.store.sync_refused.set(true);
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        assert_eq!(kept_state(&harness).sign_in.as_deref(), Some("kept"));
+        harness.store.sync_refused.set(false);
+        held.hold(false);
+        harness.advance(1_000).await;
+        assert_eq!(
+            auth.kept().as_deref(),
+            Some("kept 2"),
+            "signed in with still"
+        );
+        assert_eq!(
+            kept_state(&harness).sign_in.as_deref(),
+            Some("kept 2"),
+            "kept"
+        );
     });
 }
 
@@ -1891,6 +2029,43 @@ fn a_session_put_back_while_a_sync_reads_the_drive_is_not_let_go_by_it() {
     });
 }
 
+/// The same, with the session deleted and put back in another copy of the
+/// app on the same store, a tab or a window, while this copy's sync waits
+/// on the drive: the sync lets go of nothing put back since it began, in
+/// whichever copy, and the next sync sends it as put back. The sync used to
+/// let it go, as it read nothing of the other copy's putting back, here and
+/// everywhere.
+#[test]
+fn a_session_put_back_in_another_copy_while_this_one_syncs_is_not_let_go_by_it() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.take_up_store());
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| window.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| window.undo_delete());
+        held.hold(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        harness.in_app(|| ctx.take_up_store());
+        assert_eq!(stored_stamps(&harness), [1, 2], "not let go");
+        assert_eq!(stamps(&harness), [1, 2]);
+        assert_eq!(joined_stamps(&remote), [1, 2], "the drive's word");
+    });
+}
+
 /// The same, with sync turned off here before the sync goes on, the Undo
 /// made before the turning off or after it: the sync under way lets go of
 /// nothing put back since it began, whatever became of sync meanwhile, and
@@ -2073,6 +2248,1083 @@ fn a_sync_sending_a_deletion_once_sync_was_turned_off_keeps_nothing() {
             assert_eq!(status(&harness).is_on(), anew_here, "{case}");
         });
     }
+}
+
+/// A session put back by Undo in another copy of the app on the same store,
+/// a tab or a window, while this copy's sync sends its pack stays, here and
+/// in the drive: the sync, as it ends, lays what it did over what the other
+/// copy kept meanwhile, and this copy's next sync sends it as put back. So
+/// it does in a browser without Web Locks, where nothing locks. The sync
+/// used to keep this copy's whole state over the other's as it ended, the
+/// note of the putting back lost with it, and the next sync let the session
+/// go again, here and everywhere.
+#[test]
+fn a_session_put_back_in_another_copy_outlasts_this_copys_sync() {
+    for unlockable in [false, true] {
+        run(|| async move {
+            let mut harness = Harness::new();
+            harness.store.unlockable.set(unlockable);
+            keep(&harness, &[1, 2]);
+            let remote = Rc::new(MemoryRemote::default());
+            let auth = FakeAuth::giving(&["t"]);
+            let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+            let window = another_copy(&harness, &remote);
+            harness.in_app(|| window.take_up_store());
+            let two = harness
+                .in_app(|| harness.ctx.sessions.peek().id_at(1))
+                .expect("two");
+            harness.in_app(|| window.delete_sessions(&[two]));
+            harness.in_app(|| ctx.sync_now());
+            harness.pump();
+            assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+
+            keep(&harness, &[5]);
+            held.hold_writes(true);
+            harness.in_app(|| ctx.sync_now());
+            harness.pump();
+            harness.in_app(|| window.undo_delete());
+            held.hold_writes(false);
+            harness.advance(100).await;
+            harness.in_app(|| ctx.sync_now());
+            harness.advance(100).await;
+            assert_eq!(stored_stamps(&harness), [1, 2, 5], "not let go");
+            assert_eq!(stamps(&harness), [1, 2, 5]);
+            assert_eq!(joined_stamps(&remote), [1, 2, 5], "the drive's word");
+        });
+    }
+}
+
+/// A setting changed on another device after another copy of the app on
+/// the same store synced a change of its own is taken here: this copy's
+/// sync begins from what that copy kept, the settings as that sync left
+/// them among it, and so takes that copy's change for no change of its own.
+/// It used to begin from what it read as it opened, take the other copy's
+/// change, stored since, for one made here, and send it over the later one.
+#[test]
+fn a_setting_changed_on_another_device_after_another_copy_synced_is_taken() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = 9;
+            ctx.store_settings();
+        });
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let synced_here = kept_state(&harness).stamps["numGroups"];
+
+        // Another device joins, and changes it after.
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let mut theirs = harness.in_app(|| ctx.settings.peek().clone().clamp());
+        theirs.curriculum.num_groups = 4;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            synced_here + 1,
+        ))
+        .expect("synced");
+
+        // The other copy takes up what was stored here, and syncs later by
+        // the clock than either.
+        harness.in_app(|| window.take_up_store());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        let there = harness.in_app(|| window.settings.peek().curriculum.num_groups);
+        assert_eq!(there, 4, "the other device's, the later");
+        assert_eq!(kept_state(&harness).stamps["numGroups"], synced_here + 1);
+    });
+}
+
+/// A copy of the app on the same store, a tab or a window, that has not
+/// looked at the store since another changed a setting, stored it and
+/// synced it, takes that change as its own sync begins: the sync begins
+/// from the settings the store holds, as it begins from what the other copy
+/// kept for sync, the settings as that copy's sync left them among it. It
+/// used to begin from the settings this copy held, older than those, take
+/// them for a change made now, and send them stamped after the other
+/// copy's, which undid that change everywhere, the two copies undoing each
+/// other's at every sync.
+#[test]
+fn a_copy_behind_on_the_settings_does_not_send_them_back() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let held = harness.in_app(|| ctx.settings.peek().clone());
+        harness.store.save_settings(&held);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // Another window, opened as the app opens: on the stored settings.
+        let opened = harness.in_app(|| {
+            AppCtx::new(
+                harness.app.clone(),
+                harness.store.load_settings(),
+                Default::default(),
+            )
+        });
+        let window = harness.in_app(|| {
+            opened.link_sync(Link {
+                auth: FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
+                remote: Rc::clone(&remote) as Rc<dyn Remote>,
+            })
+        });
+        let before = harness.in_app(|| window.settings.peek().curriculum.num_groups);
+        harness.in_app(|| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = before + 7;
+            ctx.store_settings();
+        });
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // Stamped by the clock: the window's sync is the later.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // The window syncs, not having looked at the store since.
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        let there = harness.in_app(|| window.settings.peek().curriculum.num_groups);
+        assert_eq!(
+            there,
+            before + 7,
+            "the change made in the other window, taken"
+        );
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let here = harness.in_app(|| ctx.settings.peek().curriculum.num_groups);
+        assert_eq!(here, before + 7, "not taken back here");
+    });
+}
+
+/// A sign-in made in another copy of the app on the same store while this
+/// copy's sync is under way is the one kept: the sync, as it ends, keeps
+/// the sign-in the store holds, as it changed none. It used to keep this
+/// copy's own over it.
+#[test]
+fn a_sign_in_made_in_another_copy_is_kept_by_this_copys_sync() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window_auth = FakeAuth::giving(&["u"]);
+        // Its next sign-in keeps a token of its own.
+        window_auth.asked.set(4);
+        let window = another_copy_through(
+            &harness,
+            Rc::clone(&remote) as Rc<dyn Remote>,
+            Rc::clone(&window_auth) as Rc<dyn Auth>,
+        );
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| window.sync_sign_in());
+        harness.pump();
+        assert_eq!(kept_state(&harness).sign_in.as_deref(), Some("kept 5"));
+        held.hold(false);
+        harness.advance(100).await;
+        assert_eq!(
+            kept_state(&harness).sign_in.as_deref(),
+            Some("kept 5"),
+            "the other copy's"
+        );
+    });
+}
+
+/// A deletion by hand another copy of the app on the same store sent is
+/// noted as the drive's in what this copy keeps as well, though this copy
+/// read what sync keeps before it was sent: a putting back of that session
+/// made on another device after it is taken back here as this copy syncs.
+/// This copy used to write its whole state over the note as it noted a
+/// putting back of its own, and its sync, finding the session deleted here
+/// with no note of the drive holding the deletion, sent it again, deleting
+/// everywhere what the other device put back.
+#[test]
+fn a_deletion_another_copy_sent_is_kept_by_this_copys_write() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2, 3]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.take_up_store());
+        let (two, three) = harness.in_app(|| {
+            let history = harness.ctx.sessions.peek();
+            (
+                history.id_at(1).expect("two"),
+                history.id_at(2).expect("three"),
+            )
+        });
+        let session = harness.store.load_sessions()[2].clone();
+        // Deleted here, the other copy's own deletion undone there.
+        harness.in_app(|| window.delete_sessions(&[two]));
+        harness.in_app(|| ctx.delete_sessions(&[three]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).applied.contains_key(&three), "sent");
+        harness.in_app(|| window.undo_delete());
+        assert!(
+            kept_state(&harness).applied.contains_key(&three),
+            "still noted"
+        );
+
+        // Put back on another device, after.
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let later = now_ms() + 1_000;
+        put_back_in(&other, &mut other_state, three, &session, later);
+        let settings = cw_core::TrainingSettings::default();
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &settings,
+            later,
+        ))
+        .expect("synced");
+
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        assert_eq!(stored_stamps(&harness), [1, 2, 3], "taken back");
+        assert_eq!(joined_stamps(&remote), [1, 2, 3], "the drive's word");
+    });
+}
+
+/// Two copies of the app open at once on one store, a tab and another, or
+/// two windows, each deleting sessions, putting its own back by Undo, and
+/// syncing in turn, lose none of each other's deletions or puttings back:
+/// each copy's write lays what it did over what the other kept, and each
+/// sync begins from what the store holds, so every putting back is sent,
+/// whichever copy syncs, and every deletion stays. Each copy used to write
+/// its whole state over the other's: one copy's sync, with no note of the
+/// putting back the other made, let the session go again, here and
+/// everywhere.
+#[test]
+fn two_copies_open_at_once_lose_none_of_each_others_deletions_or_puttings_back() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2, 3, 4]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.take_up_store());
+        let ids = harness.in_app(|| harness.ctx.sessions.peek().ids().to_vec());
+        // Each deletes one, and this one's sync sends both deletions.
+        harness.in_app(|| window.delete_sessions(&[ids[1]]));
+        harness.in_app(|| ctx.delete_sessions(&[ids[2]]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // Each puts its own back; the other syncs, then deletes another,
+        // which this one's sync sends.
+        harness.in_app(|| window.undo_delete());
+        harness.in_app(|| ctx.undo_delete());
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        harness.in_app(|| window.take_up_store());
+        harness.in_app(|| window.delete_sessions(&[ids[3]]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| ctx.take_up_store());
+        assert_eq!(
+            stored_stamps(&harness),
+            [1, 2, 3],
+            "each copy's putting back kept, and the deletion"
+        );
+        assert_eq!(stamps(&harness), [1, 2, 3]);
+        assert_eq!(joined_stamps(&remote), [1, 2, 3], "the drive's word");
+    });
+}
+
+/// A sync asked for while another copy of the app on the same store, a tab
+/// or a window, syncs waits for that one to end, showing "Syncing..."
+/// meanwhile, and then begins from what it kept: it sends nothing that one
+/// sent. The two used to sync at once, each sending what the other sent.
+#[test]
+fn a_sync_waits_for_another_copys_and_starts_from_what_it_kept() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.take_up_store());
+        keep(&harness, &[5]);
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let (lists, sent) = (remote.lists.get(), packs(&remote));
+        harness.in_app(|| window.sync_now());
+        harness.advance(2_000).await;
+        assert_eq!(remote.lists.get(), lists, "waits for this copy's sync");
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert!(
+            matches!(there, SyncStatus::On { syncing: true, .. }),
+            "{there:?}"
+        );
+        held.hold(false);
+        harness.advance(500).await;
+        assert_eq!(
+            remote.lists.get(),
+            lists + 2,
+            "this copy's, then the other's"
+        );
+        assert_eq!(packs(&remote), sent + 1, "the other sends nothing more");
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert!(
+            matches!(
+                there,
+                SyncStatus::On {
+                    syncing: false,
+                    problem: None,
+                    ..
+                }
+            ),
+            "{there:?}"
+        );
+    });
+}
+
+/// A sync that waits for another copy's to end does not start once the
+/// synced copy is being deleted here meanwhile, as none asked for then
+/// does: the deletion goes once the other copy's sync is over, and syncs
+/// nothing first. The waiting sync used to go on to sync the drive just
+/// before it was deleted.
+#[test]
+fn a_sync_waiting_for_another_copys_does_not_start_once_the_copy_is_being_deleted() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let lists = remote.lists.get();
+        harness.in_app(|| window.sync_now());
+        harness.advance(1_000).await;
+        harness.in_app(|| window.sync_turn_off(true));
+        held.hold(false);
+        harness.advance(2_000).await;
+        assert!(remote.names().is_empty(), "{:?}", remote.names());
+        assert_eq!(
+            remote.lists.get(),
+            lists + 2,
+            "this copy's sync, and the deletion: the waiting sync never started"
+        );
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert_eq!(there, SyncStatus::Off { problem: None });
+    });
+}
+
+/// A sync waits ten minutes at most for another copy's to end, showing
+/// "Syncing..." meanwhile, and then goes on without it, as copies did before
+/// they waited for each other: a copy hung, or stopped while the system
+/// still holds its lock, keeps none from syncing for long.
+#[test]
+fn a_sync_waits_ten_minutes_at_most_for_another_copys() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let hung = harness.store.hold_lock(Lock::SyncRun);
+        let lists = remote.lists.get();
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        leap(&mut harness, 9 * 60_000).await;
+        assert_eq!(remote.lists.get(), lists, "waits");
+        assert!(
+            matches!(status(&harness), SyncStatus::On { syncing: true, .. }),
+            "{:?}",
+            status(&harness)
+        );
+        leap(&mut harness, 2 * 60_000).await;
+        assert_eq!(remote.lists.get(), lists + 1, "goes on without it");
+        assert!(
+            matches!(
+                status(&harness),
+                SyncStatus::On {
+                    syncing: false,
+                    problem: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            status(&harness)
+        );
+        drop(hung);
+    });
+}
+
+/// Turning sync off with the synced copy, in a copy of the app whose
+/// window or tab is not the one syncing, waits for the other copy's sync to
+/// end before it deletes anything, then deletes every file, the pack that
+/// sync sent among them; and the other copy finds sync off as it next
+/// syncs. The copy used to be deleted while the other copy's sync went on
+/// writing into the drive, which kept the pack it sent after.
+#[test]
+fn a_copy_deleting_the_synced_copy_waits_for_another_copys_sync() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        keep(&harness, &[5]);
+        held.hold_writes(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let names = remote.names();
+        harness.in_app(|| window.sync_turn_off(true));
+        harness.advance(2_000).await;
+        assert_eq!(remote.names(), names, "nothing deleted while it syncs");
+        held.hold_writes(false);
+        harness.advance(500).await;
+        assert!(remote.names().is_empty(), "{:?}", remote.names());
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert_eq!(there, SyncStatus::Off { problem: None });
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{:?}",
+            status(&harness)
+        );
+    });
+}
+
+/// A copy of the app reads what sync keeps, lays what it did over it and
+/// writes it back while no other copy does, on a computer or a phone, each
+/// holding the lock on what sync keeps as it does: a putting back noted here
+/// while another window lays its own over what sync keeps waits for that one
+/// to finish, and is laid over what it wrote. It used to be written at once,
+/// and the other window's write, from what it read before, lost it.
+#[test]
+fn what_sync_keeps_is_laid_over_by_one_copy_at_a_time() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2, 3]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let (two, three) = harness.in_app(|| {
+            let history = harness.ctx.sessions.peek();
+            (
+                history.id_at(1).expect("two"),
+                history.id_at(2).expect("three"),
+            )
+        });
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        // Another window lays a putting back of its own over what sync
+        // keeps, under the lock.
+        let window = harness.store.hold_lock(Lock::SyncState);
+        let mut theirs = kept_state(&harness);
+        harness.in_app(|| ctx.undo_delete());
+        theirs.revived.insert(three, now_ms());
+        *harness.store.sync.borrow_mut() = theirs.written();
+        drop(window);
+        harness.advance(100).await;
+        let kept = kept_state(&harness);
+        assert!(kept.revived.contains_key(&two), "this copy's, laid over");
+        assert!(kept.revived.contains_key(&three), "the other window's");
+    });
+}
+
+/// In a browser a tab takes no lock on what sync keeps: a putting back is
+/// kept as it is noted, as `localStorage` is read and written then and
+/// there, and a Web Lock is granted only a moment after it is asked for, so
+/// that one noted as the tab closes would be lost. It takes the lock on
+/// syncing all the same.
+#[test]
+fn a_tab_keeps_what_sync_keeps_as_it_is_noted() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        harness.store.browser.set(true);
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        let _held = harness.store.hold_lock(Lock::SyncState);
+        harness.in_app(|| ctx.undo_delete());
+        assert!(
+            kept_state(&harness).revived.contains_key(&two),
+            "kept at once"
+        );
+        let other_tab = harness.store.hold_lock(Lock::SyncRun);
+        let lists = remote.lists.get();
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(1_000).await;
+        assert_eq!(remote.lists.get(), lists, "waits for the other tab's sync");
+        drop(other_tab);
+        harness.advance(500).await;
+        assert_eq!(remote.lists.get(), lists + 1);
+    });
+}
+
+/// Sync turned off in another tab of the app is off in this one as soon as
+/// the browser tells this one of it, as it tells every other tab of a write
+/// to `localStorage`, saying why: nothing is synced meanwhile. It used to
+/// stay on here until this tab next synced or kept what sync keeps.
+#[test]
+fn sync_turned_off_in_another_tab_is_taken_up_as_it_is_told_of() {
+    run(|| async {
+        let mut harness = Harness::new();
+        harness.store.hears_news.set(true);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let tab = another_copy(&harness, &remote);
+        let lists = remote.lists.get();
+        harness.in_app(|| ctx.sync_turn_off(false));
+        harness.store.tell_sync_news();
+        harness.pump();
+        let there = harness.in_app(|| tab.sync.status.peek().clone());
+        assert!(
+            matches!(&there, SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{there:?}"
+        );
+        assert_eq!(remote.lists.get(), lists, "nothing synced");
+    });
+}
+
+/// Sync turned off in another window of the app is off in this one as it
+/// comes back into sight, saying why, on every platform, though nothing
+/// told it: it looks at what the store keeps for sync first, and syncs
+/// nothing. It used to stay on until it next synced or kept what sync keeps.
+#[test]
+fn sync_turned_off_in_another_window_is_taken_up_as_this_one_comes_into_sight() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        let lists = remote.lists.get();
+        harness.in_app(|| ctx.sync_turn_off(false));
+        harness.in_app(|| window.sync_if_stale());
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert!(
+            matches!(&there, SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{there:?}"
+        );
+        assert_eq!(remote.lists.get(), lists, "nothing synced");
+    });
+}
+
+/// A sync another copy of the app made is this copy's last sync too: the
+/// card shows it, and this copy, coming back into sight, does not sync
+/// again so soon after it. It used to go by its own last sync alone, and
+/// sync again just after the other copy had.
+#[test]
+fn a_sync_made_in_another_copy_is_this_copys_last() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        // As far as the window knows, it synced long ago.
+        harness.in_app(|| {
+            let mut state = window.sync.state;
+            if let Some(state) = state.write().as_mut() {
+                state.last = Some(now_ms() - 10 * 60_000);
+            }
+        });
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let synced = kept_state(&harness).last;
+        let lists = remote.lists.get();
+        harness.in_app(|| window.sync_if_stale());
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(remote.lists.get(), lists, "synced a moment ago, there");
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert!(
+            matches!(there, SyncStatus::On { last, .. } if last == synced),
+            "{there:?}"
+        );
+    });
+}
+
+/// A sign-in made in another copy of the app, a refresh token got there
+/// after the one kept here was turned down, say, is the one this copy signs
+/// in with as soon as it takes up what that copy kept. It used to go on with
+/// its own until the app opened again.
+#[test]
+fn a_sign_in_another_copy_made_is_this_copys_too() {
+    run(|| async {
+        let mut harness = Harness::new();
+        harness.store.hears_news.set(true);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let tab_auth = FakeAuth::giving(&["u"]);
+        tab_auth.asked.set(4);
+        let tab = another_copy_through(
+            &harness,
+            Rc::clone(&remote) as Rc<dyn Remote>,
+            Rc::clone(&tab_auth) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| tab.sync_sign_in());
+        harness.pump();
+        harness.store.tell_sync_news();
+        harness.pump();
+        assert_eq!(auth.kept().as_deref(), Some("kept 5"), "signed in as there");
+        let here = harness.in_app(|| {
+            ctx.sync
+                .state
+                .peek()
+                .as_ref()
+                .and_then(|state| state.sign_in.clone())
+        });
+        assert_eq!(here.as_deref(), Some("kept 5"));
+    });
+}
+
+/// A session put back by Undo just as this copy of the app finds sync
+/// turned off in another, a tab or a window, is put back all the same once
+/// sync is turned on here again: the note of it waits with this copy, and
+/// the first sync sends it as put back, after the drive's deletion, here
+/// and everywhere. The note used to go as sync was taken for off, and that
+/// first sync let the session go again.
+#[test]
+fn a_session_put_back_as_sync_is_turned_off_in_another_copy_is_kept_when_turned_on_here() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_turn_off(false));
+        harness.in_app(|| ctx.undo_delete());
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{:?}",
+            status(&harness)
+        );
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        assert_eq!(stamps(&harness), [1, 2], "not let go");
+        assert_eq!(joined_stamps(&remote), [1, 2], "the drive's word");
+    });
+}
+
+/// A session put back by Undo just as this copy of the app finds sync turned
+/// on anew in another, a tab or a window, goes with the sync turned on
+/// there: the history is the device's, and so the putting back stands
+/// against whichever sync the store keeps. That copy's next sync sends it as
+/// put back. The note used to go with this copy's sync, and that copy's next
+/// sync let the session go again, here and everywhere.
+#[test]
+fn a_session_put_back_as_sync_is_turned_on_anew_in_another_copy_goes_with_that_sync() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_turn_off(false));
+        harness.in_app(|| window.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| window.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(harness.in_app(|| window.sync.status.peek().is_on()));
+        harness.in_app(|| ctx.undo_delete());
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned on anew in another tab or window of Dust. Open Dust again here to sync."),
+            "{:?}",
+            status(&harness)
+        );
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        harness.in_app(|| window.take_up_store());
+        let there: Vec<u64> = harness.in_app(|| {
+            window
+                .sessions
+                .peek()
+                .iter()
+                .map(|session| session.timestamp)
+                .collect()
+        });
+        assert_eq!(there, [1, 2], "not let go");
+        assert_eq!(stored_stamps(&harness), [1, 2]);
+        assert_eq!(joined_stamps(&remote), [1, 2], "the drive's word");
+    });
+}
+
+/// A putting back this copy's sync sent, as that sync ends finding sync
+/// turned off in another copy of the app, is no note to keep: once sync is
+/// on here again, a deletion of that session another device made after it
+/// stands, here and everywhere. The take-up used to keep the note as this
+/// copy held it before the sync, which sent it, and the first sync turned on
+/// here sent it again, stamped after every deletion of it the drive held.
+#[test]
+fn a_putting_back_sent_as_sync_is_turned_off_in_another_copy_is_not_sent_again() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+        harness.in_app(|| ctx.undo_delete());
+        assert!(kept_state(&harness).revived.contains_key(&two), "noted");
+
+        // This copy's sync sends the putting back; as it ends, another
+        // window, holding the lock on what sync keeps, has turned sync off.
+        let window = harness.store.hold_lock(Lock::SyncState);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert_eq!(joined_stamps(&remote), [1, 2], "the putting back sent");
+        harness.store.save_sync(None).expect("cleared");
+        drop(window);
+        harness.advance(100).await;
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{:?}",
+            status(&harness)
+        );
+
+        // Another device deletes it a minute later.
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let later = now_ms() + 60_000;
+        delete_in(&other, two, later);
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &cw_core::TrainingSettings::default(),
+            later,
+        ))
+        .expect("synced");
+        assert_eq!(joined_stamps(&remote), [1], "deleted there, after");
+
+        // Sync turned on here again, joining the same drive.
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        assert_eq!(joined_stamps(&remote), [1], "the later deletion stands");
+        assert_eq!(stamps(&harness), [1], "let go here");
+    });
+}
+
+/// A putting back that a sync took in as it began, while the keep of its
+/// note waited for the lock on what sync keeps, is kept for the next sync
+/// turned on here, though sync is taken for off, mid-way through that sync,
+/// as turned off in another copy of the app: the sync hands back the notes
+/// it took in and did not send. Only what this copy held before the sync
+/// used to be kept, and the note, which the sync had taken from those
+/// waiting, went with it: the first sync turned on here let the session go
+/// again, here and everywhere.
+#[test]
+fn a_putting_back_a_sync_took_in_is_kept_as_sync_turned_off_in_another_copy_is_taken_up_mid_way() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+
+        // Put back while another window holds the lock on what sync keeps:
+        // the keep waits, and the sync asked for then takes the note in.
+        let window = harness.store.hold_lock(Lock::SyncState);
+        harness.in_app(|| ctx.undo_delete());
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // That window turns sync off; this one comes back into sight.
+        harness.store.save_sync(None).expect("cleared");
+        harness.in_app(|| ctx.sync_if_stale());
+        drop(window);
+        held.hold(false);
+        harness.advance(5_000).await;
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{:?}",
+            status(&harness)
+        );
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        assert_eq!(stamps(&harness), [1, 2], "not let go");
+        assert_eq!(joined_stamps(&remote), [1, 2], "the drive's word");
+    });
+}
+
+/// A putting back that a sync took in as it began goes with the sync turned
+/// on anew in another copy of the app, a tab or a window, though this copy
+/// takes that up mid-way through its sync, as one put back just as it takes
+/// it up does: the sync, ending, hands the note it did not send to the sync
+/// the store keeps, whose next sync sends it as put back.
+#[test]
+fn a_putting_back_a_sync_took_in_goes_with_sync_turned_on_anew_in_another_copy_mid_way() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+        harness.in_app(|| ctx.undo_delete());
+        assert!(kept_state(&harness).revived.contains_key(&two), "noted");
+
+        // This copy's sync takes the note in, and waits on the drive.
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // Another window turns sync off and on anew, joining the same
+        // drive: its sync waits for this copy's.
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_turn_off(false));
+        harness.in_app(|| window.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| window.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(harness.in_app(|| window.sync.status.peek().is_on()));
+        // This one comes back into sight, and finds it so.
+        harness.in_app(|| ctx.sync_if_stale());
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned on anew in another tab or window of Dust. Open Dust again here to sync."),
+            "{:?}",
+            status(&harness)
+        );
+        held.hold(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        harness.in_app(|| window.take_up_store());
+        let there: Vec<u64> = harness.in_app(|| {
+            window
+                .sessions
+                .peek()
+                .iter()
+                .map(|session| session.timestamp)
+                .collect()
+        });
+        assert_eq!(there, [1, 2], "not let go");
+        assert_eq!(stored_stamps(&harness), [1, 2]);
+        assert_eq!(joined_stamps(&remote), [1, 2], "the drive's word");
+    });
+}
+
+/// A putting back that a sync took in as it began is forgotten as sync is
+/// turned off here, though that sync, waiting on the drive all the while,
+/// ends only once sync was taken for off from another copy of the app, then
+/// turned on again here and off: turning sync off here forgets what it
+/// noted, and the sync under way hands back none of what it took in.
+#[test]
+fn a_putting_back_a_sync_took_in_is_forgotten_as_sync_is_turned_off_here_before_it_ends() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let gated = Gated::of(&remote);
+        let ctx = turned_on_through(&mut harness, Rc::clone(&gated) as Rc<dyn Remote>, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+        harness.in_app(|| ctx.undo_delete());
+
+        // This copy's sync takes the note in, and waits on the drive's
+        // answer to its first request.
+        gated.shut.set(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        gated.shut.set(false);
+        // Another window turns sync off; this one comes back into sight,
+        // turns it on again, and off.
+        harness.store.save_sync(None).expect("cleared");
+        harness.in_app(|| ctx.sync_if_stale());
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        harness.in_app(|| ctx.sync_turn_off(false));
+        gated.opened.set(true);
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        assert_eq!(status(&harness), SyncStatus::Off { problem: None });
+
+        // Turned on again: the putting back went with the rest.
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        assert_eq!(stamps(&harness), [1], "let go: the drive's deletion");
+        assert_eq!(joined_stamps(&remote), [1], "the drive's word");
+    });
+}
+
+/// Move the clock on by `ms` at once, as a long wait does, letting what was
+/// waiting on it run.
+async fn leap(harness: &mut Harness, ms: u64) {
+    tokio::time::advance(std::time::Duration::from_millis(ms)).await;
+    tokio::task::yield_now().await;
+    harness.pump();
+    harness.advance(1_000).await;
+}
+
+/// How many packs the drive `remote` holds.
+fn packs(remote: &MemoryRemote) -> usize {
+    remote
+        .names()
+        .iter()
+        .filter(|name| name.starts_with("dust-p-"))
+        .count()
+}
+
+/// The same, with the two copies' syncs asked for at once: the other's
+/// waits for this one's, which waits on the drive, while each puts its own
+/// session back and the other deletes another. Nothing either did is lost:
+/// this copy's sync lets go of neither putting back, the other's begins
+/// from what this one kept, and between them they send both puttings back
+/// and the deletion, here and everywhere.
+#[test]
+fn two_copies_syncing_at_once_lose_none_of_each_others_deletions_or_puttings_back() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2, 3, 4]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy_through(
+            &harness,
+            Rc::clone(&held) as Rc<dyn Remote>,
+            FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| window.take_up_store());
+        let ids = harness.in_app(|| harness.ctx.sessions.peek().ids().to_vec());
+        harness.in_app(|| window.delete_sessions(&[ids[1]]));
+        harness.in_app(|| ctx.delete_sessions(&[ids[2]]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        harness.in_app(|| window.undo_delete());
+        harness.in_app(|| ctx.undo_delete());
+        harness.in_app(|| window.delete_sessions(&[ids[3]]));
+        held.hold(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        harness.in_app(|| ctx.take_up_store());
+        harness.in_app(|| window.take_up_store());
+        let there: Vec<u64> = harness.in_app(|| {
+            window
+                .sessions
+                .peek()
+                .iter()
+                .map(|session| session.timestamp)
+                .collect()
+        });
+        assert_eq!(
+            stored_stamps(&harness),
+            [1, 2, 3],
+            "both put back, one deleted"
+        );
+        assert_eq!(stamps(&harness), [1, 2, 3]);
+        assert_eq!(there, [1, 2, 3]);
+        assert_eq!(joined_stamps(&remote), [1, 2, 3], "the drive's word");
+    });
+}
+
+/// What the store keeps for sync now, which it holds.
+fn kept_state(harness: &Harness) -> SyncState {
+    let raw = harness.store.sync.borrow().clone().expect("kept");
+    SyncState::read(&raw).expect("reads")
+}
+
+/// The sessions the store holds, by stamp.
+fn stored_stamps(harness: &Harness) -> Vec<u64> {
+    harness
+        .store
+        .load_sessions()
+        .iter()
+        .map(|session| session.timestamp)
+        .collect()
+}
+
+/// The sessions a device joining the sync in `remote` now takes, by stamp:
+/// the drive's word.
+fn joined_stamps(remote: &MemoryRemote) -> Vec<u64> {
+    let (joined, _) = another_device(remote, "a long passphrase", &[]);
+    joined
+        .load_history()
+        .sessions
+        .iter()
+        .map(|(_, session)| session.timestamp)
+        .collect()
+}
+
+/// Another copy of the app on the harness's store, a tab or a window, as
+/// it opens: linked to `remote` through `auth`.
+fn another_copy_through(harness: &Harness, remote: Rc<dyn Remote>, auth: Rc<dyn Auth>) -> AppCtx {
+    let copy =
+        harness.in_app(|| AppCtx::new(harness.app.clone(), Default::default(), Default::default()));
+    harness.in_app(|| copy.link_sync(Link { auth, remote }))
 }
 
 /// Turn sync on here as the first device.

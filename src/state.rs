@@ -329,6 +329,7 @@ impl AppCtx {
                 app: CopyValue::new(app),
             };
             ctx.hear_history_news();
+            ctx.hear_sync_news();
             ctx.read_again_soon();
             ctx.sync_at_launch();
             ctx
@@ -736,6 +737,28 @@ impl AppCtx {
         self.preview.set(Preview::Idle);
     }
 
+    /// Take up the settings another tab, window or copy of the app stored
+    /// since this one last read or wrote them, merged with those here as
+    /// [`Self::store_settings`] merges them, writing nothing: as the app
+    /// looks at the store ([`Self::sync_with_store`]), and as a sync begins,
+    /// which takes what differs here from the settings as of the last sync,
+    /// another copy's or this one's, for a change made here
+    /// ([`self::sync`]).
+    fn take_up_stored_settings(self) {
+        let settings_read = self.app().store.read_settings();
+        self.tell_of_set_aside();
+        let (mut settings, mut stored) = (self.settings, self.stored_settings);
+        if let Some(theirs) = settings_read
+            && theirs != *stored.peek()
+        {
+            let merged = merge_settings(&stored.peek(), &settings.peek().clone().clamp(), &theirs);
+            if *settings.peek() != merged {
+                settings.set(merged);
+            }
+            stored.set(theirs);
+        }
+    }
+
     /// Bring the history and the settings here in line with the store's,
     /// then do `then`, told whether the store could be listed: at once
     /// wherever the store answers at once, as every store but a browser's
@@ -751,8 +774,7 @@ impl AppCtx {
     /// one stored ([`StoredHistory::unread`]). One listed that could not be
     /// read at all for now is read again, at this look and the next, until
     /// it reads or is no longer listed ([`Self::unread_for_now`]). The
-    /// settings are merged as [`Self::store_settings`] merges them, writing
-    /// nothing.
+    /// settings are taken up as well ([`Self::take_up_stored_settings`]).
     ///
     /// A restore and a backup go by what the store holds, not by what this
     /// copy last saw of it: a restore merged with a history another copy
@@ -762,18 +784,7 @@ impl AppCtx {
     /// cannot be listed, nothing is taken up, and `then` is told so.
     fn sync_with_store(self, then: impl FnOnce(bool) + 'static) {
         let store = self.app().store;
-        let settings_read = store.read_settings();
-        self.tell_of_set_aside();
-        let (mut settings, mut stored) = (self.settings, self.stored_settings);
-        if let Some(theirs) = settings_read
-            && theirs != *stored.peek()
-        {
-            let merged = merge_settings(&stored.peek(), &settings.peek().clone().clamp(), &theirs);
-            if *settings.peek() != merged {
-                settings.set(merged);
-            }
-            stored.set(theirs);
-        }
+        self.take_up_stored_settings();
         // A backup another copy saved since is the last one here too, so a
         // restore of an older one never takes the mark back past it.
         let mut last_backup = self.last_backup;
@@ -878,6 +889,9 @@ impl AppCtx {
             return;
         }
         let mut lost = false;
+        // Each record here let go for one that arrived as its session, and
+        // that one.
+        let mut taken_for = Vec::new();
         {
             let mut history = sessions.write();
             let mut arrived = Vec::new();
@@ -913,6 +927,7 @@ impl AppCtx {
                 if let Some(at) = same {
                     claimed[at] = true;
                     history.remove(id);
+                    taken_for.push((id, arrived[at].0));
                 } else {
                     // Lost in passing: stored again.
                     history.mark_unsaved(id);
@@ -923,8 +938,44 @@ impl AppCtx {
                 history.insert(id, session);
             }
         }
+        self.follow_the_session_kept(&taken_for);
         if lost {
             self.store_unsaved();
+        }
+    }
+
+    /// Where the record the session just finished was kept under is no
+    /// longer here, another takes its place in what the results screen
+    /// finds it by ([`Finished::Kept`]): the one a take-up took up as that
+    /// session, `taken_for` it, under another name, filled in, or written
+    /// back by an older build without what it does not keep
+    /// ([`Self::take_up`]); failing that, as for a sync's twin of it, whose
+    /// name here the sync deletes, the one record holding that very
+    /// session, whatever format either says it was stored in
+    /// ([`StoredHistory::holding`]). The session shown stays as it ended.
+    /// None takes its place where the session went, or two records hold it
+    /// alike and neither was taken up as it. The screen used to keep the
+    /// name gone, and place the session nowhere.
+    fn follow_the_session_kept(self, taken_for: &[(RecordId, RecordId)]) {
+        let mut result = self.result;
+        let holding = {
+            let Some(Finished::Kept(session, Some(kept))) = &*result.peek() else {
+                return;
+            };
+            let history = self.sessions.peek();
+            if history.index_of(*kept).is_some() {
+                return;
+            }
+            taken_for
+                .iter()
+                .find(|(was, _)| was == kept)
+                .map(|(_, now)| *now)
+                .or_else(|| history.holding(session))
+        };
+        if let Some(holding) = holding
+            && let Some(Finished::Kept(_, kept)) = &mut *result.write()
+        {
+            *kept = Some(holding);
         }
     }
 
@@ -2307,7 +2358,8 @@ pub enum Finished {
     /// Kept, with the record it is kept under in the history, by which its
     /// place there and on the board is found, as two sessions can finish at
     /// one moment: none where it could not be written down, and so is in
-    /// no history.
+    /// no history. Followed to the one record holding it where a take-up
+    /// lets that one go ([`AppCtx::follow_the_session_kept`]).
     Kept(Box<SessionResult>, Option<RecordId>),
     /// A run that worked nobody, so nothing was kept.
     NothingKept,
@@ -2694,6 +2746,115 @@ mod tests {
         assert_eq!(a.id_of(2), renamed);
         assert_eq!(store.record_writes.get(), writes, "nothing stored again");
         assert_eq!(days(&store.load_sessions()), [1, 2]);
+    }
+
+    /// The record the results of the session just finished find it by.
+    fn kept(tab: &Tab) -> Option<RecordId> {
+        tab.act(|ctx| match &*ctx.result.peek() {
+            Some(Finished::Kept(_, kept)) => *kept,
+            _ => None,
+        })
+    }
+
+    /// Make `change` in `store`, as another copy of the app makes it.
+    fn change(store: &MemoryStore, change: HistoryChange) {
+        let mut pending = Store::change_history(store, change);
+        let mut asked = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut asked).is_ready());
+    }
+
+    /// The results of a session just finished follow it to the record a
+    /// take-up takes up as that session in place of the one it was kept
+    /// under, though it holds less of it: as a copy of an older build
+    /// writes a run back under another name without the log it does not
+    /// keep. They kept the name gone, and placed the run nowhere.
+    #[test]
+    fn the_results_follow_their_session_to_the_record_taken_up_as_it() {
+        let mut run = crate::testing::stored_run("2026-10-03", &[("K5XYZ", "214", "K5XYZ", "214")]);
+        run.timestamp = stamp(3);
+        let store = holding([1, 2]);
+        let a = Tab::on(&store);
+        a.finish(run.clone());
+        let was = a.id_of(3);
+        store.lose(was);
+        run.contest = None;
+        let json = serde_json::to_string(&run).expect("a session");
+        let older = RecordId::beside(was, &json);
+        change(
+            &store,
+            HistoryChange {
+                put: vec![Record { id: older, json }],
+                ..HistoryChange::default()
+            },
+        );
+        a.sync();
+        assert_eq!(a.shown(), [1, 2, 3]);
+        assert_eq!(a.id_of(3), older, "taken up as the run");
+        assert_eq!(kept(&a), Some(older), "followed");
+    }
+
+    /// The results of a session just finished follow it to the one record
+    /// holding that very session where a take-up lets go of the record it
+    /// was kept under for none it took up as it: as a sync keeps the
+    /// drive's name for a session this device holds under another, deleting
+    /// this one's. They kept the name gone, and placed the session nowhere.
+    /// Where the session is gone, deleted by hand elsewhere, or two records
+    /// hold it alike, no record takes the place of the one gone.
+    #[test]
+    fn the_results_follow_their_session_to_the_one_record_holding_it() {
+        let store = holding([1, 2]);
+        let a = Tab::on(&store);
+        a.finish(day(3));
+        let was = a.id_of(3);
+        let json = store.record(was).expect("stored");
+        let twin = RecordId {
+            nonce: was.nonce.wrapping_sub(1),
+            ..was
+        };
+        change(
+            &store,
+            HistoryChange {
+                put: vec![Record { id: twin, json }],
+                forget: vec![(was, Deleted::of(&day(3), stamp(4)))],
+                ..HistoryChange::default()
+            },
+        );
+        a.sync();
+        assert_eq!(a.shown(), [1, 2, 3]);
+        assert_eq!(kept(&a), Some(twin), "followed to the drive's name");
+
+        let store = holding([1, 2]);
+        let a = Tab::on(&store);
+        a.finish(day(3));
+        let was = a.id_of(3);
+        Tab::on(&store).delete(3);
+        a.sync();
+        assert_eq!(a.shown(), [1, 2]);
+        assert_eq!(kept(&a), Some(was), "deleted: nothing holds it");
+
+        let store = holding([1, 2]);
+        let a = Tab::on(&store);
+        a.finish(day(3));
+        let was = a.id_of(3);
+        let json = store.record(was).expect("stored");
+        let put = [1, 2].map(|later| Record {
+            id: RecordId {
+                order: was.order + later,
+                ..was
+            },
+            json: json.clone(),
+        });
+        change(
+            &store,
+            HistoryChange {
+                put: put.into(),
+                forget: vec![(was, Deleted::of(&day(3), stamp(4)))],
+                ..HistoryChange::default()
+            },
+        );
+        a.sync();
+        assert_eq!(a.shown(), [1, 2, 3, 3]);
+        assert_eq!(kept(&a), Some(was), "two hold it alike: neither is it");
     }
 
     /// Undo puts back only what was deleted here, where it falls among
