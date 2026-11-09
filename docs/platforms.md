@@ -666,9 +666,16 @@ not read, is kept and written back with the rest, as are the keys a later
 build added to a session, a group, its timing or a counter: a copy of this
 build left open beside a newer one never strips them. A session is stored
 once, as the build that stored it wrote it, and never written over, so what
-a later build adds to it stays. One this build cannot read, a later build's
-say, is left where it is, and the app says so once; a build that reads it
-shows it. Settings that do not read at all, a `settings.json` edited by hand
+a later build adds to it stays. Each says the format it is stored in,
+`"format"`: the oldest format a build must know to read it
+(`SESSION_FORMAT`, `crates/cw-core/src/session.rs`), 1 so far, raised only
+by a change an earlier build would misread; one that says none is from
+before sessions said it. A build reads every format up to its own. A session
+stored in a later one is a later build's: left where it is, and the app says
+so once, as saved by a newer Dust; a build that reads it shows it, and a
+restore leaves out a backup's copy of the session it says it holds. One that
+says no later format and does not read is damaged: left where it is too, and
+told of as damaged; a restore brings a backup's copy of it back beside it. Settings that do not read at all, a `settings.json` edited by hand
 and left with a stray comma say, are set aside before the defaults the app
 opens with are written over them: `settings.unreadable-*.json` beside it, or
 `dust_settings_unreadable` in a browser. So are the sessions of a history
@@ -711,9 +718,12 @@ history and what it holds, `<order>-<hash>`: twenty digits from when it
 finished, in milliseconds, raised past the newest where a clock set back
 says earlier, so such a session goes after the newest rather than among
 older ones; then the FNV-1a hash of the record's bytes (`RecordId`,
-`src/persist/record.rs`). Two copies storing one session name it alike, and
-store it once; a restore names each session it adds by when it finished, so
-two copies restoring one backup store each once too.
+`src/persist/record.rs`). Two copies of one build storing one session name
+it alike, and store it once; a restore names each session it adds by when it
+finished, so two copies restoring one backup store each once too. Builds
+from before sessions said their format wrote none, so name a session
+otherwise; a move made again over their records finds each session there
+all the same, by what it holds less its format.
 
 On a computer or a phone the history is the folder `history/`, beside the
 settings (`src/persist/files.rs`):
@@ -724,7 +734,8 @@ settings (`src/persist/files.rs`):
   deleted, and nothing else of it.
 - `layout.json`: how the history is kept, `{"layout": 1, "compatible": 1,
   …}`, and what the move from `sessions.json` took of it, written last.
-- `told.json`: the records this build cannot read and has said so of.
+- `told.json`: the records this build cannot read and has said so of,
+  each as a newer Dust's, as damaged, or as one that could not be read.
 - `restoring-<n>.json`: held locked while a restore of many sessions stores
   them, so one Dust stopped under is told of as cut short.
 - `packs/*.jsonl.gz`: older records packed together, gzip, a record a line.

@@ -9,13 +9,11 @@
 //! whole, behind the record API, where its database will not open
 //! ([`BlobHistory`]).
 
-use std::borrow::Borrow;
 #[cfg(any(feature = "web", test))]
 use std::cell::{Cell, RefCell};
 #[cfg(any(feature = "web", test))]
 use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::Hash;
 
 use cw_core::SessionResult;
 use serde::Deserialize;
@@ -499,17 +497,22 @@ pub(super) fn moved(
 /// Of `moved`, the records a move makes, those to write into a store that
 /// holds records already, each store saying for itself what it holds: one
 /// there under its own name, as `here` says, is written; one deleted by
-/// name, in `gone`, is not; one whose bytes are there under a name the
-/// move does not give, as `elsewhere` counts them, is not, as many times as
-/// it counts them; nor is one whose session's key a tombstone names, in
-/// `gone_keys`. The rest are written.
-pub(super) fn not_moved_yet<K: Borrow<str> + Hash + Eq>(
+/// name, in `gone`, is not; one whose session is there under a name the
+/// move does not give, as `elsewhere`, what each record there under such a
+/// name holds, holds it ([`as_moved`]), is not, as many times as they hold
+/// it; nor is one whose session's key a tombstone names, in `gone_keys`.
+/// The rest are written.
+pub(super) fn not_moved_yet(
     moved: Vec<record::Record>,
     here: impl Fn(RecordId) -> bool,
     gone: &BTreeSet<RecordId>,
-    mut elsewhere: HashMap<K, usize>,
+    elsewhere: impl IntoIterator<Item = impl AsRef<str>>,
     gone_keys: &HashSet<SessionKey>,
 ) -> Vec<record::Record> {
+    let mut held: HashMap<String, usize> = HashMap::new();
+    for json in elsewhere {
+        *held.entry(as_moved(json.as_ref())).or_default() += 1;
+    }
     moved
         .into_iter()
         .filter(|record| {
@@ -519,9 +522,10 @@ pub(super) fn not_moved_yet<K: Borrow<str> + Hash + Eq>(
             if gone.contains(&record.id) {
                 return false;
             }
-            if let Some(count) = elsewhere
-                .get_mut(record.json.as_str())
-                .filter(|count| **count > 0)
+            if !held.is_empty()
+                && let Some(count) = held
+                    .get_mut(&as_moved(&record.json))
+                    .filter(|count| **count > 0)
             {
                 *count -= 1;
                 return false;
@@ -529,6 +533,26 @@ pub(super) fn not_moved_yet<K: Borrow<str> + Hash + Eq>(
             !record::key_of(&record.json).is_some_and(|key| gone_keys.contains(&key))
         })
         .collect()
+}
+
+/// What a record holds, `json`, as a move tells it from what another holds
+/// ([`not_moved_yet`]): the session without the format it says it is stored
+/// in ([`cw_core::SESSION_FORMAT`]). Builds before the format wrote none,
+/// and one of them writes this build's back with it at the end, as a key it
+/// does not know: as they are written, the move's records, this build's,
+/// would never be the bytes an older build stored of the same session.
+/// Text that holds no JSON object is itself.
+fn as_moved(json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(serde_json::Value::Object(session)) => {
+            let session: serde_json::Map<String, serde_json::Value> = session
+                .into_iter()
+                .filter(|(key, _)| key != "format")
+                .collect();
+            serde_json::to_string(&session).unwrap_or_else(|_| json.to_string())
+        }
+        _ => json.to_string(),
+    }
 }
 
 /// What to take up of a history kept whole that an older build changed

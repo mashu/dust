@@ -763,6 +763,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// `session` as builds from before sessions said their format wrote
+    /// it ([`cw_core::SESSION_FORMAT`]): as this build does, with no
+    /// format.
+    pub(crate) fn as_an_older_build_wrote(session: &SessionResult) -> String {
+        let written = serde_json::to_string(session).expect("a session writes");
+        let says = format!("\"format\":{},", cw_core::SESSION_FORMAT);
+        assert!(written.contains(&says), "{written}");
+        written.replacen(&says, "", 1)
+    }
+
     /// A save from before the AGC threshold went comes back with a raised
     /// threshold as the RF gain backed off as far, which is how the AGC
     /// heard it. A threshold taken down, or one under an AGC switched off,
