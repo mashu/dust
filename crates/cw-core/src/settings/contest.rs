@@ -262,7 +262,10 @@ fn forgiving_number<'de, D: serde::Deserializer<'de>, T>(
 /// numbers. A contest whose knob is anything but two numbers is left out,
 /// as on the air, and anything but whole numbers for the replies turned off
 /// reads as none; anything but such a list of contests reads as none set.
-/// What does not fit a contest's shape goes with the rest of the clamp.
+/// A contest this build has no name for, a later build's, is left out too:
+/// what its knob means is that build's to read, and the save keeps it
+/// ([`TrainingSettings::unread_values`]). What does not fit a contest's
+/// shape goes with the rest of the clamp.
 fn forgiving_styles<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<BTreeMap<String, StyleChoice>, D::Error> {
@@ -290,6 +293,7 @@ fn forgiving_styles<'de, D: serde::Deserializer<'de>>(
     Ok(contests
         .iter()
         .filter_map(|(name, choice)| {
+            ContestKind::from_name(name)?;
             let at = read_at(choice.get("at")?)?;
             let off = read_off(choice.get("off"));
             Some((name.clone(), StyleChoice { at, off }))
@@ -1423,8 +1427,8 @@ mod tests {
         // The callers' styles: as heard on the air until set, each contest
         // its own; a knob kept as it was saved, fitted to its shape with the
         // rest of the clamp; a contest whose knob is not two numbers left
-        // out, and replies turned off that are not whole numbers read as
-        // none.
+        // out, and so is one this build has no name for, and replies turned
+        // off that are not whole numbers read as none.
         assert!(missing.caller_styles.is_empty());
         let pota = ContestKind::Pota.rules().styles_on_air();
         assert_eq!(missing.style_at(ContestKind::Pota), pota);
@@ -1434,7 +1438,7 @@ mod tests {
                 "wpx": { "at": [-0.2, 0.3], "off": [2, 5] },
                 "pota": { "at": [0.1, 0.1] },
                 "cqww": { "at": [1.0, "x"], "off": [1] },
-                "fieldday": { "at": [0.0, 0.0], "off": [1, -2] },
+                "fieldDay": { "at": [0.0, 0.0], "off": [1, -2] },
                 "nonsense": { "at": [0.0, 0.0] },
             }
         }));
@@ -1447,6 +1451,11 @@ mod tests {
             ContestKind::Cqww.rules().styles_on_air()
         );
         assert!(set.styles_off(ContestKind::FieldDay).is_empty());
+        assert_eq!(
+            set.caller_styles.keys().collect::<Vec<_>>(),
+            ["fieldDay", "pota", "wpx"],
+            "no contest this build has no name for"
+        );
         for odd in [
             serde_json::json!("lots"),
             serde_json::Value::Null,

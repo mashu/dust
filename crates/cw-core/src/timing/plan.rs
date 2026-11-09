@@ -6,11 +6,16 @@ use super::envelope::{build_envelope_curve, edge_sec};
 #[cfg(doc)]
 use super::pileup::Interferer;
 use super::pileup::Transmission;
-use super::station::StationVoice;
+#[cfg(doc)]
+use super::station::resolve_station;
+use super::station::{
+    DASH_RATIO_SPREAD, StationVoice, WEIGHT_SPREAD, fist_spread, station_speed_ends,
+};
 use super::{clamp_extra_spacing, spacing_unit_sec};
 use crate::morse::{dot_seconds, morse_for};
 use crate::numeric::finite_or;
-use crate::settings::TrainingSettings;
+use crate::rulebook::QRS_MOST;
+use crate::settings::{CharSetMode, TrainingSettings, WPM_MIN};
 
 /// The level of a station at full volume, before the receiver.
 pub const DEFAULT_TARGET_GAIN: f64 = 0.3;
@@ -251,30 +256,17 @@ pub(crate) fn plan_morse_playback_at(
     voice: &StationVoice,
     target_gain: f64,
 ) -> PlaybackPlan {
-    let resolved_char_wpm = voice.char_wpm.max(1.0);
-    let resolved_effective_wpm = voice.effective_wpm.max(1.0).min(resolved_char_wpm);
-    let extra = clamp_extra_spacing(settings.playback.extra_word_space_multiplier);
     let side_tone = finite_or(voice.tone_hz, settings.side_tone_center());
-
-    let unit = spacing_unit_sec(resolved_char_wpm, resolved_effective_wpm);
-    // The operator's fist. Every element is stretched or clipped by the
-    // same share of a dit, as a keyer's weight does, and the gap after it
-    // takes the difference back, so a heavy fist crowds its spaces rather
-    // than simply sending slower — which is what weight actually is, and
-    // why it does not quietly change the speed.
-    let weight = finite_or(voice.weight, 1.0).clamp(0.7, 1.3);
-    // Its dahs run long or short against its dits, which alone would send
-    // it slower or faster than its speed. So its letters are keyed on a
-    // dit that keys PARIS's letters in the time the book's ratio does, and
-    // a word goes at the speed the station is credited with.
-    let dash_ratio = finite_or(voice.dash_ratio, 3.0).clamp(2.0, 4.5);
-    let dot_char = dot_seconds(resolved_char_wpm) * PARIS_IN_LETTERS
-        / (PARIS_IN_LETTERS + PARIS_DAHS * (dash_ratio - 3.0));
-    let dot_duration = dot_char * weight;
-    let dash_duration = dot_char * (dash_ratio + weight - 1.0);
-    let symbol_space = dot_char * (2.0 - weight);
-    let char_space = unit * 3.0;
-    let word_space = unit * 7.0 * extra;
+    let Keying {
+        char_wpm: resolved_char_wpm,
+        effective_wpm: resolved_effective_wpm,
+        dot_char,
+        dot: dot_duration,
+        dash: dash_duration,
+        symbol_space,
+        char_space,
+        word_space,
+    } = Keying::of(settings, voice);
     let rise_time = settings.band.steepness / 1000.0;
     let smoothing = settings.band.envelope_smoothing.clamp(0.0, 1.0);
     // Every dit of a send has the same envelope, and every dah: two curves,
@@ -361,6 +353,137 @@ pub(crate) fn plan_morse_playback_at(
         resolved_effective_wpm,
         fade_from_sec: 0.0,
     }
+}
+
+/// How a voice keys a send under the settings: its speeds as they are
+/// sent, its elements and the gaps it leaves, in seconds.
+struct Keying {
+    char_wpm: f64,
+    effective_wpm: f64,
+    /// The dit its letters are keyed on, at a keyer's weight.
+    dot_char: f64,
+    /// Its dit and its dah, as its fist keys them.
+    dot: f64,
+    dash: f64,
+    /// The gap after an element inside a letter, as its fist leaves it.
+    symbol_space: f64,
+    /// Between letters and between words, from where an element would have
+    /// ended at a keyer's weight.
+    char_space: f64,
+    word_space: f64,
+}
+
+impl Keying {
+    fn of(settings: &TrainingSettings, voice: &StationVoice) -> Self {
+        let char_wpm = voice.char_wpm.max(1.0);
+        let effective_wpm = voice.effective_wpm.max(1.0).min(char_wpm);
+        let extra = clamp_extra_spacing(settings.playback.extra_word_space_multiplier);
+        let unit = spacing_unit_sec(char_wpm, effective_wpm);
+        // The operator's fist. Every element is stretched or clipped by the
+        // same share of a dit, as a keyer's weight does, and the gap after
+        // it takes the difference back, so a heavy fist crowds its spaces
+        // rather than simply sending slower — which is what weight actually
+        // is, and why it does not quietly change the speed.
+        let weight = finite_or(voice.weight, 1.0).clamp(0.7, 1.3);
+        // Its dahs run long or short against its dits, which alone would
+        // send it slower or faster than its speed. So its letters are keyed
+        // on a dit that keys PARIS's letters in the time the book's ratio
+        // does, and a word goes at the speed the station is credited with.
+        let dash_ratio = finite_or(voice.dash_ratio, 3.0).clamp(2.0, 4.5);
+        let dot_char = dot_seconds(char_wpm) * PARIS_IN_LETTERS
+            / (PARIS_IN_LETTERS + PARIS_DAHS * (dash_ratio - 3.0));
+        Self {
+            char_wpm,
+            effective_wpm,
+            dot_char,
+            dot: dot_char * weight,
+            dash: dot_char * (dash_ratio + weight - 1.0),
+            symbol_space: dot_char * (2.0 - weight),
+            char_space: unit * 3.0,
+            word_space: unit * 7.0 * extra,
+        }
+    }
+
+    /// From the key-up of a letter's last element to the key-down of the
+    /// next letter's first, as [`plan_morse_playback_at`] lays them down.
+    fn letter_gap(&self) -> f64 {
+        self.symbol_space + self.char_space - self.dot_char
+    }
+
+    /// The same between the last letter of a word and the first of the
+    /// next.
+    fn word_gap(&self) -> f64 {
+        self.letter_gap() + (self.word_space - self.char_space).max(0.0)
+    }
+}
+
+/// Each voice `settings` send at the ends of what they can, keying with a
+/// fist of `weight` whose dahs run `dash_ratio` dits: each end of their
+/// speed ranges as [`resolve_station`] draws it, and where a contest's
+/// callers slow down for you, each of those slowed as far as a caller ever
+/// is ([`QRS_MOST`]) and as far as brings its spacing to the Speed card's
+/// floor ([`WPM_MIN`]), where that is less. A voice's gaps lengthen as it
+/// slows until its spacing reaches the floor; from there only its
+/// characters slow, which brings its letters and its words closer. So a
+/// caller's letters are farthest apart where its spacing reaches the
+/// floor, and its words closest unslowed or slowed its most.
+fn voices_at_the_ends(
+    settings: &TrainingSettings,
+    (weight, dash_ratio): (f64, f64),
+) -> impl Iterator<Item = StationVoice> + '_ {
+    let callers_slow = settings.curriculum.char_set_mode == CharSetMode::Contest
+        && settings.contest.contest_habits.slow_down_for_you();
+    station_speed_ends(settings)
+        .into_iter()
+        .flat_map(move |(char_wpm, effective_wpm)| {
+            let voice = StationVoice {
+                tone_hz: 0.0,
+                char_wpm,
+                effective_wpm,
+                volume: 1.0,
+                weight,
+                dash_ratio,
+            };
+            let slowed = callers_slow.then(|| {
+                let to_the_floor = (1.0 - WPM_MIN / voice.effective_wpm).clamp(0.0, QRS_MOST);
+                [voice.slowed(QRS_MOST), voice.slowed(to_the_floor)]
+            });
+            std::iter::once(voice).chain(slowed.into_iter().flatten())
+        })
+}
+
+/// The longest gap between two letters of a word `settings` send, in
+/// seconds, from one letter's last key-up to the next's first key-down: at
+/// the slowest spacing with the fastest characters, or the slowest
+/// characters, a contest's caller slowed down for you among them, from the
+/// lightest fist they draw, its dahs the shortest. What the receiver's AGC
+/// holds the band down across ([`crate::band::agc_timing`]).
+pub(crate) fn longest_letter_gap_sec(settings: &TrainingSettings) -> f64 {
+    let spread = fist_spread(settings);
+    let lightest = (
+        1.0 - spread * WEIGHT_SPREAD,
+        3.0 - spread * DASH_RATIO_SPREAD,
+    );
+    voices_at_the_ends(settings, lightest)
+        .map(|voice| Keying::of(settings, &voice).letter_gap())
+        .fold(0.0, f64::max)
+}
+
+/// The shortest gap between two words `settings` send, in seconds, from
+/// the last key-up of one to the first key-down of the next: at their
+/// fastest, or from a contest's caller slowed down for you whose spacing
+/// is held at the floor while its characters slow, from the heaviest fist
+/// they draw, its dahs the shortest. What the receiver's AGC lets the band
+/// back in, at Fast decay ([`crate::band::agc_timing`]).
+pub(crate) fn shortest_word_gap_sec(settings: &TrainingSettings) -> f64 {
+    let spread = fist_spread(settings);
+    let heaviest = (
+        1.0 + spread * WEIGHT_SPREAD,
+        3.0 - spread * DASH_RATIO_SPREAD,
+    );
+    voices_at_the_ends(settings, heaviest)
+        .map(|voice| Keying::of(settings, &voice).word_gap())
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// `plan` from `from_sec` into it on, moved to start at nothing: for a send
@@ -997,5 +1120,113 @@ mod tests {
             }
         }
         assert_eq!(curves.len(), 2, "one curve for the dits, one for the dahs");
+    }
+
+    /// The gaps the AGC's hang is sized from are the ones the planner keys.
+    /// Over settings of every kind, no voice they send, at the ends of what
+    /// they draw or drawn, a contest's caller slowed down for you among
+    /// them, leaves a gap between two letters longer than
+    /// [`longest_letter_gap_sec`] or one between two words shorter than
+    /// [`shortest_word_gap_sec`]; and a voice at the ends keys each. One
+    /// case in five spaces its letters near the Speed card's floor, where a
+    /// caller's spacing reaches the floor before the caller slows its most,
+    /// and every voice drawn under easy habits is also slowed by each drop
+    /// a caller slows by.
+    #[test]
+    fn the_gaps_the_hang_is_sized_from_are_the_ones_the_planner_keys() {
+        use crate::rulebook::{CallerHabits, QRS_DROP, QRS_MORE};
+        let drops = QRS_DROP.map(|drop| [drop, drop + QRS_MORE]);
+        let mut rng = SplitMix64::new(0x6A9);
+        // From a letter's last key-up to the next's first key-down, inside
+        // a word and across a word gap.
+        let gaps = |settings: &TrainingSettings, voice: &StationVoice| {
+            let plan = plan_morse_playback_for("EE E", settings, voice);
+            let [first, second, third] = plan.chars[..] else {
+                panic!("three letters: {:?}", plan.chars)
+            };
+            (
+                second.start_sec - first.end_sec,
+                third.start_sec - second.end_sec,
+            )
+        };
+        for case in 0..300 {
+            let mut settings = TrainingSettings::default();
+            let p = &mut settings.playback;
+            p.char_wpm_min = rng.pick_in_range(5.0, 60.0);
+            p.char_wpm_max = rng.pick_in_range(5.0, 60.0);
+            p.link_char_to_effective = rng.f64() < 0.4;
+            p.effective_wpm_min = rng.pick_in_range(5.0, 40.0);
+            p.effective_wpm_max = rng.pick_in_range(5.0, 40.0);
+            p.extra_word_space_multiplier = rng.pick_in_range(0.5, 8.0);
+            p.fist_variation = rng.pick_in_range(0.0, 1.0);
+            if rng.f64() < 0.4 {
+                settings.curriculum.char_set_mode = CharSetMode::Contest;
+                settings.contest.contest_habits = if rng.f64() < 0.5 {
+                    CallerHabits::Easy
+                } else {
+                    CallerHabits::Rough
+                };
+            }
+            if case % 5 == 4 {
+                // Spaced near the floor, about a third of the time at it,
+                // and half the time at that one spacing: a caller's letters
+                // are farthest apart where its spacing reaches the floor,
+                // and its words come closer as it slows on from there.
+                let near = WPM_MIN / (1.0 - QRS_MOST) + 0.2;
+                let p = &mut settings.playback;
+                p.link_char_to_effective = false;
+                p.effective_wpm_min = rng.pick_in_range(WPM_MIN - 0.7, near).max(WPM_MIN);
+                if rng.f64() < 0.5 {
+                    p.effective_wpm_max = p.effective_wpm_min;
+                }
+                settings.curriculum.char_set_mode = CharSetMode::Contest;
+                settings.contest.contest_habits = CallerHabits::Easy;
+            }
+            let settings = settings.clamp();
+            let (longest, shortest) = (
+                longest_letter_gap_sec(&settings),
+                shortest_word_gap_sec(&settings),
+            );
+            let slows = settings.curriculum.char_set_mode == CharSetMode::Contest
+                && settings.contest.contest_habits == CallerHabits::Easy;
+            let mut drawn = Vec::new();
+            for _ in 0..200 {
+                let voice = resolve_station(&settings, &mut rng);
+                if slows {
+                    drawn.push(voice.slowed(rng.pick_in_range(0.0, QRS_MOST)));
+                    drawn.extend(drops.as_flattened().iter().map(|&drop| voice.slowed(drop)));
+                }
+                drawn.push(voice);
+            }
+            for voice in &drawn {
+                let (letter, word) = gaps(&settings, voice);
+                assert!(
+                    letter <= longest + 1e-9,
+                    "case {case}: a letter gap of {letter} past {longest} ({voice:?})"
+                );
+                assert!(
+                    word >= shortest - 1e-9,
+                    "case {case}: a word gap of {word} under {shortest} ({voice:?})"
+                );
+            }
+            let spread = settings.playback.fist_variation;
+            let ratio = 3.0 - spread * DASH_RATIO_SPREAD;
+            let lightest = (1.0 - spread * WEIGHT_SPREAD, ratio);
+            let heaviest = (1.0 + spread * WEIGHT_SPREAD, ratio);
+            let keyed_longest = voices_at_the_ends(&settings, lightest)
+                .map(|voice| gaps(&settings, &voice).0)
+                .fold(0.0, f64::max);
+            let keyed_shortest = voices_at_the_ends(&settings, heaviest)
+                .map(|voice| gaps(&settings, &voice).1)
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                (keyed_longest - longest).abs() < 1e-9,
+                "case {case}: {keyed_longest} keyed, {longest} said"
+            );
+            assert!(
+                (keyed_shortest - shortest).abs() < 1e-9,
+                "case {case}: {keyed_shortest} keyed, {shortest} said"
+            );
+        }
     }
 }

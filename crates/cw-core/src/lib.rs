@@ -121,10 +121,10 @@ pub use settings::{
     QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RangeValues,
     SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STARTER_WORDS, STATIONS_MAX, STATIONS_MIN,
     STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, SpeedPath, StyleChoice, TrainingSettings,
-    VOLUME_MAX, VOLUME_MIN, WORD_LIST_MAX, WPM_MAX, WPM_MIN, WordList, adaptive_speed_on,
-    adapts_group_size, adapts_speed, aim_section, class_reading, clean_word, compute_char_pool,
-    current_practice_window, newest_unlocked, power_reading, section_code, state_code,
-    unlocked_practice_count,
+    UnreadValue, VOLUME_MAX, VOLUME_MIN, WORD_LIST_MAX, WPM_MAX, WPM_MIN, WordList,
+    adaptive_speed_on, adapts_group_size, adapts_speed, aim_section, class_reading, clean_word,
+    compute_char_pool, current_practice_window, newest_unlocked, power_reading, section_code,
+    state_code, unlocked_practice_count,
 };
 pub use span::LengthForecast;
 pub use speed::SpeedForecast;
@@ -140,7 +140,8 @@ pub use stats::{
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{
-    EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC,
-    StationVoice, ToneEvent, Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm,
-    edge_gain, envelope_shape, plan_morse_playback_for, plan_transmission, resolve_station,
+    EnvelopePoint, EnvelopeShape, Interferer, LISTEN_LETTER_GAP_MS, PlannedTransmission,
+    PlaybackPlan, SEND_RELEASE_SEC, StationVoice, ToneEvent, Transmission,
+    compute_after_group_gap_ms, compute_group_gap_for_wpm, edge_gain, envelope_shape,
+    plan_morse_playback_for, plan_transmission, resolve_station,
 };
