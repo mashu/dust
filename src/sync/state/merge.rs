@@ -56,7 +56,8 @@ impl SyncState {
     ///   since, and otherwise the store's. The deletions an earlier build
     ///   made are noted where either copy noted them.
     /// - What a later build keeps here, which this one does not know, is the
-    ///   store's, and this copy's where the store holds none.
+    ///   store's: this copy never changes it, so a key the store no longer
+    ///   holds was let go, and stays gone.
     ///
     /// Of another sync in the store than this copy's, as one turned on anew
     /// in another copy, the store's is taken as it is: this copy's notes are
@@ -117,8 +118,7 @@ impl SyncState {
         } else {
             &theirs.sign_in
         };
-        let mut unread = self.unread.clone();
-        unread.extend(theirs.unread.clone());
+        let unread = theirs.unread.clone();
         SyncState {
             dust_sync_state: theirs.dust_sync_state,
             device: theirs.device.clone(),

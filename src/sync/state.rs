@@ -417,9 +417,11 @@ mod tests {
     }
 
     /// What a later build keeps for sync, which this one does not know, is
-    /// written back as it was read, and kept as two copies' states are
-    /// merged, the store's where both hold it: so a later build's notes
-    /// survive this build's writes. A key this build knows is written once.
+    /// written back as it was read, and as two copies' states are merged,
+    /// as the store holds it, since this copy never changes it: so a later
+    /// build's notes survive this build's writes, and one it let go stays
+    /// gone though a copy of this build that read it is still open. A key
+    /// this build knows is written once.
     #[test]
     fn what_a_later_build_keeps_for_sync_is_written_back() {
         let raw = r#"{"dustSyncState":1,"device":"d","key":"k","laterNote":{"a":[1,2]},"laterFlag":true}"#;
@@ -438,7 +440,7 @@ mod tests {
         let merged: Value = serde_json::from_str(&merged).expect("JSON");
         assert_eq!(merged["laterFlag"], json!(true), "the store's");
         assert_eq!(merged["laterNote"], json!({ "a": [1, 2] }));
-        assert_eq!(merged["laterOld"], json!(1), "nothing says it went");
+        assert!(merged.get("laterOld").is_none(), "the store let it go");
     }
 
     /// A state of another sync in the store, as one turned on anew in
