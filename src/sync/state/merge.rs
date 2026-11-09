@@ -13,7 +13,9 @@
 //! So no note still wanted is lost to a tab that read late, and none dropped
 //! on purpose stays once each copy has synced; one dropped as no more to
 //! note, with nothing to show it, can come back for a while, until the copy
-//! that held it syncs, which drops it again.
+//! that held it syncs, which drops it again. What no merge can do, for a
+//! sync that plans from a note another copy made or dropped since it read
+//! the state, is said at [`SyncState::merged`].
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,6 +67,18 @@ impl SyncState {
     /// are of a sync that is no more. Where the store never took this copy's
     /// sync, as one just turned on here, this copy's is kept whole, as the
     /// one last chosen here.
+    ///
+    /// What it cannot do: a sync plans from what sync keeps as it read it as
+    /// it began, and no merge at its end changes what it planned. One that
+    /// runs beside another copy's sync, or began from a late read, plans
+    /// without a deletion's note the other copy made since, or with one it
+    /// dropped as it took the session back: it can send the deletion of a
+    /// session the other let go here, deleting everywhere a putting back
+    /// made elsewhere, or take back one deleted here by hand since. In this
+    /// module's model of three copies, a deletion went out again in about
+    /// three runs in five where syncs ran at once, and one in thirty-six
+    /// where tabs read late; in none where they synced one at a time from
+    /// what the store held. Only that keeps both out.
     pub fn merged(&self, base: Option<&SyncState>, theirs: &SyncState) -> SyncState {
         // What this copy last read or kept of a sync before one turned on
         // here says nothing of this one.
@@ -255,19 +269,29 @@ fn merge_unanswered(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     use super::SyncState;
     use crate::persist::record::RecordId;
+    use crate::sync::plan::{DriveState, Here, plan};
 
     const COPIES: usize = 3;
+    /// Sessions put back here by hand.
     const SESSIONS: u64 = 3;
+    /// Sessions the other devices delete and put back in the drive, which
+    /// the copies' syncs let go here and take back.
+    const ELSEWHERE: u64 = 2;
 
     fn id(n: u64) -> RecordId {
         RecordId {
             order: n * 1000,
             nonce: n,
         }
+    }
+
+    /// The `k`th of the sessions changed [`ELSEWHERE`].
+    fn elsewhere(k: u64) -> RecordId {
+        id(SESSIONS + k)
     }
 
     /// A seeded draw, the same for a seed every run.
@@ -290,9 +314,33 @@ mod tests {
         }
     }
 
+    /// One of the sessions changed elsewhere, as the store here holds it.
+    #[derive(Clone, Copy)]
+    struct Stored {
+        /// Here, not deleted.
+        listed: bool,
+        /// Deleted here by hand, a deletion the drive does not hold yet.
+        by_hand: bool,
+    }
+
+    /// A copy's sync under way.
+    #[derive(Clone)]
+    struct UnderWay {
+        /// What it began from: what the copy held, laid over what it read.
+        began: SyncState,
+        /// What it holds as it goes: the drive as it read it, and what it
+        /// did as it listed the store.
+        synced: SyncState,
+        /// It has listed the store, and changed it as it planned.
+        listed: bool,
+        /// The puttings back noted meanwhile.
+        noted: BTreeMap<RecordId, u64>,
+    }
+
     /// Copies of the app on one store, each with what it last read or kept
-    /// (`base`), what it holds (`ours`) and its sync under way: what it
-    /// began from, and the puttings back noted meanwhile.
+    /// (`base`), what it holds (`ours`) and its sync under way; and the
+    /// drive, where other devices delete and put back the sessions changed
+    /// elsewhere.
     struct Copies {
         draw: Draw,
         /// Every state the store held, in order.
@@ -301,14 +349,26 @@ mod tests {
         seen: [usize; COPIES],
         base: Vec<SyncState>,
         ours: Vec<SyncState>,
-        syncs: Vec<Option<(SyncState, BTreeMap<RecordId, u64>)>>,
-        /// Whether each session is here, or deleted again by hand.
+        syncs: Vec<Option<UnderWay>>,
+        /// Whether each session put back by hand is here, or deleted again
+        /// by hand.
         listed: [bool; SESSIONS as usize],
         /// Whether each putting back noted is one the drive is to hear of,
         /// or one with nothing in the drive to put back over.
         wanted: HashMap<(RecordId, u64), bool>,
         /// The latest putting back of each session, any copy's.
         latest: HashMap<RecordId, u64>,
+        /// The drive's word on the sessions changed elsewhere.
+        drive: DriveState,
+        /// The sessions changed elsewhere, as the store here holds them.
+        stored: [Stored; ELSEWHERE as usize],
+        /// A sync sent the deletion of a session changed elsewhere that went
+        /// here only as the drive deleted it: a putting back made elsewhere
+        /// since, deleted everywhere.
+        resent: bool,
+        /// A sync took back a session changed elsewhere that was deleted
+        /// here by hand since it was last here: the deletion undone.
+        undone: bool,
         clock: u64,
         /// Tabs may read what sync keeps from before another's last write.
         late: bool,
@@ -317,6 +377,8 @@ mod tests {
     impl Copies {
         fn new(seed: u64, late: bool) -> Self {
             let state = SyncState::new("device".into(), "00".repeat(32), "file1".into(), None);
+            let mut drive = DriveState::default();
+            drive.puts.extend((0..ELSEWHERE).map(elsewhere));
             Self {
                 draw: Draw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1),
                 writes: vec![state.clone()],
@@ -327,6 +389,13 @@ mod tests {
                 listed: [true; SESSIONS as usize],
                 wanted: HashMap::new(),
                 latest: HashMap::new(),
+                drive,
+                stored: [Stored {
+                    listed: true,
+                    by_hand: false,
+                }; ELSEWHERE as usize],
+                resent: false,
+                undone: false,
                 clock: 0,
                 late,
             }
@@ -372,8 +441,8 @@ mod tests {
             self.latest.insert(session, at);
             self.listed[n as usize] = true;
             match &mut self.syncs[c] {
-                Some((_, noted)) => {
-                    noted.insert(session, at);
+                Some(sync) => {
+                    sync.noted.insert(session, at);
                 }
                 None => {
                     self.ours[c].revived.insert(session, at);
@@ -382,22 +451,121 @@ mod tests {
             }
         }
 
+        /// Copy `c`'s sync begins: it reads what sync keeps, and the drive.
         fn begin(&mut self, c: usize) {
             let theirs = self.read(c);
             self.ours[c] = self.ours[c].merged(Some(&self.base[c]), &theirs);
             self.base[c] = theirs;
-            self.syncs[c] = Some((self.ours[c].clone(), BTreeMap::new()));
+            let began = self.ours[c].clone();
+            let mut synced = began.clone();
+            synced.drive.join(&self.drive);
+            self.syncs[c] = Some(UnderWay {
+                began,
+                synced,
+                listed: false,
+                noted: BTreeMap::new(),
+            });
         }
 
-        /// Copy `c`'s sync ends: each putting back it began with is sent, or
-        /// dropped as no more to note, its session deleted again (the
-        /// deletion noted in applied, later than it, or as the drive's own,
-        /// earlier) or with nothing in the drive to put back over.
+        /// Copy `c`'s sync lists the store, once, and changes it.
+        fn list(&mut self, c: usize) {
+            if let Some(mut sync) = self.syncs[c].take() {
+                if !sync.listed {
+                    self.change(&mut sync);
+                }
+                self.syncs[c] = Some(sync);
+            }
+        }
+
+        /// A sync lists the store and changes it as it plans ([`plan`]),
+        /// as sync_once does, for the sessions changed elsewhere: it lets go
+        /// one the drive deleted, noting the deletion; takes back one gone
+        /// here that the drive put back since such a note; and sends the
+        /// deletion of one gone here with none, as deleted by hand. One
+        /// gone here that the drive holds as deleted is the drive's word.
+        fn change(&mut self, sync: &mut UnderWay) {
+            sync.listed = true;
+            let (began, state) = (&sync.began, &mut sync.synced);
+            let listed: BTreeSet<RecordId> = (0..ELSEWHERE)
+                .filter(|&k| self.stored[k as usize].listed)
+                .map(elsewhere)
+                .collect();
+            state.applied.retain(|id, _| !listed.contains(id));
+            // Of those not here, those the sync asks the store about, as
+            // sync_once does: those the drive holds alive, and those it
+            // deleted since this copy last read it, with no note. Each went
+            // here as deleted, by hand or let go, so the store says each was.
+            let forgotten: BTreeSet<RecordId> = (0..ELSEWHERE)
+                .map(elsewhere)
+                .filter(|&x| {
+                    !listed.contains(&x)
+                        && (state.drive.alive(x)
+                            || state.drive.deleted(x)
+                                && !began.drive.deleted(x)
+                                && !state.applied.contains_key(&x))
+                })
+                .collect();
+            let planned = plan(
+                &state.drive,
+                Here {
+                    listed: &listed,
+                    forgotten: &forgotten,
+                    applied: &state.applied,
+                    revived: &state.revived,
+                },
+            );
+            let slot = |x: RecordId| (x.nonce - SESSIONS) as usize;
+            for &(x, tomb) in planned.let_go.iter().chain(&planned.deleted_too) {
+                self.stored[slot(x)] = Stored {
+                    listed: false,
+                    by_hand: false,
+                };
+                state.applied.insert(x, tomb);
+            }
+            for &x in &planned.take_back {
+                self.undone |= self.stored[slot(x)].by_hand;
+                self.stored[slot(x)] = Stored {
+                    listed: true,
+                    by_hand: false,
+                };
+                state.applied.remove(&x);
+            }
+            for &x in &planned.send_deleted {
+                self.resent |= !self.stored[slot(x)].by_hand;
+                self.stored[slot(x)].by_hand = false;
+                self.clock += 1;
+                let at = state.stamp_change(x, self.clock);
+                for drive in [&mut self.drive, &mut state.drive] {
+                    let tomb = drive.tombs.entry(x).or_insert(at);
+                    *tomb = (*tomb).max(at);
+                }
+                state.applied.insert(x, at);
+            }
+            for x in (0..ELSEWHERE).map(elsewhere) {
+                if !self.stored[slot(x)].listed && state.drive.deleted(x) {
+                    self.stored[slot(x)].by_hand = false;
+                }
+            }
+        }
+
+        /// Copy `c`'s sync ends, having listed the store: each putting back
+        /// it began with is sent, or dropped as no more to note, its session
+        /// deleted again (the deletion noted in applied, later than it, or
+        /// as the drive's own, earlier) or with nothing in the drive to put
+        /// back over.
         fn end(&mut self, c: usize) {
-            let Some((began, noted)) = self.syncs[c].take() else {
+            let Some(mut sync) = self.syncs[c].take() else {
                 return;
             };
-            let mut synced = began.clone();
+            if !sync.listed {
+                self.change(&mut sync);
+            }
+            let UnderWay {
+                began,
+                mut synced,
+                noted,
+                ..
+            } = sync;
             for (&session, &at) in &began.revived {
                 let here = self.listed[(session.nonce) as usize];
                 if here && self.wanted[&(session, at)] {
@@ -423,34 +591,60 @@ mod tests {
             self.write(c, merged);
         }
 
+        /// A deletion, or a putting back, of one of the sessions changed
+        /// elsewhere, made on another device and sent to the drive.
+        fn changed_elsewhere(&mut self, put_back: bool) {
+            let x = elsewhere(self.draw.below(ELSEWHERE));
+            let at = self.tick();
+            let times = if put_back {
+                &mut self.drive.revives
+            } else {
+                &mut self.drive.tombs
+            };
+            let time = times.entry(x).or_insert(at);
+            *time = (*time).max(at);
+        }
+
         fn run(&mut self, steps: usize, overlapping: bool) {
             for _ in 0..steps {
                 let c = self.draw.below(COPIES as u64) as usize;
                 match self.draw.below(100) {
-                    0..40 => {
+                    0..30 => {
                         let n = self.draw.below(SESSIONS);
                         self.put_back(c, n);
                     }
-                    40..50 => {
+                    30..38 => {
                         let n = self.draw.below(SESSIONS);
                         self.listed[n as usize] = false;
                     }
-                    50..60 => self.keep(c),
+                    38..44 => self.changed_elsewhere(false),
+                    44..50 => self.changed_elsewhere(true),
+                    50..56 => {
+                        let k = self.draw.below(ELSEWHERE) as usize;
+                        if self.stored[k].listed {
+                            self.stored[k] = Stored {
+                                listed: false,
+                                by_hand: true,
+                            };
+                        }
+                    }
+                    56..64 => self.keep(c),
                     // Closed and opened again: what it held is what the
                     // store holds. Where tabs read each other late, one
                     // closed just after another left its note out loses
                     // it, as no merge can help.
-                    60..65 if !self.late && self.syncs[c].is_none() => {
+                    64..68 if !self.late && self.syncs[c].is_none() => {
                         let opened = self.read(c);
                         self.base[c] = opened.clone();
                         self.ours[c] = opened;
                     }
-                    65..85
+                    68..84
                         if self.syncs[c].is_none()
                             && (overlapping || self.syncs.iter().all(Option::is_none)) =>
                     {
                         self.begin(c)
                     }
+                    84..92 => self.list(c),
                     _ => self.end(c),
                 }
             }
@@ -510,6 +704,40 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Three copies of the app on one store, as above, while other devices
+    /// delete sessions in the drive and put them back, and each copy's sync
+    /// lists the store between reading what sync keeps and keeping its own,
+    /// letting a session go as the drive deleted it, taking one back as the
+    /// drive put it back since, and sending the deletion of one deleted here
+    /// by hand: syncing one at a time, from what the store holds, no sync
+    /// sends the deletion of a session that went here only as the drive
+    /// deleted it, which would delete everywhere a putting back made
+    /// elsewhere, and none takes back one deleted here by hand since it was
+    /// last here. R1's union, laying back a note a take-back dropped, undoes
+    /// a deletion by hand; a merge that drops every deletion's note the
+    /// drive shows put back since, though deleted again after, sends one
+    /// again.
+    ///
+    /// Where syncs overlap, or a tab reads the store late, no merge keeps
+    /// either out: a sync plans from the notes it read, and one another copy
+    /// made since, or wrote over, is not among them
+    /// ([`SyncState::merged`]).
+    #[test]
+    fn no_deletion_of_a_session_let_go_here_is_sent_by_copies_syncing_one_at_a_time() {
+        for seed in 0..2000 {
+            let mut copies = Copies::new(seed, false);
+            copies.run(70, false);
+            assert!(
+                !copies.resent,
+                "seed {seed}: the deletion of a session let go here was sent"
+            );
+            assert!(
+                !copies.undone,
+                "seed {seed}: a deletion by hand here was undone"
+            );
         }
     }
 }
