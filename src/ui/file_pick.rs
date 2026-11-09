@@ -246,8 +246,8 @@ async fn read_chosen(file: FileData, max_bytes: u64, by_mark: bool) -> ChosenFil
 /// and a browser a slice at a time where it is large, as UTF-8, and read
 /// whole, by its mark where `by_mark` says and as UTF-8 elsewhere
 /// (`whole_file_text`). A browser without a promise to read it by, as
-/// Safari before 14, reads it as its file input's reader decodes it, by
-/// its mark whatever `by_mark` says.
+/// Safari before 14, reads its bytes through the file input's reader, all
+/// at once, and decodes them as one read whole (`whole_file_text`).
 async fn read_text(file: &FileData, by_mark: bool) -> Option<String> {
     #[cfg(test)]
     crate::testing::reading_a_file(&file.name()).await;
@@ -280,7 +280,16 @@ async fn read_text(file: &FileData, by_mark: bool) -> Option<String> {
     {
         text_in(file.read_bytes().await.ok()?.to_vec(), by_mark)
     }
-    #[cfg(not(any(feature = "desktop", test)))]
+    // A browser with no promise to read a file by has the file input's
+    // reader read its bytes, taken over rather than copied again, and
+    // decodes them as those the promise reads: the reader's own text,
+    // decoded by the file's mark whatever `by_mark` says, would restore a
+    // backup saved as UTF-16.
+    #[cfg(all(feature = "web", not(any(feature = "desktop", test))))]
+    {
+        whole_file_text(file.read_bytes().await.ok()?.into(), by_mark)
+    }
+    #[cfg(not(any(feature = "desktop", feature = "web", test)))]
     {
         file.read_string().await.ok()
     }
