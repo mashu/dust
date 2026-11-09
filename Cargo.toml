@@ -24,7 +24,9 @@ cw-core = { path = "crates/cw-core" }
 dioxus = "0.7.10"
 serde = { version = "1", features = ["derive"] }
 # `raw_value`: a backup's sessions are each read from where they lie in the
-# file, rather than from a copy of the whole of it (src/persist/backup.rs).
+# file, rather than from a copy of the whole of it (src/persist/backup.rs),
+# and a history kept whole writes back each session a change leaves as it
+# held it (src/persist/legacy.rs).
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Sync (src/sync): everything bound for the user's Google Drive is sealed on

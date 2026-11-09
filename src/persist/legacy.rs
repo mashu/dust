@@ -17,6 +17,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use cw_core::SessionResult;
 use serde::Deserialize;
+use serde_json::value::RawValue;
 
 use super::record::{self, HistoryChange, RecordId};
 #[cfg(any(feature = "web", test))]
@@ -53,25 +54,42 @@ pub(super) const HISTORY_BUDGET: usize = 3_000_000;
 /// now would otherwise move them for good at the next save. The screens
 /// settle a session stamped ahead of the clock for themselves
 /// ([`crate::time::as_shown`]).
-pub(super) fn read_history(raw: &str) -> Option<ReadHistory> {
+///
+/// Beside each session that reads is its text, as the history holds it: a
+/// history kept whole writes that back of a session a change leaves as it
+/// is ([`BlobHistory::apply`]).
+pub(super) fn read_history(raw: &str) -> Option<ReadHistory<'_>> {
     let raw = super::settings::unmarked(raw);
-    // Almost always the whole list reads; only when it does not is it worth
-    // reading again a session at a time to keep the ones that do.
-    let (sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {
-        Ok(sessions) => (sessions, Vec::new()),
+    let held: Vec<&RawValue> = serde_json::from_str(raw).ok()?;
+    // Almost always every session reads; only when one does not is it
+    // worth reading each again, as JSON, to keep the ones that do.
+    let read: Result<Vec<SessionResult>, _> = held
+        .iter()
+        .map(|session| serde_json::from_str(session.get()))
+        .collect();
+    let (sessions, stored, unread) = match read {
+        Ok(sessions) => (sessions, held.iter().map(|s| s.get()).collect(), Vec::new()),
         Err(_) => {
-            let (mut sessions, mut unread) = (Vec::new(), Vec::new());
-            for value in serde_json::from_str::<Vec<serde_json::Value>>(raw).ok()? {
+            let (mut sessions, mut stored, mut unread) = (Vec::new(), Vec::new(), Vec::new());
+            for session in held {
+                let value: serde_json::Value = serde_json::from_str(session.get()).ok()?;
                 match SessionResult::deserialize(&value) {
-                    Ok(session) => sessions.push(session),
+                    Ok(read) => {
+                        sessions.push(read);
+                        stored.push(session.get());
+                    }
                     Err(_) => unread.push(value),
                 }
             }
-            (sessions, unread)
+            (sessions, stored, unread)
         }
     };
     let sessions = sessions.into_iter().map(record::scored).collect();
-    Some(ReadHistory { sessions, unread })
+    Some(ReadHistory {
+        sessions,
+        stored,
+        unread,
+    })
 }
 
 /// The sessions of a stored history that still parse ([`read_history`]),
@@ -84,14 +102,17 @@ pub(super) fn parse_sessions(raw: &str) -> Option<Vec<SessionResult>> {
 
 /// A stored history as it was read ([`read_history`]).
 #[derive(Debug, PartialEq)]
-pub(super) struct ReadHistory {
+pub(super) struct ReadHistory<'a> {
     /// Every session that still parses, oldest first.
     pub(super) sessions: Vec<SessionResult>,
+    /// The text of each of them, by its place there, as the history holds
+    /// it.
+    pub(super) stored: Vec<&'a str>,
     /// Every one that does not, as it is stored.
     pub(super) unread: Vec<serde_json::Value>,
 }
 
-impl ReadHistory {
+impl ReadHistory<'_> {
     /// The sessions that could not be read, as one JSON list to set aside;
     /// none when every one could.
     #[cfg(any(feature = "web", feature = "native-runtime", test))]
@@ -286,9 +307,13 @@ pub(super) fn set_aside_from(
 ///
 /// What it lets go is said by how many it kept: the oldest of `sessions`
 /// ([`BlobHistory::apply`] names them).
+///
+/// Each session goes in as the text beside it: what the history held of
+/// it, for one a change leaves as it is, so that a tab of an older build
+/// that shares the history reads it as it did.
 #[cfg(any(feature = "web", test))]
 pub(super) fn store_newest_that_fit(
-    sessions: &[SessionResult],
+    sessions: &[(impl AsRef<str>, &SessionResult)],
     budget: usize,
     mut set: impl FnMut(&str) -> bool,
 ) -> HistorySaved {
@@ -296,8 +321,7 @@ pub(super) fn store_newest_that_fit(
     // The room the newest session takes on its own, as a list of one.
     let newest_alone = sessions
         .last()
-        .and_then(|session| serde_json::to_string(session).ok())
-        .map_or(0, |json| json.len() + "[]".len());
+        .map_or(0, |(json, _)| json.as_ref().len() + "[]".len());
     let mut budget = budget;
     loop {
         let (raw, kept) = newest_that_fit(sessions, budget);
@@ -306,7 +330,9 @@ pub(super) fn store_newest_that_fit(
         }
         if set(&raw) {
             return if kept < sessions.len() {
-                let runs = sessions.iter().any(|session| session.contest.is_some());
+                let runs = sessions
+                    .iter()
+                    .any(|(_, session)| session.contest.is_some());
                 HistorySaved::Squeezed {
                     kept,
                     runs,
@@ -323,19 +349,20 @@ pub(super) fn store_newest_that_fit(
     }
 }
 
-/// The newest of `sessions` whose JSON fits in `budget` bytes, as one JSON
-/// list, and how many it holds.
+/// The newest of `sessions` whose JSON, the text beside each, fits in
+/// `budget` bytes, as one JSON list, and how many it holds.
 ///
 /// A browser gives a site a few megabytes, and a session's size follows its
 /// number of groups, so the cap on a browser's history is room, not count.
 #[cfg(any(feature = "web", test))]
-fn newest_that_fit(sessions: &[SessionResult], budget: usize) -> (String, usize) {
-    let mut parts: Vec<String> = Vec::new();
+fn newest_that_fit(
+    sessions: &[(impl AsRef<str>, &SessionResult)],
+    budget: usize,
+) -> (String, usize) {
+    let mut parts: Vec<&str> = Vec::new();
     let mut used = "[]".len();
-    for session in sessions.iter().rev() {
-        let Ok(json) = serde_json::to_string(session) else {
-            continue;
-        };
+    for (json, _) in sessions.iter().rev() {
+        let json = json.as_ref();
         let cost = json.len() + usize::from(!parts.is_empty());
         if used + cost > budget {
             break;
@@ -714,10 +741,21 @@ impl<S: Aside> BlobHistory<S> {
     /// The history is read out of the store once: what tells whether it
     /// changed is what the change is made to, and what it leaves is what
     /// was written, which reads back the same.
+    ///
+    /// Only what the change puts is written as this build writes a
+    /// session. Every other session goes back as the history held it, byte
+    /// for byte: a tab of an older build that shares the history, which
+    /// knows a session by what it holds, finds each as it left it.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
         let stored = self.shelf.get(self.keys.history);
         let looked = self.look_at(stored.as_ref().ok().and_then(Option::as_deref));
-        let mut held = self.current_from(stored);
+        // Each session beside its text as the history holds it, none for
+        // one the change puts.
+        let mut held: Vec<(Record, SessionResult, Option<&str>)> = self
+            .current_from(&stored)
+            .into_iter()
+            .map(|(record, session, stored)| (record, session, Some(stored)))
+            .collect();
         if self.held.get() {
             return HistorySaved::Held;
         }
@@ -751,11 +789,11 @@ impl<S: Aside> BlobHistory<S> {
                 .insert(record.id.order, record.id);
             let key = SessionKey::of(&session);
             self.seen_keys.borrow_mut().insert(record.id, key.clone());
-            let kept_already = held.iter().any(|(kept, _)| kept.json == json);
+            let kept_already = held.iter().any(|(kept, _, _)| kept.json == json);
             if kept_already || (gone.contains(&key) && !undone.contains(&record.id)) {
                 continue;
             }
-            let at = held.partition_point(|(kept, _)| kept.id < record.id);
+            let at = held.partition_point(|(kept, _, _)| kept.id < record.id);
             held.insert(
                 at,
                 (
@@ -764,6 +802,7 @@ impl<S: Aside> BlobHistory<S> {
                         json,
                     },
                     session,
+                    None,
                 ),
             );
         }
@@ -772,9 +811,9 @@ impl<S: Aside> BlobHistory<S> {
             // named it.
             let at = held
                 .iter()
-                .position(|(kept, _)| kept.id == *id)
+                .position(|(kept, _, _)| kept.id == *id)
                 .or_else(|| {
-                    held.iter().position(|(kept, session)| {
+                    held.iter().position(|(kept, session, _)| {
                         SessionKey::of(session) == gone.key()
                             && (kept.id.nonce == id.nonce
                                 || record::fnv64(kept.json.as_bytes()) == id.nonce)
@@ -791,7 +830,7 @@ impl<S: Aside> BlobHistory<S> {
         // tab would then let go for good should it go missing in passing.
         let live: HashSet<SessionKey> = held
             .iter()
-            .map(|(_, session)| SessionKey::of(session))
+            .map(|(_, session, _)| SessionKey::of(session))
             .collect();
         for (_, gone) in &change.forget {
             if !live.contains(&gone.key()) && !deleted.contains(gone) {
@@ -805,8 +844,11 @@ impl<S: Aside> BlobHistory<S> {
         if remembered {
             self.save_deleted(&deleted);
         }
-        let ids: Vec<RecordId> = held.iter().map(|(record, _)| record.id).collect();
-        let sessions: Vec<SessionResult> = held.into_iter().map(|(_, session)| session).collect();
+        let ids: Vec<RecordId> = held.iter().map(|(record, _, _)| record.id).collect();
+        let sessions: Vec<(&str, &SessionResult)> = held
+            .iter()
+            .map(|(record, session, stored)| (stored.unwrap_or(&record.json), session))
+            .collect();
         let mut written = None;
         let saved = store_newest_that_fit(&sessions, self.budget, |raw| {
             let took = self.shelf.set(self.keys.history, raw);
@@ -936,12 +978,20 @@ impl<S: Aside> BlobHistory<S> {
     /// aside; where it cannot be, the history is held, and only what reads
     /// of it comes back.
     fn current(&self) -> Vec<(Record, SessionResult)> {
-        self.current_from(self.shelf.get(self.keys.history))
+        let stored = self.shelf.get(self.keys.history);
+        self.current_from(&stored)
+            .into_iter()
+            .map(|(record, session, _)| (record, session))
+            .collect()
     }
 
     /// The history as it is stored, `stored` being what the store gave of
-    /// it, as [`Self::current`] reads it.
-    fn current_from(&self, stored: Result<Option<String>, ()>) -> Vec<(Record, SessionResult)> {
+    /// it, as [`Self::current`] reads it, each session beside its text
+    /// there. What reads beside what is set aside stays as it was held.
+    fn current_from<'a>(
+        &self,
+        stored: &'a Result<Option<String>, ()>,
+    ) -> Vec<(Record, SessionResult, &'a str)> {
         self.held.set(false);
         let raw = match stored {
             Ok(Some(raw)) => raw,
@@ -952,34 +1002,37 @@ impl<S: Aside> BlobHistory<S> {
             }
         };
         let (history, aside) = (self.keys.history, self.keys.aside);
-        let Some(read) = read_history(&raw) else {
-            let kept = set_aside_from(&self.shelf, history, &raw, aside, &raw, None);
+        let Some(read) = read_history(raw) else {
+            let kept = set_aside_from(&self.shelf, history, raw, aside, raw, None);
             if !self.noted(kept, SetAside::History { kept: None }) {
                 self.held.set(true);
             }
             return Vec::new();
         };
         if let Some(unread) = read.unread_json() {
-            let kept = match serde_json::to_string(&read.sessions) {
-                Ok(rest) => set_aside_from(&self.shelf, history, &raw, aside, &unread, Some(&rest)),
-                Err(_) => Kept::Not,
-            };
+            let rest = format!("[{}]", read.stored.join(","));
+            let kept = set_aside_from(&self.shelf, history, raw, aside, &unread, Some(&rest));
             let count = read.unread.len();
             if !self.noted(kept, SetAside::Sessions { count, kept: None }) {
                 self.held.set(true);
             }
         }
-        self.named(read.sessions)
+        self.named(read.sessions, read.stored)
     }
 
     /// `sessions`, the history in its order, each by its record: where this
-    /// copy placed it, or else at its stamp, or just after the one before.
-    fn named(&self, sessions: Vec<SessionResult>) -> Vec<(Record, SessionResult)> {
+    /// copy placed it, or else at its stamp, or just after the one before;
+    /// each beside its text there, `stored`, by its place.
+    fn named<'a>(
+        &self,
+        sessions: Vec<SessionResult>,
+        stored: Vec<&'a str>,
+    ) -> Vec<(Record, SessionResult, &'a str)> {
         let placed = self.placed.borrow();
         let mut keys = self.seen_keys.borrow_mut();
         let mut last: Option<u64> = None;
         let mut named = Vec::with_capacity(sessions.len());
-        for session in sessions {
+        for (session, stored) in sessions.into_iter().zip(stored) {
             let Ok(json) = serde_json::to_string(&session) else {
                 continue;
             };
@@ -994,7 +1047,7 @@ impl<S: Aside> BlobHistory<S> {
                 });
             last = Some(id.order);
             keys.insert(id, SessionKey::of(&session));
-            named.push((Record { id, json }, session));
+            named.push((Record { id, json }, session, stored));
         }
         named
     }
@@ -1003,7 +1056,7 @@ impl<S: Aside> BlobHistory<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persist::tests::{at, session, stamps};
+    use crate::persist::tests::{as_an_older_build_wrote, at, session, stamps};
     use cw_core::CharSetMode;
 
     #[test]
@@ -1293,7 +1346,7 @@ mod tests {
         let raw = serde_json::to_string(&[written.clone()]).unwrap();
         let back = parse_sessions(&raw).expect("a list");
         assert_eq!(back[0].char_set_mode, CharSetMode::Contest);
-        let (saved, kept) = newest_that_fit(&back, usize::MAX);
+        let (saved, kept) = newest_that_fit(&as_written(&back), usize::MAX);
         assert_eq!(kept, 1);
         let saved: Vec<serde_json::Value> = serde_json::from_str(&saved).unwrap();
         assert_eq!(saved[0]["charSetMode"], "callsign");
@@ -1301,12 +1354,21 @@ mod tests {
         assert_eq!(saved[0]["contest"], written["contest"]);
     }
 
+    /// Each of `sessions` beside its text as this build writes it.
+    fn as_written(sessions: &[SessionResult]) -> Vec<(String, &SessionResult)> {
+        sessions
+            .iter()
+            .map(|session| (serde_json::to_string(session).unwrap(), session))
+            .collect()
+    }
+
     #[test]
     fn only_the_newest_sessions_that_fit_are_kept() {
-        let all: Vec<SessionResult> = (0..10)
+        let sessions: Vec<SessionResult> = (0..10)
             .map(|i| session(&format!("2026-01-{i:02}")))
             .collect();
-        let one = serde_json::to_string(&all[0]).unwrap().len();
+        let all = as_written(&sessions);
+        let one = all[0].0.len();
         let (raw, kept) = newest_that_fit(&all, 2 + 3 * one + 2);
         assert_eq!(kept, 3);
         let back = parse_sessions(&raw).expect("a list");
@@ -1331,12 +1393,13 @@ mod tests {
     /// whole history as "the newest 0".
     #[test]
     fn a_store_short_of_room_never_writes_an_empty_history() {
-        let mut all: Vec<SessionResult> = (0..5)
+        let mut sessions: Vec<SessionResult> = (0..5)
             .map(|i| session(&format!("2026-01-{i:02}")))
             .collect();
         // The newest is far larger than the others, as a long run is.
-        all[4].alphabet_fingerprint = "x".repeat(20_000);
-        let newest = serde_json::to_string(&all[4]).unwrap().len() + 2;
+        sessions[4].alphabet_fingerprint = "x".repeat(20_000);
+        let all = as_written(&sessions);
+        let newest = all[4].0.len() + 2;
         let writes = std::cell::RefCell::new(Vec::<String>::new());
         let written = &writes;
         let with_room = |room: usize| {
@@ -1368,7 +1431,8 @@ mod tests {
         let saved = store_newest_that_fit(&all, usize::MAX, |_| true);
         assert_eq!(saved, HistorySaved::Stored { kept: 5 });
         // A history every session was deleted from is stored empty.
-        let saved = store_newest_that_fit(&[], usize::MAX, |raw| raw == "[]");
+        let none: [(&str, &SessionResult); 0] = [];
+        let saved = store_newest_that_fit(&none, usize::MAX, |raw| raw == "[]");
         assert_eq!(saved, HistorySaved::Stored { kept: 0 });
     }
 
@@ -1811,5 +1875,84 @@ mod tests {
             shelf.get("history").unwrap().as_deref(),
             Some("{ not a list")
         );
+    }
+
+    /// What a tab of an older build writes back of `session`, which it
+    /// read as this build wrote it: the format last, as a key it does not
+    /// know and carries.
+    fn as_an_older_build_writes_back(session: &SessionResult) -> String {
+        let older = as_an_older_build_wrote(session);
+        let open = older.strip_suffix('}').expect("an object");
+        format!("{open},\"format\":{}}}", cw_core::SESSION_FORMAT)
+    }
+
+    /// Each session of the history kept whole, as the shelf holds it.
+    fn held_as_stored(shelf: &Shelf) -> Vec<String> {
+        let raw = shelf.get("history").unwrap().expect("a history");
+        let held: Vec<&RawValue> = serde_json::from_str(&raw).unwrap();
+        held.iter()
+            .map(|session| session.get().to_string())
+            .collect()
+    }
+
+    /// Every session of the history kept whole that a change leaves as it
+    /// is goes back into it as the history held it, byte for byte, and so
+    /// does every one that reads beside one set aside: a tab of an older
+    /// build sharing the history reads each as it did. Each was written
+    /// again as this build writes a session, saying its format first. An
+    /// older tab (0.16.3 to 0.16.9) then read each under a new name, and
+    /// as another session than the one it held, which it took for lost in
+    /// passing and stored again beside it: the history doubled with every
+    /// write here, until its room let the oldest go.
+    #[test]
+    fn a_history_kept_whole_writes_back_as_it_held_them_the_sessions_a_change_leaves() {
+        let older = vec![
+            as_an_older_build_wrote(&finished(1_000)),
+            as_an_older_build_writes_back(&finished(2_000)),
+        ];
+        let shelf = Shelf::with_room(usize::MAX);
+        shelf.set("history", &format!("[{}]", older.join(", ")));
+        let whole = whole_on(&shelf);
+        let read = whole.load();
+        assert_eq!(read.sessions.len(), 2);
+        let newest = read.sessions.last().map(|(id, _)| *id);
+        let ours = next_after(&finished(3_000), newest);
+        let change = HistoryChange {
+            put: vec![ours.clone()],
+            ..HistoryChange::default()
+        };
+        assert_eq!(whole.apply(&change), HistorySaved::Stored { kept: 1 });
+        assert_eq!(
+            held_as_stored(&shelf),
+            [older[0].clone(), older[1].clone(), ours.json],
+            "an older build's as it wrote them, this build's as it writes it"
+        );
+        assert_eq!(
+            whole.listing().map(|ids| ids.len()),
+            Some(3),
+            "each once, here too"
+        );
+
+        // A session that does not read, in a history with no room to copy
+        // it beside: the history gives up its room, holding the rest as it
+        // held them.
+        let unread = format!(r#"{{"date":"damaged","by":"{}"}}"#, "x".repeat(100));
+        let raw = format!("[{},{unread},{}]", older[0], older[1]);
+        let copy = format!(
+            "[{}]",
+            serde_json::from_str::<serde_json::Value>(&unread).unwrap()
+        );
+        let shelf = Shelf::with_room(raw.len() + copy.len() - 1);
+        shelf.set("history", &raw);
+        let read = whole_on(&shelf).load();
+        assert_eq!(
+            read.set_aside,
+            [SetAside::Sessions {
+                count: 1,
+                kept: None
+            }]
+        );
+        assert_eq!(shelf.aside(), shelved(&[("aside", copy.as_str())]));
+        assert_eq!(held_as_stored(&shelf), older, "the rest, as they were held");
     }
 }

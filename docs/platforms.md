@@ -811,7 +811,10 @@ seconds, or will not take the move, the history is kept for that visit as
 builds before records kept it: whole, in `dust_sessions`, to a budget of
 3,000,000 characters (`HISTORY_BUDGET`, `src/persist/legacy.rs`). Should it
 outgrow that, the newest sessions that fit are kept and the oldest let go
-(`store_newest_that_fit`), as before. The app says all this at every launch
+(`store_newest_that_fit`), as before. Only what a change stores is written as
+this build writes a session; every other session goes back as the history
+held it, byte for byte, so a tab of an older build that shares the history
+finds each as it left it. The app says all this at every launch
 that falls back, and to save a backup; the database is left as it is, and
 tried again at the next visit, which takes up what the visit stored as it
 takes up an older build's sessions.
