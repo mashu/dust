@@ -85,7 +85,9 @@ character or after the last, or a sliver of an onset, costs nothing, and
 the group is timed as ever. Keys after a group's second send began are `null`: it was
 heard twice. A contest call or exchange token keeps the same record (see
 Contest, below). The record is read leniently: a shape this build does not
-know reads as untimed, never as a lost session.
+know reads as untimed, never as a lost session, and is kept as it was. Keys a
+later build adds inside the record, beside these, are kept too, and written
+back with it.
 
 A group whose first send could not be timed from says why instead, under
 `untimed`: `"heldUp"` (the audio held it up on its way), `"sentAgain"`

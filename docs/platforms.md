@@ -678,7 +678,10 @@ reads only in part, a contest's styles with a knob a later build added, until
 that entry is changed here. A number past this build's range is not one: it
 is read, held to the range, as it always was. A session is stored
 once, as the build that stored it wrote it, and never written over, so what
-a later build adds to it stays. Each says the format it is stored in,
+a later build adds to it stays; and one this build writes again, as a restore
+adds or fills it in, or an Undo puts it back, keeps every key a later build
+added anywhere in it, inside a group's times (`"charTimes"`) and a letter's
+entry of the tally (`"letterAccuracy"`) too. Each says the format it is stored in,
 `"format"`: the oldest format a build must know to read it
 (`SESSION_FORMAT`, `crates/cw-core/src/session.rs`), 1 so far, raised only
 by a change an earlier build would misread; one that says none is from

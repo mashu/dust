@@ -564,13 +564,16 @@ impl<'de> serde::de::Visitor<'de> for EachSession {
 }
 
 /// How long what `session` holds that this build does not read is, as
-/// JSON: none where it holds nothing of the kind.
+/// JSON, wherever in it it is held ([`cw_core::UnreadKeys`]): none where it
+/// holds nothing of the kind.
 fn unread_bytes(session: &SessionResult) -> usize {
     let unread = &session.unread;
     let mut counted = Counted(0);
     for part in std::iter::once(&unread.session)
         .chain(&unread.groups)
         .chain(&unread.timings)
+        .chain(&unread.char_times)
+        .chain(unread.letters.values())
         .filter(|part| !part.is_empty())
     {
         // Counting fails nowhere.
@@ -763,7 +766,8 @@ pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -
 /// holds what an older version dropped of it: none, where it holds nothing
 /// `kept` has not. Times of a group `kept` holds in a shape this version
 /// cannot read, a later version's, give way to those it takes, which it
-/// can: only those are stored ([`cw_core::UnreadKeys`]).
+/// can: only those are stored ([`cw_core::UnreadKeys`]). Times it takes
+/// come with what they hold that this version does not read.
 fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionResult> {
     if kept.contest.is_none() && restored.contest.is_some() {
         return Some(restored);
@@ -772,7 +776,9 @@ fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionR
         return None;
     }
     let mut now = kept.clone();
-    let unread = &mut now.unread.timings;
+    let places = now.group_timings.len();
+    let mut restored_inside = restored.unread.char_times;
+    let (unread, inside) = (&mut now.unread.timings, &mut now.unread.char_times);
     let timings = now.group_timings.iter_mut().zip(restored.group_timings);
     for (at, (timing, restored)) in timings.enumerate() {
         if timing.char_times.is_none() && restored.char_times.is_some() {
@@ -780,10 +786,16 @@ fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionR
             if let Some(unread) = unread.get_mut(at) {
                 unread.remove("charTimes");
             }
+            if let Some(keys) = restored_inside.get_mut(at).filter(|keys| !keys.is_empty()) {
+                inside.resize_with(places, serde_json::Map::new);
+                inside[at] = std::mem::take(keys);
+            }
         }
     }
-    if unread.iter().all(serde_json::Map::is_empty) {
-        unread.clear();
+    for by_place in [unread, inside] {
+        if by_place.iter().all(serde_json::Map::is_empty) {
+            by_place.clear();
+        }
     }
     Some(now)
 }
@@ -1045,6 +1057,46 @@ mod tests {
         assert!(again.filled.is_empty(), "its own kept");
     }
 
+    /// Times a restore fills in come with what a later version wrote inside
+    /// them that this one does not read, in their place, and are stored with
+    /// it. It was left behind, and lost from the history.
+    #[test]
+    fn times_a_restore_fills_in_come_with_what_they_hold_that_this_version_does_not_read() {
+        let times = |key: u32| cw_core::CharTimes {
+            ends: vec![300],
+            keys: vec![Some(key)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        };
+        let session = |kept: Option<u32>| {
+            let mut session =
+                crate::testing::stored_session("2026-10-10", &[("K", "K"), ("M", "M")]);
+            session.timestamp = 10;
+            session.group_timings[1].char_times = kept.map(times);
+            session
+        };
+        let mut later = serde_json::to_value(session(Some(700))).expect("writes");
+        later["groupTimings"][1]["charTimes"]["laterInside"] = serde_json::json!({ "v": 1 });
+        let backup = read_record(&later.to_string()).expect("a later version's reads");
+        let merged = merge_sessions(&[session(None)], vec![backup]);
+        let [fill] = &merged.filled[..] else {
+            panic!("filled in once: {merged:?}");
+        };
+        assert_eq!(fill.now.group_timings[1].char_times, Some(times(700)));
+        let json = serde_json::to_string(&fill.now).expect("writes");
+        let stored: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+        assert_eq!(
+            stored["groupTimings"][1]["charTimes"],
+            later["groupTimings"][1]["charTimes"]
+        );
+        assert_eq!(
+            read_record(&json).as_ref(),
+            Some(&fill.now),
+            "as it is held"
+        );
+    }
+
     /// A session whose times a later version wrote in a shape this one
     /// cannot read takes the times a backup holds of it that it can, and is
     /// stored as it is held: with those times, the others let go of. Both
@@ -1295,6 +1347,51 @@ mod tests {
         let backup = read_backup(&raw).expect("a history");
         let days: Vec<u64> = backup.sessions.iter().map(|s| s.timestamp).collect();
         assert_eq!((days, backup.left_out), (vec![9], 1));
+    }
+
+    /// What sessions hold that this build does not read inside a group's
+    /// times, or inside a letter's entry of the tally, is kept as it was
+    /// read, as what they hold beside them is, and counts to the same bound
+    /// in all: uncounted, a file of sessions holding it there would keep a
+    /// gigabyte of it.
+    #[test]
+    fn what_sessions_hold_inside_their_times_and_tally_counts_to_the_bound() {
+        let share = UNREAD_MAX_BYTES / 5 - 100;
+        for inside in ["charTimes", "letterAccuracy"] {
+            let holding = |day: u64| {
+                let mut session =
+                    crate::testing::stored_session(&format!("2026-10-{day:02}"), &[("K", "K")]);
+                session.timestamp = day;
+                session.group_timings[0].char_times = Some(cw_core::CharTimes {
+                    ends: vec![300],
+                    keys: vec![Some(700)],
+                    corrected: Vec::new(),
+                    latency_ms: 0,
+                    box_open: true,
+                });
+                let mut session = serde_json::to_value(session).unwrap();
+                let place = if inside == "charTimes" {
+                    &mut session["groupTimings"][0]["charTimes"]
+                } else {
+                    &mut session["letterAccuracy"]["K"]
+                };
+                place["later"] = "x".repeat(share).into();
+                session.to_string()
+            };
+            // Five that fit the bound together, and a sixth that does not.
+            let mut list: Vec<String> = (1..=6).map(holding).collect();
+            list.push(serde_json::to_string(&at(7, "2026-10-07")).unwrap());
+            let backup = read_backup(&format!("[{}]", list.join(","))).expect("a history");
+            assert_eq!(timestamps(&backup.sessions), [1, 2, 3, 4, 5, 7], "{inside}");
+            assert_eq!(backup.left_out, 1, "{inside}");
+            let kept = &backup.sessions[0].unread;
+            let kept = if inside == "charTimes" {
+                kept.char_times[0]["later"].as_str()
+            } else {
+                kept.letters[&'K']["later"].as_str()
+            };
+            assert_eq!(kept.map(str::len), Some(share), "{inside}: kept as it was");
+        }
     }
 
     /// The logs of the runs in a backup are kept, each whole as it was
