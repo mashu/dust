@@ -54,8 +54,8 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::disk::{aside_name, flush, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unreadable, key_of, keyed,
-    names_noted, not_told, read_record, taken_up, tombstone_key, unreadable,
+    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unreadable, held_key, key_of,
+    keyed, names_noted, not_told, read_record, taken_up, tombstone_key, unreadable,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -377,14 +377,13 @@ impl HistoryFiles {
                     load.sessions.push((id, session));
                 }
                 Some((Err(said), _)) => {
-                    // There all the same: what an older build stores of
-                    // the session it says it holds is no session to take
-                    // up beside it.
-                    if let Some(key) = &said.key {
+                    // A later build's is there all the same: what an older
+                    // build stores of the session it says it holds is no
+                    // session to take up beside it. A damaged one holds
+                    // none ([`held_key`]).
+                    if let Some(key) = said.later_key() {
                         keys.insert(id, key.clone());
-                        if said.later {
-                            load.later.push((id, key.clone()));
-                        }
+                        load.later.push((id, key.clone()));
                     }
                     load.unread.push(id);
                     unread.push((id, said));
@@ -407,10 +406,8 @@ impl HistoryFiles {
             && !listing.skipped
         {
             let mut live = keyed(load.sessions.iter().map(|(id, session)| (*id, session)));
-            for (id, said) in &unread {
-                if let Some(key) = &said.key {
-                    live.entry(key.clone()).or_default().push(*id);
-                }
+            for (id, key) in &load.later {
+                live.entry(key.clone()).or_default().push(*id);
             }
             if let Some(change) = self.import(layout, &live) {
                 taken_up(&mut load.sessions, &change);
@@ -799,11 +796,13 @@ impl HistoryFiles {
     }
 
     /// Every record there is by its session's key: those read before as
-    /// they were read, the rest read now for their keys alone. One whose
-    /// text says no session, damaged, has none. None where the history
-    /// cannot be listed, or a record in it cannot be read for now, or a
-    /// pack of them opened: it may hold a session an older build holds too,
-    /// which would be taken up a second time beside it.
+    /// they were read, the rest read now for their keys alone. One that is
+    /// damaged has none, though it may say one, as one whose bytes are no
+    /// text has none: only one that reads, or that a later build stored,
+    /// holds its session ([`held_key`]). None where the history cannot be
+    /// listed, or a record in it cannot be read for now, or a pack of them
+    /// opened: it may hold a session an older build holds too, which would
+    /// be taken up a second time beside it.
     fn live_keys(&self) -> Option<HashMap<SessionKey, Vec<RecordId>>> {
         let listing = self.listing_now().ok()?;
         if listing.skipped {
@@ -817,7 +816,7 @@ impl HistoryFiles {
                 Some(key) => key.clone(),
                 None => match raw_at(&records, *id, &listing.packed) {
                     Raw::Text(raw) => {
-                        let Some(key) = key_of(&raw) else {
+                        let Some(key) = held_key(&raw) else {
                             continue;
                         };
                         keys.insert(*id, key.clone());
@@ -2978,6 +2977,61 @@ mod tests {
         );
     }
 
+    /// A session whose record here is damaged, JSON that still says when
+    /// and on what day it finished but that no build reads, is taken up
+    /// beside it from the history an older build keeps whole, as the history
+    /// is read whole and as it is listed: the older build's copy may be the
+    /// only good one, as a restore takes a backup's. The record is left as
+    /// it is, and the older build's deletion of the session leaves it too.
+    /// The take-up took the damaged record for the session, left the good
+    /// copy out, and deleted the record with the session.
+    #[test]
+    fn a_session_whose_record_here_is_damaged_is_taken_up_from_an_older_build_beside_it() {
+        let dir = TempDir::new("older-damaged");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = Files::at(&dir.0);
+        files.load();
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let damage = |session: &SessionResult| {
+            let raw = format!(
+                r#"{{"date":{:?},"timestamp":{},"by":"damage"}}"#,
+                session.date, session.timestamp
+            );
+            let id = RecordId::next(session.timestamp, None, &raw);
+            fs::write(records.join(file_name(id)), &raw).unwrap();
+            id
+        };
+        let mine = finished(now + 60_000);
+        let damaged = damage(&mine);
+        keep_whole(&dir, &[old.clone(), mine.clone()]);
+        let read = Files::at(&dir.0).load();
+        assert_eq!(
+            stamps(&read),
+            [old.timestamp, mine.timestamp],
+            "taken up beside it"
+        );
+        assert_eq!(read.unread, [damaged], "left as it is");
+        // Another, damaged once this copy read the history, which an older
+        // build adds after.
+        let since = finished(now + 120_000);
+        let damaged_since = damage(&since);
+        keep_whole(&dir, &[old.clone(), mine.clone(), since.clone()]);
+        assert_eq!(
+            files.listing().map(|listed| listed.len()),
+            Some(5),
+            "as it is listed"
+        );
+        // The older build deletes the first.
+        let gone = [Deleted::of(&mine, now + 180_000)];
+        fs::write(dir.0.join(DELETED), serde_json::to_vec(&gone).unwrap()).unwrap();
+        keep_whole(&dir, &[old.clone(), since.clone()]);
+        let read = Files::at(&dir.0).load();
+        assert_eq!(stamps(&read), [old.timestamp, since.timestamp]);
+        assert_eq!(read.unread, [damaged, damaged_since], "left as they are");
+    }
+
     /// A session from before the move that an older copy writes back, as
     /// one left open stores the history it held, is never brought back:
     /// neither one it let go long ago, nor one deleted here since.
@@ -3545,6 +3599,7 @@ mod tests {
         #[cfg(unix)]
         a_session_a_pack_here_holds_is_not_taken_up_from_an_older_build_while_that_pack_cannot_be_opened,
         a_session_a_later_build_stored_here_is_not_taken_up_from_an_older_build,
+        a_session_whose_record_here_is_damaged_is_taken_up_from_an_older_build_beside_it,
         a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,

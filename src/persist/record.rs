@@ -257,6 +257,29 @@ pub fn unreadable(raw: &str) -> Unreadable {
     Unreadable { key, later }
 }
 
+impl Unreadable {
+    /// The session a record a later build stored holds, as it says: none
+    /// for a damaged one, which holds none any build reads, whatever it
+    /// says ([`held_key`]).
+    pub fn later_key(&self) -> Option<&SessionKey> {
+        self.key.as_ref().filter(|_| self.later)
+    }
+}
+
+/// The session a record whose text is `raw` holds, as the history an older
+/// build keeps whole is taken up ([`super::legacy::imported`]): its own,
+/// where it reads as one, or the one a later build that stored it says it
+/// holds ([`Unreadable::later_key`]). None for a damaged one, though it may
+/// still say when and on what day its session finished: no build reads it,
+/// so the older build's copy of that session may be the only good one, as
+/// a restore takes a backup's beside it.
+pub(super) fn held_key(raw: &str) -> Option<SessionKey> {
+    match serde_json::from_str::<SessionResult>(raw) {
+        Ok(session) => Some(SessionKey::of(&session)),
+        Err(_) => unreadable(raw).later_key().cloned(),
+    }
+}
+
 /// The key of the session a tombstone names, `raw` being what it holds as
 /// it is stored ([`Deleted`]). None for one that is empty or does not
 /// read, which deletes its record all the same.

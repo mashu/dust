@@ -1037,9 +1037,10 @@ impl MemoryStore {
             .and_then(read_history)
             .map(|read| read.sessions)
             .unwrap_or_default();
-        // Every record here by the session it holds, or says it holds, as
-        // the files take them: nothing is taken up while one cannot be read
-        // for now, as it may hold a session the older build holds too.
+        // Every record here by the session it holds, or a later build's by
+        // the one it says it holds, as the files take them: a damaged one
+        // holds none. Nothing is taken up while one cannot be read for now,
+        // as it may hold a session the older build holds too.
         let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
         {
             let (tombstones, held_open) = (self.tombstones.borrow(), self.held_open.borrow());
@@ -1052,7 +1053,7 @@ impl MemoryStore {
                 }
                 let key = match held.session() {
                     Some(session) => Some(SessionKey::of(&session)),
-                    None => unreadable(&held.json).key,
+                    None => unreadable(&held.json).later_key().cloned(),
                 };
                 if let Some(key) = key {
                     live.entry(key).or_default().push(*id);
@@ -1291,6 +1292,40 @@ mod tests {
         assert!(read.sessions.is_empty());
         assert_eq!(read.set_aside, [SetAside::History { kept: None }]);
         assert_eq!(*damaged.legacy_aside.borrow(), ["{ not a list"]);
+    }
+
+    /// A record here a later build stored, which says which session it
+    /// holds, holds back the older build's copy of that session, as the
+    /// files take them; a damaged one, which no build reads though it says
+    /// the same, does not, and is left as it is.
+    #[test]
+    fn only_a_later_builds_record_holds_back_the_older_builds_copy_of_its_session() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let first = finished(now_ms - 9 * DAY);
+        store.keep_whole(std::slice::from_ref(&first));
+        store.load_history();
+        let (later, damaged) = (finished(now_ms + 60_000), finished(now_ms + 120_000));
+        let says = |session: &SessionResult, format: u32| {
+            format!(
+                r#"{{"format":{format},"date":{:?},"timestamp":{},"by":"elsewhere"}}"#,
+                session.date, session.timestamp
+            )
+        };
+        let theirs = says(&later, cw_core::SESSION_FORMAT + 1);
+        store.plant_unreadable_at(later.timestamp, &theirs);
+        let mine = says(&damaged, cw_core::SESSION_FORMAT);
+        let left = store.plant_unreadable_at(damaged.timestamp, &mine);
+        store.keep_whole(&[first.clone(), later, damaged.clone()]);
+        let read = store.load_history();
+        assert_eq!(
+            read.sessions
+                .iter()
+                .map(|(_, session)| session.timestamp)
+                .collect::<Vec<_>>(),
+            [first.timestamp, damaged.timestamp]
+        );
+        assert_eq!(store.record(left), Some(mine), "left as it is");
     }
 
     /// A store that takes no change, full or failing, makes no move, as the
