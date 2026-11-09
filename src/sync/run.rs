@@ -293,6 +293,7 @@ pub async fn sync_once(
         remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
     )
     .await?;
+    take_unanswered(state, &files, &read, &drive);
 
     let listed: BTreeSet<RecordId> = store
         .history_listing()
@@ -455,23 +456,11 @@ pub async fn sync_once(
         .revived
         .retain(|id, _| sent_back.contains(id) && listed.contains(id));
     for pack in packs_of(&state.device, now, put, forget, revive) {
-        send_pack(remote, &keys, state, &pack).await?;
+        send_pack(remote, &keys, state, &pack, &by_hand).await?;
         synced.sent += pack.put.len() + pack.forget.len() + pack.revive.len();
         for revive in &pack.revive {
             if let Some(id) = revive.record_id() {
                 state.revived.remove(&id);
-            }
-        }
-        // A deletion by hand, once the drive holds it, is the drive's,
-        // noted as one taken from it: a putting back the drive holds after
-        // it brings the session back here, as on every other device, rather
-        // than this device sending it again. A twin's is not: its session
-        // is kept under the other name.
-        for forget in &pack.forget {
-            if let Some(id) = forget.record_id()
-                && by_hand.contains(&id)
-            {
-                state.applied.insert(id, forget.at);
             }
         }
     }
@@ -673,20 +662,68 @@ async fn read_here(store: &dyn Store, planned: &Plan) -> BTreeMap<RecordId, Stri
 }
 
 /// Send `pack`, and take it as read: what it holds is here already.
+///
+/// A deletion by hand it holds, of those `by_hand`, is the drive's once the
+/// drive holds it, noted as one taken from it: a putting back the drive
+/// holds after it brings the session back here, as on every other device,
+/// rather than this device sending it again. A twin's is not: its session
+/// is kept under the other name. Until the drive answers, they are noted
+/// against the pack's name ([`SyncState::unanswered`]): made though the
+/// answer was lost, the pack is found at the next sync, and they are the
+/// drive's then ([`take_unanswered`]).
 async fn send_pack(
     remote: &dyn Remote,
     keys: &Keys,
     state: &mut SyncState,
     pack: &Pack,
+    by_hand: &BTreeSet<RecordId>,
 ) -> Result<(), SyncFailed> {
     let name =
         pack_name().ok_or_else(|| SyncFailed::Store("this device could not name a file".into()))?;
     let sealed = seal_pack(keys, &name, pack)
         .ok_or_else(|| SyncFailed::Store("this device could not seal what it sends".into()))?;
+    let deletions: BTreeMap<RecordId, u64> = pack
+        .forget
+        .iter()
+        .filter_map(|forget| Some((forget.record_id()?, forget.at)))
+        .filter(|(id, _)| by_hand.contains(id))
+        .collect();
+    if !deletions.is_empty() {
+        state.unanswered.insert(name.clone(), deletions);
+    }
     remote.create(&name, sealed).await?;
+    state
+        .applied
+        .extend(state.unanswered.remove(&name).unwrap_or_default());
     state.read.insert(name);
     state.drive.take(pack);
     Ok(())
+}
+
+/// Take up the packs this device sent whose answer never came
+/// ([`SyncState::unanswered`]), as the drive's `files` and the packs `read`
+/// of them into `drive` show them now: one read was made all the same, and
+/// each deletion by hand in it the drive holds, as late or later, is noted
+/// as had the answer come ([`send_pack`]); one the drive does not list was
+/// never made, and what it held is sent again as never sent. One listed
+/// but not read yet waits.
+fn take_unanswered(
+    state: &mut SyncState,
+    files: &[RemoteFile],
+    read: &BTreeSet<String>,
+    drive: &DriveState,
+) {
+    for (name, deletions) in std::mem::take(&mut state.unanswered) {
+        if read.contains(&name) {
+            for (id, at) in deletions {
+                if drive.tombs.get(&id).is_some_and(|&tomb| tomb >= at) {
+                    state.applied.insert(id, at);
+                }
+            }
+        } else if files.iter().any(|file| file.name == name) {
+            state.unanswered.insert(name, deletions);
+        }
+    }
 }
 
 /// Sync everything a device uses beside its history, the settings `here`

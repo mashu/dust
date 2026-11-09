@@ -1012,6 +1012,86 @@ fn a_sync_cut_short_picks_up_where_it_left_off() {
     assert_eq!(computer.stamps(), [1, 2, 3]);
 }
 
+/// A session deleted by hand, whose pack the drive made though its answer
+/// was lost on the way back, is the drive's deletion once the next sync
+/// finds that pack there, as it would have been had the answer come: a
+/// putting back made on another device after it brings the session back,
+/// and the deletion is not sent again. It used to be sent again, later than
+/// the putting back, and the session was gone from every device.
+#[test]
+fn a_deletion_in_a_pack_whose_upload_went_unanswered_is_the_drives_once_found() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    let session = computer.session(two);
+    phone.delete(2, 120);
+    remote.answer_lost.set(true);
+    assert!(
+        matches!(
+            phone.sync(&remote, 130),
+            Err(SyncFailed::Remote(RemoteError::Failed(_)))
+        ),
+        "no answer"
+    );
+    remote.answer_lost.set(false);
+    let unanswered: Vec<&RecordId> = phone
+        .state
+        .unanswered
+        .values()
+        .flat_map(|deletions| deletions.keys())
+        .collect();
+    assert_eq!(unanswered, [&two], "noted until a sync finds the pack");
+    assert!(!phone.state.applied.contains_key(&two));
+
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "the pack was made");
+    computer.undo(two, &session, 150);
+    computer.sync(&remote, 155).expect("synced");
+
+    phone.sync(&remote, 160).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    assert!(phone.state.unanswered.is_empty(), "found");
+    computer.sync(&remote, 170).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 180).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// A pack the drive never made, full say, is sent again by the next sync,
+/// its deletions by hand with it: none is taken for the drive's for having
+/// been asked for once.
+#[test]
+fn a_pack_whose_upload_failed_is_sent_again() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    phone.delete(2, 120);
+    remote.full.set(true);
+    assert_eq!(
+        phone.sync(&remote, 130),
+        Err(SyncFailed::Remote(RemoteError::Full))
+    );
+    assert_eq!(phone.state.unanswered.len(), 1, "until a sync looks");
+    remote.full.set(false);
+    assert_eq!(phone.sync(&remote, 140).expect("synced").sent, 1);
+    assert!(phone.state.unanswered.is_empty(), "never made, so dropped");
+    assert!(phone.state.applied.contains_key(&two), "sent, and answered");
+    computer.sync(&remote, 150).expect("synced");
+    assert_eq!(computer.stamps(), [1], "let go");
+}
+
 /// A device whose store lost what sync took, though sync remembers reading
 /// it, reads every pack again and takes it back.
 #[test]

@@ -81,7 +81,11 @@ What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads
 every pack again and comes to the same. A sync cut short leaves the store
 as it was, or with all it took, and the next one sends what this one did
-not.
+not. A pack the drive made though its answer was lost on the way back is
+found there by the next sync, and the deletions by hand it holds are the
+drive's from then on, as they would have been had the answer come
+(`SyncState::unanswered`): not sent again, so a putting back made
+elsewhere since still stands. One the drive never made is sent again.
 
 ## Everything else a device uses
 
