@@ -1282,6 +1282,130 @@ fn a_sync_lets_go_of_nothing_put_back_since_it_began() {
     assert_eq!(joined.stamps(), [1, 2], "the drive's word");
 }
 
+/// A folder listed before what a test asks happens, as it is first listed:
+/// what another device, or another copy of the app on this one, does once
+/// a sync has listed the folder and before it reads what it listed. A
+/// memory folder lists at once, so what the sync reads is what was there.
+struct ListedBefore<'a> {
+    remote: &'a MemoryRemote,
+    then: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl Remote for ListedBefore<'_> {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        let listed = self.remote.list();
+        let then = self.then.borrow_mut().take();
+        if let Some(then) = then {
+            then();
+        }
+        listed
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        self.remote.get(id)
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        self.remote.create(name, bytes)
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        self.remote.update(id, bytes)
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        self.remote.delete(id)
+    }
+}
+
+/// Two copies of the app on the phone sync at once, each from what the
+/// phone kept: one lets a session go as the drive deleted it, while the
+/// other, which listed it here before it went, reads it put back on the
+/// computer since and so takes nothing back. Whichever ends last lays what
+/// it kept over the other's, and the note that the drive's deletion
+/// accounts for the session gone here stays, though the drive the two read
+/// between them shows it put back since: no sync here took it back. So the
+/// next sync takes it back, and the putting back stands everywhere. The
+/// note used to be dropped on that evidence alone, and the next sync found
+/// the session gone here with nothing to account for it, as one deleted by
+/// hand, and sent its deletion: the putting back was deleted everywhere.
+#[test]
+fn a_session_one_copy_lets_go_while_another_finds_it_put_back_is_taken_back() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = computer.id_of(2);
+    let session = computer.session(two);
+    computer.delete(2, 120);
+    computer.sync(&remote, 130).expect("synced");
+
+    // One copy lists the folder; the computer puts 2 back; the other copy
+    // syncs, finding 2 here, and reads it put back.
+    let kept = phone.state.clone();
+    let mut one = kept.clone();
+    let other = RefCell::new(kept.clone());
+    let store = Rc::clone(&phone.store);
+    let settings = phone.settings.clone();
+    {
+        let folder = ListedBefore {
+            remote: &remote,
+            then: RefCell::new(Some(Box::new(|| {
+                computer.undo(two, &session, 150);
+                computer.sync(&remote, 160).expect("synced");
+                let synced = now(sync_once(
+                    &*store,
+                    &remote,
+                    &mut other.borrow_mut(),
+                    &settings,
+                    170,
+                ))
+                .expect("synced");
+                assert_eq!(synced.took, 0, "2 here");
+            }))),
+        };
+        // The first goes on with what it listed, which holds only the
+        // deletion, and lets 2 go.
+        now(sync_once(
+            &*phone.store,
+            &folder,
+            &mut one,
+            &phone.settings,
+            140,
+        ))
+        .expect("synced");
+    }
+    assert_eq!(phone.stamps(), [1], "let go");
+    let other = other.into_inner();
+    let (gone, back) = (one.applied[&two], other.drive.revives[&two]);
+    assert!(back >= gone, "put back since: {back} after {gone}");
+
+    let laid = [
+        one.merged(Some(&kept), &other),
+        other.merged(Some(&kept), &one),
+    ];
+    for merged in &laid {
+        assert_eq!(
+            merged.applied.get(&two),
+            Some(&gone),
+            "the drive's deletion accounts for 2 gone here"
+        );
+    }
+    phone.state = laid[0].clone();
+    let synced = phone.sync(&remote, 180).expect("synced");
+    assert_eq!((synced.took, synced.sent), (1, 0), "taken back, none sent");
+    assert_eq!(phone.stamps(), [1, 2]);
+    computer.sync(&remote, 190).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "the putting back stands");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 200).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
 /// A device whose store lost what sync took, though sync remembers reading
 /// it, reads every pack again and takes it back.
 #[test]

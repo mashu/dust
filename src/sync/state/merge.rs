@@ -43,7 +43,13 @@ impl SyncState {
     ///   it so, as a sync took it back here then; a pack, once each deletion
     ///   in it is noted, or put back since. A note at an older stamp than
     ///   this copy last saw is one written without having read it, as a
-    ///   stamp only ever rises. One sent or spent goes whoever holds it.
+    ///   stamp only ever rises. A putting back sent or spent goes whoever
+    ///   holds it. A deletion goes on that evidence only where the other
+    ///   copy left it out: two copies syncing at once can read the drive
+    ///   between them as putting its session back after one let it go,
+    ///   though no sync here took it back, and without the note the next
+    ///   would take the session for one deleted by hand and send its
+    ///   deletion.
     /// - The settings as of the last sync, with when each was changed, go
     ///   together, as of the later sync; of one sync, this copy's where it
     ///   changed them. The sign-in is this copy's where it signed in again
@@ -74,12 +80,20 @@ impl SyncState {
         later.retain(|name, _| !read.contains(name));
         let put_back_since =
             |id: &RecordId, at: u64| drive.revives.get(id).is_some_and(|&back| back >= at);
-        let applied = merge_notes(&base.applied, &self.applied, &theirs.applied, |id, at| {
-            put_back_since(&id, at) && !drive.deleted(id)
-        });
-        let revived = merge_notes(&base.revived, &self.revived, &theirs.revived, |id, at| {
-            put_back_since(&id, at) || applied.get(&id).is_some_and(|&gone| gone > at)
-        });
+        let applied = merge_notes(
+            &base.applied,
+            &self.applied,
+            &theirs.applied,
+            false,
+            |id, at| put_back_since(&id, at) && !drive.deleted(id),
+        );
+        let revived = merge_notes(
+            &base.revived,
+            &self.revived,
+            &theirs.revived,
+            true,
+            |id, at| put_back_since(&id, at) || applied.get(&id).is_some_and(|&gone| gone > at),
+        );
         let unanswered = merge_unanswered(
             &base.unanswered,
             &self.unanswered,
@@ -136,11 +150,14 @@ impl SyncState {
 /// One kind of stamped note, by record, of two copies' states merged: as
 /// this copy last read or kept it, `base`; as it holds it now, `ours`; and
 /// as the store holds it now, `theirs` ([`SyncState::merged`]). `spent` says
-/// a note, at its stamp, was sent or spent, as the copies' drive shows it.
+/// a note, at its stamp, was sent or spent, as the copies' drive shows it:
+/// one the other copy left out goes on that alone, and, where `drop_spent`,
+/// one either holds as well.
 fn merge_notes(
     base: &BTreeMap<RecordId, u64>,
     ours: &BTreeMap<RecordId, u64>,
     theirs: &BTreeMap<RecordId, u64>,
+    drop_spent: bool,
     spent: impl Fn(RecordId, u64) -> bool,
 ) -> BTreeMap<RecordId, u64> {
     let ids: BTreeSet<RecordId> = base
@@ -157,7 +174,7 @@ fn merge_notes(
                 theirs.get(&id).copied(),
                 |at| spent(id, at),
             )?;
-            (!spent(id, at)).then_some((id, at))
+            (!(drop_spent && spent(id, at))).then_some((id, at))
         })
         .collect()
 }
