@@ -1,7 +1,8 @@
-// A browser's IndexedDB, BroadcastChannel and localStorage, made up in memory
-// for the history's page script (src/persist/idb.js) to run on in Node, as
-// the tests have no browser (`crate::testing::on_fake_page`, which puts them
-// on the page). Only what that script uses, and as a browser does it:
+// A browser's IndexedDB, BroadcastChannel, localStorage and Web Locks, made up
+// in memory for the app's page scripts (src/persist/idb.js, src/persist/tabs.js)
+// to run on in Node, as the tests have no browser (`crate::testing::on_fake_page`,
+// which puts them on the page). Only what those scripts use, and as a browser
+// does it. The database:
 //
 // - every request answers a moment later, one at a time, in the order asked;
 // - a transaction takes requests only while it is active: in the moment it
@@ -18,6 +19,25 @@
 // site's data (`evict`), a newer Dust opening it in another tab (`upgrade`),
 // what it holds (`contents`, `plant`), and how many changes it took
 // (`committed`).
+//
+// The Web Locks are one set for the whole site, which each tab asks through a
+// lock manager of its own: the page's `navigator.locks`, and another tab's
+// from `fakeLocks.tab()`. As a browser keeps them:
+//
+// - a lock is granted in the order asked for, an exclusive one alone and a
+//   shared one beside others shared, and only once none asked for before it
+//   waits;
+// - each answer comes a moment later: a grant as the callback called with the
+//   lock, which is held until what the callback gave back settles;
+// - asked for `ifAvailable`, a lock held, or asked for and waiting, gives the
+//   callback null at once, and is not asked for;
+// - `query()` says which locks each tab holds, and which it waits for, each
+//   tab by its own `clientId`.
+//
+// `fakeLocks`, on the page, is what a test does from outside: another tab's
+// manager (`tab()`), and a tab closed (`close(tab)`), which lets go of every
+// lock it held and drops every one it waited for, as a browser does for a tab
+// closed, reloaded or crashed. A closed tab hears nothing more.
 
 const later = (run) => setImmediate(run);
 
@@ -490,6 +510,151 @@ class FakeBroadcastChannel {
   }
 }
 
+// The site's Web Locks: every lock held, and every one asked for and waiting,
+// oldest first, each with the tab's manager that asked for it.
+class FakeLocks {
+  #held = [];
+  #waiting = [];
+  #tabs = 0;
+  #ids = new WeakMap();
+  #closed = new WeakSet();
+
+  // Another tab's lock manager.
+  tab() {
+    this.#tabs += 1;
+    const tab = new FakeLockManager(this);
+    this.#ids.set(tab, `tab-${this.#tabs}`);
+    return tab;
+  }
+
+  // `tab` closed: every lock it held let go of, and every one it waited for
+  // dropped.
+  close(tab) {
+    this.#closed.add(tab);
+    this.#held = this.#held.filter((lock) => lock.tab !== tab);
+    this.#waiting = this.#waiting.filter((request) => request.tab !== tab);
+    this.#grant();
+  }
+
+  // A lock manager's `request`, for `tab`.
+  ask(tab, name, options, callback) {
+    if (this.#closed.has(tab)) {
+      return Promise.reject(fault("InvalidStateError", "the tab is closed"));
+    }
+    if (typeof callback !== "function") {
+      return Promise.reject(new TypeError("a lock is asked for with a callback"));
+    }
+    if (options.steal || options.signal) {
+      return Promise.reject(fault("NotSupportedError", "the made-up locks take no steal nor signal"));
+    }
+    const mode = options.mode ?? "exclusive";
+    if (mode !== "exclusive" && mode !== "shared") {
+      return Promise.reject(new TypeError(`no such mode: ${mode}`));
+    }
+    return new Promise((resolve, reject) => {
+      const request = { tab, name: String(name), mode, callback, resolve, reject };
+      if (options.ifAvailable && !this.#grantable(request)) {
+        later(() => this.#run(request, null));
+        return;
+      }
+      this.#waiting.push(request);
+      this.#grant();
+    });
+  }
+
+  // A lock manager's `query`, for `tab`: what every tab holds and waits for,
+  // as it stands now.
+  query(tab) {
+    if (this.#closed.has(tab)) {
+      return Promise.reject(fault("InvalidStateError", "the tab is closed"));
+    }
+    const said = ({ name, mode, tab: of }) => ({ name, mode, clientId: this.#ids.get(of) });
+    const state = { held: this.#held.map(said), pending: this.#waiting.map(said) };
+    return new Promise((resolve) => later(() => resolve(state)));
+  }
+
+  // Whether `request` can be granted now: none of its name waits before it
+  // (or at all, for one not yet waiting), and none held stands in its way.
+  #grantable(request) {
+    const first = this.#waiting.find((other) => other.name === request.name);
+    if (first !== undefined && first !== request) {
+      return false;
+    }
+    return !this.#held.some(
+      (lock) => lock.name === request.name && (request.mode === "exclusive" || lock.mode === "exclusive"),
+    );
+  }
+
+  // Grant every lock waiting that can be, in order.
+  #grant() {
+    for (const request of [...this.#waiting]) {
+      if (!this.#grantable(request)) {
+        continue;
+      }
+      this.#waiting.splice(this.#waiting.indexOf(request), 1);
+      const lock = { name: request.name, mode: request.mode, tab: request.tab };
+      this.#held.push(lock);
+      later(() => this.#run(request, lock));
+    }
+  }
+
+  // Call back `request` with `lock`, or with null for one not available,
+  // and hold the lock until what the callback gave back settles.
+  #run(request, lock) {
+    if (this.#closed.has(request.tab) || (lock !== null && !this.#held.includes(lock))) {
+      return;
+    }
+    let result;
+    try {
+      result = request.callback(lock === null ? null : { name: lock.name, mode: lock.mode });
+    } catch (error) {
+      this.#release(lock);
+      request.reject(error);
+      return;
+    }
+    Promise.resolve(result).then(
+      (value) => this.#settle(request, lock, () => request.resolve(value)),
+      (error) => this.#settle(request, lock, () => request.reject(error)),
+    );
+  }
+
+  // The lock let go of, and `request` answered, unless its tab is closed.
+  #settle(request, lock, answer) {
+    this.#release(lock);
+    if (!this.#closed.has(request.tab)) {
+      answer();
+    }
+  }
+
+  #release(lock) {
+    const at = lock === null ? -1 : this.#held.indexOf(lock);
+    if (at >= 0) {
+      this.#held.splice(at, 1);
+      this.#grant();
+    }
+  }
+}
+
+// One tab's `navigator.locks`.
+class FakeLockManager {
+  #locks;
+
+  constructor(locks) {
+    this.#locks = locks;
+  }
+
+  request(name, options, callback) {
+    if (typeof options === "function") {
+      return this.#locks.ask(this, name, {}, options);
+    }
+    return this.#locks.ask(this, name, options ?? {}, callback);
+  }
+
+  query() {
+    return this.#locks.query(this);
+  }
+}
+
 class FakeStorage {
   #items = new Map();
 
@@ -514,15 +679,19 @@ class FakeStorage {
   }
 }
 
-// Put them on `page`, as a browser's page has them.
+// Put them on `page`, as a browser's page has them: its `navigator` holds
+// only its own tab's Web Locks.
 export const install = (page) => {
   const factory = new FakeIndexedDB();
+  const locks = new FakeLocks();
   for (const [name, value] of [
     ["indexedDB", factory],
     ["fakeIdb", factory],
     ["IDBKeyRange", KeyRange],
     ["BroadcastChannel", FakeBroadcastChannel],
     ["localStorage", new FakeStorage()],
+    ["navigator", { locks: locks.tab() }],
+    ["fakeLocks", locks],
   ]) {
     Object.defineProperty(page, name, { value, configurable: true, writable: true });
   }
