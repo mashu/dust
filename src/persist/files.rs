@@ -3023,12 +3023,17 @@ mod tests {
             Some(5),
             "as it is listed"
         );
-        // The older build deletes the first.
+        // The older build deletes the first: its copy taken up goes, and
+        // the damaged record stays, with no tombstone, as the next read
+        // finds it.
         let gone = [Deleted::of(&mine, now + 180_000)];
         fs::write(dir.0.join(DELETED), serde_json::to_vec(&gone).unwrap()).unwrap();
         keep_whole(&dir, &[old.clone(), since.clone()]);
-        let read = Files::at(&dir.0).load();
+        let deleting = Files::at(&dir.0);
+        let read = deleting.load();
         assert_eq!(stamps(&read), [old.timestamp, since.timestamp]);
+        assert_eq!(deleting.forgotten(&[damaged]), [], "no tombstone");
+        let read = Files::at(&dir.0).load();
         assert_eq!(read.unread, [damaged, damaged_since], "left as they are");
     }
 
