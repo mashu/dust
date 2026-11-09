@@ -22,7 +22,7 @@ use windows_sys::Win32::{
         DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
         PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
-    Storage::FileSystem::WRITE_DAC,
+    Storage::FileSystem::{FILE_SHARE_DELETE, WRITE_DAC},
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 
@@ -45,6 +45,13 @@ pub(super) fn for_the_user_alone(sid: &str) -> Option<String> {
 /// file the store writes is opened, and its access list (`WRITE_DAC`).
 #[cfg(windows)]
 pub(super) const OPENED_TO_SET_ACCESS: u32 = GENERIC_WRITE | WRITE_DAC;
+
+/// How a file for the user alone is shared while it is open to be made and
+/// written: with no one, but to be deleted. No one else may open it to read
+/// or write it while it is open, as in the moment before its list is set
+/// ([`keep_to_the_user`]), whatever its folder lets them do.
+#[cfg(windows)]
+pub(super) const SHARED_TO_DELETE_ALONE: u32 = FILE_SHARE_DELETE;
 
 /// Make `file`, opened to be given its list ([`OPENED_TO_SET_ACCESS`]),
 /// the user's alone: the account this app runs as alone may open it

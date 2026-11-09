@@ -256,6 +256,9 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
         let mut file = private_file(&tmp)?;
         file.write_all(bytes)?;
         flush(&file)?;
+        // Closed before it takes its name: on Windows no one else may open
+        // it while it is open, and another copy reads what sync keeps.
+        drop(file);
         fs::rename(&tmp, dir.join(name))
     })();
     if written.is_err() {
@@ -282,27 +285,35 @@ fn private_file(path: &Path) -> io::Result<fs::File> {
 
 /// On Windows, the same by the file's access list, set while the file is
 /// still empty: the account the app runs as alone may open it, and it
-/// inherits nothing from its folder ([`super::acl`]). Where the list cannot
-/// be set, as on a volume that keeps none (FAT) or a share that will not
-/// take one, the file is made as any other is, with its folder's list, and
-/// the log says why: sync goes on as before.
+/// inherits nothing from its folder ([`super::acl`]). The file is made new,
+/// never one already there, which another account could have made to be
+/// written into, and no one else may open it while it is open, so no one
+/// opens it in the moment before its list is set. Where the list cannot be
+/// set, as on a volume that keeps none (FAT) or a share that will not take
+/// one, the file is made as any other is, new all the same, with its
+/// folder's list, and the log says why: sync goes on as before.
 #[cfg(windows)]
 fn private_file(path: &Path) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
-    let opened = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .access_mode(super::acl::OPENED_TO_SET_ACCESS)
-        .open(path);
-    let file = match opened {
+    let new = |access: Option<u32>| {
+        let mut options = fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .share_mode(super::acl::SHARED_TO_DELETE_ALONE);
+        if let Some(access) = access {
+            options.access_mode(access);
+        }
+        options.open(path)
+    };
+    let file = match new(Some(super::acl::OPENED_TO_SET_ACCESS)) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
             eprintln!(
                 "{} keeps its folder's access list, as it could not be opened to change it: {err}",
                 path.display()
             );
-            return fs::File::create(path);
+            return new(None);
         }
         Err(err) => return Err(err),
     };
@@ -2065,6 +2076,31 @@ pub(super) mod tests {
         );
         store.save_sync(None).expect("cleared");
         assert_eq!(store.load_sync(), None);
+    }
+
+    /// On Windows, what sync keeps goes only into a file made for it: one
+    /// already where it is made, another account's say, is never written
+    /// into, and no one else may open the one made while it is open, before
+    /// its list is set or after. CI's Windows lint compiles this, and runs
+    /// no test: it is run by hand on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn what_sync_keeps_goes_into_no_file_already_there_on_windows() {
+        let dir = TempDir::new("sync-new");
+        fs::create_dir_all(&dir.0).unwrap();
+        let theirs = dir.0.join(".sync.json.theirs.tmp");
+        fs::write(&theirs, "theirs").unwrap();
+        let refused = private_file(&theirs).expect_err("not written into");
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists, "{refused}");
+        assert_eq!(fs::read_to_string(&theirs).unwrap(), "theirs");
+        let ours = dir.0.join(".sync.json.ours.tmp");
+        let open = private_file(&ours).expect("made");
+        assert!(
+            fs::File::open(&ours).is_err(),
+            "no one else opens it while it is open"
+        );
+        drop(open);
+        assert!(fs::File::open(&ours).is_ok(), "the user, once it is shut");
     }
 
     /// On Android, a history past 20 MB is about to outgrow Android's own
