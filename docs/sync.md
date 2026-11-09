@@ -215,7 +215,9 @@ the store holds, and lays what it did over what the store holds as it
 ends, so a putting back made in another tab or window meanwhile goes with
 the next sync. A note another tab or window left out goes only once the
 drive shows it sent, or no more to send, as a browser can hand one tab
-another's write late. They sync one at a time: a sync asked for while
+another's write late. Every such write reads what the store keeps for
+sync first, on the app's thread, which is one read of `sync.json`, or of
+`localStorage`, more than writing it whole was. They sync one at a time: a sync asked for while
 another tab or window syncs waits for it, the corner's cloud breathing
 meanwhile, ten minutes at most, then begins from what that one kept.
 Turning sync off with the copy waits for it too, so nothing is written

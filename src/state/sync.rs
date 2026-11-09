@@ -150,17 +150,19 @@ pub struct SyncCtx {
     /// this copy then knows of the drive ([`SyncState::stamp_change`]),
     /// but while a sync has taken in those noted before it
     /// ([`SyncCtx::taking_in`]), it waits for that sync's end, and is
-    /// stamped after what it read and sent. Turning sync off forgets them
-    /// with the rest; the sync under way lets go of none of them all the
-    /// same ([`SyncCtx::put_back`]).
+    /// stamped after what it read and sent. Turning sync off here forgets
+    /// them with the rest, while taking up sync turned off, or on anew, in
+    /// another copy keeps them, with those not yet sent ([`Notes::Kept`]);
+    /// the sync under way lets go of none of them all the same
+    /// ([`SyncCtx::put_back`]).
     revived: CopyValue<BTreeMap<RecordId, u64>>,
     /// A sync of sync as it is on now has taken in the sessions put back
     /// before it, and has yet to keep what it comes to.
     taking_in: CopyValue<bool>,
     /// Every session put back by hand here while a sync is under way,
-    /// whatever became of sync since: that sync lets none of them go, nor
-    /// any another copy put back meanwhile ([`AppCtx::put_back_since`]).
-    /// Emptied as each begins.
+    /// whatever became of sync since: that sync lets none of them go, as it
+    /// lets go of none another copy put back meanwhile, which the store's
+    /// notes show ([`AppCtx::put_back_since`]). Emptied as each begins.
     put_back: CopyValue<BTreeSet<RecordId>>,
 }
 
