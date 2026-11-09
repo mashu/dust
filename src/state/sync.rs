@@ -450,11 +450,12 @@ impl AppCtx {
     /// as against `base`, what the sync began from or last kept this way,
     /// which becomes `sending` once kept: the sync's end lays what it does
     /// after over the store in turn ([`Self::keep_synced`]). The sign-in
-    /// kept is the store's, or one made here since the sync began. Nothing
-    /// is kept where sync was turned off or on anew since, here or in
-    /// another copy of the app, which the sync's end takes up; nor is a
-    /// failing told of, which the sync's end tells. Under the lock on what
-    /// sync keeps, as every keep is ([`Self::keep_sync_state`]).
+    /// kept is the store's, or one made here that the store has yet to take,
+    /// before the sync began or since. Nothing is kept where sync was turned
+    /// off or on anew since, here or in another copy of the app, which the
+    /// sync's end takes up; nor is a failing told of, which the sync's end
+    /// tells. Under the lock on what sync keeps, as every keep is
+    /// ([`Self::keep_sync_state`]).
     async fn keep_sync_under_way(self, epoch: u64, sending: &SyncState, base: &RefCell<SyncState>) {
         let _held = lock_state(&*self.app().store).await;
         if *self.sync.epoch.peek() != epoch {
@@ -493,8 +494,9 @@ impl AppCtx {
     /// here or in another copy, is stamped again after what this sync read
     /// and sent ([`SyncState::stamp_change`]), as it was put back after the
     /// sync began. The sign-in is no sync's to keep: the store's, or one
-    /// made here meanwhile. Nothing is kept where sync was turned off or on
-    /// anew meanwhile, here or in another copy: off here as well, then.
+    /// made here that the store has yet to take, before the sync began or
+    /// meanwhile. Nothing is kept where sync was turned off or on anew
+    /// meanwhile, here or in another copy: off here as well, then.
     /// Under the lock on what sync keeps, as every keep is
     /// ([`Self::keep_sync_state`]): a putting back noted while it waits for
     /// it waits with it.
@@ -932,8 +934,19 @@ impl AppCtx {
         }
         put(self.sync.put_back, BTreeSet::new());
         // What it began from, or last kept as it went: what it does is laid
-        // over the store as against it.
-        let base = Rc::new(RefCell::new(state.clone()));
+        // over the store as against it. The sign-in, which no sync changes,
+        // as against the store's: one made here that the store has yet to
+        // take, as it would not take it at once, is this copy's change still.
+        let stored_sign_in = self
+            .sync
+            .base
+            .peek()
+            .as_ref()
+            .and_then(|stored| stored.sign_in.clone());
+        let base = Rc::new(RefCell::new(SyncState {
+            sign_in: stored_sign_in,
+            ..state.clone()
+        }));
         // The settings here are taken for changed where they differ from
         // those as of the last sync, which may be another copy's, taken up
         // just now: those another copy stored since are taken up here first,

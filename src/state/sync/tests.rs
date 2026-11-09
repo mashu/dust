@@ -1626,6 +1626,42 @@ fn a_sign_in_made_while_it_syncs_is_the_one_kept() {
     });
 }
 
+/// Signed in again where the store would not take what sync keeps at once,
+/// as a full disk will not, the new sign-in is the one the next sync keeps,
+/// and the one signed in with still: it is a change made here, which the
+/// store has yet to take, though the sync begins from this copy's state,
+/// which holds it. That sync, as it ended, used to take the store's older
+/// sign-in for the one to keep, write it, and sign in with it, dropping the
+/// token just got, often as the old one was turned down.
+#[test]
+fn a_sign_in_the_store_would_not_take_at_once_is_kept_by_the_next_sync() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        assert_eq!(kept_state(&harness).sign_in.as_deref(), Some("kept"));
+        held.hold(true);
+        harness.store.sync_refused.set(true);
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        assert_eq!(kept_state(&harness).sign_in.as_deref(), Some("kept"));
+        harness.store.sync_refused.set(false);
+        held.hold(false);
+        harness.advance(1_000).await;
+        assert_eq!(
+            auth.kept().as_deref(),
+            Some("kept 2"),
+            "signed in with still"
+        );
+        assert_eq!(
+            kept_state(&harness).sign_in.as_deref(),
+            Some("kept 2"),
+            "kept"
+        );
+    });
+}
+
 /// A session deleted and put back by Undo after the deletion was synced
 /// stays, here and on every device.
 #[test]
