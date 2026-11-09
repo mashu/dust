@@ -117,7 +117,7 @@ pub fn confusions_card(rows: &[ConfusionEntry]) -> Element {
                                     style: "width: {row.percentage.clamp(0.0, 100.0):.1}%;",
                                 }
                             }
-                            span { class: "tiny confusion-of", "{row.percentage.round()}% of every {row.sent}" }
+                            span { class: "tiny confusion-of", "{row.percentage:.0}% of every {row.sent}" }
                         }
                     }
                 }

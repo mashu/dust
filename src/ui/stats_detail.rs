@@ -146,7 +146,7 @@ fn HistoryRow(
             span { class: "history-sub", "{history_sub(&row)}" }
         }
         span { class: "history-acc",
-            span { class: "value", "{row.accuracy_pct.round()}%" }
+            span { class: "value", "{row.accuracy_pct:.0}%" }
             span { class: "muted", "{row.score.round()} pts" }
         }
     };

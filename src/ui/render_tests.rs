@@ -2153,6 +2153,85 @@ fn results_say_where_the_session_stands_on_the_board() {
     assert!(short.contains("Sessions of 10 groups or more go on the score board."));
 }
 
+/// One share reads one way wherever it is shown, a half between two whole
+/// percents going to the even one, as `format::percent` gives it: a session
+/// that copied two of the sixteen K it was sent, 12.5%, reads 12% on its
+/// results, on Home, and on Stats in the overview, its History row and the
+/// board, as K's own row and its taking for M twice of the sixteen do; and
+/// a threshold of 86.5% marks the chart at 86%, as the help names it. They
+/// read 13% and 87% before, rounding the half away from zero.
+#[test]
+fn a_share_half_way_between_two_percents_reads_the_even_one_on_every_screen() {
+    crate::testing::run(|| async {
+        let copies: Vec<(&str, &str)> = [("K", "K"); 2]
+            .into_iter()
+            .chain([("K", "M"); 2])
+            .chain([("K", "E"); 12])
+            .collect();
+        let session = crate::testing::stored_session("2026-10-01", &copies);
+        assert_eq!(session.accuracy, 0.125);
+        let results = results_of(session.clone(), false);
+        assert!(results.contains(">12%</text>"), "{results}");
+
+        let mut settings = crate::testing::test_settings();
+        settings.auto_level.auto_adjust_level = true;
+        settings.auto_level.auto_adjust_threshold = 86.5;
+        let (mut ui, _recorder) = crate::testing::Ui::app_with_history(settings, &[session]);
+        let tile =
+            |label: &str| format!(r#"<div class="tiny">{label}</div><div class="value">12%</div>"#);
+        assert!(ui.has(&tile("Last accuracy")), "Home: {}", ui.html());
+        ui.click("nav-stats");
+        assert!(ui.has(&tile("Average")), "{}", ui.html());
+        assert!(ui.has(&tile("Best")), "{}", ui.html());
+        assert!(ui.has("1 session · latest 12%"), "{}", ui.html());
+        assert!(ui.has("Level up at 86%"), "{}", ui.html());
+        ui.click("seg-history");
+        assert!(ui.has(r#"<span class="value">12%</span>"#), "{}", ui.html());
+        ui.click("seg-scores");
+        assert!(ui.has("12% accuracy"), "{}", ui.html());
+        assert!(ui.has("16 groups · 40 WPM · 12%"), "{}", ui.html());
+        ui.click("seg-letters");
+        assert!(
+            ui.has(r#"<span class="mono muted stat-value">12%</span>"#),
+            "{}",
+            ui.html()
+        );
+        ui.click("seg-mistakes");
+        assert!(
+            ui.has(r#"<span class="tiny confusion-of">12% of every K</span>"#),
+            "{}",
+            ui.html()
+        );
+    });
+}
+
+/// A run's shares read as every other share does: one QSO logged clean of
+/// eight, 12.5%, and four of its thirty-two characters right, read 12% in
+/// its ring and its Accuracy; and an everyday QSO's names copied once in
+/// eight read 12% in its table. They read 13% before.
+#[test]
+fn a_runs_shares_half_way_between_two_percents_read_the_even_one() {
+    let mut qsos = vec![("K1A", "1", "K1A", "1")];
+    qsos.extend([("K2B", "2", "XXX", "9"); 7]);
+    let run = crate::testing::stored_run("2026-10-20", &qsos);
+    assert_eq!(run.accuracy, 0.125);
+    let html = results_of(run, false);
+    for shown in [
+        r#"aria-label="12% of QSOs logged clean""#,
+        ">12%</text>",
+        r#"<div class="tiny">Accuracy</div><div class="value">12%</div>"#,
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    let mut names = vec![[("K1A", "K1A"), ("599", "599"), ("A", "A")]];
+    names.extend([[("K2B", "K2B"), ("599", "599"), ("B", "C")]; 7]);
+    let html = results_of(
+        crate::testing::stored_simple_qso_run("2026-10-20", &names),
+        false,
+    );
+    assert!(html.contains("<td>12%</td>"), "{html}");
+}
+
 #[test]
 fn listen_renders_the_selected_character() {
     let html = render(|| {
