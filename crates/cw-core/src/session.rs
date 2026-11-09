@@ -2768,7 +2768,8 @@ mod tests {
     /// do not read read as none, and are kept as they were; an entry they
     /// do not read makes no session, as it always has; and what they read
     /// is read beside every key they do not, which is kept as it was and
-    /// written back where it was.
+    /// written back where it was. A value JSON's numbers or text cannot hold,
+    /// anywhere in either, makes no session, as it always has.
     #[test]
     fn a_session_reads_inside_its_times_and_tally_as_their_own_readers_do() {
         use crate::rng::SplitMix64;
@@ -2786,53 +2787,71 @@ mod tests {
         assert_eq!(written.matches(times).count(), 1, "{written}");
         assert_eq!(written.matches(entry).count(), 1, "{written}");
         let mut rng = SplitMix64::new(0x5e55_1015);
-        let (mut times_read, mut entries_read) = (0, 0);
+        let (mut times_read, mut entries_read, mut unholdable) = (0, 0, 0);
         for _ in 0..2_000 {
             let text = written_for(keys_read::<CharTimes>(), &mut rng);
-            let raw: Value = serde_json::from_str(&text).unwrap();
             let stored = written.replacen(times, &format!("\"sends\":1,\"charTimes\":{text}}}"), 1);
-            let read: SessionResult = serde_json::from_str(&stored)
-                .unwrap_or_else(|err| panic!("{stored} read as no session: {err}"));
-            let timing = &read.group_timings[0];
-            match serde_json::from_str::<CharTimes>(&text) {
-                Ok(own) => {
-                    times_read += 1;
-                    let beside = beside::<CharTimes>(&raw);
-                    let kept = if beside.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![beside]
-                    };
-                    assert_eq!(timing.char_times.as_ref(), Some(&own), "{text}");
-                    assert_eq!(read.unread.char_times, kept, "{text}");
-                    assert!(read.unread.timings.is_empty(), "{text}");
+            'times: {
+                // A value JSON's numbers or text cannot hold, anywhere in the
+                // times, makes no session, as ever: a timing is held first as
+                // serde's own buffer, which refuses it.
+                let Ok(raw) = serde_json::from_str::<Value>(&text) else {
+                    let read = serde_json::from_str::<SessionResult>(&stored);
+                    assert!(read.is_err(), "{stored}: read as a session");
+                    unholdable += 1;
+                    break 'times;
+                };
+                let read: SessionResult = serde_json::from_str(&stored)
+                    .unwrap_or_else(|err| panic!("{stored} read as no session: {err}"));
+                let timing = &read.group_timings[0];
+                match serde_json::from_str::<CharTimes>(&text) {
+                    Ok(own) => {
+                        times_read += 1;
+                        let beside = beside::<CharTimes>(&raw);
+                        let kept = if beside.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![beside]
+                        };
+                        assert_eq!(timing.char_times.as_ref(), Some(&own), "{text}");
+                        assert_eq!(read.unread.char_times, kept, "{text}");
+                        assert!(read.unread.timings.is_empty(), "{text}");
+                    }
+                    // No times at all, as ever.
+                    Err(_) if raw.is_null() => assert_eq!(read.unread, UnreadKeys::default()),
+                    Err(_) => {
+                        assert_eq!(timing.char_times, None, "{text}");
+                        assert_eq!(read.unread.timings[0]["charTimes"], raw, "{text}");
+                        assert!(read.unread.char_times.is_empty(), "{text}");
+                    }
                 }
-                // No times at all, as ever.
-                Err(_) if raw.is_null() => assert_eq!(read.unread, UnreadKeys::default()),
-                Err(_) => {
-                    assert_eq!(timing.char_times, None, "{text}");
-                    assert_eq!(read.unread.timings[0]["charTimes"], raw, "{text}");
-                    assert!(read.unread.char_times.is_empty(), "{text}");
+                // Written back: times read with what they held beside, the
+                // same when read again; times kept as they were, as they
+                // were, as JSON keeps them. That keeps a key given twice
+                // once, so that times their reader refused for it may read
+                // when read again.
+                let back = serde_json::to_string(&read).unwrap();
+                if timing.char_times.is_some() {
+                    let again: SessionResult = serde_json::from_str(&back).unwrap();
+                    assert_eq!(again, read, "{text}: the same, read again");
+                } else if !raw.is_null() {
+                    let back: Value = serde_json::from_str(&back).unwrap();
+                    let kept = &back["groupTimings"][0]["charTimes"];
+                    assert_eq!(kept, &raw, "{text}: written back as it was");
                 }
-            }
-            // Written back: times read with what they held beside, the same
-            // when read again; times kept as they were, as they were, as JSON
-            // keeps them. That keeps a key given twice once, so that times
-            // their reader refused for it may read when read again.
-            let back = serde_json::to_string(&read).unwrap();
-            if timing.char_times.is_some() {
-                let again: SessionResult = serde_json::from_str(&back).unwrap();
-                assert_eq!(again, read, "{text}: the same, read again");
-            } else if !raw.is_null() {
-                let back: Value = serde_json::from_str(&back).unwrap();
-                let kept = &back["groupTimings"][0]["charTimes"];
-                assert_eq!(kept, &raw, "{text}: written back as it was");
             }
 
             let text = written_for(keys_read::<LetterAccuracy>(), &mut rng);
-            let raw: Value = serde_json::from_str(&text).unwrap();
             let stored = written.replacen(entry, &format!("{{\"K\":{text}}}"), 1);
             let read = serde_json::from_str::<SessionResult>(&stored);
+            // And in a letter's entry, where its own reader would pass over
+            // it under a key it does not read: no session, as when the tally
+            // was held first as serde's own buffer.
+            let Ok(raw) = serde_json::from_str::<Value>(&text) else {
+                assert!(read.is_err(), "{stored}: read as a session");
+                unholdable += 1;
+                continue;
+            };
             match serde_json::from_str::<LetterAccuracy>(&text) {
                 Ok(own) => {
                     entries_read += 1;
@@ -2850,6 +2869,7 @@ mod tests {
         }
         assert!(times_read > 500, "{times_read} times of 2,000 read");
         assert!(entries_read > 500, "{entries_read} entries of 2,000 read");
+        assert!(unholdable > 10, "{unholdable} of 4,000 no JSON value holds");
     }
 
     /// A timing and the tally, written with what they and what is inside

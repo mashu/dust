@@ -18,9 +18,13 @@ use serde_json::{Map, Value};
 /// `T`'s own reader reads every key it names just as it would read them on
 /// their own: a key given twice, a key missing, a value of the wrong type,
 /// a value left out for its default. So this takes what `T` takes, as `T`,
-/// and refuses what `T` refuses. Only the keys `T` does not name, which it
-/// would pass over, are taken out on the way and kept. It is read in one
-/// pass, and nothing is held on the way but what is kept.
+/// and refuses what `T` refuses; and beside, a value JSON's numbers or text
+/// cannot hold under a key `T` does not name, a number past `f64`'s range
+/// or text of half a surrogate pair: `T` passes over it unread, where it is
+/// refused as it is kept, as serde's own buffer refuses it for `T` read
+/// through an untagged enum or a flattened field. Only the keys `T` does not
+/// name, which it would pass over, are taken out on the way and kept. It is
+/// read in one pass, and nothing is held on the way but what is kept.
 ///
 /// `T` is a struct that passes over the keys it does not name, rather than
 /// refuse them, and reads none flattened.
@@ -304,15 +308,23 @@ pub(crate) mod tests {
     use crate::recognition::CharTimes;
     use crate::rng::{Rng, SplitMix64};
 
+    /// Values JSON may write that its numbers or text cannot hold, as
+    /// serde_json reads them: a number past `f64`'s range, and text of half
+    /// a surrogate pair.
+    const UNHOLDABLE: [&str; 2] = ["1e400", r#""\ud800""#];
+
     /// A JSON value of any kind, small, as a later build might write under
-    /// a key: lists and objects of them only near the top.
+    /// a key: lists and objects of them only near the top. Now and then one
+    /// JSON's numbers or text cannot hold ([`UNHOLDABLE`]).
     fn any_value(rng: &mut SplitMix64, depth: u32) -> String {
         let kinds = if depth < 2 { 7 } else { 4 };
         match rng.usize_in(0, kinds) {
             0 => "null".to_string(),
             1 => (rng.f64() < 0.5).to_string(),
+            2 if rng.f64() < 0.03 => UNHOLDABLE[0].to_string(),
             2 => rng.usize_in(0, 70_000).to_string(),
             3 => format!("-{}.5", rng.usize_in(0, 9)),
+            4 if rng.f64() < 0.03 => UNHOLDABLE[1].to_string(),
             4 => serde_json::to_string(&format!("s{}", rng.usize_in(0, 9))).unwrap(),
             5 => {
                 let items: Vec<String> = (0..rng.usize_in(0, 3))
@@ -442,18 +454,25 @@ pub(crate) mod tests {
     /// them, [`KeepingUnknown`] reads what `T` reads, and refuses what it
     /// refuses, read in each of the ways a session's reader reads them; and
     /// it keeps every key of an object that `T` does not read, as the
-    /// object holds it, and none that it does. Beside it, how many read.
-    fn reads_as_the_typed_reader<T>(seed: u64) -> usize
+    /// object holds it, and none that it does. But for one thing, read
+    /// directly: a value JSON's numbers or text cannot hold
+    /// ([`UNHOLDABLE`]), which `T` passes over unread under a key it does
+    /// not read, and it refuses. Beside it, how many read, and how many
+    /// such it refused.
+    fn reads_as_the_typed_reader<T>(seed: u64) -> (usize, usize)
     where
         T: DeserializeOwned + PartialEq + fmt::Debug,
     {
         let read = keys_read::<T>();
         assert!(!read.is_empty());
         let mut rng = SplitMix64::new(seed);
-        let mut took = 0;
+        let (mut took, mut refused) = (0, 0);
         for _ in 0..20_000 {
             let text = written_for(read, &mut rng);
-            let beside = match serde_json::from_str::<Value>(&text) {
+            // Only a value it cannot hold keeps JSON from reading it.
+            let held = serde_json::from_str::<Value>(&text);
+            let unholdable = held.is_err();
+            let beside = match held {
                 Ok(Value::Object(mut beside)) => {
                     beside.retain(|key, _| !read.contains(&key.as_str()));
                     beside
@@ -462,7 +481,7 @@ pub(crate) mod tests {
             };
             let typed = three_ways::<T>(&text);
             let keeping = three_ways::<KeepingUnknown<T>>(&text);
-            for (typed, keeping) in typed.into_iter().zip(keeping) {
+            for (way, (typed, keeping)) in typed.into_iter().zip(keeping).enumerate() {
                 match (typed, keeping) {
                     (Ok(typed), Ok(keeping)) => {
                         took += 1;
@@ -470,6 +489,7 @@ pub(crate) mod tests {
                         assert_eq!(keeping.unknown, beside, "{text}");
                     }
                     (Err(_), Err(_)) => {}
+                    (Ok(_), Err(_)) if way == 0 && unholdable => refused += 1,
                     (typed, keeping) => panic!(
                         "{text}: read as {typed:?}, kept as {:?}",
                         keeping.map(|keeping| keeping.known)
@@ -477,20 +497,25 @@ pub(crate) mod tests {
                 }
             }
         }
-        took
+        (took, refused)
     }
 
     /// A group's times and a letter's entry of the tally read with what
     /// they hold that this build does not read read as their own readers
     /// read them, one value at a time: what they take, what they refuse,
     /// and every key they read, given twice, missing, of another type, or
-    /// beside keys they do not read, as an object or as a list.
+    /// beside keys they do not read, as an object or as a list. Read
+    /// directly, they refuse beside a value JSON's numbers or text cannot
+    /// hold under a key their own readers pass over, and nothing else.
     #[test]
     fn the_readers_keeping_unknown_keys_read_as_the_typed_ones() {
-        let read = reads_as_the_typed_reader::<CharTimes>(0x5eed_c4a7);
-        assert!((15_000..57_000).contains(&read), "{read} of 60,000 read");
-        let read = reads_as_the_typed_reader::<LetterAccuracy>(0x5eed_1e77);
-        assert!((15_000..57_000).contains(&read), "{read} of 60,000 read");
+        for (read, refused) in [
+            reads_as_the_typed_reader::<CharTimes>(0x5eed_c4a7),
+            reads_as_the_typed_reader::<LetterAccuracy>(0x5eed_1e77),
+        ] {
+            assert!((15_000..57_000).contains(&read), "{read} of 60,000 read");
+            assert!(refused > 100, "{refused} refused beside");
+        }
     }
 
     /// What a value read whole is written with beside its own keys is
