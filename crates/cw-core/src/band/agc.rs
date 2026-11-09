@@ -16,10 +16,13 @@
 //!   the station stands over the knee, from the first element of the over to
 //!   the last. No swell at the start, no pumping between elements or
 //!   letters: the hang carries the gain across the gaps, sized from the
-//!   longest letter gap the settings send ([`agc_timing`]). Fading too steep
-//!   for it to carry lets the gain come up between elements toward the faded
-//!   station, as a rig's hang AGC lets go of a fading peak. Backing the RF
-//!   gain off is what makes it duck less.
+//!   longest letter gap the settings send ([`agc_timing`]), where their word
+//!   gaps leave room for it. At Fast the hang stops short of their shortest
+//!   word gap, so with a wide speed range, and on the Listen screen at the
+//!   default speeds, the slowest letter gaps still let the band up. Fading
+//!   too steep for it to carry lets the gain come up between elements toward
+//!   the faded station, as a rig's hang AGC lets go of a fading peak.
+//!   Backing the RF gain off is what makes it duck less.
 //! - In a pause the hiss is back, as fast as the decay setting lets it.
 //! - A crash pulls the gain for a moment and lets go, or, louder than the
 //!   station, holds it for a hang as the strongest signal heard; either way
@@ -62,12 +65,12 @@ pub const AGC_MAX_DUCK_DB: f64 = 60.0;
 /// has to catch a crash before it is deafening.
 pub const AGC_ATTACK_SEC: f64 = 0.002;
 /// The shortest the gain holds after the last sustained signal at Fast
-/// decay: across the gaps between elements and characters at 16 WPM and
-/// over (165 ms at 22 WPM). Settings that send slower, or with Farnsworth
-/// spacing, hold it longer, across their own letter gaps, while a word gap
-/// still lets the band back ([`agc_timing`]). Operators prefer hang AGC on
-/// CW for exactly this: a per-element pumping AGC is the one everyone
-/// dislikes.
+/// decay: across the gaps between elements and characters at about 17 WPM
+/// and over (165 ms at 22 WPM). Settings that send slower, or with
+/// Farnsworth spacing, hold it longer, across their own letter gaps where
+/// their word gaps leave room for it, while a word gap still lets the band
+/// back ([`agc_timing`]). Operators prefer hang AGC on CW for exactly this:
+/// a per-element pumping AGC is the one everyone dislikes.
 pub const AGC_HANG_SEC: f64 = 0.22;
 /// Once the hang has run out, the time constant the gain recovers with at
 /// Fast decay, in decibels: the way down left shrinks by e every this long,
@@ -1349,6 +1352,19 @@ mod tests {
             (hang - (listen + AGC_LETTER_MARGIN_SEC)).abs() < 1e-12,
             "{hang}"
         );
+        // Held so, the hang at Fast is shorter than the Listen screen's
+        // pause out of the box, and than the letter gaps of a range from 10
+        // to 30 WPM at 10: the band comes up in those.
+        let (hang, _) = agc_timing(&default, AgcDecay::Fast);
+        assert!(hang < listen, "{hang}");
+        let mut wide = TrainingSettings::default();
+        (wide.playback.char_wpm_min, wide.playback.effective_wpm_min) = (10.0, 10.0);
+        let (hang, _) = agc_timing(&wide, AgcDecay::Fast);
+        assert!(hang < 3.0 * 1.2 / 10.0, "{hang}");
+        // The decay's own hang spans a keyer's letter gap, three dots, and
+        // the margin from about 17 WPM on.
+        let held = |wpm: f64| 3.0 * 1.2 / wpm + AGC_LETTER_MARGIN_SEC <= AGC_HANG_SEC;
+        assert!(held(17.2) && !held(17.0));
         // A receiver built with no length of hang holds the decay's own.
         for no_length in [f64::NAN, 0.0, -1.0, f64::INFINITY] {
             let agc = Agc::with_hang(SR, 0.01, AgcDecay::Fast, no_length);

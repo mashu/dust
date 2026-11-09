@@ -123,8 +123,11 @@ pub enum FilterShape {
 #[serde(rename_all = "lowercase")]
 pub enum AgcDecay {
     /// Holds across the gaps inside a word, at the slowest speed and spacing
-    /// the settings send, and lets the band back in a word gap
-    /// ([`crate::band::agc_timing`]): what most CW operators run.
+    /// the settings send where their word gaps leave room for it, and lets
+    /// the band back in a word gap ([`crate::band::agc_timing`]): what most
+    /// CW operators run. The hang stops short of the settings' shortest word
+    /// gap, so with a wide speed range, and on the Listen screen at the
+    /// default speeds, the slowest letter gaps still let the band up.
     #[default]
     Fast,
     /// Holds across word gaps too and comes back over a second or so: the
