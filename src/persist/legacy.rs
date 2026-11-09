@@ -384,8 +384,9 @@ pub(super) const LAYOUT: u64 = 1;
 /// it, and this one then only reads ([`Gate::Newer`]).
 pub(super) const COMPATIBLE: u64 = 1;
 
-/// How long before the move a session may have finished and still be one
-/// an older build stored after it: one finished a day before the move,
+/// How long before the newest session the move took
+/// ([`Layout::taken_through`]) a session may have finished and still be one
+/// an older build stored after the move: one finished a day before it,
 /// stored by a copy left open since, is still taken up.
 const MOVE_SLACK_MS: u64 = 86_400_000;
 
