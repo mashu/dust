@@ -23,6 +23,8 @@ mod files;
 mod idb;
 mod legacy;
 mod lock;
+#[cfg(feature = "web")]
+mod marks;
 #[cfg(test)]
 pub mod memory;
 pub mod record;

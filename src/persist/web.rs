@@ -6,9 +6,10 @@
 //! and a GitHub Pages project site shares its origin with every other one
 //! of the account (docs/platforms.md). So every name kept or locked here
 //! starts with `dust_`, and only names of Dust's own are ever taken away: by
-//! exact name, or by a prefix of its own ([`keep_aside`], [`take_marks`]).
+//! exact name, or by a prefix of its own ([`keep_aside`], the marks' page
+//! script, `src/persist/marks.js`).
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
@@ -20,6 +21,7 @@ use wasm_bindgen_futures::JsFuture;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::idb::{BrowserHistory, Script, waited_ms};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
+use super::marks::MARKS_JS;
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
     failed_for_now,
@@ -67,8 +69,11 @@ pub struct WebStore {
     /// The browser has been asked to keep the store, this visit.
     asked_to_keep: Cell<bool>,
     /// This page's mark, while its session is marked open: what writes it,
-    /// and takes it away with its lock ([`hold_mark`]).
+    /// and takes it away with its lock ([`WebStore::hold_mark`]).
     open_held: RefCell<Option<js_sys::Function>>,
+    /// The marks' page script ([`MARKS_JS`]), once it has run: none where
+    /// it would not.
+    marks: OnceCell<Option<JsValue>>,
     /// Where the history is kept this visit.
     history: History,
 }
@@ -163,6 +168,7 @@ impl Default for WebStore {
             set_aside: RefCell::new(set_aside),
             asked_to_keep: Cell::default(),
             open_held: RefCell::default(),
+            marks: OnceCell::new(),
             history,
         }
     }
@@ -232,89 +238,15 @@ impl Aside for Shelf<'_> {
     }
 }
 
-/// Hold the Web Lock `name`, and keep the mark of the same name in
-/// `localStorage` only while the lock is held. The function handed back
-/// takes the mark's text, or, given none, takes the mark away and lets go
-/// of the lock. None in a browser without Web Locks, where nothing is
-/// marked, so no running tab is ever taken for one cut off.
-///
-/// A lock asked for is not held at once: the browser grants it a moment
-/// later, and only then does a page looking for marks see it, held or
-/// waiting. A mark written as the lock was asked for could be found in
-/// that moment without it, taken for one cut off, told of in the page that
-/// looked, and deleted from under this one as it ran on. So the mark goes
-/// in once the lock is granted, and under the lock pages look under
-/// ([`take_marks`]): a look finds no mark, or one whose lock is held. It
-/// is taken away before the lock is let go of.
-fn hold_mark(name: &str) -> Option<js_sys::Function> {
-    let hold = js_sys::Function::new_with_args(
-        "name, look",
-        "if (!navigator.locks) return null;
-        let release;
-        const held = new Promise((done) => { release = done; });
-        let text = null;
-        let placed = false;
-        let gone = false;
-        const place = () => {
-            if (!gone && text !== null) localStorage.setItem(name, text);
-            placed = true;
-        };
-        navigator.locks
-            .request(name, () => navigator.locks.request(look, place).then(() => held, () => held))
-            .catch(() => {});
-        return (raw) => {
-            if (typeof raw !== 'string') {
-                gone = true;
-                localStorage.removeItem(name);
-                release();
-                return;
-            }
-            text = raw;
-            if (placed && !gone) localStorage.setItem(name, raw);
-        };",
-    );
-    let look = format!("{OPEN_PREFIX}look");
-    hold.call2(
-        &JsValue::NULL,
-        &JsValue::from_str(name),
-        &JsValue::from_str(&look),
-    )
-    .ok()?
-    .dyn_into()
-    .ok()
-}
-
-/// Take every mark whose page has gone, and hand back what each said: one
-/// look at a time across tabs, so two opening at once tell of it once.
-async fn take_marks() -> Vec<String> {
-    let take = js_sys::Function::new_with_args(
-        "prefix",
-        "if (!navigator.locks) return Promise.resolve([]);
-        return navigator.locks.request(prefix + 'look', async () => {
-            const state = await navigator.locks.query();
-            const live = new Set([...state.held, ...state.pending].map((lock) => lock.name));
-            const keys = [];
-            for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i);
-                if (key && key.startsWith(prefix) && !live.has(key)) keys.push(key);
-            }
-            return keys.map((key) => {
-                const mark = localStorage.getItem(key) ?? '';
-                localStorage.removeItem(key);
-                return mark;
-            });
-        }).catch(() => []);",
-    );
-    let Ok(promise) = take.call1(&JsValue::NULL, &JsValue::from_str(OPEN_PREFIX)) else {
-        return Vec::new();
-    };
-    let Ok(marks) = JsFuture::from(js_sys::Promise::from(promise)).await else {
-        return Vec::new();
-    };
-    js_sys::Array::from(&marks)
-        .iter()
-        .map(|mark| mark.as_string().unwrap_or_default())
-        .collect()
+/// The script's `name`, called with `args`: what it gave back, or none where
+/// it has no such function, or it threw.
+fn call(script: &JsValue, name: &str, args: &[JsValue]) -> Option<JsValue> {
+    let function: js_sys::Function = js_sys::Reflect::get(script, &JsValue::from_str(name))
+        .ok()?
+        .dyn_into()
+        .ok()?;
+    let args: js_sys::Array = args.iter().collect();
+    function.apply(script, &args).ok()
 }
 
 /// What this tab does with the Web Locks it shares with the site's other
@@ -327,6 +259,7 @@ mod tabs {
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
 
+    use super::call;
     use crate::persist::lock::TABS_JS;
     use crate::persist::record::{Pending, done};
     use crate::persist::{LockHeld, Locking};
@@ -377,17 +310,6 @@ mod tabs {
             }
             script.clone()
         })
-    }
-
-    /// The script's `name`, called with `args`: what it gave back, or none
-    /// where it has no such function, or it threw.
-    fn call(tabs: &JsValue, name: &str, args: &[JsValue]) -> Option<JsValue> {
-        let function: js_sys::Function = js_sys::Reflect::get(tabs, &JsValue::from_str(name))
-            .ok()?
-            .dyn_into()
-            .ok()?;
-        let args: js_sys::Array = args.iter().collect();
-        function.apply(tabs, &args).ok()
     }
 
     /// What the script's answer to a lock tried says: a function to let go
@@ -483,6 +405,34 @@ async fn ask_for_persistence() {
 }
 
 impl WebStore {
+    /// The marks' page script ([`MARKS_JS`]), run as it is first wanted.
+    fn marks(&self) -> Option<&JsValue> {
+        self.marks
+            .get_or_init(|| {
+                let make = js_sys::Function::new_with_args("prefix, options", MARKS_JS);
+                make.call2(
+                    &JsValue::NULL,
+                    &JsValue::from_str(OPEN_PREFIX),
+                    &JsValue::UNDEFINED,
+                )
+                .ok()
+            })
+            .as_ref()
+    }
+
+    /// Hold the Web Lock `name`, and keep the mark of the same name in
+    /// `localStorage` only while the lock is held: the function handed back
+    /// takes the mark's text, or, given none, takes the mark away and lets
+    /// go of the lock. None in a browser without Web Locks, where nothing is
+    /// marked, so no running tab is ever taken for one cut off. The mark
+    /// goes in only once the lock is granted, under the lock pages look for
+    /// marks under (`src/persist/marks.js`).
+    fn hold_mark(&self, name: &str) -> Option<js_sys::Function> {
+        call(self.marks()?, "hold", &[JsValue::from_str(name)])?
+            .dyn_into()
+            .ok()
+    }
+
     /// Note `what` to tell of, if it was set aside now, and say whether it
     /// is kept aside, now or before.
     fn noted(&self, kept: Kept, what: SetAside) -> bool {
@@ -708,7 +658,7 @@ impl Store for WebStore {
                 // The lock first: a page looking for marks then never finds
                 // this one without it.
                 let mark = held.take().or_else(|| {
-                    hold_mark(&format!("{OPEN_PREFIX}{:016x}", crate::time::seed_rng()))
+                    self.hold_mark(&format!("{OPEN_PREFIX}{:016x}", crate::time::seed_rng()))
                 });
                 let Some(mark) = mark else {
                     return;
@@ -726,12 +676,21 @@ impl Store for WebStore {
         }
     }
 
+    /// Every mark whose page has gone, taken, and what each said: one look
+    /// at a time across tabs, so two opening at once tell of it once
+    /// (`src/persist/marks.js`).
     fn take_cut_off(&self) -> CutOffTaking {
-        Box::pin(async {
-            let marks = take_marks().await;
-            marks
+        let marks = self.marks().cloned();
+        Box::pin(async move {
+            let Some(taking) = marks.and_then(|marks| call(&marks, "take", &[])) else {
+                return Vec::new();
+            };
+            let Ok(marks) = JsFuture::from(js_sys::Promise::resolve(&taking)).await else {
+                return Vec::new();
+            };
+            js_sys::Array::from(&marks)
                 .iter()
-                .map(|mark| CutOff::read(mark.as_bytes()))
+                .map(|mark| CutOff::read(mark.as_string().unwrap_or_default().as_bytes()))
                 .collect()
         })
     }
