@@ -72,10 +72,12 @@ const RUN_LOGS_MAX_BYTES: usize = 300_000_000;
 /// How much memory what this build reads of the sessions in a backup may
 /// take, in all, for each byte of the list that holds them
 /// ([`typed_bytes`]): three. Sessions as Dust has stored them come to at
-/// most two, in the first builds' shape, with no character's times kept
-/// and keys no build reads any more, and to one or one and a half as this
-/// build stores them. A list of nothing but bare timings,
-/// `{"timeToCompleteMs":0}`, comes to five and a half, and is held to this.
+/// most some two and a quarter, in the first builds' shape with groups of
+/// one character left unanswered, with no character's times kept and keys
+/// no build reads any more; and to one or one and a half as this build
+/// stores them. The room their list holds as it grows adds two tenths at
+/// most. A list of nothing but bare timings, `{"timeToCompleteMs":0}`,
+/// comes to five and a half, and is held to this.
 const TYPED_PER_BYTE: usize = 3;
 
 /// The same, in all, for a list so short that its bytes allow less:
@@ -1765,7 +1767,8 @@ mod tests {
     /// as this build keeps them; the same untimed, as older builds, or audio
     /// that could not be timed, keep them; and the shape of the first
     /// builds, with keys no build reads any more, the densest, with groups
-    /// of five and of one.
+    /// of five and of one, and of one left unanswered, the densest of all,
+    /// at some two and a quarter a byte.
     #[test]
     fn a_real_history_comes_to_well_under_the_bound_its_backup_is_read_to() {
         let session = |at: u64, timed: bool| {
@@ -1802,25 +1805,43 @@ mod tests {
             }
             serde_json::to_string(&session).unwrap()
         };
-        let first = |at: u64, sent: &str| {
-            let group = format!(r#"{{"sent":"{sent}","received":"{sent}","correct":true}}"#);
-            let timing = r#"{"timeToCompleteMs":3456,"perCharMs":691.2}"#;
+        // Each group answered as sent, or left unanswered: nothing typed,
+        // nothing timed, nothing scored.
+        let first = |at: u64, sent: &str, answered: bool| {
+            let (received, time, mean, right) = match answered {
+                true => (sent, "3456", "691.2", 1),
+                false => ("", "0", "0", 0),
+            };
+            let group =
+                format!(r#"{{"sent":"{sent}","received":"{received}","correct":{answered}}}"#);
+            let timing = format!(r#"{{"timeToCompleteMs":{time},"perCharMs":{mean}}}"#);
             let letters: Vec<String> = sent
                 .chars()
-                .map(|letter| format!(r#""{letter}":{{"correct":20,"total":20}}"#))
+                .map(|letter| format!(r#""{letter}":{{"correct":{},"total":20}}"#, right * 20))
                 .collect();
             format!(
-                r#"{{"date":"2026-01-01","timestamp":{at},"startedAt":0,"finishedAt":{at},"groups":[{}],"groupTimings":[{}],"accuracy":1,"letterAccuracy":{{{}}},"alphabetSize":5,"avgResponseMs":691.2,"totalChars":100,"effectiveAlphabetSize":5,"score":100,"kochLevel":3}}"#,
+                r#"{{"date":"2026-01-01","timestamp":{at},"startedAt":0,"finishedAt":{at},"groups":[{}],"groupTimings":[{}],"accuracy":{right},"letterAccuracy":{{{}}},"alphabetSize":5,"avgResponseMs":{mean},"totalChars":100,"effectiveAlphabetSize":5,"score":{},"kochLevel":3}}"#,
                 [group.as_str(); 20].join(","),
-                [timing; 20].join(","),
-                letters.join(",")
+                [timing.as_str(); 20].join(","),
+                letters.join(","),
+                right * 100
             )
         };
-        let shapes: [(&str, Vec<String>); 4] = [
+        let shapes: [(&str, Vec<String>); 5] = [
             ("timed", (0..500).map(|at| session(at, true)).collect()),
             ("untimed", (0..500).map(|at| session(at, false)).collect()),
-            ("first", (0..500).map(|at| first(at, "KMRSU")).collect()),
-            ("first, of one", (0..500).map(|at| first(at, "K")).collect()),
+            (
+                "first",
+                (0..500).map(|at| first(at, "KMRSU", true)).collect(),
+            ),
+            (
+                "first, of one",
+                (0..500).map(|at| first(at, "K", true)).collect(),
+            ),
+            (
+                "first, of one, unanswered",
+                (0..500).map(|at| first(at, "K", false)).collect(),
+            ),
         ];
         for (shape, sessions) in shapes {
             let raw = format!("[{}]", sessions.join(","));
