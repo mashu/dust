@@ -9,7 +9,9 @@ use std::sync::{Mutex, PoisonError};
 use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::disk::{aside_name, move_aside, save_streamed, shown, sync_dir, temporary, write_whole};
+use super::disk::{
+    aside_name, flush, move_aside, save_streamed, shown, sync_dir, temporary, write_whole,
+};
 use super::files::HistoryFiles;
 use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
@@ -253,7 +255,7 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let written = (|| {
         let mut file = private_file(&tmp)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        flush(&file)?;
         fs::rename(&tmp, dir.join(name))
     })();
     if written.is_err() {

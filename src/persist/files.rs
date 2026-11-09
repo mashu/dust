@@ -51,7 +51,7 @@ use cw_core::SessionResult;
 use flate2::read::GzDecoder;
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::disk::{aside_name, move_aside, place_whole, shown, sync_dir, write_whole};
+use super::disk::{aside_name, flush, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, key_of, keyed, not_told,
@@ -1002,7 +1002,7 @@ impl HistoryFiles {
         let placed = (|| {
             lock.try_lock().map_err(io::Error::other)?;
             lock.write_all(&serde_json::to_vec(&journaled)?)?;
-            lock.sync_all()?;
+            flush(&lock)?;
             let path = self.dir.join(&name);
             fs::rename(&making, &path)?;
             sync_dir(&self.dir)?;
