@@ -7,7 +7,9 @@
 //! were it lost, the next sync reads every pack again and comes to the same.
 //! The two notes the plan reads ([`super::plan::Here`]) are what this
 //! device did, and it alone knows: kept with the rest, and carried forward
-//! by every sync.
+//! by every sync. Two copies of the app on one device, tabs or windows,
+//! keep one state between them, each laying what it did over what the
+//! other kept ([`SyncState::merged`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,6 +18,15 @@ use serde_json::{Map, Value};
 
 use super::plan::DriveState;
 use crate::persist::record::RecordId;
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "two copies' states are merged from SYNC-1's next step on"
+    )
+)]
+mod merge;
 
 /// The layout of what sync keeps.
 const STATE_LAYOUT: u32 = 1;
@@ -88,6 +99,11 @@ pub struct SyncState {
     /// When each setting was last changed, as of the last sync.
     #[serde(default)]
     pub stamps: BTreeMap<String, u64>,
+    /// What a later build keeps here that this one does not know, by key,
+    /// as it was read: written back as it was, so that what a later build
+    /// notes outlasts this build's writes, as a record's keys do.
+    #[serde(flatten)]
+    pub unread: Map<String, Value>,
 }
 
 impl SyncState {
@@ -230,6 +246,230 @@ mod drive_state {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn id(n: u64) -> RecordId {
+        RecordId {
+            order: n * 1000,
+            nonce: n,
+        }
+    }
+
+    fn times(pairs: &[(u64, u64)]) -> BTreeMap<RecordId, u64> {
+        pairs.iter().map(|&(n, at)| (id(n), at)).collect()
+    }
+
+    fn names(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    fn groups(n: u64) -> Map<String, Value> {
+        Map::from_iter([("numGroups".to_string(), Value::from(n))])
+    }
+
+    /// One device's state of one sync.
+    fn state() -> SyncState {
+        SyncState::new(
+            "device".into(),
+            "00".repeat(32),
+            "file1".into(),
+            Some("refresh".into()),
+        )
+    }
+
+    /// What two copies of the app keep of one sync is merged note by note:
+    /// what either noted since stays, and what this copy's own sync sent, or
+    /// found was no more to note, is gone, unless the other copy noted it
+    /// again since; the packs read and what they say are put together; the
+    /// settings are those of the later sync, the sign-in the one made since,
+    /// and the rest the later or either's. Laid either way, it comes to the
+    /// same.
+    #[test]
+    fn what_two_copies_keep_is_merged_note_by_note() {
+        let mut base = state();
+        base.last = Some(100);
+        base.read = names(&["dust-p-1"]);
+        base.drive.tombs = times(&[(1, 5), (2, 5), (5, 50), (6, 60)]);
+        base.revived = times(&[(1, 10), (2, 20)]);
+        base.applied = times(&[(5, 50), (6, 60)]);
+        base.settings = Some(groups(5));
+        base.stamps = BTreeMap::from([("numGroups".to_string(), 90)]);
+
+        // This copy synced since: it sent 2 as put back, took 6 back as the
+        // drive put it back, let 7 go and read a pack; and 3 was put back.
+        let mut ours = base.clone();
+        ours.last = Some(200);
+        ours.read.insert("dust-p-2".into());
+        ours.drive.revives.extend(times(&[(2, 20), (6, 65)]));
+        ours.drive.tombs.insert(id(7), 70);
+        ours.revived.remove(&id(2));
+        ours.revived.insert(id(3), 30);
+        ours.applied.remove(&id(6));
+        ours.applied.insert(id(7), 70);
+        ours.deletions_noted = true;
+        ours.settings = Some(groups(7));
+        ours.stamps = BTreeMap::from([("numGroups".to_string(), 190)]);
+
+        // The other copy, meanwhile: 1 put back again, and 4; signed in
+        // again; and an earlier sync of its own, which read a pack a later
+        // build wrote, and one this copy read.
+        let mut theirs = base.clone();
+        theirs.last = Some(150);
+        theirs.sign_in = Some("again".into());
+        theirs.read.insert("dust-p-3".into());
+        theirs.later = BTreeMap::from([("dust-p-9".to_string(), 1), ("dust-p-2".to_string(), 1)]);
+        theirs.revived.extend(times(&[(1, 15), (4, 40)]));
+        theirs.drive.tombs.insert(id(8), 80);
+        theirs.applied.insert(id(8), 80);
+        theirs.settings = Some(groups(6));
+        theirs.stamps = BTreeMap::from([("numGroups".to_string(), 140)]);
+
+        for merged in [
+            ours.merged(Some(&base), &theirs),
+            theirs.merged(Some(&base), &ours),
+        ] {
+            assert_eq!(
+                merged.revived,
+                times(&[(1, 15), (3, 30), (4, 40)]),
+                "2 went, as sent; 1 at the later"
+            );
+            assert_eq!(
+                merged.applied,
+                times(&[(5, 50), (7, 70), (8, 80)]),
+                "6 went, as taken back"
+            );
+            assert_eq!(merged.read, names(&["dust-p-1", "dust-p-2", "dust-p-3"]));
+            assert_eq!(
+                merged.later,
+                BTreeMap::from([("dust-p-9".to_string(), 1)]),
+                "one read is no later build's"
+            );
+            let mut drive = base.drive.clone();
+            drive.revives.extend(times(&[(2, 20), (6, 65)]));
+            drive.tombs.extend(times(&[(7, 70), (8, 80)]));
+            assert_eq!(merged.drive, drive);
+            assert_eq!(merged.last, Some(200), "the later");
+            assert_eq!(
+                (merged.settings, merged.stamps),
+                (ours.settings.clone(), ours.stamps.clone()),
+                "as of the later sync"
+            );
+            assert_eq!(merged.sign_in.as_deref(), Some("again"), "made since");
+            assert!(merged.deletions_noted, "looked for, by either");
+        }
+    }
+
+    /// What another copy's write leaves out stays, as a tab can read what
+    /// sync keeps from before another tab's last write, and write without
+    /// what that one noted; it goes only on evidence. A putting back goes
+    /// once the drive shows it sent, or a deletion of its session after it
+    /// is noted; a deletion the drive holds, once the drive has put its
+    /// session back since, and holds it so; a pack whose answer never came,
+    /// once each deletion in it is noted. A note at an older stamp than
+    /// this copy last saw is as one left out. Left out by this copy, which
+    /// knows what it dropped, each is gone.
+    #[test]
+    fn what_another_copy_left_out_goes_only_on_evidence() {
+        let mut base = state();
+        base.revived = times(&[(1, 10), (2, 20), (3, 30), (4, 40)]);
+        base.applied = times(&[(5, 50), (6, 60), (7, 70)]);
+        base.unanswered = BTreeMap::from([
+            ("dust-p-1".to_string(), times(&[(8, 80)])),
+            ("dust-p-2".to_string(), times(&[(9, 90)])),
+        ]);
+        base.drive.tombs = times(&[(5, 50), (6, 60), (7, 70), (8, 80), (9, 90)]);
+        let ours = base.clone();
+
+        let mut theirs = state();
+        theirs.drive = base.drive.clone();
+        theirs.revived = times(&[(4, 35)]);
+        theirs.drive.revives.insert(id(2), 20);
+        theirs.drive.tombs.insert(id(3), 31);
+        theirs.applied = times(&[(3, 31), (9, 90)]);
+        theirs.drive.revives.extend(times(&[(6, 65), (7, 75)]));
+        theirs.drive.tombs.insert(id(7), 76);
+        let merged = ours.merged(Some(&base), &theirs);
+        assert_eq!(
+            merged.revived,
+            times(&[(1, 10), (4, 40)]),
+            "1, nothing saying it went; 4, at the stamp seen here"
+        );
+        assert_eq!(
+            merged.applied,
+            times(&[(3, 31), (5, 50), (7, 70), (9, 90)]),
+            "6 put back since, and so held; 7 deleted again after"
+        );
+        assert_eq!(
+            merged.unanswered.keys().collect::<Vec<_>>(),
+            ["dust-p-1"],
+            "the deletion in dust-p-2 is noted"
+        );
+
+        let mut synced = base.clone();
+        synced.revived.clear();
+        synced.applied.clear();
+        synced.unanswered.clear();
+        let merged = synced.merged(Some(&base), &base);
+        assert!(
+            merged.revived.is_empty() && merged.applied.is_empty() && merged.unanswered.is_empty(),
+            "{merged:?}"
+        );
+    }
+
+    /// What a later build keeps for sync, which this one does not know, is
+    /// written back as it was read, and kept as two copies' states are
+    /// merged, the store's where both hold it: so a later build's notes
+    /// survive this build's writes. A key this build knows is written once.
+    #[test]
+    fn what_a_later_build_keeps_for_sync_is_written_back() {
+        let raw = r#"{"dustSyncState":1,"device":"d","key":"k","laterNote":{"a":[1,2]},"laterFlag":true}"#;
+        let state = SyncState::read(raw).expect("read");
+        let written: Value =
+            serde_json::from_str(&state.written().expect("written")).expect("JSON");
+        assert_eq!(written["laterNote"], json!({ "a": [1, 2] }));
+        assert_eq!(written["laterFlag"], json!(true));
+
+        let ours = SyncState::read(
+            r#"{"dustSyncState":1,"device":"d","key":"k","laterFlag":false,"laterOld":1}"#,
+        )
+        .expect("read");
+        let merged = ours.merged(Some(&ours), &state).written().expect("written");
+        assert_eq!(merged.matches(r#""device""#).count(), 1, "{merged}");
+        let merged: Value = serde_json::from_str(&merged).expect("JSON");
+        assert_eq!(merged["laterFlag"], json!(true), "the store's");
+        assert_eq!(merged["laterNote"], json!({ "a": [1, 2] }));
+        assert_eq!(merged["laterOld"], json!(1), "nothing says it went");
+    }
+
+    /// A state of another sync in the store, as one turned on anew in
+    /// another copy of the app, is taken as it is: this copy's notes are of
+    /// a sync that is no more.
+    #[test]
+    fn another_sync_in_the_store_is_taken_as_it_is() {
+        let mut ours = state();
+        ours.revived = times(&[(1, 10)]);
+        let anew = SyncState::new("another".into(), "11".repeat(32), "file2".into(), None);
+        assert_eq!(ours.merged(Some(&ours.clone()), &anew), anew);
+        let mut begun_anew = state();
+        begun_anew.keyring = "file2".into();
+        assert_eq!(ours.merged(None, &begun_anew), begun_anew);
+    }
+
+    /// A state the store never took from this copy, as one just turned on,
+    /// is merged as against nothing: what either holds, this copy's where
+    /// each has its own.
+    #[test]
+    fn a_state_never_kept_is_merged_as_against_nothing() {
+        let mut ours = state();
+        ours.revived = times(&[(1, 10)]);
+        ours.sign_in = Some("mine".into());
+        let mut theirs = state();
+        theirs.revived = times(&[(1, 12), (2, 20)]);
+        theirs.sign_in = Some("theirs".into());
+        let merged = ours.merged(None, &theirs);
+        assert_eq!(merged.revived, times(&[(1, 12), (2, 20)]));
+        assert_eq!(merged.sign_in.as_deref(), Some("mine"));
+    }
 
     /// What sync keeps reads back as it was written.
     #[test]
@@ -258,6 +498,7 @@ mod tests {
         state.deletions_noted = true;
         state.settings = Some(Map::from_iter([("numGroups".to_string(), Value::from(5))]));
         state.stamps.insert("numGroups".into(), 3);
+        state.unread.insert("laterKey".into(), json!({ "a": 1 }));
         let written = state.written().expect("written");
         assert_eq!(SyncState::read(&written), Some(state));
     }

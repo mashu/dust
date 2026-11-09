@@ -37,7 +37,7 @@ impl Lock {
     /// a tab closed in that moment. Nor would one help: a tab can read what
     /// another wrote late whatever lock it holds, as the browser hands each
     /// tab the other tabs' writes when it gets to it, which sync's merge
-    /// allows for.
+    /// allows for ([`crate::sync::state::SyncState::merged`]).
     pub fn web_name(self) -> Option<&'static str> {
         match self {
             Self::SyncRun => Some("dust_sync_run"),
