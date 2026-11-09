@@ -3097,6 +3097,19 @@ mod interactions {
         let seventh = " 14% chance of the first callers<";
         assert_eq!(even.html().matches(seventh).count(), 6, "{}", even.html());
         assert_ne!(adapting.html().matches(seventh).count(), 6);
+        // Copied at 26 WPM, the range's slowest speed is all but never a
+        // first caller's, but can be: under one percent, as What comes up
+        // next gives a chance, not none. It read 0%.
+        assert!(
+            adapting.has(" &#60;1% chance of the first callers<"),
+            "{}",
+            adapting.html()
+        );
+        assert!(
+            !adapting.has(" 0% chance of the first callers<"),
+            "{}",
+            adapting.html()
+        );
     }
 
     /// On a board of every mode, a run is flagged with its contest and
