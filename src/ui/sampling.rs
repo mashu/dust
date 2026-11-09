@@ -15,6 +15,7 @@
 use cw_core::{CharSetMode, SamplingRow, TrainingSettings, sampling_rows};
 use dioxus::prelude::*;
 
+use crate::format::whole_percent;
 use crate::ui::figures::{History, without_band};
 
 use crate::ui::bigram::id_part;
@@ -100,13 +101,13 @@ fn line(row: &SamplingRow, threshold: f64) -> Line {
 }
 
 /// A share as a percentage, and under one percent as such rather than as
-/// nothing.
+/// nothing: every share over nothing that whole percents would show as 0%,
+/// half a percent among them, which goes to the even 0.
 fn percent(share: f64) -> String {
-    let pct = share * 100.0;
-    if pct > 0.0 && pct < 0.5 {
+    if share > 0.0 && whole_percent(share) == 0.0 {
         "<1%".to_string()
     } else {
-        format!("{pct:.0}%")
+        crate::format::percent(share)
     }
 }
 
@@ -402,6 +403,23 @@ mod tests {
         assert_eq!(line_label(&new), "K: not heard yet, not drawn now");
         assert_eq!(percent(0.004), "<1%");
         assert_eq!(percent(0.0), "0%");
+    }
+
+    /// A chance more than nothing never reads 0%: half a percent, which
+    /// whole percents send to the even 0, reads under one percent as a
+    /// smaller one does, and a hair over half reads 1%.
+    #[test]
+    fn a_share_of_half_a_percent_reads_under_one_percent() {
+        assert_eq!(percent(0.005), "<1%");
+        assert_eq!(percent(0.004), "<1%");
+        assert_eq!(percent(0.005_000_01), "1%");
+        assert_eq!(percent(0.015), "2%");
+        assert_eq!(percent(0.0), "0%");
+        let rare = Line {
+            chance: Some(0.005),
+            ..line(&row(190.0, 10.0, true), 0.1)
+        };
+        assert_eq!(line_note(&rare), "likely 4–8% wrong · <1% chance next");
     }
 
     /// Most work first: over the threshold, the worst first, then still
