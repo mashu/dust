@@ -56,8 +56,8 @@ pub(super) const HISTORY_BUDGET: usize = 3_000_000;
 /// ([`crate::time::as_shown`]).
 ///
 /// Beside each session that reads is its text, as the history holds it: a
-/// history kept whole writes that back of a session a change leaves as it
-/// is ([`BlobHistory::apply`]).
+/// browser that keeps the history whole writes that back of a session a
+/// change leaves as it is (`BlobHistory::apply`, built for the web alone).
 pub(super) fn read_history(raw: &str) -> Option<ReadHistory<'_>> {
     let raw = super::settings::unmarked(raw);
     let held: Vec<&RawValue> = serde_json::from_str(raw).ok()?;
