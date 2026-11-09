@@ -651,6 +651,23 @@ under the lock a tab looking for marks holds while it looks; it goes again
 before its lock is let go of. A browser without Web Locks marks nothing,
 rather than take a tab still running for one cut off.
 
+Copies of the app on one device sync one at a time, and lay what each did
+over what sync keeps one at a time ([sync.md](sync.md)). On desktop and
+mobile each holds a lock file beside `sync.json` for it: `sync-run.lock`
+for the whole of a sync, and while the synced copy is deleted, and
+`sync.lock` only while it reads what sync keeps, lays what it did over it
+and writes it back. They are files of their own rather than `sync.json`
+locked, as on Windows a file locked cannot be read through another handle;
+they hold nothing, are never deleted, and are let go of however the copy
+holding one stops. A browser's tabs hold the Web Lock `dust_sync_run` for a
+sync, and none for what sync keeps: a tab reads and writes `dust_sync` in
+`localStorage` there and then, while a Web Lock is granted only a moment
+after it is asked for, so a change kept under one would wait, and be lost
+with a tab closed in that moment. A sync that finds another copy's under
+way waits for it, ten minutes at most, then goes on without it, as copies
+do where the store takes no lock at all: a browser without Web Locks, or a
+folder that takes none, on some network shares.
+
 Updating the app does not clear any of it. The `localStorage` keys
 (`dust_settings`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
 `dust_told_of_paddle_keys`, `dust_asked_about_lock`, `dust_last_backup`,

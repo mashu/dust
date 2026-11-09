@@ -22,10 +22,6 @@ mod files;
 #[cfg(any(feature = "web", test))]
 mod idb;
 mod legacy;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
-)]
 mod lock;
 #[cfg(test)]
 pub mod memory;
@@ -232,10 +228,6 @@ pub trait Store {
     /// another copy to let go of it: a browser answers a moment later, as
     /// it grants a Web Lock, and every other store at once. A store that
     /// keeps no locks says so ([`Locking::Unlockable`]).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
-    )]
     fn try_lock(&self, _lock: Lock) -> Pending<Locking> {
         done(Locking::Unlockable)
     }

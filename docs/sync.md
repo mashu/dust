@@ -214,7 +214,13 @@ the store holds, and lays what it did over what the store holds as it
 ends, so a putting back made in another tab or window meanwhile goes with
 the next sync. A note another tab or window left out goes only once the
 drive shows it sent, or no more to send, as a browser can hand one tab
-another's write late.
+another's write late. They sync one at a time: a sync asked for while
+another tab or window syncs waits for it, the corner's cloud breathing
+meanwhile, ten minutes at most, then begins from what that one kept.
+Turning sync off with the copy waits for it too, so nothing is written
+into the folder after the copy is deleted. Where nothing locks, as in a
+browser without Web Locks, tabs sync as they come, and the merge alone
+keeps each one's notes (`docs/platforms.md`).
 
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that

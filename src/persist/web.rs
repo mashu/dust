@@ -320,10 +320,6 @@ async fn take_marks() -> Vec<String> {
 /// What this tab does with the Web Locks it shares with the site's other
 /// tabs: the tabs' script ([`crate::persist::lock::TABS_JS`]), run once for
 /// the page, as the page is the tab.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
-)]
 mod tabs {
     use std::cell::RefCell;
 

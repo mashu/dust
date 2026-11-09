@@ -155,6 +155,10 @@ pub struct MemoryStore {
     locks: Rc<RefCell<BTreeSet<Lock>>>,
     /// The store takes no lock, as a browser without Web Locks takes none.
     pub unlockable: Cell<bool>,
+    /// The store takes only the locks a browser takes, each a Web Lock of
+    /// the site's ([`Lock::web_name`]), as a browser's tabs share them: none
+    /// on what sync keeps.
+    pub browser: Cell<bool>,
 }
 
 /// A lock a copy of the app holds on a [`MemoryStore`], let go of as this
@@ -660,7 +664,7 @@ impl Store for MemoryStore {
 
     /// Answered at once, as by a computer's or a phone's store.
     fn try_lock(&self, lock: Lock) -> Pending<Locking> {
-        if self.unlockable.get() {
+        if self.unlockable.get() || self.browser.get() && lock.web_name().is_none() {
             return done(Locking::Unlockable);
         }
         done(self.locked(lock).map_or(Locking::Busy, Locking::Held))
@@ -1207,6 +1211,18 @@ mod tests {
         store.unlockable.set(true);
         let none = now(store.try_lock(Lock::SyncRun));
         assert!(matches!(none, Locking::Unlockable), "{none:?}");
+    }
+
+    /// As a browser's, the store takes only the locks a browser takes: the
+    /// one on syncing, and none on what sync keeps.
+    #[test]
+    fn as_a_browser_the_store_takes_only_what_a_browser_locks() {
+        let store = MemoryStore::default();
+        store.browser.set(true);
+        let none = now(store.try_lock(Lock::SyncState));
+        assert!(matches!(none, Locking::Unlockable), "{none:?}");
+        let held = now(store.try_lock(Lock::SyncRun));
+        assert!(matches!(held, Locking::Held(_)), "{held:?}");
     }
 
     /// The store keeps the history by record, as the files do: one write a
