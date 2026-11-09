@@ -152,13 +152,24 @@ pub struct SyncCtx {
     /// ([`SyncCtx::taking_in`]), it waits for that sync's end, and is
     /// stamped after what it read and sent. Turning sync off here forgets
     /// them with the rest, while taking up sync turned off, or on anew, in
-    /// another copy keeps them, with those not yet sent ([`Notes::Kept`]);
-    /// the sync under way lets go of none of them all the same
-    /// ([`SyncCtx::put_back`]).
+    /// another copy keeps them, with those not yet sent ([`Notes::Kept`]):
+    /// those a sync under way took in, as it hands them back, unless it
+    /// sent them ([`SyncCtx::hand_back`]). The sync under way lets go of
+    /// none of them all the same ([`SyncCtx::put_back`]).
     revived: CopyValue<BTreeMap<RecordId, u64>>,
     /// A sync of sync as it is on now has taken in the sessions put back
     /// before it, and has yet to keep what it comes to.
     taking_in: CopyValue<bool>,
+    /// The sessions put back by hand that the sync under way took in as it
+    /// began, each at its stamp then: it alone knows which of them it sent.
+    /// Emptied as it ends, or as this copy of the app forgets sync
+    /// meanwhile, turned off here, or taken for off or on anew in another
+    /// copy ([`SyncCtx::hand_back`]).
+    taken_in: CopyValue<BTreeMap<RecordId, u64>>,
+    /// Sync was taken for off, or on anew, in another copy of the app while
+    /// the sync under way held notes it took in: it hands back those it did
+    /// not send, which go as the notes kept then go ([`Notes::Kept`]).
+    hand_back: CopyValue<bool>,
     /// Every session put back by hand here while a sync is under way,
     /// whatever became of sync since: that sync lets none of them go, as it
     /// lets go of none another copy put back meanwhile, which the store's
@@ -210,6 +221,8 @@ impl SyncCtx {
             soon: CopyValue::new(false),
             revived: CopyValue::new(BTreeMap::new()),
             taking_in: CopyValue::new(false),
+            taken_in: CopyValue::new(BTreeMap::new()),
+            hand_back: CopyValue::new(false),
             put_back: CopyValue::new(BTreeSet::new()),
         }
     }
@@ -249,6 +262,8 @@ enum Notes {
     /// the sync turned on anew there ([`AppCtx::give_notes_to`]), or with
     /// the next one turned on here, as noted before it, stamped again after
     /// its first read of the drive; closed first, this copy loses them.
+    /// Those a sync under way took in go as it ends, those it did not send
+    /// alone ([`SyncCtx::hand_back`]): one it sent is no note to keep.
     Kept,
 }
 
@@ -388,9 +403,15 @@ impl AppCtx {
         );
     }
 
-    /// Keep what sync keeps, as [`Self::keep_sync_state`] does, now.
+    /// Keep what sync keeps, as [`Self::keep_sync_state`] does, now. Where
+    /// sync is off here, as taken for off or on anew in another copy of the
+    /// app, the sessions put back here that sync has yet to send go with
+    /// the sync the store keeps, if it keeps one ([`Self::give_notes_to`]).
     fn keep_now(self) {
         let Some(ours) = self.sync.state.peek().clone() else {
+            if !self.sync.revived.peek().is_empty() {
+                self.give_notes_to(read_kept(&*self.app().store));
+            }
             return;
         };
         let kept = read_kept(&*self.app().store);
@@ -504,19 +525,19 @@ impl AppCtx {
         let _held = lock_state(&*self.app().store).await;
         put(self.sync.taking_in, false);
         if *self.sync.epoch.peek() != epoch {
+            // Taken for off, or on anew, in another copy as it waited: what
+            // it took in and did not send goes as the notes kept then go.
+            if take(self.sync.hand_back) {
+                self.note_waiting(&synced.revived);
+                self.keep_now();
+            }
             return;
         }
         let kept = read_kept(&*self.app().store);
         if let Some(why) = self.changed_elsewhere(&kept) {
             // What it took in and did not send waits with what was noted
             // since, as the rest of what this copy noted does.
-            {
-                let mut noted = self.sync.revived;
-                let mut noted = noted.write();
-                for (&id, &at) in &synced.revived {
-                    note(&mut noted, id, at);
-                }
-            }
+            self.note_waiting(&synced.revived);
             self.take_up_change_elsewhere(why);
             self.give_notes_to(kept);
             return;
@@ -642,6 +663,16 @@ impl AppCtx {
         self.set_sync_status(SyncStatus::Off {
             problem: Some(why.into()),
         });
+    }
+
+    /// Note `notes`, sessions put back by hand, each at its stamp, among
+    /// those waiting to go into what sync keeps ([`SyncCtx::revived`]).
+    fn note_waiting(self, notes: &BTreeMap<RecordId, u64>) {
+        let mut noted = self.sync.revived;
+        let mut noted = noted.write();
+        for (&id, &at) in notes {
+            note(&mut noted, id, at);
+        }
     }
 
     /// Lay the sessions put back by hand here that sync has yet to send,
@@ -900,6 +931,9 @@ impl AppCtx {
             let held =
                 lock_within(&*store, Lock::SyncRun, RUN_LOCK_POLL_MS, RUN_LOCK_WAIT_MS).await;
             self.sync_through(&link).await;
+            // What it took in is its own no longer: handed back, or kept.
+            put(self.sync.taken_in, BTreeMap::new());
+            put(self.sync.hand_back, false);
             // Let go of before the next asked for meanwhile, which takes it.
             drop(held);
             self.sync_over();
@@ -932,6 +966,7 @@ impl AppCtx {
             let at = state.stamp_change(id, at);
             note(&mut state.revived, id, at);
         }
+        put(self.sync.taken_in, state.revived.clone());
         put(self.sync.put_back, BTreeSet::new());
         // What it began from, or last kept as it went: what it does is laid
         // over the store as against it. The sign-in, which no sync changes,
@@ -975,12 +1010,17 @@ impl AppCtx {
             // what it would keep is kept. What was put back by hand since is
             // sync's as it is now, and is kept with it, where it is on. One
             // stopped as it asked the drive for more may have stored what it
-            // took before then.
+            // took before then. Taken for off, or on anew, in another copy:
+            // what it took in and did not send goes as the notes kept then
+            // go ([`Notes::Kept`]).
             match &synced {
                 Ok(synced) => self.take_up_synced(synced),
                 Err(_) => self.take_up_store(),
             }
             put(self.sync.taking_in, false);
+            if take(self.sync.hand_back) {
+                self.note_waiting(&state.revived);
+            }
             if !self.sync.revived.peek().is_empty() {
                 self.keep_sync_state();
             }
@@ -1288,20 +1328,30 @@ impl AppCtx {
         self.give_up_sign_ins();
         self.next_sync_epoch();
         match notes {
-            Notes::Forgotten => put(self.sync.revived, BTreeMap::new()),
+            Notes::Forgotten => {
+                put(self.sync.revived, BTreeMap::new());
+                // Those a sync under way took in go too: it hands none back.
+                put(self.sync.taken_in, BTreeMap::new());
+                put(self.sync.hand_back, false);
+            }
             Notes::Kept => {
-                let unsent = self
+                // Those a sync under way took in are its to hand back, as it
+                // alone knows which it sent; one noted again since, at a
+                // later stamp, is kept here.
+                let taken_in = take(self.sync.taken_in);
+                if !taken_in.is_empty() {
+                    put(self.sync.hand_back, true);
+                }
+                let unsent: BTreeMap<RecordId, u64> = self
                     .sync
                     .state
                     .peek()
-                    .as_ref()
-                    .map(|state| state.revived.clone())
-                    .unwrap_or_default();
-                let mut noted = self.sync.revived;
-                let mut noted = noted.write();
-                for (id, at) in unsent {
-                    note(&mut noted, id, at);
-                }
+                    .iter()
+                    .flat_map(|state| &state.revived)
+                    .filter(|&(id, &at)| taken_in.get(id).is_none_or(|&was| at > was))
+                    .map(|(&id, &at)| (id, at))
+                    .collect();
+                self.note_waiting(&unsent);
             }
         }
         put(self.sync.state, None);
