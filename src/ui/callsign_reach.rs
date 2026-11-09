@@ -22,10 +22,11 @@ const NEXT: usize = 9;
 /// sides, and the part's tap, tooltip and accessible name carry it.
 const LABELLED: f64 = 0.12;
 
-/// A share as the bar and its parts say it: whole percent, and "under 1%"
-/// rather than a 0% that is not nothing.
+/// A share as the bar and its parts say it: whole percent, a half going to
+/// the even one as [`crate::format::percent`] has it, and "under 1%" rather
+/// than a 0% that is not nothing.
 pub fn percent(share: f64) -> String {
-    let percent = (share * 100.0).round();
+    let percent = crate::format::whole_percent(share);
     if percent < 1.0 {
         "under 1%".to_string()
     } else {
@@ -284,5 +285,16 @@ mod tests {
         let kinds: Vec<&str> = dx.parts.iter().map(|part| part.kind).collect();
         assert_eq!(kinds, ["next", "rest"]);
         assert_eq!(dx.parts[0].name, "9 commonest countries");
+    }
+
+    /// A share half way between two whole percents reads the even one, as
+    /// every other share does; one that would read 0% reads under 1%.
+    #[test]
+    fn a_share_reads_in_whole_percents_as_everywhere_else() {
+        assert_eq!(percent(0.125), "12%");
+        assert_eq!(percent(0.625), "62%");
+        assert_eq!(percent(0.35), "35%");
+        assert_eq!(percent(0.015), "2%");
+        assert_eq!(percent(0.005), "under 1%");
     }
 }

@@ -423,11 +423,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: History) -> Element {
         best: best_accuracy(sessions),
         mastered: mastered_count(sessions),
     });
-    let pct = |accuracy: Option<f64>| {
-        accuracy.map_or("—".to_string(), |accuracy| {
-            format!("{}%", (accuracy * 100.0).round())
-        })
-    };
+    let pct = |accuracy: Option<f64>| accuracy.map_or("—".to_string(), percent);
     let avg = pct(overview.average);
     let best = pct(overview.best);
     let mastered = overview.mastered;
@@ -465,7 +461,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: History) -> Element {
                         CardHead {
                             icon: IconName::Chart,
                             title: "Accuracy over time",
-                            note: format!("{} · latest {}%", counted(sessions.len(), "session"), latest.round()),
+                            note: format!("{} · latest {latest:.0}%", counted(sessions.len(), "session")),
                             help: help::accuracy_over_time(
                                 threshold.map(|pct| pct / 100.0),
                                 sessions.len() > PER_SESSION_UP_TO,
@@ -517,7 +513,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: History) -> Element {
                                 "Scale {geometry.floor_pct}–100%"
                             }
                             if let Some(threshold) = threshold {
-                                span { class: "chip good", "Level up at {threshold.round()}%" }
+                                span { class: "chip good", "Level up at {threshold:.0}%" }
                             }
                         }
                     }

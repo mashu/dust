@@ -5,6 +5,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::audio::AUDIO_IS_SILENT;
+use crate::format::percent;
 use crate::page::{Caret, focus_by_id};
 use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::figures::History;
@@ -389,7 +390,7 @@ pub fn Home(
     let held = settings.clone();
     let acc = practice
         .last_accuracy
-        .map(|a| format!("{}%", (a * 100.0).round()))
+        .map(percent)
         .unwrap_or_else(|| "—".into());
     let session_count = practice.session_count;
 

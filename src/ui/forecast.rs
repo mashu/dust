@@ -17,7 +17,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::format::percent;
+use crate::format::{chance, percent, whole_percent};
 use crate::ui::figures::{History, span_history_of, speed_history_of, without_band};
 use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
@@ -62,13 +62,10 @@ fn standing(share: f64, aim: f64) -> &'static str {
 }
 
 /// Whether a share copied is at or over `aim`, in the whole percents the
-/// rows show: what a row and the summary both go by.
+/// rows show ([`whole_percent`], a half to the even one, as [`percent`]
+/// shows it): what a row and the summary both go by.
 fn meets(share: f64, aim: f64) -> bool {
     whole_percent(share) >= whole_percent(aim)
-}
-
-fn whole_percent(share: f64) -> f64 {
-    (share * 100.0).round()
 }
 
 /// The range a share is likely in: the middle of what its spread allows.
@@ -76,6 +73,20 @@ fn likely(share: f64, sd: f64) -> (f64, f64) {
     (
         (share - LIKELY_Z * sd).clamp(0.0, 1.0),
         (share + LIKELY_Z * sd).clamp(0.0, 1.0),
+    )
+}
+
+/// The line under a row: where the share it copies `copied` ("whole" or
+/// "right") likely is, and `drawn`, its chance of coming up `next`, which
+/// reads under one percent rather than none while there is any
+/// ([`chance`]), as What comes up next gives its chances.
+fn row_note(share: f64, sd: f64, copied: &str, drawn: f64, next: &str) -> String {
+    let (low, high) = likely(share, sd);
+    format!(
+        "likely {:.0}–{:.0}% {copied} · {} {next}",
+        low * 100.0,
+        high * 100.0,
+        chance(drawn)
     )
 }
 
@@ -253,19 +264,13 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &History) -> Ele
             div { class: "stat-rows", role: "list",
                 for row in rows.iter() {
                     {
-                        let (low, high) = likely(row.whole, row.whole_sd);
                         bar_row(
                             control_id("next-length", &row.length.to_string()),
                             row.length.to_string(),
                             row.whole,
                             row.whole_sd,
                             aim,
-                            format!(
-                                "likely {:.0}–{:.0}% whole · {} chance next",
-                                low * 100.0,
-                                high * 100.0,
-                                percent(row.drawn)
-                            ),
+                            row_note(row.whole, row.whole_sd, "whole", row.drawn, "chance next"),
                         )
                     }
                 }
@@ -371,19 +376,13 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &History) -> Element {
             div { class: "stat-rows", role: "list",
                 for row in rows.iter() {
                     {
-                        let (low, high) = likely(row.right, row.right_sd);
                         bar_row(
                             control_id("next-speed", &format!("{:.0}", row.wpm)),
                             format!("{:.0}", row.wpm),
                             row.right,
                             row.right_sd,
                             aim,
-                            format!(
-                                "likely {:.0}–{:.0}% right · {} {next}",
-                                low * 100.0,
-                                high * 100.0,
-                                percent(row.drawn)
-                            ),
+                            row_note(row.right, row.right_sd, "right", row.drawn, next),
                         )
                     }
                 }
@@ -499,6 +498,56 @@ mod tests {
         assert_eq!(
             length_reach(&[(2, 0.934)], aim, 2),
             "not yet at 2 characters"
+        );
+    }
+
+    /// A share half way between two percents is judged by the one its row
+    /// shows, the even one: 12.5% reads 12%, so it is under an aim that
+    /// reads 13%, and at an aim of 12.5%, which reads 12% too. It was
+    /// judged as 13: solid under an aim that read higher than the row, and
+    /// short of an aim that read the same.
+    #[test]
+    fn a_share_is_judged_by_the_percent_its_row_shows() {
+        assert_eq!(percent(0.125), "12%");
+        assert_eq!(percent(0.13), "13%");
+        assert!(!meets(0.125, 0.13), "a row reading 12% is under 13%");
+        assert_eq!(standing(0.125, 0.13), "building");
+        assert!(
+            meets(0.12, 0.125),
+            "a row reading 12% is at an aim reading 12%"
+        );
+        assert_eq!(standing(0.12, 0.125), "solid");
+        assert_eq!(
+            length_reach(&[(2, 0.12)], 0.125, 2),
+            "every length in your range, up to 2 characters"
+        );
+    }
+
+    /// A row's chance of coming up next reads as What comes up next reads
+    /// one, on the Group length and Speed cards alike: over nothing, under
+    /// half a percent or at half, which whole percents send to the even 0,
+    /// it reads under one percent rather than none. It read "0%".
+    #[test]
+    fn a_rare_row_reads_under_one_percent_chance_next() {
+        assert_eq!(
+            row_note(0.8, 0.05, "right", 0.004, "chance next"),
+            "likely 74–86% right · <1% chance next"
+        );
+        assert_eq!(
+            row_note(0.8, 0.05, "whole", 0.005, "chance next"),
+            "likely 74–86% whole · <1% chance next"
+        );
+        assert_eq!(
+            row_note(0.8, 0.05, "right", 0.004, "chance of the first callers"),
+            "likely 74–86% right · <1% chance of the first callers"
+        );
+        assert_eq!(
+            row_note(0.8, 0.05, "right", 0.005_000_01, "chance next"),
+            "likely 74–86% right · 1% chance next"
+        );
+        assert_eq!(
+            row_note(0.8, 0.05, "whole", 0.0, "chance next"),
+            "likely 74–86% whole · 0% chance next"
         );
     }
 }
