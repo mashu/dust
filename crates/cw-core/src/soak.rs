@@ -7,9 +7,9 @@
 //!
 //! Every property runs on one range of seeds, 2,000 from 0 unless
 //! `DUST_SOAK_FIRST` moves it and `DUST_SOAK_SEEDS` sizes it ([`SoakSeeds`]):
-//! `DUST_SOAK_FIRST=31415926535 cargo test -p cw-core soak::` runs seeds no
-//! run has seen, `DUST_SOAK_SEEDS=20000` ten times as many, and a failure
-//! comes back with the same two.
+//! `DUST_SOAK_FIRST=600000000000 cargo test -p cw-core soak::` runs seeds
+//! the floors were not measured on ([`Fewest`]), `DUST_SOAK_SEEDS=20000`
+//! ten times as many, and a failure comes back with the same two.
 
 #![cfg(test)]
 
