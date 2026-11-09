@@ -17,7 +17,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::format::percent;
+use crate::format::{percent, whole_percent};
 use crate::ui::figures::{History, span_history_of, speed_history_of, without_band};
 use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
@@ -62,13 +62,10 @@ fn standing(share: f64, aim: f64) -> &'static str {
 }
 
 /// Whether a share copied is at or over `aim`, in the whole percents the
-/// rows show: what a row and the summary both go by.
+/// rows show ([`whole_percent`], a half to the even one, as [`percent`]
+/// shows it): what a row and the summary both go by.
 fn meets(share: f64, aim: f64) -> bool {
     whole_percent(share) >= whole_percent(aim)
-}
-
-fn whole_percent(share: f64) -> f64 {
-    (share * 100.0).round()
 }
 
 /// The range a share is likely in: the middle of what its spread allows.
@@ -499,6 +496,28 @@ mod tests {
         assert_eq!(
             length_reach(&[(2, 0.934)], aim, 2),
             "not yet at 2 characters"
+        );
+    }
+
+    /// A share half way between two percents is judged by the one its row
+    /// shows, the even one: 12.5% reads 12%, so it is under an aim that
+    /// reads 13%, and at an aim of 12.5%, which reads 12% too. It was
+    /// judged as 13: solid under an aim that read higher than the row, and
+    /// short of an aim that read the same.
+    #[test]
+    fn a_share_is_judged_by_the_percent_its_row_shows() {
+        assert_eq!(percent(0.125), "12%");
+        assert_eq!(percent(0.13), "13%");
+        assert!(!meets(0.125, 0.13), "a row reading 12% is under 13%");
+        assert_eq!(standing(0.125, 0.13), "building");
+        assert!(
+            meets(0.12, 0.125),
+            "a row reading 12% is at an aim reading 12%"
+        );
+        assert_eq!(standing(0.12, 0.125), "solid");
+        assert_eq!(
+            length_reach(&[(2, 0.12)], 0.125, 2),
+            "every length in your range, up to 2 characters"
         );
     }
 }

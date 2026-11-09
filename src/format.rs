@@ -115,6 +115,14 @@ pub fn percent(share: f64) -> String {
     format!("{:.0}%", share * 100.0)
 }
 
+/// The number [`percent`] shows for `share`: 12 for 0.125, a half going to
+/// the even one. What is judged by the percent a share reads, as a row
+/// against the aim it is drawn beside, goes by this, so the judgement
+/// agrees with what is shown.
+pub fn whole_percent(share: f64) -> f64 {
+    (share * 100.0).round_ties_even()
+}
+
 /// A stretch of run time as a clock reads it: "07:42", "60:00".
 pub fn minutes_seconds(ms: u64) -> String {
     let seconds = ms / 1_000;
@@ -222,6 +230,24 @@ mod tests {
         // A share, where the Auto level's is in percent already.
         assert_eq!(percent(0.875), "88%");
         assert_eq!(auto_level::percent_to_tenth(87.5), "87.5%");
+    }
+
+    /// The number a share is judged by is the one it reads, ties and all,
+    /// across the whole range of shares.
+    #[test]
+    fn whole_percent_is_the_number_percent_shows() {
+        let ties = [0.005, 0.015, 0.125, 0.375, 0.625, 0.875];
+        let shares = (0..=100_000).map(|k| f64::from(k) / 100_000.0);
+        for share in shares.chain(ties) {
+            assert_eq!(
+                percent(share),
+                format!("{}%", whole_percent(share)),
+                "{share}"
+            );
+        }
+        assert_eq!(whole_percent(0.125), 12.0);
+        assert_eq!(whole_percent(0.625), 62.0);
+        assert_eq!(whole_percent(0.005), 0.0);
     }
 
     #[test]
