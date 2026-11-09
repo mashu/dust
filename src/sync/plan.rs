@@ -84,13 +84,6 @@ impl DriveState {
     /// latest deletion and putting back of each that either knows. Two
     /// copies of the app on one device each read packs of their own, and
     /// what both read is put together ([`super::state::SyncState::merged`]).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "two copies' states are merged from SYNC-1's next step on"
-        )
-    )]
     pub fn join(&mut self, other: &DriveState) {
         self.puts.extend(other.puts.iter().copied());
         for (&id, &at) in &other.tombs {

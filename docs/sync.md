@@ -204,6 +204,18 @@ cloud stays, and a tap on it signs in again from any screen, as a browser
 opens Google's window only for a tap. The corner is never shown over a
 session or a run, and takes no tap but that one.
 
+Two tabs or windows of the app on one device keep what sync keeps in the
+same place (`SyncState`), and each lays what it did over what the store
+holds as it writes, note by note, rather than writing its own whole over
+the other's (`SyncState::merged`): a session one of them puts back by Undo,
+a deletion the other's sync sent, a sign-in made in either, and the
+settings as the later sync left them all stay. Each sync begins from what
+the store holds, and lays what it did over what the store holds as it
+ends, so a putting back made in another tab or window meanwhile goes with
+the next sync. A note another tab or window left out goes only once the
+drive shows it sent, or no more to send, as a browser can hand one tab
+another's write late.
+
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that
 device, which keeps what sync keeps in the same place, finds it gone as it

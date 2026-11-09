@@ -665,7 +665,9 @@ is how the AGC heard it. A setting a later build added, which this one does
 not read, is kept and written back with the rest, as are the keys a later
 build added to a session, a group, its timing or a counter: a copy of this
 build left open beside a newer one never strips them. So are the keys a later
-build added to what sync keeps, as this build read them. So is a value this
+build added to what sync keeps: this build lays what it changes there over
+what the store holds as it writes, so they stay as a later build last left
+them, and one it let go stays gone. So is a value this
 build cannot read under a key it reads, a later build's choice of a filter
 shape or a contest, say (`TrainingSettings::unread_values`): read as this
 build can, it goes back as it was stored, to the file, a backup and sync

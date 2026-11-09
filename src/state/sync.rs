@@ -4,7 +4,15 @@
 //! after the history or the settings change here, and as it comes back
 //! into sight, if it has not synced for a while. Never while a session or
 //! a run is under way, which waits on nothing: once it is over.
+//!
+//! Copies of the app on one device, a browser's tabs or a computer's
+//! windows, keep what sync keeps in one place, the store's. Each lays what
+//! it did over what the store holds as it writes, rather than writing its
+//! own whole over what another kept ([`SyncState::merged`]); and each sync
+//! begins from what the store holds, and lays what it did over the store as
+//! it ends.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -103,12 +111,18 @@ pub struct SyncCtx {
     /// show: stored already.
     pub theme: Signal<Option<String>>,
     link: CopyValue<Option<Link>>,
-    /// What sync keeps, while it is on.
+    /// What sync keeps, while it is on, as this copy of the app holds it:
+    /// what the store held as this copy last read or kept it there
+    /// ([`SyncCtx::base`]), with what this copy did since laid over it.
     state: CopyValue<Option<SyncState>>,
-    /// The store holds what sync keeps as this copy of the app found it or
-    /// last kept it there: gone from the store since, it was turned off by
-    /// another copy on the same store, a tab or a window.
-    stored: CopyValue<bool>,
+    /// What the store held for sync as this copy of the app last read or
+    /// kept it there: none where the store has never taken this copy's
+    /// sync, as one just turned on here. Other copies on the same store, a
+    /// tab or a window, keep what they do there as well, each laying it
+    /// over what the store holds as it writes ([`SyncState::merged`]): gone
+    /// from the store since, sync was turned off by one of them, and
+    /// another sync there was turned on anew by one.
+    base: CopyValue<Option<SyncState>>,
     /// Which turning on of sync `state` is of: moved on as sync is turned
     /// off here, and as it is turned on, so that a sync under way across
     /// either keeps nothing of what it did.
@@ -130,11 +144,18 @@ pub struct SyncCtx {
     again: CopyValue<bool>,
     /// A sync is waiting to start ([`AppCtx::sync_soon`]).
     soon: CopyValue<bool>,
-    /// Sessions put back by hand while a sync was under way: noted once it
-    /// is over, or by the next, where that one was of a turning on of sync
-    /// gone since. Turning sync off forgets them with the rest; the sync
-    /// under way lets go of none of them all the same ([`SyncCtx::put_back`]).
+    /// Sessions put back by hand, each with when by the clock, not yet in
+    /// what sync keeps: each goes in as it is noted, stamped after what
+    /// this copy then knows of the drive ([`SyncState::stamp_change`]),
+    /// but while a sync has taken in those noted before it
+    /// ([`SyncCtx::taking_in`]), it waits for that sync's end, and is
+    /// stamped after what it read and sent. Turning sync off forgets them
+    /// with the rest; the sync under way lets go of none of them all the
+    /// same ([`SyncCtx::put_back`]).
     revived: CopyValue<BTreeMap<RecordId, u64>>,
+    /// A sync of sync as it is on now has taken in the sessions put back
+    /// before it, and has yet to keep what it comes to.
+    taking_in: CopyValue<bool>,
     /// Every session put back by hand here while a sync is under way,
     /// whatever became of sync since: that sync lets none of them go
     /// ([`AppCtx::put_back_since`]). Emptied as each begins.
@@ -174,7 +195,7 @@ impl SyncCtx {
             status: Signal::new(status),
             theme: Signal::new(None),
             link: CopyValue::new(link),
-            stored: CopyValue::new(state.is_some()),
+            base: CopyValue::new(state.clone()),
             state: CopyValue::new(state),
             epoch: CopyValue::new(0),
             found: CopyValue::new(None),
@@ -184,9 +205,57 @@ impl SyncCtx {
             again: CopyValue::new(false),
             soon: CopyValue::new(false),
             revived: CopyValue::new(BTreeMap::new()),
+            taking_in: CopyValue::new(false),
             put_back: CopyValue::new(BTreeSet::new()),
         }
     }
+}
+
+/// Why sync is off here, once another copy of the app on the same store
+/// turned it off.
+const OFF_ELSEWHERE: &str = "Sync was turned off in another tab or window of Dust.";
+/// Why sync is off here, once another copy of the app on the same store
+/// turned it on anew, and keeps its own there.
+const ANEW_ELSEWHERE: &str =
+    "Sync was turned on anew in another tab or window of Dust. Open Dust again here to sync.";
+
+/// What the store keeps for sync, as it was read just now ([`read_kept`]).
+enum Kept {
+    /// Nothing: sync was turned off, by whichever copy of the app.
+    Cleared,
+    /// It could not be read just now, as a file another program holds open
+    /// cannot be: no word of anything.
+    Unread,
+    /// What sync keeps, as this build reads it.
+    State(Box<SyncState>),
+    /// What this build does not read: a later build's, say.
+    Unknown,
+}
+
+/// What `store` keeps for sync now.
+fn read_kept(store: &dyn Store) -> Kept {
+    if store.sync_cleared() {
+        return Kept::Cleared;
+    }
+    match store.load_sync() {
+        None => Kept::Unread,
+        Some(raw) => {
+            SyncState::read(&raw).map_or(Kept::Unknown, |state| Kept::State(Box::new(state)))
+        }
+    }
+}
+
+/// Whether `kept` is a state of the sync `ours` is of: of the same device,
+/// joined to the same keyring. One turned on anew is of another device.
+fn same_sync(kept: &SyncState, ours: &SyncState) -> bool {
+    kept.device == ours.device && kept.keyring == ours.keyring
+}
+
+/// Note `id` as put back by hand at `at` in `notes`: at the later, where it
+/// was noted already.
+fn note(notes: &mut BTreeMap<RecordId, u64>, id: RecordId, at: u64) {
+    let noted = notes.entry(id).or_insert(at);
+    *noted = (*noted).max(at);
 }
 
 /// What the card says of a passphrase that will not do for a new sync, if
@@ -233,91 +302,215 @@ impl AppCtx {
         }
     }
 
-    /// Keep what sync keeps, as it is now: told of where it cannot be.
-    /// Where another copy of the app turned sync off since, or on anew,
-    /// nothing is kept, and sync is off here ([`Self::take_up_sync_off`]).
+    /// Keep what sync keeps, as this copy holds it now, laid over what the
+    /// store holds, which another copy of the app on the same store, a tab
+    /// or a window, may have kept since this one last read or kept it: what
+    /// each did stays ([`SyncState::merged`]). The sessions put back by hand
+    /// noted meanwhile go in with it ([`SyncCtx::revived`]), unless a sync
+    /// has taken in those noted before it, whose end keeps them. Told of
+    /// where it cannot be kept. Where another copy turned sync off since, or
+    /// on anew, nothing is kept, and sync is off here
+    /// ([`Self::take_up_kept`]).
     fn keep_sync_state(self) {
-        if self.take_up_sync_off() {
+        let Some(ours) = self.sync.state.peek().clone() else {
+            return;
+        };
+        let kept = read_kept(&*self.app().store);
+        if let Some(why) = self.changed_elsewhere(&kept) {
+            self.take_up_change_elsewhere(why);
             return;
         }
-        let written = self.sync.state.peek().as_ref().and_then(SyncState::written);
-        if let Some(written) = written {
-            match self.app().store.save_sync(Some(&written)) {
-                Ok(()) => put(self.sync.stored, true),
-                Err(why) => self.toasts.show(format!(
-                    "What sync keeps could not be saved: {}.",
-                    why.trim_end_matches('.')
-                )),
+        let base = self.sync.base.peek().clone();
+        let (mut merged, theirs) = match kept {
+            Kept::State(theirs) => (ours.merged(base.as_ref(), &theirs), Some(*theirs)),
+            // Nothing this copy can lay what it holds over: kept whole, as
+            // it was before copies merged.
+            Kept::Cleared | Kept::Unread | Kept::Unknown => (ours, None),
+        };
+        if !*self.sync.taking_in.peek() {
+            for (id, at) in take(self.sync.revived) {
+                let at = merged.stamp_change(id, at);
+                note(&mut merged.revived, id, at);
             }
         }
+        self.write_kept(merged, theirs);
     }
 
-    /// Keep `state`, what the sync under way of the turning on of sync
+    /// Write `merged` for sync, laid over `theirs`, what the store held of
+    /// this sync as it was read just before: once written, it is what this
+    /// copy holds and what the store holds. Where it could not be, it is
+    /// what this copy holds all the same, `theirs` what the store holds, so
+    /// that the next write lays what this copy did over the store again;
+    /// and the user is told.
+    fn write_kept(self, merged: SyncState, theirs: Option<SyncState>) {
+        let saved = match merged.written() {
+            Some(written) => self.app().store.save_sync(Some(&written)),
+            None => Err("it could not be written out".into()),
+        };
+        match saved {
+            Ok(()) => put(self.sync.base, Some(merged.clone())),
+            Err(why) => {
+                if let Some(theirs) = theirs.filter(|theirs| same_sync(theirs, &merged)) {
+                    put(self.sync.base, Some(theirs));
+                }
+                self.toasts.show(format!(
+                    "What sync keeps could not be saved: {}.",
+                    why.trim_end_matches('.')
+                ));
+            }
+        }
+        put(self.sync.state, Some(merged));
+    }
+
+    /// Keep `sending`, what the sync under way of the turning on of sync
     /// `epoch` has come to, as it sends deletions by hand: with what it
     /// took into the store, and the pack it is sending, which the drive may
     /// make though the app stops before the sync ends
-    /// ([`SyncState::unanswered`]). The sign-in kept is the app's, as the
-    /// sync's end keeps it. Nothing is kept where sync was turned off or on
-    /// anew since, here or in another copy of the app, which the sync's end
-    /// takes up; nor is a failing told of, which the sync's end tells.
-    fn keep_sync_under_way(self, epoch: u64, state: &SyncState) {
+    /// ([`SyncState::unanswered`]). It is laid over what the store holds,
+    /// as against `base`, what the sync began from or last kept this way,
+    /// which becomes `sending` once kept: the sync's end lays what it does
+    /// after over the store in turn ([`Self::keep_synced`]). The sign-in
+    /// kept is the store's, or one made here since the sync began. Nothing
+    /// is kept where sync was turned off or on anew since, here or in
+    /// another copy of the app, which the sync's end takes up; nor is a
+    /// failing told of, which the sync's end tells.
+    fn keep_sync_under_way(self, epoch: u64, sending: &SyncState, base: &RefCell<SyncState>) {
         if *self.sync.epoch.peek() != epoch {
             return;
         }
-        let sign_in = match self.sync.state.peek().as_ref() {
-            Some(here)
-                if !*self.sync.stored.peek() || self.sync_changed_elsewhere(here).is_none() =>
-            {
-                here.sign_in.clone()
-            }
-            _ => return,
+        let Some(here) = self.sync.state.peek().clone() else {
+            return;
         };
-        let mut state = state.clone();
-        state.sign_in = sign_in;
-        if let Some(written) = state.written()
-            && self.app().store.save_sync(Some(&written)).is_ok()
+        let store = self.app().store;
+        let kept = read_kept(&*store);
+        if self.changed_elsewhere(&kept).is_some() {
+            return;
+        }
+        // A sync the store never took is laid over nothing of another's.
+        let taken = self.sync.base.peek().is_some();
+        let mut merged = match &kept {
+            Kept::State(theirs) => sending.merged(taken.then_some(&*base.borrow()), theirs),
+            Kept::Cleared | Kept::Unread | Kept::Unknown => sending.clone(),
+        };
+        if here.sign_in != base.borrow().sign_in {
+            merged.sign_in = here.sign_in;
+        }
+        if let Some(written) = merged.written()
+            && store.save_sync(Some(&written)).is_ok()
         {
-            put(self.sync.stored, true);
+            *base.borrow_mut() = sending.clone();
         }
     }
 
-    /// Turn sync off here, saying why, where another copy of the app on the
-    /// same store, a tab or a window, has turned it off since this one
-    /// found or last kept what sync keeps there, or turned it on anew and
-    /// kept its own; and say whether it was. Each copy keeps the whole of
-    /// what sync keeps, so one keeping it again would turn sync back on in
-    /// the store for every copy, or undo the sync turned on anew. What the
-    /// store holds is left as it is: nothing, or the other copy's.
-    fn take_up_sync_off(self) -> bool {
-        let why = match self.sync.state.peek().as_ref() {
-            Some(here) if *self.sync.stored.peek() => self.sync_changed_elsewhere(here),
-            _ => None,
+    /// Keep `synced`, what the sync of the turning on of sync `epoch` came
+    /// to, as it ends, laid over what the store holds now, as against
+    /// `base`, what it began from or last kept as it sent deletions by hand
+    /// ([`Self::keep_sync_under_way`]): what another copy of the app on the
+    /// same store kept meanwhile stays, and what this sync did is kept over
+    /// it ([`SyncState::merged`]). A session put back by hand meanwhile,
+    /// here or in another copy, is stamped again after what this sync read
+    /// and sent ([`SyncState::stamp_change`]), as it was put back after the
+    /// sync began. The sign-in is no sync's to keep: the store's, or one
+    /// made here meanwhile. Nothing is kept where sync was turned off or on
+    /// anew meanwhile, here or in another copy: off here as well, then.
+    fn keep_synced(self, epoch: u64, base: &SyncState, synced: SyncState) {
+        put(self.sync.taking_in, false);
+        if *self.sync.epoch.peek() != epoch {
+            return;
+        }
+        let kept = read_kept(&*self.app().store);
+        if let Some(why) = self.changed_elsewhere(&kept) {
+            self.take_up_change_elsewhere(why);
+            return;
+        }
+        // A sync the store never took is laid over nothing of another's:
+        // kept whole over another sync the store holds, as the one last
+        // turned on here.
+        let taken = self.sync.base.peek().is_some();
+        let (mut merged, theirs) = match kept {
+            Kept::State(theirs) => (synced.merged(taken.then_some(base), &theirs), Some(*theirs)),
+            Kept::Cleared | Kept::Unread | Kept::Unknown => (synced, None),
         };
-        let Some(why) = why else {
+        let sign_in = self
+            .sync
+            .state
+            .peek()
+            .as_ref()
+            .and_then(|here| here.sign_in.clone());
+        if sign_in != base.sign_in {
+            merged.sign_in = sign_in;
+        }
+        // Noted in another copy since: where it still stands.
+        let elsewhere: Vec<(RecordId, u64)> = theirs
+            .iter()
+            .flat_map(|theirs| &theirs.revived)
+            .filter(|&(id, &at)| base.revived.get(id).is_none_or(|&was| at > was))
+            .filter(|(id, _)| merged.revived.contains_key(id))
+            .map(|(&id, &at)| (id, at))
+            .collect();
+        for (id, at) in elsewhere.into_iter().chain(take(self.sync.revived)) {
+            let at = merged.stamp_change(id, at);
+            note(&mut merged.revived, id, at);
+        }
+        self.write_kept(merged, theirs);
+    }
+
+    /// Take up what another copy of the app on the same store, a tab or a
+    /// window, kept for sync since this one last read or kept it there,
+    /// laid under what this copy did since ([`SyncState::merged`]); or,
+    /// where it turned sync off since, or on anew and kept its own, turn
+    /// sync off here as well, saying why ([`Self::changed_elsewhere`]). Says
+    /// whether sync is on here still.
+    fn take_up_kept(self) -> bool {
+        if self.sync.state.peek().is_none() {
             return false;
-        };
+        }
+        let kept = read_kept(&*self.app().store);
+        if let Some(why) = self.changed_elsewhere(&kept) {
+            self.take_up_change_elsewhere(why);
+            return false;
+        }
+        let base = self.sync.base.peek().clone();
+        if let (Kept::State(theirs), Some(base)) = (kept, base)
+            && *theirs != base
+        {
+            let merged = self
+                .sync
+                .state
+                .peek()
+                .as_ref()
+                .map(|ours| ours.merged(Some(&base), &theirs));
+            put(self.sync.state, merged);
+            put(self.sync.base, Some(*theirs));
+        }
+        true
+    }
+
+    /// Turn sync off here, saying `why`: another copy of the app on the
+    /// same store turned it off, or on anew. What the store holds is left
+    /// as it is: nothing, or the other copy's.
+    fn take_up_change_elsewhere(self, why: &'static str) {
         self.forget_sync_here();
         self.set_sync_status(SyncStatus::Off {
             problem: Some(why.into()),
         });
-        true
     }
 
-    /// Why sync is no longer as `here` keeps it, where another copy of the
-    /// app has changed it in the store: turned off, or turned on anew,
-    /// which keeps another device and keyring. A store that could not be
-    /// read is no word of either.
-    fn sync_changed_elsewhere(self, here: &SyncState) -> Option<&'static str> {
-        let store = self.app().store;
-        if store.sync_cleared() {
-            return Some("Sync was turned off in another tab or window of Dust.");
+    /// Why sync is no longer as this copy of the app holds it, where
+    /// another copy has changed it in the store, `kept`, since this one last
+    /// read or kept its own there: turned off, or turned on anew, which
+    /// keeps another device and keyring, or what this build does not read.
+    /// A store that could not be read is no word of either; nor is anything
+    /// the store holds while it has never taken this copy's.
+    fn changed_elsewhere(self, kept: &Kept) -> Option<&'static str> {
+        let base = self.sync.base.peek();
+        let base = base.as_ref()?;
+        match kept {
+            Kept::Unread => None,
+            Kept::State(theirs) if same_sync(theirs, base) => None,
+            Kept::Cleared => Some(OFF_ELSEWHERE),
+            Kept::State(_) | Kept::Unknown => Some(ANEW_ELSEWHERE),
         }
-        let kept = store.load_sync()?;
-        let same = SyncState::read(&kept)
-            .is_some_and(|kept| kept.device == here.device && kept.keyring == here.keyring);
-        (!same).then_some(
-            "Sync was turned on anew in another tab or window of Dust. Open Dust again here to sync.",
-        )
     }
 
     /// Ask the user to sign in to Google: to turn sync on, or to sync again
@@ -431,6 +624,9 @@ impl AppCtx {
                     };
                     put(self.sync.found, None);
                     self.next_sync_epoch();
+                    // The store has never taken this sync: kept whole, over
+                    // whatever another copy keeps there.
+                    put(self.sync.base, None);
                     put(
                         self.sync.state,
                         Some(SyncState::new(
@@ -521,15 +717,30 @@ impl AppCtx {
         put(self.sync.running, true);
         self.change_on_status(|_, syncing, _, _| *syncing = true);
         spawn_forever(async move {
-            self.take_up_sync_off();
+            // Begun from what the store holds: what another copy of the app
+            // kept since, laid under what this one holds; unless sync was
+            // turned off before it began, here or in another copy.
+            if !self.take_up_kept() {
+                self.sync_over();
+                return;
+            }
             let epoch = *self.sync.epoch.peek();
-            // Turned off before it began, here or in another copy.
             let Some(mut state) = self.sync.state.peek().clone() else {
                 self.sync_over();
                 return;
             };
-            state.revived.extend(take(self.sync.revived));
+            // Put back by hand before it, each stamped after what this copy
+            // knows of the drive: those put back from here on wait for its
+            // end.
+            put(self.sync.taking_in, true);
+            for (id, at) in take(self.sync.revived) {
+                let at = state.stamp_change(id, at);
+                note(&mut state.revived, id, at);
+            }
             put(self.sync.put_back, BTreeSet::new());
+            // What it began from, or last kept as it went: what it does is
+            // laid over the store as against it.
+            let base = RefCell::new(state.clone());
             let here = self.settings.peek().clone().clamp();
             let store = self.app().store;
             let remote = WhileCurrent {
@@ -539,20 +750,23 @@ impl AppCtx {
             // Put back by hand since it took the notes in: none let go.
             let since = || self.put_back_since();
             // Kept as it sends deletions by hand, should the app stop.
-            let keep = |sending: &SyncState| self.keep_sync_under_way(epoch, sending);
+            let keep = |sending: &SyncState| self.keep_sync_under_way(epoch, sending, &base);
             let synced =
                 sync_once_with(&*store, &remote, &mut state, &here, now_ms(), &since, &keep).await;
-            self.take_up_sync_off();
             if *self.sync.epoch.peek() != epoch {
                 // Sync was turned off meanwhile, here or in another copy,
                 // or turned on anew: what this sync stored is taken up,
                 // and none of what it would keep is kept. What was put
-                // back by hand since is sync's as it is now, and waits for
-                // its next sync. One stopped as it asked the drive for
-                // more may have stored what it took before then.
+                // back by hand since is sync's as it is now, and is kept
+                // with it, where it is on. One stopped as it asked the
+                // drive for more may have stored what it took before then.
                 match &synced {
                     Ok(synced) => self.take_up_synced(synced),
                     Err(_) => self.take_up_store(),
+                }
+                put(self.sync.taking_in, false);
+                if !self.sync.revived.peek().is_empty() {
+                    self.keep_sync_state();
                 }
                 self.sync_over();
                 return;
@@ -562,20 +776,7 @@ impl AppCtx {
             if synced.is_err() {
                 self.take_up_store();
             }
-            // Put back by hand meanwhile: noted with the rest, each stamped
-            // again after what this sync read of it and sent, the deletion
-            // by hand it put back among them.
-            for (id, at) in take(self.sync.revived) {
-                let at = state.stamp_change(id, at);
-                state.revived.insert(id, at);
-            }
-            // The sign-in is no sync's to keep: one made meanwhile stays.
-            state.sign_in = self
-                .sync
-                .state
-                .peek()
-                .as_ref()
-                .and_then(|kept| kept.sign_in.clone());
+            let base = base.into_inner();
             match synced {
                 Err(failed) if failed.ends_sync() => {
                     self.sync_forget();
@@ -584,8 +785,7 @@ impl AppCtx {
                     });
                 }
                 Err(failed) => {
-                    put(self.sync.state, Some(state));
-                    self.keep_sync_state();
+                    self.keep_synced(epoch, &base, state);
                     let signed_out = failed == SyncFailed::Remote(RemoteError::SignIn);
                     self.change_on_status(|_, syncing, problem, needs| {
                         *syncing = false;
@@ -594,10 +794,14 @@ impl AppCtx {
                     });
                 }
                 Ok(synced) => {
-                    let last = state.last;
-                    put(self.sync.state, Some(state));
-                    self.keep_sync_state();
+                    self.keep_synced(epoch, &base, state);
                     self.take_up_synced(&synced);
+                    // Turned off, or on anew, in another copy meanwhile:
+                    // off here as well, its settings left as they are.
+                    let Some(last) = self.sync.state.peek().as_ref().map(|state| state.last) else {
+                        self.sync_over();
+                        return;
+                    };
                     let unreadable = passed_over(&synced);
                     // What the sync took is laid over the settings as they
                     // are now, not as they were as it began: one changed
@@ -707,10 +911,11 @@ impl AppCtx {
     /// The sessions `ids` were put back by hand, after a deletion, by Undo
     /// or a restore: the drive is told, so that a deletion it already holds
     /// does not take them away again. Each is put back after the deletion
-    /// of it this device knows of ([`SyncState::stamp_change`]); while a
-    /// sync is under way, after what that sync read and sent as well, as
-    /// it ends. A sync under way lets none of them go, though sync is off
-    /// by then, or is turned off before that sync goes on
+    /// of it this device knows of as it is kept ([`SyncState::stamp_change`]),
+    /// at once, with what another copy of the app kept meanwhile; while a
+    /// sync is under way, as it ends, after what that sync read and sent as
+    /// well. A sync under way lets none of them go, though sync is off by
+    /// then, or is turned off before that sync goes on
     /// ([`SyncCtx::put_back`]).
     pub fn sync_revived(self, ids: impl IntoIterator<Item = RecordId>) {
         let ids: Vec<RecordId> = ids.into_iter().collect();
@@ -718,22 +923,18 @@ impl AppCtx {
             let mut put_back = self.sync.put_back;
             put_back.write().extend(ids.iter().copied());
         }
+        if self.sync.state.peek().is_none() {
+            return;
+        }
         let now = now_ms();
-        let revived: Vec<(RecordId, u64)> = match self.sync.state.peek().as_ref() {
-            Some(state) => ids
-                .into_iter()
-                .map(|id| (id, state.stamp_change(id, now)))
-                .collect(),
-            None => return,
-        };
-        if *self.sync.running.peek() {
+        {
             let mut noted = self.sync.revived;
-            noted.write().extend(revived);
-        } else {
-            let mut state = self.sync.state;
-            if let Some(state) = state.write().as_mut() {
-                state.revived.extend(revived);
+            let mut noted = noted.write();
+            for id in ids {
+                note(&mut noted, id, now);
             }
+        }
+        if !*self.sync.taking_in.peek() {
             self.keep_sync_state();
         }
         self.sync_soon();
@@ -758,9 +959,12 @@ impl AppCtx {
         if !and_copy {
             // Turned off, or on anew, in another copy of the app since: off
             // here as well, saying so, the store left as that copy left it.
-            if !self.take_up_sync_off() {
-                self.sync_forget();
-                self.set_sync_status(SyncStatus::Off { problem: None });
+            match self.changed_elsewhere(&read_kept(&*self.app().store)) {
+                Some(why) => self.take_up_change_elsewhere(why),
+                None => {
+                    self.sync_forget();
+                    self.set_sync_status(SyncStatus::Off { problem: None });
+                }
             }
             return;
         }
@@ -799,23 +1003,24 @@ impl AppCtx {
     }
 
     /// Forget everything sync keeps here, and what it keeps in the store,
-    /// where the store may hold it still: not where another copy of the app
-    /// on the same store has turned sync off since, or on anew and kept its
-    /// own there, which stays ([`Self::sync_changed_elsewhere`]). A copy
-    /// looks for that as it keeps what sync keeps and as each sync ends, but
-    /// only once the store has taken its own ([`Self::take_up_sync_off`]).
+    /// where the store may hold it still: this copy's sync, or what could
+    /// not be read just now. Not where another copy of the app on the same
+    /// store has turned sync off since, or on anew and kept its own there,
+    /// which stays, whether this copy took that up already or not
+    /// ([`Self::changed_elsewhere`]).
     fn sync_forget(self) {
-        let ours = self
-            .sync
-            .state
-            .peek()
-            .as_ref()
-            .is_some_and(|here| self.sync_changed_elsewhere(here).is_none());
+        let ours = self.sync.state.peek().clone();
         self.forget_sync_here();
-        if !ours {
+        let Some(ours) = ours else {
             return;
-        }
-        if let Err(why) = self.app().store.save_sync(None) {
+        };
+        let store = self.app().store;
+        let still_ours = match read_kept(&*store) {
+            Kept::Unread => true,
+            Kept::State(kept) => same_sync(&kept, &ours),
+            Kept::Cleared | Kept::Unknown => false,
+        };
+        if still_ours && let Err(why) = store.save_sync(None) {
             self.toasts.show(format!(
                 "What sync kept could not be cleared: {}.",
                 why.trim_end_matches('.')
@@ -834,9 +1039,10 @@ impl AppCtx {
         self.give_up_sign_ins();
         self.next_sync_epoch();
         put(self.sync.state, None);
-        put(self.sync.stored, false);
+        put(self.sync.base, None);
         put(self.sync.found, None);
         put(self.sync.revived, BTreeMap::new());
+        put(self.sync.taking_in, false);
     }
 
     /// Move on to the next turning on of sync: a sync under way keeps
