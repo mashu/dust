@@ -194,10 +194,10 @@ pub(super) fn free_name(folder: &Path, name: &str) -> String {
 ///
 /// A filesystem that flushes no folder at all, as a virtual machine's
 /// shared folder or some network mounts flush none, says so (`EINVAL`,
-/// `ENOTSUP`): the rename is then as durable as it can be made there, and
-/// the write stands, as SQLite and PostgreSQL take it. Any other failure is
-/// one. A folder is flushed as a file is ([`flush`]): on an Apple system,
-/// plainly where its volume refuses a flush in full.
+/// `ENOTSUP`, `ENOTTY`): the rename is then as durable as it can be made
+/// there, and the write stands, as SQLite and PostgreSQL take it. Any other
+/// failure is one. A folder is flushed as a file is ([`flush`]): on an
+/// Apple system, plainly where its volume refuses a flush in full.
 #[cfg(unix)]
 pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
     match flush(&fs::File::open(dir)?) {
@@ -209,13 +209,16 @@ pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
 /// Whether `err`, from flushing a file or a folder, says its filesystem
 /// does not make that flush at all: `EINVAL`, or `ENOTSUP` (with
 /// `EOPNOTSUPP`, where that is another number), which std gives no kind of
-/// its own.
+/// its own; or `ENOTTY`, a request the filesystem does not know, which an
+/// Apple system gives for one with no flush in full of its own, as a WebDAV
+/// or some FUSE mounts may have none. None of them says anything was lost,
+/// as `EIO` does.
 #[cfg(unix)]
 fn refuses_flush(err: &io::Error) -> bool {
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    const NOT_SUPPORTED: &[i32] = &[95];
+    const NOT_SUPPORTED: &[i32] = &[95, 25];
     #[cfg(target_vendor = "apple")]
-    const NOT_SUPPORTED: &[i32] = &[45, 102];
+    const NOT_SUPPORTED: &[i32] = &[45, 102, 25];
     #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
     const NOT_SUPPORTED: &[i32] = &[];
     err.kind() == io::ErrorKind::InvalidInput
@@ -236,8 +239,9 @@ mod tests {
     use crate::persist::TempDir;
 
     /// A volume that refuses a flush made in full, as some SMB and NFS
-    /// shares refuse Apple's `F_FULLFSYNC`, has the file flushed as plain
-    /// `fsync` flushes it: before, every write made on such a volume failed.
+    /// shares refuse Apple's `F_FULLFSYNC` and a filesystem that does not
+    /// know it answers `ENOTTY`, has the file flushed as plain `fsync`
+    /// flushes it: before, every write made on such a volume failed.
     /// Any other failure is the write's, a plain flush that fails is too,
     /// and a flush made in full needs no other.
     #[test]
@@ -249,7 +253,7 @@ mod tests {
         };
         let code = |said: io::Result<()>| said.map_err(|err| err.raw_os_error());
         let eio = || io::Error::from_raw_os_error(5);
-        for (refusal, refused) in [(22, "EINVAL"), (95, "ENOTSUP")] {
+        for (refusal, refused) in [(22, "EINVAL"), (95, "ENOTSUP"), (25, "ENOTTY")] {
             made.set(0);
             let full = Err(io::Error::from_raw_os_error(refusal));
             assert!(
