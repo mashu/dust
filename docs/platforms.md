@@ -904,9 +904,13 @@ card:
   room left for the site than the file holds, the card says so first, as a
   restore that does not fit stores none of it. A session or a setting the
   file can no longer read is left out, as when the store is read; so is a
-  session past three times the file's length in memory, in all, which no
-  history Dust stored reaches, only a file made up to swell far past its
-  length. The message says how many sessions were left out. A backup
+  session past the memory the sessions read are held to, in all: about
+  three times the file's length, or 16 MB for a short one, for what this
+  build reads of them, and beside it 256 MB for what they hold that it
+  does not read, a later build's keys, and 300 MB for contest runs' logs,
+  each counted as the memory it takes. No history Dust stored reaches
+  them, only a file made up to swell far past its length. The message
+  says how many sessions were left out. A backup
   saved by any build restores on any other: the web app's on a phone, a
   phone's on a computer. A build from before records takes one of up to
   50 MB, and keeps the newest 500 sessions of it.
