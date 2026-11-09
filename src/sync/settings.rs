@@ -541,6 +541,45 @@ mod tests {
         assert!(taken(&merged, &after).is_empty(), "taken up once");
     }
 
+    /// A value a later build stamped that this build cannot read is taken
+    /// up as it is, and sent back as it is at its own stamp, never as this
+    /// build reads it: so it stays the later build's on every device until
+    /// it is changed here, when the change wins. This build's reading of it
+    /// used to go back at the later build's stamp and win the tie by its
+    /// text, `sharp` over `notch`, on every device.
+    #[test]
+    fn a_setting_this_build_cannot_read_is_not_stamped_as_changed() {
+        let mut later_keys = keys_of(&TrainingSettings::default());
+        later_keys.insert("filterShape".into(), "notch".into());
+        let later = stamp(&later_keys, &Map::new(), &BTreeMap::new(), 50);
+        // Joining: what the drive holds is taken up here.
+        let here = using(TrainingSettings::default());
+        let merged = merge([&later]);
+        let now = here.with(&taken(&merged, &here));
+        let (base, stamps) = (now.keys(), stamps_of(&merged));
+
+        // Its next sync, with nothing changed here.
+        let mine = stamp(&now.keys(), &base, &stamps, 100);
+        assert_eq!(mine["filterShape"].at, 50, "not stamped as changed");
+        let merged = merge([&later, &mine]);
+        assert_eq!(merged["filterShape"].v, "notch");
+        assert_eq!(merged, merge([&mine, &later]));
+        let after = now.with(&taken(&merged, &now));
+        assert_eq!(
+            after.keys()["filterShape"],
+            "notch",
+            "still the later build's"
+        );
+
+        // Changed here, the change wins.
+        let mut changed = now;
+        changed.settings.band.filter_shape = cw_core::FilterShape::Soft;
+        changed.settings = changed.settings.clamp();
+        let mine = stamp(&changed.keys(), &base, &stamps, 200);
+        assert_eq!(mine["filterShape"].at, 200);
+        assert_eq!(merge([&later, &mine])["filterShape"].v, "soft");
+    }
+
     /// Settings out of bounds come back clamped, as a store reads them.
     #[test]
     fn settings_from_the_drive_are_clamped() {

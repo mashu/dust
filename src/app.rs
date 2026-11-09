@@ -684,6 +684,42 @@ mod ui_tests {
         });
     }
 
+    /// What a later build chose that this build cannot read goes back to
+    /// the store as it was stored, through every edit of another setting,
+    /// until it is changed here; from then on it is this build's choice,
+    /// though that is chosen back. It used to go back as this build read
+    /// it with the first edit of anything.
+    #[test]
+    fn a_choice_this_build_cannot_read_is_stored_back_until_changed_here() {
+        run(|| async {
+            let mut save = serde_json::to_value(test_settings()).expect("JSON");
+            save["filterShape"] = "notch".into();
+            save["agcDecay"] = "medium".into();
+            let later = crate::persist::settings_from(&save.to_string()).expect("settings");
+            let (mut ui, _recorder) = Ui::app_with_settings(later);
+            let written = |settings: &TrainingSettings| {
+                let json = serde_json::to_value(settings).expect("JSON");
+                (json["filterShape"].clone(), json["agcDecay"].clone())
+            };
+            ui.click("nav-settings");
+            ui.open_disclosures();
+            ui.type_into("slider-rise-time", "12");
+            let stored = ui.stored_settings().await;
+            assert_eq!(stored.band.steepness, 12.0, "the edit");
+            assert_eq!(written(&stored), ("notch".into(), "medium".into()));
+
+            ui.click("seg-filter-soft");
+            let stored = ui.stored_settings().await;
+            assert_eq!(written(&stored), ("soft".into(), "medium".into()));
+            ui.click("seg-filter-sharp");
+            let stored = ui.stored_settings().await;
+            assert_eq!(written(&stored), ("sharp".into(), "medium".into()));
+            ui.click("nav-practice");
+            let live = ui.with_app(|ctx| ctx.settings.peek().clone());
+            assert_eq!(written(&live), ("sharp".into(), "medium".into()));
+        });
+    }
+
     /// Another copy of the app on the same store, a second tab or window,
     /// stores changes of its own. This copy, left open on the settings it
     /// had, keeps them when it stores a change of its own rather than

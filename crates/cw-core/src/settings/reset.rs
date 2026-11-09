@@ -27,9 +27,12 @@ impl TrainingSettings {
 
     /// Put one card back as it was in `before`, where a reset of it left
     /// it: what Undo does after [`Self::reset_section`]. Every other card,
-    /// changed since or not, is left as it is now.
+    /// changed since or not, is left as it is now. A later build's choice
+    /// the reset let go of comes back with its setting
+    /// ([`Self::unread_values`]).
     pub fn restore_section(&mut self, which: SettingsSection, before: &Self) {
         self.put_section(which, before);
+        self.take_back_values_of(before);
     }
 
     /// What a reset puts the cards back to: the settings as they ship, but
