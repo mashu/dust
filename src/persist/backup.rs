@@ -68,6 +68,19 @@ const UNREAD_MAX_BYTES: usize = 16_000_000;
 /// ([`each_session`]).
 const RUN_LOGS_MAX_BYTES: usize = 16_000_000;
 
+/// How much memory what this build reads of the sessions in a backup may
+/// take, in all, for each byte of the list that holds them
+/// ([`typed_bytes`]): three. Sessions as Dust has stored them come to at
+/// most two, in the first builds' shape, with no character's times kept
+/// and keys no build reads any more, and to one or one and a half as this
+/// build stores them. A list of nothing but bare timings,
+/// `{"timeToCompleteMs":0}`, comes to five and a half, and is held to this.
+const TYPED_PER_BYTE: usize = 3;
+
+/// The same, in all, for a list so short that its bytes allow less:
+/// sixteen megabytes.
+const TYPED_FLOOR: usize = 16_000_000;
+
 /// The longest the settings in a backup may be and still be read: a
 /// megabyte, far more than settings come to, a word list of two thousand
 /// words among them. Longer, they are read as settings that do not read.
@@ -513,12 +526,23 @@ fn settings_in(raw: &str) -> TrainingSettings {
 /// not counted at all, one of two hundred and fifty runs, each with a log
 /// of nearly four megabytes, kept as much.
 ///
+/// And what this build reads of them is kept only up to
+/// [`TYPED_PER_BYTE`] times the bytes of the list, or [`TYPED_FLOOR`] for a
+/// short one: a session that would take it past that is left out too.
+/// Sessions as Dust has stored them come to well under that
+/// ([`typed_bytes`]), but a list of a gigabyte of bare timings,
+/// `{"timeToCompleteMs":0}`, each twenty-three bytes and a hundred and
+/// twenty-eight in memory, was read into some five and a half gigabytes.
+///
 /// None where `raw` is no list. Beside them, how many of its elements were
 /// left out.
 fn each_session(raw: &str) -> Option<(Vec<SessionResult>, usize)> {
     use serde::Deserializer as _;
+    let typed_most = raw.len().saturating_mul(TYPED_PER_BYTE).max(TYPED_FLOOR);
     let mut list = serde_json::Deserializer::from_str(raw);
-    let read = (&mut list).deserialize_seq(EachSession).ok()?;
+    let read = (&mut list)
+        .deserialize_seq(EachSession { typed_most })
+        .ok()?;
     list.end().ok()?;
     Some(read)
 }
@@ -527,8 +551,11 @@ fn each_session(raw: &str) -> Option<(Vec<SessionResult>, usize)> {
 /// so that a list holds no more memory than the sessions in it take: a
 /// file of a gigabyte of nothing but `0,` was a list of five hundred
 /// million elements held at once, some eight gigabytes, and the app was
-/// stopped for want of them.
-struct EachSession;
+/// stopped for want of them. What they take of what this build reads is
+/// kept to `typed_most` ([`typed_bytes`]).
+struct EachSession {
+    typed_most: usize,
+}
 
 impl<'de> serde::de::Visitor<'de> for EachSession {
     type Value = (Vec<SessionResult>, usize);
@@ -540,20 +567,31 @@ impl<'de> serde::de::Visitor<'de> for EachSession {
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut list: A) -> Result<Self::Value, A::Error> {
         let (mut sessions, mut left_out) = (Vec::new(), 0);
         // What is kept so far of what they hold that this build does not
-        // read, and of their runs' logs, as JSON.
-        let (mut unread, mut logs) = (0, 0);
+        // read, and of their runs' logs, as JSON; and of what it reads, in
+        // memory.
+        let (mut unread, mut logs, mut typed) = (0, 0, 0);
         while let Some(session) = list.next_element::<&RawValue>()? {
             let session = session.get();
             let read = (session.len() <= SESSION_MAX_BYTES)
                 .then(|| serde_json::from_str::<SessionResult>(session).ok())
                 .flatten();
-            let read = read.map(|session| (unread_bytes(&session), log_bytes(&session), session));
+            let read = read.map(|session| {
+                let sizes = (
+                    unread_bytes(&session),
+                    log_bytes(&session),
+                    typed_bytes(&session),
+                );
+                (sizes, session)
+            });
             match read {
-                Some((more, log, session))
-                    if unread + more <= UNREAD_MAX_BYTES && logs + log <= RUN_LOGS_MAX_BYTES =>
+                Some(((more, log, size), session))
+                    if unread + more <= UNREAD_MAX_BYTES
+                        && logs + log <= RUN_LOGS_MAX_BYTES
+                        && typed + size <= self.typed_most =>
                 {
                     unread += more;
                     logs += log;
+                    typed += size;
                     sessions.push(scored(session));
                 }
                 _ => left_out += 1,
@@ -581,6 +619,44 @@ fn unread_bytes(session: &SessionResult) -> usize {
     }
     counted.0
 }
+
+/// About how much memory what this build reads of `session` takes: all of
+/// it but what it holds that this build does not read ([`unread_bytes`])
+/// and a run's log ([`log_bytes`]), bounded apart. Each part counts as
+/// large as its type, with the room it holds for its lists and text, and
+/// an entry of the tally as [`TALLY_ENTRY_BYTES`].
+fn typed_bytes(session: &SessionResult) -> usize {
+    use std::mem::size_of;
+    let groups: usize = session
+        .groups
+        .iter()
+        .map(|group| group.sent.capacity() + group.received.capacity())
+        .sum();
+    let timings: usize = session
+        .group_timings
+        .iter()
+        .filter_map(|timing| timing.char_times.as_ref())
+        .map(|times| {
+            times.ends.capacity() * size_of::<u32>()
+                + times.keys.capacity() * size_of::<Option<u32>>()
+                + times.corrected.capacity() * size_of::<usize>()
+        })
+        .sum();
+    let tally = &session.tally;
+    size_of::<SessionResult>()
+        + session.date.capacity()
+        + session.alphabet_fingerprint.capacity()
+        + session.groups.capacity() * size_of::<cw_core::GroupResult>()
+        + groups
+        + session.group_timings.capacity() * size_of::<cw_core::SessionTiming>()
+        + timings
+        + (tally.sent.len() + tally.inserted.len()) * TALLY_ENTRY_BYTES
+}
+
+/// How much memory an entry of a session's tally takes, a letter's and an
+/// inserted character's alike: its key and its counts, and its share of
+/// the map's nodes, generously.
+const TALLY_ENTRY_BYTES: usize = 32;
 
 /// How long the log of `session`, a contest run, is, as JSON: none where it
 /// keeps none.
@@ -1347,6 +1423,128 @@ mod tests {
         let backup = read_backup(&raw).expect("a history");
         let days: Vec<u64> = backup.sessions.iter().map(|s| s.timestamp).collect();
         assert_eq!((days, backup.left_out), (vec![9], 1));
+    }
+
+    /// What this build reads of the sessions in a backup is kept only up to
+    /// a bound in all, in proportion to the file: past it, a session is
+    /// left out and told of, as one too long to read is. Bounded a session
+    /// at a time, a file of sessions holding nothing but bare timings,
+    /// `{"timeToCompleteMs":0}`, some twenty-three bytes each and five and
+    /// a half times as much in memory, was read whole: a gigabyte of them
+    /// came to some five and a half gigabytes.
+    #[test]
+    fn a_backup_of_bare_timings_is_read_only_to_a_budget_in_all() {
+        let bare = |day: u64| {
+            let mut session = serde_json::to_value(at(day, "2026-10-10")).unwrap();
+            let timing = serde_json::json!({ "timeToCompleteMs": 0 });
+            session["groupTimings"] = serde_json::Value::Array(vec![timing; 20_000]);
+            session.to_string()
+        };
+        let list: Vec<String> = (1..=40).map(bare).collect();
+        let raw = format!("[{}]", list.join(","));
+        assert!(
+            raw.len() * TYPED_PER_BYTE > TYPED_FLOOR,
+            "bound by the file"
+        );
+        let backup = read_backup(&raw).expect("a history");
+        let kept = backup.sessions.len();
+        let held = kept * 20_000 * std::mem::size_of::<cw_core::SessionTiming>();
+        assert!(
+            held <= raw.len() * TYPED_PER_BYTE,
+            "{kept} of 40 read: {held} bytes of timings from a file of {}",
+            raw.len()
+        );
+        assert!(kept > 0, "as many as the bound holds");
+        let first: Vec<u64> = (1..=kept as u64).collect();
+        assert_eq!(timestamps(&backup.sessions), first, "the first, in order");
+        assert_eq!(backup.left_out, 40 - kept);
+        assert_eq!(
+            Backup::told_left_out(backup.left_out),
+            Some(format!(
+                "{} sessions in it could not be read by this version and were left out.",
+                40 - kept
+            ))
+        );
+    }
+
+    /// Histories as Dust has stored them take well under the memory a
+    /// backup's sessions are read to ([`TYPED_PER_BYTE`]), so a backup of
+    /// any of them restores whole, however long: each shape is tried on its
+    /// own. Sessions of twenty groups of five, timed character by character
+    /// as this build keeps them; the same untimed, as older builds, or audio
+    /// that could not be timed, keep them; and the shape of the first
+    /// builds, with keys no build reads any more, the densest, with groups
+    /// of five and of one.
+    #[test]
+    fn a_real_history_comes_to_well_under_the_bound_its_backup_is_read_to() {
+        let session = |at: u64, timed: bool| {
+            let mut session = crate::testing::stored_session("2026-10-10", &[]);
+            session.timestamp = 1_700_000_000_000 + at * 600_000;
+            session.groups.clear();
+            session.group_timings.clear();
+            session.tally = cw_core::CopyTally::default();
+            for group in 0..20_u64 {
+                let sent: String = (0..5)
+                    .map(|place| char::from(b'A' + ((at * 7 + group * 5 + place) % 26) as u8))
+                    .collect();
+                session.tally.add(&sent, &sent);
+                session.groups.push(cw_core::GroupResult {
+                    sent: sent.clone(),
+                    received: sent,
+                    correct: true,
+                });
+                let ends: Vec<u32> = (1..=5).map(|end| end * 260).collect();
+                session.group_timings.push(cw_core::SessionTiming {
+                    time_to_complete_ms: 1_234.5,
+                    char_wpm: Some(25.0),
+                    effective_wpm: Some(18.0),
+                    sends: 1,
+                    char_times: timed.then(|| cw_core::CharTimes {
+                        keys: ends.iter().map(|end| Some(end + 410)).collect(),
+                        ends,
+                        corrected: Vec::new(),
+                        latency_ms: 40,
+                        box_open: true,
+                    }),
+                    untimed: None,
+                });
+            }
+            serde_json::to_string(&session).unwrap()
+        };
+        let first = |at: u64, sent: &str| {
+            let group = format!(r#"{{"sent":"{sent}","received":"{sent}","correct":true}}"#);
+            let timing = r#"{"timeToCompleteMs":3456,"perCharMs":691.2}"#;
+            let letters: Vec<String> = sent
+                .chars()
+                .map(|letter| format!(r#""{letter}":{{"correct":20,"total":20}}"#))
+                .collect();
+            format!(
+                r#"{{"date":"2026-01-01","timestamp":{at},"startedAt":0,"finishedAt":{at},"groups":[{}],"groupTimings":[{}],"accuracy":1,"letterAccuracy":{{{}}},"alphabetSize":5,"avgResponseMs":691.2,"totalChars":100,"effectiveAlphabetSize":5,"score":100,"kochLevel":3}}"#,
+                [group.as_str(); 20].join(","),
+                [timing; 20].join(","),
+                letters.join(",")
+            )
+        };
+        let shapes: [(&str, Vec<String>); 4] = [
+            ("timed", (0..500).map(|at| session(at, true)).collect()),
+            ("untimed", (0..500).map(|at| session(at, false)).collect()),
+            ("first", (0..500).map(|at| first(at, "KMRSU")).collect()),
+            ("first, of one", (0..500).map(|at| first(at, "K")).collect()),
+        ];
+        for (shape, sessions) in shapes {
+            let raw = format!("[{}]", sessions.join(","));
+            let backup = read_backup(&raw).expect("a history");
+            assert_eq!(
+                (backup.sessions.len(), backup.left_out),
+                (500, 0),
+                "{shape}"
+            );
+            let typed: usize = backup.sessions.iter().map(typed_bytes).sum();
+            let per_byte = typed as f64 / raw.len() as f64;
+            // A quarter of the bound and more to spare.
+            let most = TYPED_PER_BYTE as f64 * 0.75;
+            assert!(per_byte <= most, "{shape}: {per_byte:.2} a byte");
+        }
     }
 
     /// What sessions hold that this build does not read inside a group's
