@@ -51,11 +51,11 @@ use cw_core::SessionResult;
 use flate2::read::GzDecoder;
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::disk::{aside_name, move_aside, place_whole, shown, sync_dir, write_whole};
+use super::disk::{aside_name, flush, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, key_of, keyed, not_told,
-    read_record, taken_up, tombstone_key,
+    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unreadable, key_of, keyed,
+    not_told, read_record, taken_up, tombstone_key, unreadable,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -286,9 +286,10 @@ impl HistoryFiles {
     ///
     /// A record and its tombstone read as deleted, and the deletion cut
     /// short is finished. A record this build cannot read is left where it
-    /// is, and told of once ([`HistoryNotice::Unread`]). A history a newer
-    /// build keeps in a way this one would harm is read, and nothing is
-    /// written to it, not even to tidy up.
+    /// is, and told of once, as a newer Dust's, as damaged, or as one that
+    /// could not be read ([`not_told`]). A history a newer build keeps in a
+    /// way this one would harm is read, and nothing is written to it, not
+    /// even to tidy up.
     pub(super) fn load(&self) -> HistoryLoad {
         self.on_its_thread();
         let mut load = HistoryLoad::default();
@@ -357,22 +358,35 @@ impl HistoryFiles {
         self.size.store(size, Ordering::Relaxed);
         let mut keys = self.keys.borrow_mut();
         load.sessions.reserve(live.len());
+        // Each record that holds no session this build reads, with what it
+        // says of itself, if it could be read.
+        let mut unread = Vec::new();
         for (id, read) in live.into_iter().zip(read) {
             match read {
-                Some((Some(session), _)) => {
+                Some((Ok(session), _)) => {
                     keys.insert(id, SessionKey::of(&session));
                     load.sessions.push((id, session));
                 }
-                _ => load.unread.push(id),
+                Some((Err(said), _)) => {
+                    if said.later
+                        && let Some(key) = &said.key
+                    {
+                        load.later.push((id, key.clone()));
+                    }
+                    load.unread.push(id);
+                    unread.push((id, Some(said)));
+                }
+                None => {
+                    load.unread.push(id);
+                    unread.push((id, None));
+                }
             }
         }
         drop(keys);
         if unlinked {
             let _ = sync_dir(&self.records());
         }
-        if let Some(count) = self.tell(&load.unread, writable) {
-            load.notices.push(HistoryNotice::Unread { count });
-        }
+        load.notices.extend(self.tell(&unread, writable));
         if let Some(layout) = &layout {
             let live = keyed(load.sessions.iter().map(|(id, session)| (*id, session)));
             if let Some(change) = self.import(layout, &live) {
@@ -618,15 +632,17 @@ impl HistoryFiles {
         packed: &mut BTreeMap<RecordId, String>,
     ) -> Vec<Option<String>> {
         let records = self.records();
-        let mut read: Vec<Option<String>> =
-            ids.iter().map(|&id| raw_at(&records, id, packed)).collect();
+        let mut read: Vec<Option<String>> = ids
+            .iter()
+            .map(|&id| raw_at(&records, id, packed).text())
+            .collect();
         if read.iter().any(Option::is_none) {
             if let Ok(now) = self.packed() {
                 packed.extend(now.records);
             }
             for (read, &id) in read.iter_mut().zip(ids) {
                 if read.is_none() {
-                    *read = raw_at(&records, id, packed);
+                    *read = raw_at(&records, id, packed).text();
                 }
             }
         }
@@ -693,7 +709,7 @@ impl HistoryFiles {
     /// What is stored for `id`, loose, or else in a pack: none where it
     /// cannot be read.
     fn raw_record(&self, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<String> {
-        raw_at(&self.records(), id, packed)
+        raw_at(&self.records(), id, packed).text()
     }
 
     /// Every record a later build packed together, and what each holds,
@@ -917,12 +933,10 @@ impl HistoryFiles {
         let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
         // What each record here under a name the move does not give holds:
         // a session that needs no record of the move's.
-        let mut elsewhere: HashMap<String, usize> = HashMap::new();
-        for id in here.difference(&names) {
-            if let Ok(json) = fs::read_to_string(self.records().join(file_name(*id))) {
-                *elsewhere.entry(json).or_default() += 1;
-            }
-        }
+        let elsewhere: Vec<String> = here
+            .difference(&names)
+            .filter_map(|id| fs::read_to_string(self.records().join(file_name(*id))).ok())
+            .collect();
         Ok(legacy::not_moved_yet(
             moved,
             |id| here.contains(&id),
@@ -945,19 +959,24 @@ impl HistoryFiles {
             .collect()
     }
 
-    /// Say how many of `unread`, the records this build cannot read, are
-    /// new to it: none, once each has been told of. `writable` is whether
-    /// what was told may be noted, so it is told of once.
-    fn tell(&self, unread: &[RecordId], writable: bool) -> Option<usize> {
+    /// What to tell of `unread`, the records this build cannot read, each
+    /// with what it says of itself, where it could be read ([`not_told`]):
+    /// nothing, once each has been told of. `writable` is whether what was
+    /// told may be noted, so it is told of once.
+    fn tell(
+        &self,
+        unread: &[(RecordId, Option<Unreadable>)],
+        writable: bool,
+    ) -> Vec<HistoryNotice> {
         let path = self.dir.join(TOLD);
-        let new = not_told(unread, fs::read(&path).ok().as_deref())?;
-        if writable {
-            let names: Vec<String> = unread.iter().map(|id| id.name()).collect();
+        let notices = not_told(unread, fs::read(&path).ok().as_deref());
+        if !notices.is_empty() && writable {
+            let names: Vec<String> = unread.iter().map(|(id, _)| id.name()).collect();
             if let Ok(raw) = serde_json::to_vec(&names) {
                 let _ = write_whole(&self.dir, TOLD, &raw);
             }
         }
-        Some(new)
+        notices
     }
 
     /// Clear what writes cut short left behind: temporary files no write
@@ -1002,7 +1021,7 @@ impl HistoryFiles {
         let placed = (|| {
             lock.try_lock().map_err(io::Error::other)?;
             lock.write_all(&serde_json::to_vec(&journaled)?)?;
-            lock.sync_all()?;
+            flush(&lock)?;
             let path = self.dir.join(&name);
             fs::rename(&making, &path)?;
             sync_dir(&self.dir)?;
@@ -1136,25 +1155,60 @@ impl Watch {
     }
 }
 
-/// What is stored for `id` in `records`, loose, or else in a pack: none
-/// where it cannot be read.
-fn raw_at(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<String> {
-    match fs::read_to_string(records.join(file_name(id))) {
-        Ok(raw) => Some(raw),
-        Err(_) => packed.get(&id).cloned(),
+/// What is stored of a record ([`raw_at`]).
+enum Raw {
+    /// Its text.
+    Text(String),
+    /// So many bytes that are no text, as damage to a disk leaves them: no
+    /// build reads them, now or later.
+    NoText(u64),
+    /// Nothing, for now: it could not be read just then.
+    Failed,
+}
+
+impl Raw {
+    /// What is stored, where it is text.
+    fn text(self) -> Option<String> {
+        match self {
+            Self::Text(raw) => Some(raw),
+            Self::NoText(_) | Self::Failed => None,
+        }
     }
 }
 
+/// What is stored for `id` in `records`, loose, or else in a pack: a loose
+/// copy that cannot be read, or whose bytes are no text, is looked for
+/// there.
+fn raw_at(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Raw {
+    let in_a_pack = || packed.get(&id).cloned().map(Raw::Text);
+    match fs::read(records.join(file_name(id))) {
+        Ok(bytes) => String::from_utf8(bytes).map_or_else(
+            |bytes| in_a_pack().unwrap_or(Raw::NoText(bytes.as_bytes().len() as u64)),
+            Raw::Text,
+        ),
+        Err(_) => in_a_pack().unwrap_or(Raw::Failed),
+    }
+}
+
+/// A record as it is read ([`read_one`]): its session, or where it holds
+/// none this build reads, what its text says of it ([`unreadable`]), beside
+/// how many bytes are stored of it.
+type ReadOne = (Result<SessionResult, Unreadable>, u64);
+
 /// Record `id`, read from `records` or else from `packed`, and scored as it
 /// reads ([`read_record`]), beside how many bytes are stored of it: none
-/// where it is in neither place, and no session where it does not read.
-fn read_one(
-    records: &Path,
-    id: RecordId,
-    packed: &BTreeMap<RecordId, String>,
-) -> Option<(Option<SessionResult>, u64)> {
-    let raw = raw_at(records, id, packed)?;
-    Some((read_record(&raw), raw.len() as u64))
+/// where it could not be read just then, and what it says of itself where
+/// it holds no session that reads. Bytes that are no text say nothing:
+/// damaged.
+fn read_one(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<ReadOne> {
+    match raw_at(records, id, packed) {
+        Raw::Text(raw) => {
+            let read = read_record(&raw).ok_or_else(|| unreadable(&raw));
+            Some((read, raw.len() as u64))
+        }
+        Raw::NoText(bytes) => Some((Err(Unreadable::default()), bytes)),
+        Raw::Failed => None,
+    }
 }
 
 /// Each of `ids`, read as [`read_one`] reads it, in their order. A long
@@ -1164,7 +1218,7 @@ fn read_each(
     records: &Path,
     ids: &[RecordId],
     packed: &BTreeMap<RecordId, String>,
-) -> Vec<Option<(Option<SessionResult>, u64)>> {
+) -> Vec<Option<ReadOne>> {
     let one = |id: &RecordId| read_one(records, *id, packed);
     let threads = thread::available_parallelism()
         .map_or(1, NonZeroUsize::get)
@@ -1404,7 +1458,7 @@ mod tests {
     use super::*;
     use crate::persist::desktop::tests::TempDir;
     use crate::persist::record::{records_for_blob, scored};
-    use crate::persist::tests::session;
+    use crate::persist::tests::{as_an_older_build_wrote, session};
     use crate::persist::worker::{HistoryJobs, wait};
     use std::cell::Cell;
 
@@ -1695,8 +1749,10 @@ mod tests {
         assert!(fresh.exists() && other.exists(), "left be");
     }
 
-    /// A record this build cannot read — a newer build's, say — is left
-    /// where it is as it is, and the user is told of it once.
+    /// A record this build cannot read, a newer build's as it says
+    /// ([`cw_core::SESSION_FORMAT`]), is left where it is as it is, known
+    /// by the session it says it holds, and the user is told of it once,
+    /// as a newer Dust's; one that is damaged is told of as damaged.
     #[test]
     fn a_record_this_build_cannot_read_is_left_in_place_and_told_of_once() {
         let (dir, files) = history("unread");
@@ -1707,20 +1763,26 @@ mod tests {
             order: 2_000_000,
             nonce: 1,
         };
-        let raw = r#"{"date":5,"laterKey":true}"#;
-        fs::write(records.join(file_name(unread)), raw).unwrap();
+        let raw = format!(
+            r#"{{"format":{},"date":"2026-10-30","timestamp":2000,"laterKey":true}}"#,
+            cw_core::SESSION_FORMAT + 1
+        );
+        fs::write(records.join(file_name(unread)), &raw).unwrap();
         let read = files.load();
         assert_eq!(read.sessions.len(), 1);
         assert_eq!(read.unread, [unread]);
-        assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
+        let said = SessionKey::new(2_000, "2026-10-30".into());
+        assert_eq!(read.later, [(unread, said.clone())]);
+        assert_eq!(read.notices, [HistoryNotice::Later { count: 1 }]);
         let again = Files::at(&dir.0).load();
         assert_eq!(again.unread, [unread], "still known");
+        assert_eq!(again.later, [(unread, said)]);
         assert!(again.notices.is_empty(), "told of once");
         assert_eq!(
             fs::read_to_string(records.join(file_name(unread))).unwrap(),
             raw
         );
-        // One more is told of on its own.
+        // One more is told of on its own, as damaged.
         let another = RecordId {
             order: 3_000_000,
             nonce: 1,
@@ -1728,7 +1790,46 @@ mod tests {
         fs::write(records.join(file_name(another)), "[").unwrap();
         let read = files.load();
         assert_eq!(read.unread, [unread, another]);
-        assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
+        assert_eq!(read.notices, [HistoryNotice::Damaged { count: 1 }]);
+    }
+
+    /// A record whose bytes are no text, as damage to a disk leaves them, is
+    /// told of as damaged, as one whose text holds no session is: no build
+    /// reads it, now or at the next launch. It was told of as one that could
+    /// not be read just now, which Dust would read again, and noted as told,
+    /// so that was never so. One packed by a later build beside such bytes
+    /// reads from its pack, as before.
+    #[test]
+    fn a_record_whose_bytes_are_no_text_is_told_of_as_damaged() {
+        let (dir, files) = history("no-text");
+        files.load();
+        files.apply(&put(&[record(&finished(1_000))]));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let damaged = RecordId {
+            order: 2_000_000,
+            nonce: 1,
+        };
+        let bytes = b"{\"date\":\"2026-10-30\",\"timestamp\":2000,\"\xff\xfe\":1}";
+        fs::write(records.join(file_name(damaged)), bytes).unwrap();
+        let read = files.load();
+        assert_eq!(read.sessions.len(), 1);
+        assert_eq!(read.unread, [damaged]);
+        assert!(read.later.is_empty());
+        assert_eq!(read.notices, [HistoryNotice::Damaged { count: 1 }]);
+        assert_eq!(
+            fs::read(records.join(file_name(damaged))).unwrap(),
+            bytes,
+            "left as it is"
+        );
+
+        // Packed, it reads from the pack.
+        let third = record(&finished(3_000));
+        let name = format!("{}-{}{PACK_EXTENSION}", third.id, third.id);
+        pack(&dir.0, &name, &[&third], &[]);
+        fs::write(records.join(file_name(third.id)), b"\xff").unwrap();
+        let read = files.load();
+        assert_eq!(stamps(&read), [1_000, 3_000]);
+        assert_eq!(read.unread, [damaged]);
     }
 
     /// What this build could not read stays as it was through every change
@@ -2637,6 +2738,47 @@ mod tests {
         .unwrap();
         assert_eq!(held, after);
         assert_eq!(stamps(&Files::at(&dir.0).load()), [first.timestamp]);
+    }
+
+    /// A move an older build cut short, its records written as it writes
+    /// them, with no format, and no layout yet, is made again over them
+    /// writing no session twice; and so is a session an older build took
+    /// up since, stored as it writes one, when the move is made again over
+    /// a layout that no longer reads. This build writes the format in
+    /// every session ([`cw_core::SESSION_FORMAT`]), so the move's own
+    /// bytes are never an older build's, and a record of each was written
+    /// beside the older build's, every session twice.
+    #[test]
+    fn a_move_made_again_over_what_an_older_build_stored_writes_no_session_twice() {
+        let dir = TempDir::new("move-again-older");
+        let now = crate::time::now_ms();
+        let held = [finished(now - 9 * DAY), finished(now - 8 * DAY)];
+        keep_whole(&dir, &held);
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::create_dir_all(&records).unwrap();
+        let mut last = None;
+        for session in &held {
+            let older = as_an_older_build_wrote(session);
+            let id = RecordId::next(session.timestamp, last, &older);
+            fs::write(records.join(file_name(id)), &older).unwrap();
+            last = Some(id);
+        }
+        let moved = Files::at(&dir.0).load();
+        assert!(moved.complete);
+        assert_eq!(moved.sessions.len(), 2, "each once");
+        assert_eq!(names(&records).len(), 2, "no record written twice");
+        // An older build took up a session stored whole since, as it
+        // stores one, and the layout was damaged.
+        let third = finished(now - 7 * DAY);
+        let older = as_an_older_build_wrote(&third);
+        let taken = RecordId::placed(third.timestamp, &older);
+        fs::write(records.join(file_name(taken)), &older).unwrap();
+        keep_whole(&dir, &[held[0].clone(), held[1].clone(), third]);
+        fs::write(dir.0.join(HISTORY).join(LAYOUT_FILE), "{ damaged").unwrap();
+        let again = Files::at(&dir.0).load();
+        assert!(again.complete);
+        assert_eq!(again.sessions.len(), 3, "each once");
+        assert_eq!(names(&records).len(), 3, "no record written twice");
     }
 
     /// A layout that does not read, damaged where it lies, is set aside,

@@ -24,7 +24,9 @@ cw-core = { path = "crates/cw-core" }
 dioxus = "0.7.10"
 serde = { version = "1", features = ["derive"] }
 # `raw_value`: a backup's sessions are each read from where they lie in the
-# file, rather than from a copy of the whole of it (src/persist/backup.rs).
+# file, rather than from a copy of the whole of it (src/persist/backup.rs),
+# and a history kept whole writes back each session a change leaves as it
+# held it (src/persist/legacy.rs).
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Sync (src/sync): everything bound for the user's Google Drive is sealed on
@@ -120,6 +122,18 @@ objc2-avf-audio = { version = "0.3", default-features = false, features = [
     "std",
     "AVAudioSession",
     "AVAudioSessionTypes",
+] }
+
+# Windows: what sync keeps is made the user's alone by its access list, as
+# the mode 0600 makes it on Unix (src/persist/acl.rs). The version the lock
+# holds already, for tokio and others.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
 ] }
 
 # Android: the VM and the activity tao keeps, for asking Android where the
