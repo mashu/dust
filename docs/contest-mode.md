@@ -4262,6 +4262,11 @@ under rough ones). Keys carry fields 40% as heard (a quarter of them with
 the call heard before the last, as when logging a QSO left after F3), 20%
 one edit off, 10% empty, 10% partial and 20% junk, among stale and
 current turn events, timers by any id, pause, resume, hide and finish.
+As built after the code review (docs/code-review.md), the seeds move
+and grow: `DUST_SOAK_FIRST` sets the first and `DUST_SOAK_SEEDS` how
+many (2,000 by default, each style's runs in proportion: 1½ times as
+many of single callers, 3 times of pile-ups), and a failure names its
+seed, which the same two variables run again (`SoakSeeds`).
 
 - Every step: no panic, fresh ids, a clock that never goes back, but for
   the retries a failed send gives back as paused (4.2); no station sends
