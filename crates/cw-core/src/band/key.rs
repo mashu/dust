@@ -227,6 +227,35 @@ mod tests {
         }
     }
 
+    /// Where the hang is not held under the top speed's word gap, the
+    /// slowest spacing sizes it, and moving it retunes the receiver on the
+    /// air: at Slow, which is never held under a word gap, and at Fast at
+    /// 10 WPM, whose word gaps are long.
+    #[test]
+    fn the_slowest_spacing_retunes_the_receiver_where_it_moves_the_hang() {
+        let key = |decay: AgcDecay, char_wpm: f64, slowest_spacing: f64| {
+            let mut s = TrainingSettings::default();
+            s.band.agc_decay = decay;
+            let p = &mut s.playback;
+            (p.char_wpm_min, p.char_wpm_max) = (char_wpm, char_wpm);
+            p.link_char_to_effective = false;
+            (p.effective_wpm_min, p.effective_wpm_max) = (slowest_spacing, char_wpm);
+            BandKey::of(&s.clamp())
+        };
+        for (decay, char_wpm, from, to) in [
+            (AgcDecay::Slow, 20.0, 15.0, 8.0),
+            (AgcDecay::Fast, 10.0, 9.0, 6.0),
+        ] {
+            let (before, after) = (key(decay, char_wpm, from), key(decay, char_wpm, to));
+            assert_ne!(after, before, "{decay:?} at {char_wpm} WPM");
+            assert_eq!(
+                after.change_from(Some(&before)),
+                BandChange::Retune,
+                "{decay:?} at {char_wpm} WPM"
+            );
+        }
+    }
+
     /// A layer switched off is the same band at any level, fading switched
     /// off is the same at any depth or rate, and a band with no stations of
     /// its own has none to keep clear of the one you are copying.
