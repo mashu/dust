@@ -122,6 +122,18 @@ objc2-avf-audio = { version = "0.3", default-features = false, features = [
     "AVAudioSessionTypes",
 ] }
 
+# Windows: what sync keeps is made the user's alone by its access list, as
+# the mode 0600 makes it on Unix (src/persist/acl.rs). The version the lock
+# holds already, for tokio and others.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
 # Android: the VM and the activity tao keeps, for asking Android where the
 # app's own files go (src/persist/android.rs). The same crate tao fills in.
 [target.'cfg(target_os = "android")'.dependencies]

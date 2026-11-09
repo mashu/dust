@@ -130,9 +130,12 @@ stored, and synced, once it ends.
 
 The passphrase never leaves the device it is typed on, and is not kept.
 Each device keeps the data key, in what sync keeps
-(`Store::save_sync`): `sync.json` in the store's folder on a computer;
-`dust/sync.json` in the app's no-backup folder on Android, which Android's
-Auto Backup leaves out; `dust_sync` in a browser's `localStorage`.
+(`Store::save_sync`): `sync.json` in the store's folder on a computer, for
+the user alone to read (mode 0600 on Linux and macOS; on Windows an access
+list that lets in the user alone and inherits nothing from the folder,
+wherever the volume keeps one); `dust/sync.json` in the app's no-backup
+folder on Android, which Android's Auto Backup leaves out; `dust_sync` in a
+browser's `localStorage`.
 
 What Google can see: how many files there are, how large, and when each
 device reads or writes them, with the account and the IP address of each

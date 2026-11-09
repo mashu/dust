@@ -280,8 +280,40 @@ fn private_file(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// On Windows, the same by the file's access list, set while the file is
+/// still empty: the account the app runs as alone may open it, and it
+/// inherits nothing from its folder ([`super::acl`]). Where the list cannot
+/// be set, as on a volume that keeps none (FAT) or a share that will not
+/// take one, the file is made as any other is, with its folder's list, and
+/// the log says why: sync goes on as before.
+#[cfg(windows)]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let opened = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .access_mode(super::acl::OPENED_TO_SET_ACCESS)
+        .open(path);
+    let file = match opened {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            eprintln!(
+                "{} keeps its folder's access list, as it could not be opened to change it: {err}",
+                path.display()
+            );
+            return fs::File::create(path);
+        }
+        Err(err) => return Err(err),
+    };
+    if let Err(err) = super::acl::keep_to_the_user(&file) {
+        eprintln!("{} keeps its folder's access list: {err}", path.display());
+    }
+    Ok(file)
+}
+
 /// Elsewhere, as any other file is made.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn private_file(path: &Path) -> io::Result<fs::File> {
     fs::File::create(path)
 }
@@ -1991,6 +2023,40 @@ pub(super) mod tests {
         fs::set_permissions(dir.0.join(SYNC), fs::Permissions::from_mode(0o644)).unwrap();
         store.save_sync(Some("{}")).expect("saved");
         assert_eq!(mode(), 0o600, "{:o}", mode());
+        assert_eq!(store.load_sync().as_deref(), Some("{}"));
+        assert!(
+            files(&dir).iter().all(|name| !name.ends_with(".tmp")),
+            "{:?}",
+            files(&dir)
+        );
+        store.save_sync(None).expect("cleared");
+        assert_eq!(store.load_sync(), None);
+    }
+
+    /// On Windows, what sync keeps is the user's alone by its access list:
+    /// the account the app runs as alone may open it, and it inherits
+    /// nothing from its folder; and so is one an earlier build left with
+    /// its folder's list, once written again. CI's Windows lint compiles
+    /// this, and runs no test: it is run by hand on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn what_sync_keeps_is_for_the_user_alone_to_read_on_windows() {
+        use crate::persist::acl::{access_list, the_users_alone};
+        let (dir, store) = store("sync-kept");
+        let the_users = the_users_alone().expect("the user's list");
+        let list = || access_list(&fs::File::open(dir.0.join(SYNC)).expect("kept")).expect("read");
+        store.save_sync(Some(r#"{"key":"secret"}"#)).expect("saved");
+        assert_eq!(list(), the_users);
+        assert_eq!(store.load_sync().as_deref(), Some(r#"{"key":"secret"}"#));
+        fs::remove_file(dir.0.join(SYNC)).unwrap();
+        fs::write(dir.0.join(SYNC), "{}").unwrap();
+        assert_ne!(
+            list(),
+            the_users,
+            "a file made as any other is has its folder's list"
+        );
+        store.save_sync(Some("{}")).expect("saved");
+        assert_eq!(list(), the_users);
         assert_eq!(store.load_sync().as_deref(), Some("{}"));
         assert!(
             files(&dir).iter().all(|name| !name.ends_with(".tmp")),

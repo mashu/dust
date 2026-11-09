@@ -8,6 +8,8 @@
 //! that cannot read something gives back the most it can, and never writes
 //! over what it could not read.
 
+#[cfg(all(feature = "native-runtime", any(windows, test)))]
+mod acl;
 #[cfg(all(target_os = "android", not(test)))]
 mod android;
 pub mod backup;
