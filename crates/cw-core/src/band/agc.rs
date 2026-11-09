@@ -1229,10 +1229,11 @@ mod tests {
     }
 
     /// The same between the letters of a contest's caller slowed down for
-    /// you under easy habits, as far as one ever slows, and between the
-    /// letters the Listen screen sends one at a time: each a letter gap the
-    /// settings send, which the hang is sized from where their word gaps
-    /// let it.
+    /// you under easy habits, as far as one ever slows, and by less where
+    /// its Farnsworth spacing reaches the Speed card's floor first, which
+    /// is where its letters are farthest apart; and between the letters the
+    /// Listen screen sends one at a time: each a letter gap the settings
+    /// send, which the hang is sized from where their word gaps let it.
     #[test]
     fn the_hiss_holds_between_a_slowed_callers_letters_and_the_listen_screens() {
         let mut contest = sending_at(10.0, 10.0, AgcDecay::Fast);
@@ -1246,6 +1247,30 @@ mod tests {
                 swell <= 1.0,
                 "a caller slowed to {slowed:.1} WPM: {swell:.1} dB at {at:.2} s"
             );
+        }
+
+        // A caller of skill 2 slows by 16%, which takes a spacing of 6 WPM
+        // to 5.04. Slowed by 22%, the most, its spacing would stop at the
+        // floor of 5 while its characters slowed on, which brings its
+        // letters closer.
+        let skill_2 = crate::rulebook::QRS_DROP[1];
+        for (char_wpm, decay) in [
+            (7.0, AgcDecay::Fast),
+            (7.0, AgcDecay::Slow),
+            (10.0, AgcDecay::Fast),
+        ] {
+            let mut contest = sending_at(char_wpm, 6.0, decay);
+            contest.curriculum.char_set_mode = crate::settings::CharSetMode::Contest;
+            let caller = keyer(char_wpm, 6.0).slowed(skill_2);
+            let (keyed, hiss) = hiss_under(&contest, &caller, &["PARIS"], 0.0);
+            let dot = 1.2 / caller.char_wpm;
+            for (at, swell) in gap_swells(&keyed, &hiss, |gap| gap > 2.0 * dot) {
+                assert!(
+                    swell <= 1.0,
+                    "a caller at {char_wpm}/6 WPM slowed by {skill_2} at {decay:?}: \
+                     {swell:.1} dB at {at:.2} s"
+                );
+            }
         }
 
         let listen = sending_at(12.0, 12.0, AgcDecay::Fast);

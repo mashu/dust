@@ -127,9 +127,9 @@ pub enum CallerHabits {
 pub(crate) const QRS_DROP: [f64; 3] = [0.20, 0.16, 0.12];
 pub(crate) const QRS_MORE: f64 = 0.02;
 /// The most a caller slows down for you, at skill 1 from its fourth
-/// incomplete try on: the slowest a run's callers can send, which the
-/// receiver's AGC holds the band down between the letters of
-/// ([`crate::band::agc_timing`]).
+/// incomplete try on: the slowest a run's callers can send. The receiver's
+/// AGC holds the band down between the letters of a caller slowed by this
+/// or less ([`crate::band::agc_timing`]).
 pub(crate) const QRS_MOST: f64 = QRS_DROP[0] + QRS_MORE;
 
 impl CallerHabits {
