@@ -2813,6 +2813,63 @@ fn packs(remote: &MemoryRemote) -> usize {
         .count()
 }
 
+/// The same, with the two copies' syncs asked for at once: the other's
+/// waits for this one's, which waits on the drive, while each puts its own
+/// session back and the other deletes another. Nothing either did is lost:
+/// this copy's sync lets go of neither putting back, the other's begins
+/// from what this one kept, and between them they send both puttings back
+/// and the deletion, here and everywhere.
+#[test]
+fn two_copies_syncing_at_once_lose_none_of_each_others_deletions_or_puttings_back() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2, 3, 4]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy_through(
+            &harness,
+            Rc::clone(&held) as Rc<dyn Remote>,
+            FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| window.take_up_store());
+        let ids = harness.in_app(|| harness.ctx.sessions.peek().ids().to_vec());
+        harness.in_app(|| window.delete_sessions(&[ids[1]]));
+        harness.in_app(|| ctx.delete_sessions(&[ids[2]]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        harness.in_app(|| window.undo_delete());
+        harness.in_app(|| ctx.undo_delete());
+        harness.in_app(|| window.delete_sessions(&[ids[3]]));
+        held.hold(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        harness.in_app(|| ctx.take_up_store());
+        harness.in_app(|| window.take_up_store());
+        let there: Vec<u64> = harness.in_app(|| {
+            window
+                .sessions
+                .peek()
+                .iter()
+                .map(|session| session.timestamp)
+                .collect()
+        });
+        assert_eq!(
+            stored_stamps(&harness),
+            [1, 2, 3],
+            "both put back, one deleted"
+        );
+        assert_eq!(stamps(&harness), [1, 2, 3]);
+        assert_eq!(there, [1, 2, 3]);
+        assert_eq!(joined_stamps(&remote), [1, 2, 3], "the drive's word");
+    });
+}
+
 /// What the store keeps for sync now, which it holds.
 fn kept_state(harness: &Harness) -> SyncState {
     let raw = harness.store.sync.borrow().clone().expect("kept");
