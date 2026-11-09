@@ -257,6 +257,29 @@ pub fn unreadable(raw: &str) -> Unreadable {
     Unreadable { key, later }
 }
 
+impl Unreadable {
+    /// The session a record a later build stored holds, as it says: none
+    /// for a damaged one, which holds none any build reads, whatever it
+    /// says ([`held_key`]).
+    pub fn later_key(&self) -> Option<&SessionKey> {
+        self.key.as_ref().filter(|_| self.later)
+    }
+}
+
+/// The session a record whose text is `raw` holds, as the history an older
+/// build keeps whole is taken up ([`super::legacy::imported`]): its own,
+/// where it reads as one, or the one a later build that stored it says it
+/// holds ([`Unreadable::later_key`]). None for a damaged one, though it may
+/// still say when and on what day its session finished: no build reads it,
+/// so the older build's copy of that session may be the only good one, as
+/// a restore takes a backup's beside it.
+pub(super) fn held_key(raw: &str) -> Option<SessionKey> {
+    match serde_json::from_str::<SessionResult>(raw) {
+        Ok(session) => Some(SessionKey::of(&session)),
+        Err(_) => unreadable(raw).later_key().cloned(),
+    }
+}
+
 /// The key of the session a tombstone names, `raw` being what it holds as
 /// it is stored ([`Deleted`]). None for one that is empty or does not
 /// read, which deletes its record all the same.
@@ -276,15 +299,21 @@ pub(super) fn not_told(
     unread: &[(RecordId, Option<Unreadable>)],
     told: Option<&[u8]>,
 ) -> Vec<HistoryNotice> {
-    let told: HashSet<String> = told
-        .and_then(|raw| serde_json::from_slice(raw).ok())
-        .unwrap_or_default();
+    let told = names_noted(told);
     unread_notices(
         unread
             .iter()
             .filter(|(id, _)| !told.contains(&id.name()))
             .map(|(_, said)| said.as_ref()),
     )
+}
+
+/// The names of the records a note of them, `raw`, holds, as the note of
+/// those told of holds them: none, where it does not read, or there is
+/// none.
+pub(super) fn names_noted(raw: Option<&[u8]>) -> HashSet<String> {
+    raw.and_then(|raw| serde_json::from_slice(raw).ok())
+        .unwrap_or_default()
 }
 
 /// What to tell of `new`, records this build cannot read found for the
@@ -370,6 +399,32 @@ impl HistoryChange {
     }
 }
 
+/// A record a read could not hand back ([`super::Store::read_records`]),
+/// by why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unopened {
+    /// It could not be read at all just now, as a file another program
+    /// holds open for a moment cannot be: it may read a moment later, as
+    /// one that fails as the history is read whole may ([`HistoryLoad::failed`]).
+    Failed(RecordId),
+    /// It was read, and its bytes are no text, as damage to a disk leaves
+    /// them: no build reads it, now or later, as the history read whole
+    /// finds such a record damaged ([`HistoryLoad::unread`]). Only files
+    /// hold bytes that are no text: a browser holds text alone.
+    #[cfg_attr(not(feature = "native-runtime"), allow(dead_code))]
+    Damaged(RecordId),
+}
+
+/// `read`, as a store that reads each record whole or not at all, and holds
+/// text alone, answers a read ([`super::Store::read_records`]): a record it
+/// could not read could not be read just now ([`Unopened::Failed`]).
+#[cfg(any(feature = "web", test))]
+pub(super) fn failed_for_now(read: Vec<Result<Record, RecordId>>) -> Vec<Result<Record, Unopened>> {
+    read.into_iter()
+        .map(|read| read.map_err(Unopened::Failed))
+        .collect()
+}
+
 /// The history as a store read it ([`super::Store::load_history`]).
 #[derive(Debug, Default, PartialEq)]
 pub struct HistoryLoad {
@@ -379,6 +434,14 @@ pub struct HistoryLoad {
     /// Records there that this build cannot read: left where they are, for
     /// a build that can.
     pub unread: Vec<RecordId>,
+    /// Records there that could not be read at all just now, as a file
+    /// another program holds open for a moment cannot be: kept apart from
+    /// `unread`, as they may read a moment later. The app reads them again
+    /// at every look, and soon after on its own
+    /// ([`crate::state::READ_AGAIN_MS`]); one is told of only where it
+    /// could not be read as the history was read before either
+    /// ([`HistoryNotice::Unread`]).
+    pub failed: Vec<RecordId>,
     /// Of `unread`, those a later build stored ([`Unreadable::later`]),
     /// each with the session it says it holds.
     pub later: Vec<(RecordId, SessionKey)>,
@@ -398,7 +461,10 @@ pub struct HistoryLoad {
 #[cfg_attr(feature = "web", allow(dead_code))]
 pub enum HistoryNotice {
     /// `count` records that could not be read at all, found for the first
-    /// time: left where they are, and read again at the next launch.
+    /// time once they still could not be read at the app's last try
+    /// ([`crate::state::READ_AGAIN_MS`]), or as the history was read again
+    /// at a later launch ([`HistoryLoad::failed`]): left where they are, and
+    /// read again at every look, and every launch.
     Unread { count: usize },
     /// `count` records a later build stored, in a format this one does not
     /// read ([`cw_core::SESSION_FORMAT`]), found for the first time. They
@@ -436,8 +502,9 @@ impl HistoryNotice {
         match self {
             Self::Unread { count } => {
                 let (a_session, left, them) = unread_words(*count);
+                let they = if *count == 1 { "it" } else { "they" };
                 format!(
-                    "{a_session} in your history could not be read just now, so {left}. Dust reads {them} again the next time it opens."
+                    "{a_session} in your history could not be read, so {left}. Dust keeps trying, and shows {them} once {they} can be read."
                 )
             }
             Self::Later { count } => {
@@ -757,12 +824,15 @@ mod tests {
     #[test]
     fn what_became_of_the_history_is_said_plainly() {
         let one = HistoryNotice::Unread { count: 1 }.text();
-        assert!(one.starts_with("1 session in your history"), "{one}");
+        assert!(
+            one.starts_with("1 session in your history could not be read,"),
+            "{one}"
+        );
         assert!(one.contains("so it was left as it is."), "{one}");
-        assert!(one.contains("reads it again the next time"), "{one}");
+        assert!(one.contains("shows it once it can be read"), "{one}");
         let many = HistoryNotice::Unread { count: 3 }.text();
         assert!(many.starts_with("3 sessions"), "{many}");
-        assert!(many.contains("reads them again"), "{many}");
+        assert!(many.contains("shows them once they can be read"), "{many}");
         let later = HistoryNotice::Later { count: 1 }.text();
         assert!(
             later.starts_with("1 session in your history was saved by a newer Dust"),

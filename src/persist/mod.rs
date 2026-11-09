@@ -22,6 +22,11 @@ mod files;
 #[cfg(any(feature = "web", test))]
 mod idb;
 mod legacy;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
+)]
+mod lock;
 #[cfg(test)]
 pub mod memory;
 pub mod record;
@@ -36,6 +41,7 @@ mod worker;
 
 #[cfg(all(test, feature = "native-runtime"))]
 pub(crate) use desktop::tests::TempDir;
+pub use lock::{Lock, LockHeld, Locking};
 pub use saved::HistorySaved;
 pub use session::{Deleted, SessionKey};
 pub use set_aside::SetAside;
@@ -50,7 +56,7 @@ use cw_core::{
 };
 use serde::Deserialize;
 
-use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, Unopened, done};
 use settings::{load_settings_from, unmarked};
 
 pub trait Store {
@@ -161,12 +167,23 @@ pub trait Store {
     /// cannot be listed, which is no word that anything is missing.
     fn history_listing(&self) -> Pending<Option<Vec<RecordId>>>;
     /// The records `ids`, as they are stored. One that cannot be read
-    /// comes back as its id.
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>>;
+    /// comes back as why ([`record::Unopened`]): it could not be read just
+    /// now, or, where the store can tell, its bytes are no text, damaged.
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>>;
     /// Which of `ids` were deleted by hand: of those missing from the
     /// listing, the ones to let go. Any other was lost in passing, and is
     /// to be stored again: missing is never deleted.
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>>;
+    /// What to tell of `ids`, records listed that could not be read at all
+    /// at any of the app's tries since it found them so
+    /// ([`HistoryLoad::failed`]): of those not told of before, how many,
+    /// as records that could not be read ([`record::HistoryNotice::Unread`]),
+    /// each noted as told so it is told of once, at this launch or a later
+    /// one. Every one of them, where the store notes nothing, as a browser's
+    /// does not: its database reads each record whole, or nothing.
+    fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<record::HistoryNotice>> {
+        record::done(record::unread_notices(ids.iter().map(|_| None)))
+    }
     /// Whether the history may have changed, elsewhere, since this copy
     /// last read or listed it: whether it is worth listing again.
     fn history_changed(&self) -> bool;
@@ -209,6 +226,18 @@ pub trait Store {
     /// and lets the oldest go for room.
     fn syncs_history(&self) -> bool {
         true
+    }
+    /// Try `lock`, which every copy of the app on this store shares, and
+    /// say whether this copy holds it now ([`Locking`]). It never waits for
+    /// another copy to let go of it: a browser answers a moment later, as
+    /// it grants a Web Lock, and every other store at once. A store that
+    /// keeps no locks says so ([`Locking::Unlockable`]).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
+    )]
+    fn try_lock(&self, _lock: Lock) -> Pending<Locking> {
+        done(Locking::Unlockable)
     }
 }
 

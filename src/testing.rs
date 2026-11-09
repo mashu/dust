@@ -1801,6 +1801,82 @@ localStorage.setItem("dust_theme", "dark");"#;
         assert_eq!(heard[1].sent, [serde_json::json!("dark")]);
     }
 
+    /// The made-up page's Web Locks go as a browser's do: one tab at a time
+    /// holds a lock, the next that asked for it holds it once let go of, a
+    /// lock held or waited for is no lock to one asked for only if it is
+    /// free, shared locks are held together, a tab says what every tab holds
+    /// and waits for, and a tab closed lets go of all it held and drops all
+    /// it waited for.
+    #[test]
+    fn the_fake_pages_web_locks_go_one_tab_at_a_time_in_the_order_asked() {
+        let script = r#"const settle = async () => {
+    for (let i = 0; i < 20; i += 1) await new Promise((done) => setImmediate(done));
+};
+const one = navigator.locks;
+const two = fakeLocks.tab();
+const three = fakeLocks.tab();
+const heard = [];
+let release;
+const held = one.request("a", (lock) => {
+    heard.push(["one", lock.name, lock.mode]);
+    return new Promise((done) => { release = done; });
+}).then((value) => heard.push(["one let go", value]));
+two.request("a", () => heard.push(["two"]));
+three.request("a", { ifAvailable: true }, (lock) => heard.push(["three", lock]));
+await settle();
+dioxus.send(heard.splice(0));
+dioxus.send(await three.query());
+release("done");
+await held;
+await settle();
+dioxus.send(heard.splice(0));
+await Promise.all([
+    one.request("b", { mode: "shared" }, () => heard.push(["one shares"])),
+    two.request("b", { mode: "shared" }, () => heard.push(["two shares"])),
+]);
+dioxus.send(heard.splice(0));
+two.request("c", () => new Promise(() => {}));
+three.request("c", () => heard.push(["three after two"]));
+one.request("d", () => heard.push(["one, before it closed"]));
+await settle();
+fakeLocks.close(two);
+fakeLocks.close(one);
+await settle();
+dioxus.send(heard.splice(0));
+dioxus.send(await three.query());
+dioxus.send(await two.request("e", () => {}).catch((error) => error.name));"#;
+        let Some(heard) = on_fake_page(&[PageStep::wait(script)]) else {
+            return;
+        };
+        let sent = &heard[0].sent;
+        use serde_json::json;
+        assert_eq!(
+            sent[0],
+            json!([["one", "a", "exclusive"], ["three", null]]),
+            "two waits, and three, asking only if it is free, is told it is not"
+        );
+        assert_eq!(
+            sent[1],
+            json!({
+                "held": [{ "name": "a", "mode": "exclusive", "clientId": "tab-1" }],
+                "pending": [{ "name": "a", "mode": "exclusive", "clientId": "tab-2" }],
+            })
+        );
+        assert_eq!(sent[2], json!([["one let go", "done"], ["two"]]));
+        assert_eq!(sent[3], json!([["one shares"], ["two shares"]]));
+        assert_eq!(
+            sent[4],
+            json!([["one, before it closed"], ["three after two"]]),
+            "a tab closed lets go of what it held"
+        );
+        assert_eq!(sent[5], json!({ "held": [], "pending": [] }));
+        assert_eq!(
+            sent[6],
+            json!("InvalidStateError"),
+            "a closed tab asks no more"
+        );
+    }
+
     /// A script that throws on the made-up page fails the test, saying what
     /// it threw.
     #[test]

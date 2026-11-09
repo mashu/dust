@@ -20,10 +20,13 @@ use wasm_bindgen_futures::JsFuture;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::idb::{BrowserHistory, Script, waited_ms};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
-use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done};
+use super::record::{
+    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
+    failed_for_now,
+};
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
-    over_stored, read_settings_from,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, Locking, OpenSession, SETTINGS_HELD,
+    SetAside, Store, over_stored, read_settings_from,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -312,6 +315,111 @@ async fn take_marks() -> Vec<String> {
         .iter()
         .map(|mark| mark.as_string().unwrap_or_default())
         .collect()
+}
+
+/// What this tab does with the Web Locks it shares with the site's other
+/// tabs: the tabs' script ([`crate::persist::lock::TABS_JS`]), run once for
+/// the page, as the page is the tab.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
+)]
+mod tabs {
+    use std::cell::RefCell;
+
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_futures::JsFuture;
+
+    use crate::persist::lock::TABS_JS;
+    use crate::persist::record::{Pending, done};
+    use crate::persist::{LockHeld, Locking};
+
+    thread_local! {
+        /// The script, once run: none before, or where it would not run.
+        static SCRIPT: RefCell<Option<JsValue>> = const { RefCell::new(None) };
+    }
+
+    /// Try the Web Lock `name`, never waiting for it.
+    pub(super) fn try_lock(name: &str) -> Pending<Locking> {
+        let Some(tabs) = script() else {
+            return done(Locking::Unlockable);
+        };
+        let Some(asked) = call(&tabs, "tryLock", &[JsValue::from_str(name)]) else {
+            return done(Locking::Unlockable);
+        };
+        let answer = js_sys::Promise::resolve(&asked);
+        let mut waiting = Unanswered {
+            tabs,
+            answer: Some(answer.clone()),
+        };
+        Box::pin(async move {
+            let answer = JsFuture::from(answer).await;
+            // Answered, and taken: nothing to hand back.
+            waiting.answer.take();
+            locking(answer)
+        })
+    }
+
+    /// The script, run as it is first wanted.
+    fn script() -> Option<JsValue> {
+        SCRIPT.with(|script| {
+            let mut script = script.borrow_mut();
+            if script.is_none() {
+                let make = js_sys::Function::new_with_args("options", TABS_JS);
+                *script = make.call1(&JsValue::NULL, &JsValue::UNDEFINED).ok();
+            }
+            script.clone()
+        })
+    }
+
+    /// The script's `name`, called with `args`: what it gave back, or none
+    /// where it has no such function, or it threw.
+    fn call(tabs: &JsValue, name: &str, args: &[JsValue]) -> Option<JsValue> {
+        let function: js_sys::Function = js_sys::Reflect::get(tabs, &JsValue::from_str(name))
+            .ok()?
+            .dyn_into()
+            .ok()?;
+        let args: js_sys::Array = args.iter().collect();
+        function.apply(tabs, &args).ok()
+    }
+
+    /// What the script's answer to a lock tried says: a function to let go
+    /// of it with, held; `false`, busy; anything else, as `null` from a
+    /// browser without Web Locks, no lock.
+    fn locking(answer: Result<JsValue, JsValue>) -> Locking {
+        match answer.map(JsCast::dyn_into::<js_sys::Function>) {
+            Ok(Ok(release)) => Locking::Held(LockHeld::new(Release(release))),
+            Ok(Err(busy)) if busy == JsValue::FALSE => Locking::Busy,
+            _ => Locking::Unlockable,
+        }
+    }
+
+    /// A Web Lock this tab holds, let go of as this is dropped: the function
+    /// the script handed over with it.
+    struct Release(js_sys::Function);
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.0.call0(&JsValue::NULL);
+        }
+    }
+
+    /// The script's answer to a lock tried, while it is waited for: one no
+    /// longer waited for is handed back to the script, which lets go of the
+    /// lock should the browser grant it, so that no tab holds a lock it
+    /// knows nothing of until it closes.
+    struct Unanswered {
+        tabs: JsValue,
+        answer: Option<js_sys::Promise>,
+    }
+
+    impl Drop for Unanswered {
+        fn drop(&mut self) {
+            if let Some(answer) = self.answer.take() {
+                let _ = call(&self.tabs, "dropped", &[answer.into()]);
+            }
+        }
+    }
 }
 
 fn counters_key(key: &CountersKey) -> String {
@@ -659,13 +767,16 @@ impl Store for WebStore {
         }
     }
 
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+    /// A browser's database reads each record whole or not at all, and the
+    /// page storage holds text alone: one that cannot be read could not be
+    /// read just now.
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>> {
         match &self.history {
             History::Database(database) => {
                 let database = Rc::clone(database);
-                Box::pin(async move { database.read(ids).await })
+                Box::pin(async move { failed_for_now(database.read(ids).await) })
             }
-            History::Page { whole, .. } => done(whole.read(&ids)),
+            History::Page { whole, .. } => done(failed_for_now(whole.read(&ids))),
         }
     }
 
@@ -709,6 +820,15 @@ impl Store for WebStore {
     /// Only the browser's database keeps the history by record.
     fn syncs_history(&self) -> bool {
         matches!(self.history, History::Database(_))
+    }
+
+    /// A Web Lock of the site's ([`Lock::web_name`]), asked for only if it
+    /// is free: answered a moment later, as the browser grants it.
+    fn try_lock(&self, lock: Lock) -> Pending<Locking> {
+        match lock.web_name() {
+            Some(name) => tabs::try_lock(name),
+            None => done(Locking::Unlockable),
+        }
     }
 
     /// Another tab's word of each change, as the database's channel gives

@@ -12,8 +12,9 @@
 // A script waited on runs to its end before the next step is taken, as one
 // that waits on the browser's database has to.
 //
-// The page has a browser's database, broadcast channels and page storage too,
-// made up in memory (`src/fake_idb.mjs`), for the history's script.
+// The page has a browser's database, broadcast channels, page storage and Web
+// Locks too, made up in memory (`src/fake_idb.mjs`), for the history's script
+// and the tabs' (src/persist/tabs.js).
 
 import { readFileSync } from "node:fs";
 import { install } from "./fake_idb.mjs";
@@ -60,7 +61,8 @@ const document = new Target();
 document.body = body;
 document.activeElement = body;
 document.fullscreenElement = null;
-const navigator = {};
+// The page's own, with the Web Locks of its tab (src/fake_idb.mjs).
+const navigator = globalThis.navigator;
 window.document = document;
 window.navigator = navigator;
 
