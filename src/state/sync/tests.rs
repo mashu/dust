@@ -1891,6 +1891,64 @@ fn a_session_put_back_while_a_sync_reads_the_drive_is_not_let_go_by_it() {
     });
 }
 
+/// The same, with sync turned off here before the sync goes on, the Undo
+/// made before the turning off or after it: the sync under way lets go of
+/// nothing put back since it began, whatever became of sync meanwhile, and
+/// the session stays here, though sync, off, sends nothing of it. That sync
+/// used to let it go again, as the drive's deletion, the toast's Undo spent:
+/// what it asked of was what sync noted, which the turning off forgot, or
+/// which sync, off by then, never noted.
+#[test]
+fn a_session_put_back_while_a_sync_reads_the_drive_is_not_let_go_by_it_as_sync_is_turned_off() {
+    for undo_first in [true, false] {
+        run(|| async move {
+            let case = if undo_first {
+                "Undo, then sync turned off"
+            } else {
+                "sync turned off, then Undo"
+            };
+            let mut harness = Harness::new();
+            keep(&harness, &[1, 2]);
+            let remote = Rc::new(MemoryRemote::default());
+            let auth = FakeAuth::giving(&["t"]);
+            let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+            let two = harness
+                .in_app(|| harness.ctx.sessions.peek().id_at(1))
+                .expect("two");
+            harness.in_app(|| ctx.delete_sessions(&[two]));
+            harness.in_app(|| ctx.sync_now());
+            harness.pump();
+            let sent = harness.in_app(|| {
+                ctx.sync
+                    .state
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|state| state.drive.deleted(two))
+            });
+            assert!(sent, "the deletion sent: {case}");
+
+            held.hold(true);
+            harness.in_app(|| ctx.sync_now());
+            harness.pump();
+            if undo_first {
+                harness.in_app(|| ctx.undo_delete());
+                harness.in_app(|| ctx.sync_turn_off(false));
+            } else {
+                harness.in_app(|| ctx.sync_turn_off(false));
+                harness.in_app(|| ctx.undo_delete());
+            }
+            held.hold(false);
+            harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+            assert_eq!(stamps(&harness), [1, 2], "not let go: {case}");
+            assert_eq!(
+                status(&harness),
+                SyncStatus::Off { problem: None },
+                "{case}"
+            );
+        });
+    }
+}
+
 /// What sync noted of a session put back while a sync was under way goes
 /// with everything else sync keeps as sync is turned off here, as one put
 /// back while none was would: turned on again, sync begins from nothing.
