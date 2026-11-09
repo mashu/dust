@@ -27,8 +27,8 @@ use super::record::{
     records_for_blob, unread_notices, unreadable,
 };
 use super::{
-    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SessionKey, SetAside,
-    Store, saved_as, saved_now,
+    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Lock, LockHeld, Locking,
+    OpenSession, SessionKey, SetAside, Store, saved_as, saved_now,
 };
 
 #[derive(Default)]
@@ -145,6 +145,24 @@ pub struct MemoryStore {
     /// looked whether the store holds nothing for it, as a copy turning
     /// sync on anew at that moment would: kept once, after that look.
     pub sync_kept_after_look: RefCell<Option<String>>,
+    /// The locks held ([`Store::try_lock`]), by whichever copy of the app
+    /// holds each: every copy shares the store, and so its locks.
+    locks: Rc<RefCell<BTreeSet<Lock>>>,
+    /// The store takes no lock, as a browser without Web Locks takes none.
+    pub unlockable: Cell<bool>,
+}
+
+/// A lock a copy of the app holds on a [`MemoryStore`], let go of as this
+/// is dropped.
+struct Unlocks {
+    locks: Rc<RefCell<BTreeSet<Lock>>>,
+    lock: Lock,
+}
+
+impl Drop for Unlocks {
+    fn drop(&mut self) {
+        self.locks.borrow_mut().remove(&self.lock);
+    }
 }
 
 /// How many changes other copies have told of, and what waits on the next.
@@ -618,6 +636,14 @@ impl Store for MemoryStore {
         self.page.is_none()
     }
 
+    /// Answered at once, as by a computer's or a phone's store.
+    fn try_lock(&self, lock: Lock) -> Pending<Locking> {
+        if self.unlockable.get() {
+            return done(Locking::Unlockable);
+        }
+        done(self.locked(lock).map_or(Locking::Busy, Locking::Held))
+    }
+
     /// Whether the history changed since this store last read or listed
     /// it. Tabs sharing one store share what it last saw, so a test of
     /// tabs syncs each by hand.
@@ -651,6 +677,23 @@ impl Store for MemoryStore {
 }
 
 impl MemoryStore {
+    /// Another copy of the app holds `lock`, until what this hands back is
+    /// dropped: as a copy mid-sync holds what syncs take.
+    pub fn hold_lock(&self, lock: Lock) -> LockHeld {
+        self.locked(lock)
+            .unwrap_or_else(|| panic!("{lock:?} is held already"))
+    }
+
+    /// `lock`, now held, where no copy held it.
+    fn locked(&self, lock: Lock) -> Option<LockHeld> {
+        self.locks.borrow_mut().insert(lock).then(|| {
+            LockHeld::new(Unlocks {
+                locks: Rc::clone(&self.locks),
+                lock,
+            })
+        })
+    }
+
     /// Another copy of the app tells of a change it made to the history:
     /// every copy that hears of them takes it up ([`Self::hears_news`]).
     pub fn tell_news(&self) {
@@ -1091,6 +1134,35 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("not done"),
         }
+    }
+
+    /// A lock is held by one copy of the app at a time, whichever copy
+    /// takes it, and is free again once let go of; each lock is apart from
+    /// the other. A store that takes no locks says so.
+    #[test]
+    fn a_lock_is_held_by_one_copy_at_a_time() {
+        let store = MemoryStore::default();
+        let run = match now(store.try_lock(Lock::SyncRun)) {
+            Locking::Held(held) => held,
+            other => panic!("held by the copy that tries it first: {other:?}"),
+        };
+        let busy = now(store.try_lock(Lock::SyncRun));
+        assert!(matches!(busy, Locking::Busy), "{busy:?}");
+        let another = store.hold_lock(Lock::SyncState);
+        let busy = now(store.try_lock(Lock::SyncState));
+        assert!(matches!(busy, Locking::Busy), "held by another: {busy:?}");
+        drop(run);
+        let free = now(store.try_lock(Lock::SyncRun));
+        assert!(
+            matches!(free, Locking::Held(_)),
+            "free once let go of: {free:?}"
+        );
+        drop(another);
+        let free = now(store.try_lock(Lock::SyncState));
+        assert!(matches!(free, Locking::Held(_)), "{free:?}");
+        store.unlockable.set(true);
+        let none = now(store.try_lock(Lock::SyncRun));
+        assert!(matches!(none, Locking::Unlockable), "{none:?}");
     }
 
     /// The store keeps the history by record, as the files do: one write a

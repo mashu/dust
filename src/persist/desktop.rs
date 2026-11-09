@@ -13,11 +13,11 @@ use super::disk::{
     aside_name, flush, move_aside, save_streamed, shown, sync_dir, temporary, write_whole,
 };
 use super::files::HistoryFiles;
-use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
-    over_stored, read_settings_from, unmarked,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, LockHeld, Locking, OpenSession,
+    SETTINGS_HELD, SetAside, Store, over_stored, read_settings_from, unmarked,
 };
 
 const THEME: &str = "theme.txt";
@@ -266,6 +266,42 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     }
     written?;
     sync_dir(dir)
+}
+
+/// Try the lock that the file `name` in `dir` is, made there where it is
+/// not. The system holds a file's lock for whoever opened it, and lets go of
+/// it as the file is closed, or as the process that opened it ends, however
+/// it ends. A lock file is never deleted: a copy deleting one could do so
+/// under another that has it open and locked, while a third made it anew and
+/// locked that, and two copies would hold the lock at once. It holds nothing.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
+)]
+fn lock_file(dir: &Path, name: &str) -> Locking {
+    let opened = fs::create_dir_all(dir).and_then(|()| {
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(name))
+    });
+    let file = match opened {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("{} cannot be locked: {err}", dir.join(name).display());
+            return Locking::Unlockable;
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => Locking::Held(LockHeld::new(file)),
+        Err(fs::TryLockError::WouldBlock) => Locking::Busy,
+        // A volume that takes no lock, as some network shares do not.
+        Err(fs::TryLockError::Error(err)) => {
+            eprintln!("{} cannot be locked: {err}", dir.join(name).display());
+            Locking::Unlockable
+        }
+    }
 }
 
 /// The file at `path`, made empty, that the user alone can read and write:
@@ -635,6 +671,12 @@ impl Store for DesktopStore {
 
     fn history_changed(&self) -> bool {
         self.history.changed()
+    }
+
+    /// A file of its own for each lock, beside what sync keeps
+    /// ([`Lock::file_name`]), answered at once.
+    fn try_lock(&self, lock: Lock) -> Pending<Locking> {
+        done(lock_file(&self.sync_dir, lock.file_name()))
     }
 
     fn flush_history(&self) {
@@ -2011,6 +2053,51 @@ pub(super) mod tests {
             android_files_dir_of(10, "dev.dust.morse"),
             PathBuf::from("/data/user/10/dev.dust.morse/files")
         );
+    }
+
+    /// A lock across copies of the app is held by one copy at a time, each
+    /// lock apart from the other, and is taken by the next copy to try it
+    /// once let go of: each in a file of its own beside what sync keeps,
+    /// which it leaves as it is. The lock files stay, for the next copy to
+    /// lock.
+    #[test]
+    fn a_lock_across_copies_is_held_by_one_copy_at_a_time() {
+        let (dir, first) = store("locks");
+        let second = DesktopStore::at(dir.0.clone());
+        let kept = r#"{"key":"secret"}"#;
+        first.save_sync(Some(kept)).expect("saved");
+        let held = |store: &DesktopStore, lock: Lock, why: &str| match now(store.try_lock(lock)) {
+            Locking::Held(held) => held,
+            other => panic!("{why}: {other:?}"),
+        };
+        let run = held(&first, Lock::SyncRun, "held by the first copy to try it");
+        let busy = now(second.try_lock(Lock::SyncRun));
+        assert!(matches!(busy, Locking::Busy), "held by the other: {busy:?}");
+        let state = held(&second, Lock::SyncState, "what sync keeps is a lock apart");
+        let busy = now(first.try_lock(Lock::SyncState));
+        assert!(matches!(busy, Locking::Busy), "{busy:?}");
+        drop(run);
+        let run = held(&second, Lock::SyncRun, "free once let go of");
+        drop((run, state));
+        assert_eq!(second.load_sync().as_deref(), Some(kept), "left as it is");
+        let names = files(&dir);
+        for name in ["sync-run.lock", "sync.lock", SYNC] {
+            assert!(names.iter().any(|held| held == name), "{name}: {names:?}");
+        }
+        let _ = held(&first, Lock::SyncRun, "locked again where it stayed");
+    }
+
+    /// Where the folder of the lock files cannot be made, there is no lock,
+    /// and sync goes on without one, as it did before there were locks.
+    #[test]
+    fn a_lock_whose_file_cannot_be_made_is_none() {
+        let dir = TempDir::new("locks-nowhere");
+        fs::create_dir_all(&dir.0).unwrap();
+        let not_a_folder = dir.0.join("a file");
+        fs::write(&not_a_folder, "").unwrap();
+        let store = DesktopStore::at(not_a_folder);
+        let none = now(store.try_lock(Lock::SyncRun));
+        assert!(matches!(none, Locking::Unlockable), "{none:?}");
     }
 
     /// What sync keeps, the key to the synced copy and the sign-in, is the

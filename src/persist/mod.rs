@@ -22,6 +22,11 @@ mod files;
 #[cfg(any(feature = "web", test))]
 mod idb;
 mod legacy;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
+)]
+mod lock;
 #[cfg(test)]
 pub mod memory;
 pub mod record;
@@ -36,6 +41,7 @@ mod worker;
 
 #[cfg(all(test, feature = "native-runtime"))]
 pub(crate) use desktop::tests::TempDir;
+pub use lock::{Lock, LockHeld, Locking};
 pub use saved::HistorySaved;
 pub use session::{Deleted, SessionKey};
 pub use set_aside::SetAside;
@@ -50,7 +56,7 @@ use cw_core::{
 };
 use serde::Deserialize;
 
-use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
 use settings::{load_settings_from, unmarked};
 
 pub trait Store {
@@ -209,6 +215,18 @@ pub trait Store {
     /// and lets the oldest go for room.
     fn syncs_history(&self) -> bool {
         true
+    }
+    /// Try `lock`, which every copy of the app on this store shares, and
+    /// say whether this copy holds it now ([`Locking`]). It never waits for
+    /// another copy to let go of it: a browser answers a moment later, as
+    /// it grants a Web Lock, and every other store at once. A store that
+    /// keeps no locks says so ([`Locking::Unlockable`]).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
+    )]
+    fn try_lock(&self, _lock: Lock) -> Pending<Locking> {
+        done(Locking::Unlockable)
     }
 }
 
