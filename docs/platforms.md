@@ -810,6 +810,10 @@ beside it, but it cannot delete or write over a record. A build that keeps
 records takes up, once, each session an older build stores there that
 finished no earlier than a day before the move and is neither here already
 nor deleted here, and makes here each deletion the older build made since.
+A record here that this build cannot read but that says which session it
+holds counts as that session, and while a record here cannot be read at all
+for now nothing is taken up: it may be the session, and the take-up waits
+for the next look at which every record reads.
 Going back to an older build shows the history as it was at the update,
 plus what it stores, and loses nothing kept since: the records stay for the
 next update. A history kept by a newer Dust in a way this build cannot

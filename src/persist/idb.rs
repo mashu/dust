@@ -376,7 +376,15 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         load.complete = layout.is_some();
         self.layout.replace(layout);
         if load.complete {
-            let live = keyed(read.sessions.iter().map(|(id, session)| (*id, session)));
+            // A record this build cannot read that says which session it
+            // holds holds it all the same: an older build's copy of that
+            // session is no session to take up beside it.
+            let mut live = keyed(read.sessions.iter().map(|(id, session)| (*id, session)));
+            for (id, said) in &read.unread {
+                if let Some(key) = &said.key {
+                    live.entry(key.clone()).or_default().push(*id);
+                }
+            }
             if let Some(change) = self.import(Some(live)).await {
                 taken_up(&mut read.sessions, &change);
             }
@@ -416,9 +424,15 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
                             keys.insert(id, SessionKey::of(&session));
                             read.sessions.push((id, session));
                         }
-                        None => read
-                            .unread
-                            .push((id, raw.as_deref().map(unreadable).unwrap_or_default())),
+                        None => {
+                            let said = raw.as_deref().map(unreadable).unwrap_or_default();
+                            // There all the same, as the session it says
+                            // it holds.
+                            if let Some(key) = &said.key {
+                                keys.insert(id, key.clone());
+                            }
+                            read.unread.push((id, said));
+                        }
                     }
                     if keep && let Some(raw) = raw {
                         read.raw.insert(id, raw);

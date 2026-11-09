@@ -1037,12 +1037,25 @@ impl MemoryStore {
             .and_then(read_history)
             .map(|read| read.sessions)
             .unwrap_or_default();
+        // Every record here by the session it holds, or says it holds, as
+        // the files take them: nothing is taken up while one cannot be read
+        // for now, as it may hold a session the older build holds too.
         let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
         {
-            let tombstones = self.tombstones.borrow();
+            let (tombstones, held_open) = (self.tombstones.borrow(), self.held_open.borrow());
             for (id, held) in self.records.borrow().iter() {
-                if let Some(session) = held.session().filter(|_| !tombstones.contains_key(id)) {
-                    live.entry(SessionKey::of(&session)).or_default().push(*id);
+                if tombstones.contains_key(id) {
+                    continue;
+                }
+                if held_open.contains(id) {
+                    return;
+                }
+                let key = match held.session() {
+                    Some(session) => Some(SessionKey::of(&session)),
+                    None => unreadable(&held.json).key,
+                };
+                if let Some(key) = key {
+                    live.entry(key).or_default().push(*id);
                 }
             }
         }

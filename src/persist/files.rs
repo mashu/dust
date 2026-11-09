@@ -287,7 +287,7 @@ impl HistoryFiles {
 
     /// Read the whole history: making the move from a history kept whole
     /// first, where none was made, and taking up what an older build stored
-    /// there since, where one was.
+    /// there since, where one was, and every record here could be read.
     ///
     /// A record and its tombstone read as deleted, and the deletion cut
     /// short is finished. A record this build cannot read is left where it
@@ -376,10 +376,14 @@ impl HistoryFiles {
                     load.sessions.push((id, session));
                 }
                 Some((Err(said), _)) => {
-                    if said.later
-                        && let Some(key) = &said.key
-                    {
-                        load.later.push((id, key.clone()));
+                    // There all the same: what an older build stores of
+                    // the session it says it holds is no session to take
+                    // up beside it.
+                    if let Some(key) = &said.key {
+                        keys.insert(id, key.clone());
+                        if said.later {
+                            load.later.push((id, key.clone()));
+                        }
                     }
                     load.unread.push(id);
                     unread.push((id, said));
@@ -393,8 +397,19 @@ impl HistoryFiles {
         }
         load.notices
             .extend(self.tell(&unread, &load.failed, writable));
-        if let Some(layout) = &layout {
-            let live = keyed(load.sessions.iter().map(|(id, session)| (*id, session)));
+        // Nothing is taken up from an older build while a record here
+        // cannot be read for now: it may hold a session the older build
+        // holds too. A later look takes it up, once every record reads
+        // ([`Self::listing`]).
+        if let Some(layout) = &layout
+            && load.failed.is_empty()
+        {
+            let mut live = keyed(load.sessions.iter().map(|(id, session)| (*id, session)));
+            for (id, said) in &unread {
+                if let Some(key) = &said.key {
+                    live.entry(key.clone()).or_default().push(*id);
+                }
+            }
             if let Some(change) = self.import(layout, &live) {
                 taken_up(&mut load.sessions, &change);
             }
@@ -542,8 +557,8 @@ impl HistoryFiles {
     }
 
     /// Every record there is, deleted ones left out, once whatever an older
-    /// build stored since has been taken up. None where the history cannot
-    /// be listed.
+    /// build stored since has been taken up, where every record here can be
+    /// read ([`Self::live_keys`]). None where the history cannot be listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
         self.on_its_thread();
         // As the folders were before they were looked at, the history kept
@@ -712,12 +727,6 @@ impl HistoryFiles {
         }
     }
 
-    /// What is stored for `id`, loose, or else in a pack: none where it
-    /// cannot be read.
-    fn raw_record(&self, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<String> {
-        raw_at(&self.records(), id, packed).text()
-    }
-
     /// Every record a later build packed together, and what each holds,
     /// as it was written. A line that does not read, or a pack cut short,
     /// gives up what it can, and a pack that cannot be opened, gone since
@@ -788,24 +797,30 @@ impl HistoryFiles {
     }
 
     /// Every record there is by its session's key: those read before as
-    /// they were read, the rest read now for their keys alone.
+    /// they were read, the rest read now for their keys alone. One whose
+    /// text says no session, damaged, has none. None where the history
+    /// cannot be listed, or a record in it cannot be read for now: it may
+    /// hold a session an older build holds too, which would be taken up a
+    /// second time beside it.
     fn live_keys(&self) -> Option<HashMap<SessionKey, Vec<RecordId>>> {
         let listing = self.listing_now().ok()?;
+        let records = self.records();
         let mut keys = self.keys.borrow_mut();
         let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
         for id in listing.records.difference(&listing.gone) {
             let key = match keys.get(id) {
                 Some(key) => key.clone(),
-                None => {
-                    let Some(key) = self
-                        .raw_record(*id, &listing.packed)
-                        .and_then(|raw| key_of(&raw))
-                    else {
-                        continue;
-                    };
-                    keys.insert(*id, key.clone());
-                    key
-                }
+                None => match raw_at(&records, *id, &listing.packed) {
+                    Raw::Text(raw) => {
+                        let Some(key) = key_of(&raw) else {
+                            continue;
+                        };
+                        keys.insert(*id, key.clone());
+                        key
+                    }
+                    Raw::NoText(_) => continue,
+                    Raw::Failed => return None,
+                },
             };
             live.entry(key).or_default().push(*id);
         }
@@ -2825,6 +2840,90 @@ mod tests {
         );
     }
 
+    /// A session a record here holds is not taken up from the history an
+    /// older build keeps whole while that record cannot be read for now, as
+    /// a file another program holds open cannot be: the record may be that
+    /// session. Once it reads, the session is there once. The take-up left
+    /// out every record that did not read, and stored the session a second
+    /// time beside it.
+    #[test]
+    fn a_session_a_record_here_holds_is_not_taken_up_from_an_older_build_while_that_record_cannot_be_read()
+     {
+        let dir = TempDir::new("older-busy");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = Files::at(&dir.0);
+        files.load();
+        // Finished here after the move, and held by an older build too.
+        let mine = finished(now + 60_000);
+        let kept = record(&mine);
+        files.apply(&put(std::slice::from_ref(&kept)));
+        keep_whole(&dir, &[old.clone(), mine.clone()]);
+        // A folder where its file goes, which cannot be read as one.
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let path = records.join(file_name(kept.id));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        // A copy opened since, which has not read it.
+        let since = Files::at(&dir.0);
+        let read = since.load();
+        assert_eq!(stamps(&read), [old.timestamp], "nothing taken up");
+        assert_eq!(read.failed, [kept.id]);
+        assert_eq!(names(&records).len(), 2, "nothing stored");
+        assert_eq!(
+            since.listing().map(|listed| listed.len()),
+            Some(2),
+            "nor as it is listed"
+        );
+        assert_eq!(names(&records).len(), 2);
+
+        // It reads again.
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &kept.json).unwrap();
+        let read = Files::at(&dir.0).load();
+        assert_eq!(stamps(&read), [old.timestamp, mine.timestamp], "once");
+        assert_eq!(names(&records).len(), 2);
+        assert_eq!(files.listing().map(|listed| listed.len()), Some(2));
+    }
+
+    /// A session a later build stored here, in a record this build cannot
+    /// read that says which session it holds, is not taken up a second time
+    /// from the history an older build keeps whole, as the history is read
+    /// whole nor as it is listed. Read whole, the take-up left that record
+    /// out, and stored the session again beside it.
+    #[test]
+    fn a_session_a_later_build_stored_here_is_not_taken_up_from_an_older_build() {
+        let dir = TempDir::new("older-later");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = Files::at(&dir.0);
+        files.load();
+        let theirs = finished(now + 60_000);
+        let later = format!(
+            r#"{{"format":{},"date":{:?},"timestamp":{},"by":"a later build"}}"#,
+            cw_core::SESSION_FORMAT + 1,
+            theirs.date,
+            theirs.timestamp
+        );
+        let id = RecordId::next(theirs.timestamp, None, &later);
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::write(records.join(file_name(id)), &later).unwrap();
+        keep_whole(&dir, &[old.clone(), theirs.clone()]);
+        let read = Files::at(&dir.0).load();
+        assert_eq!(stamps(&read), [old.timestamp], "not taken up");
+        assert_eq!(read.later, [(id, SessionKey::of(&theirs))]);
+        assert_eq!(names(&records).len(), 2, "nothing stored");
+        keep_whole(&dir, &[old, theirs, finished(now + 120_000)]);
+        assert_eq!(files.listing().map(|listed| listed.len()), Some(3));
+        assert_eq!(
+            names(&records).len(),
+            3,
+            "only the one an older build added"
+        );
+    }
+
     /// A session from before the move that an older copy writes back, as
     /// one left open stores the history it held, is never brought back:
     /// neither one it let go long ago, nor one deleted here since.
@@ -3355,6 +3454,8 @@ mod tests {
         sessions_an_older_build_added_after_the_move_are_taken_up,
         sessions_from_before_the_move_are_never_brought_back,
         a_session_imported_once_is_never_imported_again,
+        a_session_a_record_here_holds_is_not_taken_up_from_an_older_build_while_that_record_cannot_be_read,
+        a_session_a_later_build_stored_here_is_not_taken_up_from_an_older_build,
         a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
         a_pack_and_a_loose_copy_of_one_record_read_as_one,
