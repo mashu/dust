@@ -139,6 +139,9 @@ pub struct MemoryStore {
     /// the app made while this is set.
     pub hears_news: Cell<bool>,
     news: Rc<RefCell<News>>,
+    /// Another copy's word of each change it makes to what sync keeps,
+    /// heard where [`Self::hears_news`] is set ([`Self::tell_sync_news`]).
+    sync_news: Rc<RefCell<News>>,
     /// What sync keeps here ([`Store::load_sync`]).
     pub sync: RefCell<Option<String>>,
     /// What sync keeps cannot be written, as a full disk refuses it.
@@ -686,19 +689,34 @@ impl Store for MemoryStore {
     }
 
     fn history_news(&self) -> Option<Pending<()>> {
-        if !self.hears_news.get() {
-            return None;
+        self.hears_news.get().then(|| next_news(&self.news))
+    }
+
+    fn sync_news(&self) -> Option<Pending<()>> {
+        self.hears_news.get().then(|| next_news(&self.sync_news))
+    }
+}
+
+/// A wait that ends at the next word of `news` told after it began.
+fn next_news(news: &Rc<RefCell<News>>) -> Pending<()> {
+    let news = news.clone();
+    let told = news.borrow().told;
+    Box::pin(std::future::poll_fn(move |asked| {
+        let mut news = news.borrow_mut();
+        if news.told > told {
+            return Poll::Ready(());
         }
-        let news = self.news.clone();
-        let told = news.borrow().told;
-        Some(Box::pin(std::future::poll_fn(move |asked| {
-            let mut news = news.borrow_mut();
-            if news.told > told {
-                return Poll::Ready(());
-            }
-            news.waiting.push(asked.waker().clone());
-            Poll::Pending
-        })))
+        news.waiting.push(asked.waker().clone());
+        Poll::Pending
+    }))
+}
+
+/// Tell `news` of a change: every wait on it ends.
+fn tell(news: &RefCell<News>) {
+    let mut news = news.borrow_mut();
+    news.told += 1;
+    for waker in news.waiting.drain(..) {
+        waker.wake();
     }
 }
 
@@ -723,11 +741,15 @@ impl MemoryStore {
     /// Another copy of the app tells of a change it made to the history:
     /// every copy that hears of them takes it up ([`Self::hears_news`]).
     pub fn tell_news(&self) {
-        let mut news = self.news.borrow_mut();
-        news.told += 1;
-        for waker in news.waiting.drain(..) {
-            waker.wake();
-        }
+        tell(&self.news);
+    }
+
+    /// Another copy of the app tells of a change it made to what sync
+    /// keeps, as a browser fires a `storage` event in every other tab of the
+    /// site as one writes `localStorage`: every copy that hears of them
+    /// takes it up ([`Self::hears_news`]).
+    pub fn tell_sync_news(&self) {
+        tell(&self.sync_news);
     }
 
     /// A copy of the app that keeps the history whole in `shelf`, a

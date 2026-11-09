@@ -329,6 +329,7 @@ impl AppCtx {
                 app: CopyValue::new(app),
             };
             ctx.hear_history_news();
+            ctx.hear_sync_news();
             ctx.read_again_soon();
             ctx.sync_at_launch();
             ctx

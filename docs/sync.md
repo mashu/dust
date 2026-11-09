@@ -224,11 +224,16 @@ keeps each one's notes (`docs/platforms.md`).
 
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that
-device, which keeps what sync keeps in the same place, finds it gone as it
-next syncs, or keeps what it keeps, and turns sync off too, saying so. One
-that finds there instead what another tab or window kept as it turned sync
-on anew turns off as well, saying so, rather than write its own over it:
-opened again, it syncs as that one does. Neither clears anything from the
+device, which keeps what sync keeps in the same place, finds it gone and
+turns sync off too, saying so: a browser's other tabs at once, as the
+browser tells each of the write (a `storage` event), and a window as it
+comes back into sight, syncs, or keeps what it keeps. One that finds there
+instead what another tab or window kept as it turned sync on anew turns off
+as well, saying so, rather than write its own over it: opened again, it
+syncs as that one does. So, too, a tab or window takes up what another
+synced: when this device last synced, which its card shows, so that coming
+back into sight it does not sync again just after the other did, and a
+sign-in made there, which it signs in with from then on. Neither clears anything from the
 store, nor does a tab or window that finds the store so as sync is turned
 off in it, by hand or as the copy is gone from the drive. Turning it off
 with the copy deletes every file of Dust's from the folder, the keyring

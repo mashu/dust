@@ -217,6 +217,15 @@ pub trait Store {
     fn save_sync(&self, _state: Option<&str>) -> Result<(), String> {
         Err("this device keeps nothing for sync".into())
     }
+    /// A wait that ends as another copy of the app tells of a change it
+    /// made to what sync keeps, so that this one takes it up at once: sync
+    /// turned off there, or on anew, and what it synced and signed in with.
+    /// None where no copy tells, as only a browser's tabs do: a copy takes
+    /// up what another kept as it syncs or keeps, and as it comes back into
+    /// sight.
+    fn sync_news(&self) -> Option<Pending<()>> {
+        None
+    }
     /// Whether the history here can sync: kept by record, as every store
     /// keeps it but a browser's small page storage, which keeps it whole
     /// and lets the oldest go for room.

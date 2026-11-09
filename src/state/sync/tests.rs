@@ -2546,6 +2546,126 @@ fn a_tab_keeps_what_sync_keeps_as_it_is_noted() {
     });
 }
 
+/// Sync turned off in another tab of the app is off in this one as soon as
+/// the browser tells this one of it, as it tells every other tab of a write
+/// to `localStorage`, saying why: nothing is synced meanwhile. It used to
+/// stay on here until this tab next synced or kept what sync keeps.
+#[test]
+fn sync_turned_off_in_another_tab_is_taken_up_as_it_is_told_of() {
+    run(|| async {
+        let mut harness = Harness::new();
+        harness.store.hears_news.set(true);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let tab = another_copy(&harness, &remote);
+        let lists = remote.lists.get();
+        harness.in_app(|| ctx.sync_turn_off(false));
+        harness.store.tell_sync_news();
+        harness.pump();
+        let there = harness.in_app(|| tab.sync.status.peek().clone());
+        assert!(
+            matches!(&there, SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{there:?}"
+        );
+        assert_eq!(remote.lists.get(), lists, "nothing synced");
+    });
+}
+
+/// Sync turned off in another window of the app is off in this one as it
+/// comes back into sight, saying why, on every platform, though nothing
+/// told it: it looks at what the store keeps for sync first, and syncs
+/// nothing. It used to stay on until it next synced or kept what sync keeps.
+#[test]
+fn sync_turned_off_in_another_window_is_taken_up_as_this_one_comes_into_sight() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        let lists = remote.lists.get();
+        harness.in_app(|| ctx.sync_turn_off(false));
+        harness.in_app(|| window.sync_if_stale());
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert!(
+            matches!(&there, SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{there:?}"
+        );
+        assert_eq!(remote.lists.get(), lists, "nothing synced");
+    });
+}
+
+/// A sync another copy of the app made is this copy's last sync too: the
+/// card shows it, and this copy, coming back into sight, does not sync
+/// again so soon after it. It used to go by its own last sync alone, and
+/// sync again just after the other copy had.
+#[test]
+fn a_sync_made_in_another_copy_is_this_copys_last() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        // As far as the window knows, it synced long ago.
+        harness.in_app(|| {
+            let mut state = window.sync.state;
+            if let Some(state) = state.write().as_mut() {
+                state.last = Some(now_ms() - 10 * 60_000);
+            }
+        });
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let synced = kept_state(&harness).last;
+        let lists = remote.lists.get();
+        harness.in_app(|| window.sync_if_stale());
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(remote.lists.get(), lists, "synced a moment ago, there");
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert!(
+            matches!(there, SyncStatus::On { last, .. } if last == synced),
+            "{there:?}"
+        );
+    });
+}
+
+/// A sign-in made in another copy of the app, a refresh token got there
+/// after the one kept here was turned down, say, is the one this copy signs
+/// in with as soon as it takes up what that copy kept. It used to go on with
+/// its own until the app opened again.
+#[test]
+fn a_sign_in_another_copy_made_is_this_copys_too() {
+    run(|| async {
+        let mut harness = Harness::new();
+        harness.store.hears_news.set(true);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let tab_auth = FakeAuth::giving(&["u"]);
+        tab_auth.asked.set(4);
+        let tab = another_copy_through(
+            &harness,
+            Rc::clone(&remote) as Rc<dyn Remote>,
+            Rc::clone(&tab_auth) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| tab.sync_sign_in());
+        harness.pump();
+        harness.store.tell_sync_news();
+        harness.pump();
+        assert_eq!(auth.kept().as_deref(), Some("kept 5"), "signed in as there");
+        let here = harness.in_app(|| {
+            ctx.sync
+                .state
+                .peek()
+                .as_ref()
+                .and_then(|state| state.sign_in.clone())
+        });
+        assert_eq!(here.as_deref(), Some("kept 5"));
+    });
+}
+
 /// Move the clock on by `ms` at once, as a long wait does, letting what was
 /// waiting on it run.
 async fn leap(harness: &mut Harness, ms: u64) {

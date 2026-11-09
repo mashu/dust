@@ -402,6 +402,7 @@ impl AppCtx {
     /// that the next write lays what this copy did over the store again;
     /// and the user is told.
     fn write_kept(self, merged: SyncState, theirs: Option<SyncState>) {
+        self.take_up_sign_in(&merged);
         let saved = match merged.written() {
             Some(written) => self.app().store.save_sync(Some(&written)),
             None => Err("it could not be written out".into()),
@@ -522,14 +523,16 @@ impl AppCtx {
 
     /// Take up what another copy of the app on the same store, a tab or a
     /// window, kept for sync since this one last read or kept it there,
-    /// laid under what this copy did since ([`SyncState::merged`]); or,
+    /// laid under what this copy did since ([`SyncState::merged`]): its
+    /// notes, when this device last synced, which the card shows, and a
+    /// sign-in made there, which this copy signs in with from then on. Or,
     /// where it turned sync off since, or on anew and kept its own, turn
     /// sync off here as well, saying why ([`Self::changed_elsewhere`]). Says
-    /// whether sync is on here still.
+    /// whether sync is on here still. It only reads.
     fn take_up_kept(self) -> bool {
-        if self.sync.state.peek().is_none() {
+        let Some(ours) = self.sync.state.peek().clone() else {
             return false;
-        }
+        };
         let kept = read_kept(&*self.app().store);
         if let Some(why) = self.changed_elsewhere(&kept) {
             self.take_up_change_elsewhere(why);
@@ -539,16 +542,56 @@ impl AppCtx {
         if let (Kept::State(theirs), Some(base)) = (kept, base)
             && *theirs != base
         {
-            let merged = self
-                .sync
-                .state
-                .peek()
-                .as_ref()
-                .map(|ours| ours.merged(Some(&base), &theirs));
-            put(self.sync.state, merged);
+            let merged = ours.merged(Some(&base), &theirs);
+            self.take_up_sign_in(&merged);
+            let last = merged.last;
+            put(self.sync.state, Some(merged));
             put(self.sync.base, Some(*theirs));
+            self.change_on_status(|shown, _, _, _| *shown = last);
         }
         true
+    }
+
+    /// Sign in with what `merged` keeps to, where it is a sign-in another
+    /// copy of the app made, as a merge takes it from the store: a refresh
+    /// token another window got after this one's was turned down, say. As
+    /// the app opening takes up the one kept ([`SyncCtx::new`]).
+    fn take_up_sign_in(self, merged: &SyncState) {
+        let here = self
+            .sync
+            .state
+            .peek()
+            .as_ref()
+            .and_then(|state| state.sign_in.clone());
+        if merged.sign_in.is_some()
+            && merged.sign_in != here
+            && let Some(link) = self.sync_link()
+        {
+            link.auth.keep(merged.sign_in.clone());
+        }
+    }
+
+    /// Take up what another copy of the app kept for sync as it tells of
+    /// it, where the store hears of such words ([`Store::sync_news`]), as a
+    /// browser's tabs do: a tab left open beside another shows sync turned
+    /// off there at once, and takes up what that one synced and signed in
+    /// with.
+    pub(super) fn hear_sync_news(self) {
+        let store = self.app().store;
+        let Some(first) = store.sync_news() else {
+            return;
+        };
+        spawn_forever(async move {
+            let mut news = first;
+            loop {
+                news.await;
+                self.take_up_kept();
+                match store.sync_news() {
+                    Some(next) => news = next,
+                    None => return,
+                }
+            }
+        });
     }
 
     /// Turn sync off here, saying `why`: another copy of the app on the
@@ -962,8 +1005,13 @@ impl AppCtx {
 
     /// Sync soon, where the last sync was a while ago: as the app comes
     /// back into sight. One stamped ahead of the clock, as it is once the
-    /// clock is set back after it, is taken for one a while ago.
+    /// clock is set back after it, is taken for one a while ago. What
+    /// another copy of the app kept meanwhile is taken up first, a sync it
+    /// made, or sync turned off there, among it ([`Self::take_up_kept`]).
     pub fn sync_if_stale(self) {
+        if !self.take_up_kept() {
+            return;
+        }
         let last = self.sync.state.peek().as_ref().and_then(|state| state.last);
         let now = now_ms();
         if last.is_none_or(|last| last > now || now - last >= SYNC_STALE_MS) {
@@ -1153,6 +1201,7 @@ impl AppCtx {
     pub fn link_sync(mut self, link: Link) -> Self {
         let store = self.app().store;
         self.sync = crate::state::in_root(|| SyncCtx::linked(&*store, Some(link)));
+        crate::state::in_root(|| self.hear_sync_news());
         self
     }
 }
