@@ -1267,9 +1267,12 @@ mod tests {
     /// A run filled in with the log a copy kept keeps what the run here
     /// held that the copy does not: a later version's keys, on the run, a
     /// group or inside a letter's entry of the tally, and the times of a
-    /// group the copy holds none of. What the copy holds stays as it is,
-    /// its own value under a key both hold among it. The copy was taken
-    /// whole, and the rest lost from the history.
+    /// group the copy says nothing of the times of, in whatever shape. What
+    /// the copy holds stays as it is, its own value under a key both hold
+    /// among it, and its word on a group's times. The copy was taken whole,
+    /// and the rest lost from the history; then, where either said
+    /// something of a group's times in a shape this version does not read,
+    /// the run here's times went in beside the copy's word on them.
     #[test]
     fn restoring_a_runs_log_keeps_what_the_session_here_held_beside_it() {
         let run = |log: bool| {
