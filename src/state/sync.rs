@@ -905,6 +905,12 @@ impl AppCtx {
     /// Sync through `link`, as [`Self::sync_now`] does, once it holds the
     /// lock on syncing, or has waited for it long enough.
     async fn sync_through(self, link: &Link) {
+        // None starts while the copy is being deleted, as none asked for
+        // then does: one that waited for another copy's sync meanwhile
+        // gives way to the deletion.
+        if *self.sync.status.peek() == SyncStatus::TurningOff {
+            return;
+        }
         // Begun from what the store holds: what another copy of the app
         // kept since, laid under what this one holds; unless sync was
         // turned off before it began, here or in another copy.

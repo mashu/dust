@@ -2434,6 +2434,39 @@ fn a_sync_waits_for_another_copys_and_starts_from_what_it_kept() {
     });
 }
 
+/// A sync that waits for another copy's to end does not start once the
+/// synced copy is being deleted here meanwhile, as none asked for then
+/// does: the deletion goes once the other copy's sync is over, and syncs
+/// nothing first. The waiting sync used to go on to sync the drive just
+/// before it was deleted.
+#[test]
+fn a_sync_waiting_for_another_copys_does_not_start_once_the_copy_is_being_deleted() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let lists = remote.lists.get();
+        harness.in_app(|| window.sync_now());
+        harness.advance(1_000).await;
+        harness.in_app(|| window.sync_turn_off(true));
+        held.hold(false);
+        harness.advance(2_000).await;
+        assert!(remote.names().is_empty(), "{:?}", remote.names());
+        assert_eq!(
+            remote.lists.get(),
+            lists + 2,
+            "this copy's sync, and the deletion: the waiting sync never started"
+        );
+        let there = harness.in_app(|| window.sync.status.peek().clone());
+        assert_eq!(there, SyncStatus::Off { problem: None });
+    });
+}
+
 /// A sync waits ten minutes at most for another copy's to end, showing
 /// "Syncing..." meanwhile, and then goes on without it, as copies did before
 /// they waited for each other: a copy hung, or stopped while the system
