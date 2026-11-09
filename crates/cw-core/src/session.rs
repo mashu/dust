@@ -1012,6 +1012,18 @@ impl SessionTiming {
     pub fn ms_per_char(&self, sent: &str) -> f64 {
         self.time_to_complete_ms / sent.chars().count().max(1) as f64
     }
+
+    /// Whether the timing holds a value of its own under `key`, one of the
+    /// keys it reads leniently: a value it could not read there, kept as it
+    /// was ([`UnreadKeys::timings`]), gives way to it as the session is
+    /// written.
+    pub fn holds(&self, key: &str) -> bool {
+        match key {
+            "charTimes" => self.char_times.is_some(),
+            "untimed" => self.untimed.is_some(),
+            _ => false,
+        }
+    }
 }
 
 /// The average answer of a session with none to average: a second a
@@ -1257,11 +1269,7 @@ impl Part for GroupResult {
 
 impl Part for SessionTiming {
     fn holds(&self, key: &str) -> bool {
-        match key {
-            "charTimes" => self.char_times.is_some(),
-            "untimed" => self.untimed.is_some(),
-            _ => false,
-        }
+        SessionTiming::holds(self, key)
     }
 }
 

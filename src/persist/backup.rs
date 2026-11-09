@@ -846,7 +846,7 @@ pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -
 /// come with what they hold that this version does not read.
 fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionResult> {
     if kept.contest.is_none() && restored.contest.is_some() {
-        return Some(restored);
+        return Some(with_log(kept, restored));
     }
     if !dropped_char_times(kept, &restored) {
         return None;
@@ -874,6 +874,91 @@ fn filled_from(kept: &SessionResult, restored: SessionResult) -> Option<SessionR
         }
     }
     Some(now)
+}
+
+/// `restored`, a copy of `kept` that kept the log `kept` lost, with what
+/// `kept` holds that it does not: what `kept` holds that this version does
+/// not read, wherever in it, a key at a time; and, where the two hold the
+/// same groups, the times of a group that `restored` says nothing of the
+/// times of. Nothing `restored` holds changes. A version that drops the
+/// log drops every key it does not read, and has no times the run did not,
+/// so for what every version so far stored this is `restored` as it is.
+fn with_log(kept: &SessionResult, mut restored: SessionResult) -> SessionResult {
+    let (here, now) = (&kept.unread, &mut restored.unread);
+    take_missing(&mut now.session, &here.session);
+    for (letter, keys) in &here.letters {
+        if !keys.is_empty() && restored.tally.sent.contains_key(letter) {
+            take_missing(now.letters.entry(*letter).or_default(), keys);
+        }
+    }
+    let alike =
+        kept.groups == restored.groups && kept.group_timings.len() == restored.group_timings.len();
+    if !alike {
+        return restored;
+    }
+    let places = kept.groups.len();
+    for (at, keys) in here.groups.iter().enumerate() {
+        take_missing_at(&mut now.groups, at, places, keys);
+    }
+    let places = kept.group_timings.len();
+    let timings = restored.group_timings.iter_mut().zip(&kept.group_timings);
+    for (at, (timing, held)) in timings.enumerate() {
+        // Only where the copy says nothing of the group's times.
+        let raw = now
+            .timings
+            .get(at)
+            .is_some_and(|raw| raw.contains_key("charTimes"));
+        if timing.char_times.is_none() && timing.untimed.is_none() && !raw {
+            timing.char_times.clone_from(&held.char_times);
+        }
+        if let Some(keys) = here.timings.get(at) {
+            let keys = keys.iter().filter(|(key, _)| !timing.holds(key));
+            take_missing_at(&mut now.timings, at, places, keys);
+        }
+        if let Some(keys) = here
+            .char_times
+            .get(at)
+            .filter(|_| timing.char_times.is_some())
+        {
+            take_missing_at(&mut now.char_times, at, places, keys);
+        }
+    }
+    restored
+}
+
+/// Each of `keys` that `into` holds none of, put into it: a key both hold
+/// keeps the value `into` holds.
+fn take_missing<'a>(
+    into: &mut serde_json::Map<String, serde_json::Value>,
+    keys: impl IntoIterator<Item = (&'a String, &'a serde_json::Value)>,
+) {
+    for (key, value) in keys {
+        if !into.contains_key(key) {
+            into.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+/// The same, into what the part at `at` holds that this version does not
+/// read, of `places` parts kept by place ([`cw_core::UnreadKeys`]): one map
+/// a part once any holds a key, none at all while none does.
+fn take_missing_at<'a>(
+    by_place: &mut Vec<serde_json::Map<String, serde_json::Value>>,
+    at: usize,
+    places: usize,
+    keys: impl IntoIterator<Item = (&'a String, &'a serde_json::Value)>,
+) {
+    for (key, value) in keys {
+        if by_place.get(at).is_some_and(|held| held.contains_key(key)) {
+            continue;
+        }
+        if by_place.len() < places {
+            by_place.resize_with(places, serde_json::Map::new);
+        }
+        if let Some(held) = by_place.get_mut(at) {
+            held.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 /// Whether `one` and `other` are one session, the one filled in from the
@@ -1103,6 +1188,67 @@ mod tests {
         let twice = merge_sessions(&[], vec![run(10, false), run(10, true)]);
         assert_eq!(twice.added, [run(10, true)]);
         assert!(twice.filled.is_empty());
+    }
+
+    /// A run filled in with the log a copy kept keeps what the run here
+    /// held that the copy does not: a later version's keys, on the run, a
+    /// group or inside a letter's entry of the tally, and the times of a
+    /// group the copy holds none of. What the copy holds stays as it is,
+    /// its own value under a key both hold among it. The copy was taken
+    /// whole, and the rest lost from the history.
+    #[test]
+    fn restoring_a_runs_log_keeps_what_the_session_here_held_beside_it() {
+        let run = |log: bool| {
+            let qso = [("K5XYZ", "214", "K5XYZ", "214")];
+            let mut run = crate::testing::stored_run("2026-10-10", &qso);
+            run.timestamp = 10;
+            if !log {
+                run.contest = None;
+            }
+            run
+        };
+        let times = cw_core::CharTimes {
+            ends: vec![100, 200, 300, 400, 500],
+            keys: vec![Some(700); 5],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        };
+        let mut here = serde_json::to_value({
+            let mut here = run(false);
+            here.group_timings[1].char_times = Some(times.clone());
+            here
+        })
+        .expect("writes");
+        here["laterKey"] = serde_json::json!(1);
+        here["bothKey"] = serde_json::json!("here");
+        here["groups"][0]["laterGroupKey"] = serde_json::json!([2]);
+        here["letterAccuracy"]["K"]["laterInside"] = serde_json::json!(3);
+        here["groupTimings"][1]["charTimes"]["laterTimes"] = serde_json::json!(4);
+        let here = read_record(&here.to_string()).expect("a later version's reads");
+        let mut copy = serde_json::to_value(run(true)).expect("writes");
+        copy["bothKey"] = serde_json::json!("copy");
+        let copy = read_record(&copy.to_string()).expect("reads");
+
+        let merged = merge_sessions(std::slice::from_ref(&here), vec![copy.clone()]);
+        let [fill] = &merged.filled[..] else {
+            panic!("filled in once: {merged:?}");
+        };
+        let mut both = serde_json::to_value(&copy).expect("writes");
+        both["laterKey"] = serde_json::json!(1);
+        both["groups"][0]["laterGroupKey"] = serde_json::json!([2]);
+        both["letterAccuracy"]["K"]["laterInside"] = serde_json::json!(3);
+        both["groupTimings"][1]["charTimes"] = serde_json::to_value(&times).expect("writes");
+        both["groupTimings"][1]["charTimes"]["laterTimes"] = serde_json::json!(4);
+        let json = serde_json::to_string(&fill.now).expect("writes");
+        let now: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+        assert_eq!(now, both, "the copy, with what was here beside it");
+        assert_eq!(
+            read_record(&json).as_ref(),
+            Some(&fill.now),
+            "as it is held"
+        );
+        assert!(filled_in(&here, &fill.now), "one session");
     }
 
     /// A session whose per-character records an older version dropped takes
