@@ -133,10 +133,18 @@ impl fmt::Display for RecordId {
 /// holds. Written out here rather than taken from a crate, as it is part of
 /// what every record is named by, and must never change with a dependency.
 pub fn fnv64(bytes: &[u8]) -> u64 {
+    fnv64_parts([bytes])
+}
+
+/// The same hash of `parts` one after another: of the bytes they come to
+/// joined, with none of them copied to join them.
+pub fn fnv64_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for part in parts {
+        for &byte in part {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     }
     hash
 }
@@ -622,6 +630,34 @@ mod tests {
         ] {
             assert_eq!(RecordId::parse(not_a_name), None, "{not_a_name}");
         }
+    }
+
+    /// The hash of parts one after another is the hash of the bytes they
+    /// come to joined, wherever they are cut: what the page storage hashes
+    /// its history and its deletions by, without a copy of them joined.
+    #[test]
+    fn the_hash_of_parts_is_the_hash_of_them_joined() {
+        use cw_core::{Rng, SplitMix64};
+        let mut rng = SplitMix64::new(0x0f17_64a7);
+        for _ in 0..1_000 {
+            let joined: Vec<u8> = (0..rng.usize_in(0, 300))
+                .map(|_| rng.usize_in(0, 255) as u8)
+                .collect();
+            let mut cuts: Vec<usize> = (0..rng.usize_in(0, 4))
+                .map(|_| rng.usize_in(0, joined.len()))
+                .collect();
+            cuts.sort_unstable();
+            let mut parts = Vec::new();
+            let mut from = 0;
+            for cut in cuts {
+                parts.push(&joined[from..cut]);
+                from = cut;
+            }
+            parts.push(&joined[from..]);
+            assert_eq!(fnv64_parts(parts), fnv64(&joined), "{joined:?}");
+        }
+        let parts: [&[u8]; 3] = [b"foo", b"", b"bar"];
+        assert_eq!(fnv64_parts(parts), 0x8594_4171_f739_67e8);
     }
 
     /// A session a clock set back stamped before the newest goes after it,
