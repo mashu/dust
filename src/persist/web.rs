@@ -318,12 +318,9 @@ async fn take_marks() -> Vec<String> {
 }
 
 /// What this tab does with the Web Locks it shares with the site's other
-/// tabs: the tabs' script ([`crate::persist::lock::TABS_JS`]), run once for
-/// the page, as the page is the tab.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
-)]
+/// tabs, and what it hears of their writes of what sync keeps: the tabs'
+/// script ([`crate::persist::lock::TABS_JS`]), run once for the page, as the
+/// page is the tab.
 mod tabs {
     use std::cell::RefCell;
 
@@ -337,6 +334,16 @@ mod tabs {
     thread_local! {
         /// The script, once run: none before, or where it would not run.
         static SCRIPT: RefCell<Option<JsValue>> = const { RefCell::new(None) };
+    }
+
+    /// A wait that ends at another tab's next word on what sync keeps, a
+    /// `storage` event for it: none where the script would not run.
+    pub(super) fn heard() -> Option<Pending<()>> {
+        let tabs = script()?;
+        let waiting: js_sys::Promise = call(&tabs, "heard", &[])?.dyn_into().ok()?;
+        Some(Box::pin(async move {
+            let _ = JsFuture::from(waiting).await;
+        }))
     }
 
     /// Try the Web Lock `name`, never waiting for it.
@@ -829,6 +836,12 @@ impl Store for WebStore {
             Some(name) => tabs::try_lock(name),
             None => done(Locking::Unlockable),
         }
+    }
+
+    /// Another tab's word of each write of what sync keeps, a `storage`
+    /// event the browser fires in every other tab of the site.
+    fn sync_news(&self) -> Option<Pending<()>> {
+        tabs::heard()
     }
 
     /// Another tab's word of each change, as the database's channel gives

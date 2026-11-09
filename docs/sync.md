@@ -68,9 +68,10 @@ latest of the record the device knows the drive to hold, where that is
 later (`SyncState::stamp_change`): one made after another is the later,
 however far apart the devices' clocks are. One made while a sync is under
 way is stamped again as it ends, after what that sync read and sent, and
-a session put back by hand meanwhile is not let go by that sync, which
-planned with no note of it, even where sync is turned off before it ends:
-the next sends it as put back, where sync is on still. A
+a session put back by hand meanwhile, in that tab or window or in another
+on the device, is not let go by that sync, which planned with no note of
+it, even where sync is turned off before it ends: the next sends it as put
+back, where sync is on still. A
 putting back noted while sync knows nothing of the drive, as just after it
 is turned on anew, when what it knew before went with it, is stamped again
 after what the drive holds once its first sync reads it.
@@ -204,18 +205,53 @@ cloud stays, and a tap on it signs in again from any screen, as a browser
 opens Google's window only for a tap. The corner is never shown over a
 session or a run, and takes no tap but that one.
 
+Two tabs or windows of the app on one device keep what sync keeps in the
+same place (`SyncState`), and each lays what it did over what the store
+holds as it writes, note by note, rather than writing its own whole over
+the other's (`SyncState::merged`): a session one of them puts back by Undo,
+a deletion the other's sync sent, a sign-in made in either, and the
+settings as the later sync left them all stay. Each sync begins from what
+the store holds, and lays what it did over what the store holds as it
+ends, so a putting back made in another tab or window meanwhile goes with
+the next sync. It begins from the settings the store holds as well: a tab or
+window that has not looked since another changed a setting and synced it
+takes that change up, rather than send its own older value back as a change
+made there. A note another tab or window left out goes only once the drive
+shows it sent, or no more to send, as a browser can hand one tab another's
+write late. Every such write reads what the store keeps for sync first, on
+the app's thread, which is one read of `sync.json`, or of `localStorage`,
+more than writing it whole was. They sync one at a time: a sync asked for
+while another tab or window syncs waits for it, the corner's cloud breathing
+meanwhile, ten minutes at most, then begins from what that one kept. Turning
+sync off with the copy waits for it too, so nothing is written into the
+folder after the copy is deleted. Where nothing locks, as in a browser
+without Web Locks, tabs sync as they come, and the merge alone keeps each
+one's notes (`docs/platforms.md`).
+
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that
-device, which keeps what sync keeps in the same place, finds it gone as it
-next syncs, or keeps what it keeps, and turns sync off too, saying so. One
-that finds there instead what another tab or window kept as it turned sync
-on anew turns off as well, saying so, rather than write its own over it:
-opened again, it syncs as that one does. Neither clears anything from the
-store, nor does a tab or window that finds the store so as sync is turned
-off in it, by hand or as the copy is gone from the drive. Turning it off
-with the copy deletes every file of Dust's from the folder, the keyring
-first, and every other device then finds it gone, says so, and turns sync
-off too.
+device, which keeps what sync keeps in the same place, finds it gone and
+turns sync off too, saying so: a browser's other tabs at once, as the
+browser tells each of the write (a `storage` event), and a window as it
+comes back into sight, syncs, or keeps what it keeps. One that finds there
+instead what another tab or window kept as it turned sync on anew turns off
+as well, saying so, rather than write its own over it: opened again, it
+syncs as that one does. A session it put back by hand that sync had yet to
+send is not forgotten with it: it goes with the sync turned on anew in the
+other, or, where sync was turned off there, waits with this tab or window
+for the next sync turned on in it; closed first, the tab or window loses it.
+Either sync sends it as put back after every deletion of it that sync knows
+of, or finds at its first read of the drive: a deletion made on another
+device after the putting back among them, which it then undoes. One left off
+notes no putting back at all. So, too, a tab or window takes up what another
+synced: when this device last synced, which its card shows, so that coming
+back into sight it does not sync again just after the other did, and a
+sign-in made there, which it signs in with from then on. Neither clears
+anything from the store, nor does a tab or window that finds the store so as
+sync is turned off in it, by hand or as the copy is gone from the drive.
+Turning it off with the copy deletes every file of Dust's from the folder,
+the keyring first, and every other device then finds it gone, says so, and
+turns sync off too.
 
 ## Setting up
 

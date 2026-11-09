@@ -9,7 +9,7 @@ use cw_core::{SessionResult, TrainingSettings};
 use super::*;
 use crate::persist::Store;
 use crate::persist::memory::MemoryStore;
-use crate::persist::record::{HistoryChange, Pending, Record, RecordId};
+use crate::persist::record::{HistoryChange, Pending, Record, RecordId, done};
 use crate::persist::tests::at;
 use crate::sync::remote::MemoryRemote;
 use crate::sync::seal::Stretch;
@@ -1097,7 +1097,10 @@ fn a_deletion_in_a_pack_made_as_the_app_stopped_is_the_drives_once_found() {
         &phone.settings,
         130,
         &BTreeSet::new,
-        &|state| *kept.borrow_mut() = state.clone(),
+        &|state| {
+            *kept.borrow_mut() = state.clone();
+            done(())
+        },
     ))
     .expect("synced");
     phone.state = kept.into_inner();
@@ -1264,7 +1267,7 @@ fn a_sync_lets_go_of_nothing_put_back_since_it_began() {
         &phone.settings,
         140,
         &|| since.borrow().clone(),
-        &|_| {},
+        &|_| done(()),
     ))
     .expect("synced");
     assert_eq!(phone.stamps(), [1, 2], "not let go");
