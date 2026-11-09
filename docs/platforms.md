@@ -677,7 +677,13 @@ so once, as saved by a newer Dust; a build that reads it shows it, and a
 restore leaves out a backup's copy of the session it says it holds. One that
 says no later format and does not read is damaged, as is one whose bytes are
 no text at all: left where it is too, and told of as damaged; a restore
-brings a backup's copy of it back beside it. Settings that do not read at all, a `settings.json` edited by hand
+brings a backup's copy of it back beside it. One that cannot be read at all
+for now, as a file another program holds open for a moment cannot be, is
+neither: it is read again at every look at the history, and on its own two,
+ten and sixty seconds after it was found so; one that still cannot be read
+at the last, or as the app opens again, is told of once, as one that could
+not be read, and a restore asked for meanwhile is refused once, as the
+backup could store its session a second time. Settings that do not read at all, a `settings.json` edited by hand
 and left with a stray comma say, are set aside before the defaults the app
 opens with are written over them: `settings.unreadable-*.json` beside it, or
 `dust_settings_unreadable` in a browser. So are the sessions of a history
@@ -738,6 +744,9 @@ settings (`src/persist/files.rs`):
   …}`, and what the move from `sessions.json` took of it, written last.
 - `told.json`: the records this build cannot read and has said so of,
   each as a newer Dust's, as damaged, or as one that could not be read.
+- `failing.json`: the records that could not be read at all as the history
+  was last read whole, and have not read since, so that one that still
+  cannot be read at the next launch is told of then.
 - `restoring-<n>.json`: held locked while a restore of many sessions stores
   them, so one Dust stopped under is told of as cut short.
 - `packs/*.jsonl.gz`: older records packed together, gzip, a record a line.
@@ -800,8 +809,21 @@ in `history/` or the database. It opens the history as it was at the move,
 stores its sessions there, up to its own 500, and remembers its deletions
 beside it, but it cannot delete or write over a record. A build that keeps
 records takes up, once, each session an older build stores there that
-finished no earlier than a day before the move and is neither here already
-nor deleted here, and makes here each deletion the older build made since.
+finished no earlier than a day before the newest session the move took
+(`takenThrough` in the layout: the newest no later than the clock said as
+the move was made, so a clock set ahead holds nothing back; where it took
+none, the newest it remembers deleting, and where there was no history kept
+whole at all, none, so nothing is cut off) and is neither
+here already nor deleted here, and makes here each deletion the older build
+made since, once, by what it is, whatever its clock said (`deletionsTaken`,
+beside `deletedSeen`, which builds before them go by).
+A record here that a later build stored counts as the session it says it
+holds; a damaged one does not, though it may still say one, and the older
+build's copy is taken up beside it, as a restore brings a backup's back
+beside it, and is left as it is when the older build deletes that session.
+While a record here cannot be read at all for now, or a pack of them opened,
+nothing is taken up: it may be the session, and the take-up waits for the
+next look at which every record reads.
 Going back to an older build shows the history as it was at the update,
 plus what it stores, and loses nothing kept since: the records stay for the
 next update. A history kept by a newer Dust in a way this build cannot

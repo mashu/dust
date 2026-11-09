@@ -376,7 +376,16 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         load.complete = layout.is_some();
         self.layout.replace(layout);
         if load.complete {
-            let live = keyed(read.sessions.iter().map(|(id, session)| (*id, session)));
+            // A record a later build stored holds the session it says it
+            // holds all the same: an older build's copy of that session is
+            // no session to take up beside it. A damaged one holds none
+            // ([`record::held_key`]).
+            let mut live = keyed(read.sessions.iter().map(|(id, session)| (*id, session)));
+            for (id, said) in &read.unread {
+                if let Some(key) = said.later_key() {
+                    live.entry(key.clone()).or_default().push(*id);
+                }
+            }
             if let Some(change) = self.import(Some(live)).await {
                 taken_up(&mut read.sessions, &change);
             }
@@ -416,9 +425,15 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
                             keys.insert(id, SessionKey::of(&session));
                             read.sessions.push((id, session));
                         }
-                        None => read
-                            .unread
-                            .push((id, raw.as_deref().map(unreadable).unwrap_or_default())),
+                        None => {
+                            let said = raw.as_deref().map(unreadable).unwrap_or_default();
+                            // A later build's is there all the same, as the
+                            // session it says it holds.
+                            if let Some(key) = said.later_key() {
+                                keys.insert(id, key.clone());
+                            }
+                            read.unread.push((id, said));
+                        }
                     }
                     if keep && let Some(raw) = raw {
                         read.raw.insert(id, raw);
@@ -592,7 +607,9 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     }
 
     /// Every record there is by its session's key: those read before as
-    /// they were read, the rest read now for their keys alone.
+    /// they were read, the rest read now for their keys alone. One that is
+    /// damaged has none, though it may say one: only one that reads, or that
+    /// a later build stored, holds its session ([`record::held_key`]).
     async fn live_keys(&self) -> Option<HashMap<SessionKey, Vec<RecordId>>> {
         let ids = live_ids(&self.glue.list().await.ok()?);
         let unknown: Vec<RecordId> = {
@@ -607,7 +624,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             let held = self.glue.read(names).await.ok()?;
             let mut keys = self.session_keys.borrow_mut();
             for (id, raw) in unknown.into_iter().zip(held) {
-                if let Some(key) = raw.as_deref().and_then(key_of) {
+                if let Some(key) = raw.as_deref().and_then(record::held_key) {
                     keys.insert(id, key);
                 }
             }
@@ -704,21 +721,22 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     }
 
     /// The records `ids`, as they are stored: one that is not there, or
-    /// cannot be read, comes back as its id.
+    /// cannot be read, comes back as its id. Their keys are not noted for
+    /// the take-up ([`Self::live_keys`]): whether one holds the session it
+    /// says it does takes reading it whole, which a backup of every record
+    /// need not.
     pub(super) async fn read(&self, ids: Vec<RecordId>) -> Vec<Result<Record, RecordId>> {
         let names = ids.iter().map(|id| id.name()).collect();
         let Ok(held) = self.glue.read(names).await else {
             return ids.into_iter().map(Err).collect();
         };
-        let mut keys = self.session_keys.borrow_mut();
         ids.into_iter()
             .zip(held.into_iter().chain(std::iter::repeat(None)))
             .map(|(id, json)| {
-                let json = json.ok_or(id)?;
-                if let Some(key) = key_of(&json) {
-                    keys.insert(id, key);
-                }
-                Ok(Record { id, json })
+                Ok(Record {
+                    id,
+                    json: json.ok_or(id)?,
+                })
             })
             .collect()
     }

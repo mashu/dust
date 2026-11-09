@@ -35,7 +35,7 @@ use crate::persist::backup::{
     Backup, BackupFile, Filled, NotSaved, backup_name, filled_in, merge_sessions,
 };
 use crate::persist::record::{
-    HistoryChange, HistoryLoad, Record, RecordId, read_record, unreadable,
+    HistoryChange, HistoryLoad, Record, RecordId, Unopened, Unreadable, read_record, unreadable,
 };
 use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
@@ -47,6 +47,16 @@ use crate::time::{POLL_MS, now_ms, sleep_ms};
 /// is tried again, while anything waits: the page coming back into sight,
 /// or the next change, try it sooner.
 pub const RETRY_MS: u32 = 60_000;
+
+/// How long after the store could not read a record it listed, as the app
+/// opened or as a look found it, the history is looked at again on its own,
+/// at each of these from the first, while any such record is left
+/// ([`AppCtx::read_again_soon`]): a window kept in front, with no other copy
+/// of the app beside it, may not look again for as long as it runs. A
+/// moment's failure, as of a file another program holds open, is over by
+/// the first; a record that still cannot be read at the last is told of
+/// ([`crate::persist::record::HistoryNotice::Unread`]).
+pub const READ_AGAIN_MS: [u32; 3] = [2_000, 10_000, 60_000];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -218,9 +228,24 @@ pub struct AppCtx {
     /// The settings could not be stored, and the user has been told: not
     /// again until they have been stored since.
     settings_unsaved: CopyValue<bool>,
-    /// The records the store listed and could not read, that a restore was
-    /// refused for already: one still unread at a later restore is taken
-    /// as one that cannot be read at all ([`Self::restore_backup`]).
+    /// The records the store listed and could not read at all for now, as
+    /// the app opened or as a look found them ([`HistoryLoad::failed`]):
+    /// neither shown nor held as stored, but read again at every look, and
+    /// on their own soon after ([`READ_AGAIN_MS`]), until each reads or is
+    /// no longer listed. A restore is refused while any is, once each
+    /// ([`Self::restore_backup`]), and a backup holds none of them but as
+    /// the store holds it.
+    unread_for_now: CopyValue<BTreeSet<RecordId>>,
+    /// Of those, the ones told of as still unread at their last try, or
+    /// whose store was asked to: not read again on their own as this copy
+    /// runs, though every look still reads them.
+    told_unread_for_now: CopyValue<BTreeSet<RecordId>>,
+    /// Tries at reading those again on their own are under way
+    /// ([`Self::read_again_soon`]).
+    reading_again: CopyValue<bool>,
+    /// Of those, the ones a restore was refused for already: one still
+    /// unread at a later restore is taken as one that cannot be read at
+    /// all ([`Self::restore_backup`]).
     restore_refused_for: CopyValue<BTreeSet<RecordId>>,
     /// A restore, or the Undo of one, is under way: from its being asked
     /// for until what became of it has been told ([`Self::restore_backup`]).
@@ -266,6 +291,7 @@ impl AppCtx {
                 .collect();
             let stored_settings = CopyValue::new(settings.clone().clamp());
             let sync = SyncCtx::new(&*app.store);
+            let unread_for_now = history.failed.iter().copied().collect();
             let ctx = Self {
                 screen: Signal::new(Screen::Home),
                 settings: Signal::new(settings),
@@ -293,6 +319,9 @@ impl AppCtx {
                 cut_off_carried: CopyValue::new(Vec::new()),
                 retrying: CopyValue::new(false),
                 settings_unsaved: CopyValue::new(false),
+                unread_for_now: CopyValue::new(unread_for_now),
+                told_unread_for_now: CopyValue::new(BTreeSet::new()),
+                reading_again: CopyValue::new(false),
                 restore_refused_for: CopyValue::new(BTreeSet::new()),
                 restore_under_way: CopyValue::new(false),
                 restores_waiting: CopyValue::new(VecDeque::new()),
@@ -300,6 +329,7 @@ impl AppCtx {
                 app: CopyValue::new(app),
             };
             ctx.hear_history_news();
+            ctx.read_again_soon();
             ctx.sync_at_launch();
             ctx
         })
@@ -700,10 +730,9 @@ impl AppCtx {
     }
 
     /// Bring the history and the settings here in line with the store's,
-    /// then do `then`, told whether the store could be listed, and where it
-    /// could, which of the records it listed that were not here could not
-    /// be read: at once wherever the store answers at once, as every store
-    /// but a browser's database does.
+    /// then do `then`, told whether the store could be listed: at once
+    /// wherever the store answers at once, as every store but a browser's
+    /// database does.
     ///
     /// Whatever another tab, window or copy of the app stored or deleted
     /// since this one last looked is taken up: each record listed that is
@@ -712,18 +741,19 @@ impl AppCtx {
     /// other reason is stored again: missing is never deleted. What is here
     /// and not stored yet is left as it is, to be stored. A record this
     /// build could not read that is no longer listed is no longer held for
-    /// one stored ([`StoredHistory::unread`]). The settings are merged as
-    /// [`Self::store_settings`] merges them, writing nothing.
+    /// one stored ([`StoredHistory::unread`]). One listed that could not be
+    /// read at all for now is read again, at this look and the next, until
+    /// it reads or is no longer listed ([`Self::unread_for_now`]). The
+    /// settings are merged as [`Self::store_settings`] merges them, writing
+    /// nothing.
     ///
     /// A restore and a backup go by what the store holds, not by what this
     /// copy last saw of it: a restore merged with a history another copy
     /// has since deleted from takes a session it brings back for one
     /// already here, and a backup of an old copy's history leaves out what
     /// was stored since, though it counts as backed up. Where the store
-    /// cannot be listed, nothing is taken up, and `then` is told so (none);
-    /// a record listed that could not be read is not taken up either, and
-    /// `then` is told of it.
-    fn sync_with_store(self, then: impl FnOnce(Option<Vec<RecordId>>) + 'static) {
+    /// cannot be listed, nothing is taken up, and `then` is told so.
+    fn sync_with_store(self, then: impl FnOnce(bool) + 'static) {
         let store = self.app().store;
         let settings_read = store.read_settings();
         self.tell_of_set_aside();
@@ -749,6 +779,9 @@ impl AppCtx {
             let here: BTreeSet<RecordId> = history.ids().iter().copied().collect();
             (here, history.unread().clone(), history.unsaved().clone())
         };
+        // Those that could not be read for now are read again, as they are
+        // neither here nor held as unread.
+        let unread_for_now = self.unread_for_now.peek().clone();
         let looking = Box::pin(async move {
             let there: BTreeSet<RecordId> = store.history_listing().await?.into_iter().collect();
             let new: Vec<RecordId> = there
@@ -762,6 +795,7 @@ impl AppCtx {
                 .copied()
                 .collect();
             let unread_gone: Vec<RecordId> = unread.difference(&there).copied().collect();
+            let failed_gone: Vec<RecordId> = unread_for_now.difference(&there).copied().collect();
             let read = if new.is_empty() {
                 Vec::new()
             } else {
@@ -777,19 +811,15 @@ impl AppCtx {
                 missing,
                 forgotten,
                 unread_gone,
+                failed_gone,
             })
         });
         settle_or_spawn(looking, move |looked| {
-            let unread = looked.map(|looked| {
-                let unread = looked
-                    .read
-                    .iter()
-                    .filter_map(|record| record.as_ref().err().copied())
-                    .collect();
+            let listed = looked.is_some();
+            if let Some(looked) = looked {
                 self.take_up(looked);
-                unread
-            });
-            then(unread);
+            }
+            then(listed);
         });
     }
 
@@ -800,7 +830,9 @@ impl AppCtx {
             missing,
             forgotten,
             unread_gone,
+            failed_gone,
         } = looked;
+        self.note_unread_for_now(&read, &failed_gone);
         let forgotten: HashSet<RecordId> = forgotten.into_iter().collect();
         let mut sessions = self.sessions;
         let gone = {
@@ -809,6 +841,22 @@ impl AppCtx {
         };
         if gone {
             sessions.write().forget_unread(&unread_gone);
+        }
+        // One whose bytes are no text is damaged, as the history read whole
+        // takes it: held as one no build reads, not read again, and told of
+        // as damaged at the next launch.
+        let damaged: Vec<RecordId> = read
+            .iter()
+            .filter_map(|record| match record {
+                Err(Unopened::Damaged(id)) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        if !damaged.is_empty() {
+            let mut history = sessions.write();
+            for id in damaged {
+                history.mark_unread(id, &Unreadable::default());
+            }
         }
         let changes = {
             let history = sessions.peek();
@@ -873,6 +921,155 @@ impl AppCtx {
         }
     }
 
+    /// Note what a look found of the records the store could not read for
+    /// now ([`Self::unread_for_now`]): each read now is one no more, as is
+    /// each found damaged and each no longer listed, `gone`, and each
+    /// listed that could not be read just now is one, and is read again
+    /// soon ([`Self::read_again_soon`]). One that is no more refuses no
+    /// restore, and is told of no more, for having been so: should it fail
+    /// again, that is a failure of its own.
+    fn note_unread_for_now(self, read: &[Result<Record, Unopened>], gone: &[RecordId]) {
+        let mut unread_for_now = self.unread_for_now;
+        let (over, joined) = {
+            let held = unread_for_now.peek();
+            let over: Vec<RecordId> = read
+                .iter()
+                .filter_map(|record| match record {
+                    Ok(record) => Some(record.id),
+                    Err(Unopened::Damaged(id)) => Some(*id),
+                    Err(Unopened::Failed(_)) => None,
+                })
+                .chain(gone.iter().copied())
+                .filter(|id| held.contains(id))
+                .collect();
+            let joined: Vec<RecordId> = read
+                .iter()
+                .filter_map(|record| match record {
+                    Err(Unopened::Failed(id)) => Some(*id),
+                    _ => None,
+                })
+                .filter(|id| !held.contains(id))
+                .collect();
+            (over, joined)
+        };
+        if over.is_empty() && joined.is_empty() {
+            return;
+        }
+        {
+            let mut held = unread_for_now.write();
+            for id in &over {
+                held.remove(id);
+            }
+            held.extend(joined.iter().copied());
+        }
+        let (mut refused, mut told) = (self.restore_refused_for, self.told_unread_for_now);
+        if over.iter().any(|id| refused.peek().contains(id)) {
+            refused.write().retain(|id| !over.contains(id));
+        }
+        if over.iter().any(|id| told.peek().contains(id)) {
+            told.write().retain(|id| !over.contains(id));
+        }
+        if !joined.is_empty() {
+            self.read_again_soon();
+        }
+    }
+
+    /// Read again, on their own, the records the store could not read for
+    /// now and has not told of ([`Self::unread_for_now`]), at each of
+    /// [`READ_AGAIN_MS`] from now while any of them is left: one window
+    /// kept in front, with no other copy of the app beside it, may never
+    /// look again. Each look reads every one of them, and takes up what
+    /// else changed. Those still unread at the last are told of, once, as
+    /// records that could not be read ([`Self::tell_still_unread`]), and
+    /// any that joined them meanwhile are read again in turn. One round at
+    /// a time.
+    fn read_again_soon(self) {
+        let mut reading = self.reading_again;
+        if *reading.peek() {
+            return;
+        }
+        let round: BTreeSet<RecordId> = {
+            let told = self.told_unread_for_now.peek();
+            self.unread_for_now
+                .peek()
+                .difference(&told)
+                .copied()
+                .collect()
+        };
+        if round.is_empty() {
+            return;
+        }
+        reading.set(true);
+        self.read_again_at(Rc::new(round), 0);
+    }
+
+    /// The `step`th try of a round of [`Self::read_again_soon`] at reading
+    /// `round` again, the tries before it made: or, past the last, what is
+    /// still unread told of, and the round over.
+    fn read_again_at(self, round: Rc<BTreeSet<RecordId>>, step: usize) {
+        let left = move |round: &BTreeSet<RecordId>| {
+            self.unread_for_now
+                .peek()
+                .iter()
+                .any(|id| round.contains(id))
+        };
+        let Some(&due) = READ_AGAIN_MS.get(step) else {
+            self.tell_still_unread(&round);
+            self.round_over();
+            return;
+        };
+        let since = step
+            .checked_sub(1)
+            .and_then(|before| READ_AGAIN_MS.get(before))
+            .copied()
+            .unwrap_or(0);
+        // In the root scope: the screen it began on may be left.
+        spawn_forever(async move {
+            sleep_ms(due - since).await;
+            if !left(&round) {
+                self.round_over();
+                return;
+            }
+            self.sync_with_store(move |_| self.read_again_at(round, step + 1));
+        });
+    }
+
+    /// A round of tries at reading again what could not be read for now is
+    /// over ([`Self::read_again_soon`]): the next starts, for what joined
+    /// them meanwhile, where anything did.
+    fn round_over(self) {
+        let mut reading = self.reading_again;
+        reading.set(false);
+        self.read_again_soon();
+    }
+
+    /// Tell of each of `round` still unread for now after every try, as
+    /// the store says of it, so that each is told of once, at this launch
+    /// or a later one ([`Store::still_unread`]).
+    fn tell_still_unread(self, round: &BTreeSet<RecordId>) {
+        let still: Vec<RecordId> = self
+            .unread_for_now
+            .peek()
+            .iter()
+            .filter(|id| round.contains(id))
+            .copied()
+            .collect();
+        if still.is_empty() {
+            return;
+        }
+        let mut told = self.told_unread_for_now;
+        told.write().extend(still.iter().copied());
+        let telling = self.app().store.still_unread(still);
+        let mut notices = self.notices;
+        settle_or_spawn(telling, move |said| {
+            if !said.is_empty() {
+                notices
+                    .write()
+                    .extend(said.iter().map(|notice| Notice::History(notice.text())));
+            }
+        });
+    }
+
     /// Take up what the store holds now, whatever it says of having
     /// changed: as sync has just changed it ([`self::sync`]).
     pub(crate) fn take_up_store(self) {
@@ -881,10 +1078,11 @@ impl AppCtx {
 
     /// Take up whatever another tab, window or copy of the app stored or
     /// deleted since this one last looked, where the store says anything
-    /// may have changed: as a screen that shows the history opens, and as
-    /// the page comes back into sight.
+    /// may have changed, or a record it listed could not be read for now
+    /// ([`Self::unread_for_now`]): as a screen that shows the history
+    /// opens, and as the page comes back into sight.
     pub fn take_up_changes(self) {
-        if self.app().store.history_changed() {
+        if self.app().store.history_changed() || !self.unread_for_now.peek().is_empty() {
             self.sync_with_store(|_| {});
         }
     }
@@ -1252,7 +1450,7 @@ impl AppCtx {
                 .filter_map(|id| history.record(*id))
                 .collect();
             BackupFile::new(&self.settings.peek(), at, unsaved)
-                .beside_unread(history.unread().clone())
+                .beside_unread(self.unread_here(&history))
         };
         let name = backup_name(&crate::time::local_date_string());
         let saving = self.app().store.save_backup(&name, backup);
@@ -1277,8 +1475,18 @@ impl AppCtx {
             .filter_map(|id| history.record(*id))
             .collect();
         BackupFile::new(&self.settings.peek(), at, every)
-            .beside_unread(history.unread().clone())
+            .beside_unread(self.unread_here(&history))
             .holding_every_session()
+    }
+
+    /// Every record the store holds that `history` has no session of, as
+    /// this build cannot read it, or could not for now
+    /// ([`Self::unread_for_now`]): a backup has them as the store holds
+    /// them, or not at all.
+    fn unread_here(self, history: &StoredHistory) -> BTreeSet<RecordId> {
+        let mut unread = history.unread().clone();
+        unread.extend(self.unread_for_now.peek().iter().copied());
+        unread
     }
 
     /// Tell of the backup asked for at `at` as `saved` says, and remember
@@ -1349,17 +1557,21 @@ impl AppCtx {
             return;
         }
         under_way.set(true);
-        self.sync_with_store(move |unread| match unread {
-            Some(unread) => self.restore_beside(backup, unread),
-            None => self.restore_refused(match why_not_stored(&HistorySaved::Held) {
-                Some(why) => format!("Nothing was restored: {why}."),
-                None => "Nothing was restored.".into(),
-            }),
+        self.sync_with_store(move |listed| {
+            if listed {
+                self.restore_beside(backup);
+            } else {
+                self.restore_refused(match why_not_stored(&HistorySaved::Held) {
+                    Some(why) => format!("Nothing was restored: {why}."),
+                    None => "Nothing was restored.".into(),
+                });
+            }
         });
     }
 
-    /// Restore `backup` ([`Self::restore_backup`]), the store looked at,
-    /// `unread` being the records it listed and could not read.
+    /// Restore `backup` ([`Self::restore_backup`]), the store looked at:
+    /// what it listed that could not be read for now was read again, and
+    /// taken up where it read ([`Self::unread_for_now`]).
     ///
     /// A record here that a later build stored, as it says
     /// ([`cw_core::SESSION_FORMAT`]), leaves out each session of the backup
@@ -1372,19 +1584,19 @@ impl AppCtx {
     /// or as a look found it, that is named for when a session of the
     /// backup not here finished is read again first, as that session may
     /// be its own:
-    /// - one that reads now, as one a moment's failure kept from being read
-    ///   does, is taken up, the backup's session merged with it, and the
-    ///   user told;
+    /// - one that reads now, as one another program was still writing in
+    ///   place as it was read does, is taken up, the backup's session
+    ///   merged with it, and the user told;
     /// - one that says now that a later build stored it is taken as such;
     /// - one that holds no session at all, damaged, though it may be JSON
-    ///   still that says when its session finished, or that still cannot
-    ///   be read, as it could not before, leaves the backup's session to be
-    ///   restored beside it: no build may ever read it, and the backup may
-    ///   hold the only copy of that session there is.
+    ///   still that says when its session finished, or that cannot be read
+    ///   now, leaves the backup's session to be restored beside it: no
+    ///   build may ever read it, and the backup may hold the only copy of
+    ///   that session there is.
     ///
     /// What the app told of unread records as it opened is not taken back
     /// where one reads now.
-    fn restore_beside(self, backup: Backup, unread: Vec<RecordId>) {
+    fn restore_beside(self, backup: Backup) {
         let (again, later) = {
             let history = self.sessions.peek();
             let finished: HashSet<u64> = backup
@@ -1403,7 +1615,7 @@ impl AppCtx {
         };
         let beside = Beside { later, read_now: 0 };
         if again.is_empty() {
-            self.restore_unless_unread(backup, unread, beside);
+            self.restore_unless_unread(backup, beside);
             return;
         }
         let reading = self.app().store.read_records(again);
@@ -1435,20 +1647,27 @@ impl AppCtx {
                     history.mark_unread(*id, said);
                 }
             }
-            self.restore_unless_unread(backup, unread, beside);
+            self.restore_unless_unread(backup, beside);
         });
     }
 
     /// Restore `backup` as `beside` says ([`Self::restore_beside`]), unless
-    /// the store listed a record it could not read for now, `unread`, that
-    /// no restore was refused for yet: that refuses this one, and the user
-    /// is told why, and that asking again goes ahead.
-    fn restore_unless_unread(self, backup: Backup, unread: Vec<RecordId>, beside: Beside) {
+    /// the store listed a record it could not read for now, at this look or
+    /// before ([`Self::unread_for_now`]), that no restore was refused for
+    /// yet: it may hold a session of the backup, which would be stored a
+    /// second time beside it once it reads. That refuses this one, and the
+    /// user is told why, and that asking again goes ahead.
+    fn restore_unless_unread(self, backup: Backup, beside: Beside) {
         let mut refused_for = self.restore_refused_for;
-        let new: Vec<RecordId> = unread
-            .into_iter()
-            .filter(|id| !refused_for.peek().contains(id))
-            .collect();
+        let new: Vec<RecordId> = {
+            let refused = refused_for.peek();
+            self.unread_for_now
+                .peek()
+                .iter()
+                .filter(|id| !refused.contains(id))
+                .copied()
+                .collect()
+        };
         if new.is_empty() {
             self.restore_now(backup, beside);
         } else {
@@ -1917,9 +2136,9 @@ fn backup_mark(store: &dyn Store) -> Option<u64> {
 
 /// What a look at the store found ([`AppCtx::sync_with_store`]).
 struct Looked {
-    /// Each record listed that was not here, as it is stored, or its id
-    /// where it could not be read.
-    read: Vec<Result<Record, RecordId>>,
+    /// Each record listed that was not here, as it is stored, or why it
+    /// could not be read.
+    read: Vec<Result<Record, Unopened>>,
     /// Each record here, the store had taken, that was no longer listed.
     missing: Vec<RecordId>,
     /// Of those, the ones deleted by hand.
@@ -1927,6 +2146,9 @@ struct Looked {
     /// Each record here this build could not read that was no longer
     /// listed.
     unread_gone: Vec<RecordId>,
+    /// Each record that could not be read for now that was no longer
+    /// listed ([`AppCtx::unread_for_now`]).
+    failed_gone: Vec<RecordId>,
 }
 
 /// A restore on its way to the store ([`AppCtx::restored`]).
@@ -2237,6 +2459,7 @@ mod tests {
     #[cfg(feature = "native-runtime")]
     use crate::persist::TempDir;
     use crate::persist::memory::{MemoryStore, PageShelf};
+    use crate::persist::record::HistoryNotice;
 
     /// A copy of the app — a tab, or a window — on `store`, which other
     /// copies may share, opened on what it holds.
@@ -2309,6 +2532,17 @@ mod tests {
         /// Run whatever this copy's tasks are ready to do.
         fn pump(&mut self) {
             self.dom.process_events();
+        }
+
+        /// Move the clock on by `ms`, a tenth of a second at a time, doing
+        /// whatever this copy's tasks are ready to do as it goes: in a test
+        /// run on a paused clock ([`crate::testing::run`]).
+        async fn advance(&mut self, ms: u64) {
+            for _ in 0..ms.div_ceil(100) {
+                tokio::time::advance(std::time::Duration::from_millis(100)).await;
+                tokio::task::yield_now().await;
+                self.pump();
+            }
         }
     }
 
@@ -3320,23 +3554,337 @@ mod tests {
         assert_eq!(a.shown(), [1, 2]);
     }
 
-    /// A record that could not be read as the app opened, and still cannot
-    /// be read at all, as a file another program holds open for good, is
-    /// taken as one no build may ever read: the backup's session from its
-    /// moment is brought back beside it at once.
+    /// So does one whose bytes became no text after the app opened: a look
+    /// that finds it takes it for one no build reads, as the app's launch
+    /// does, and neither reads it again nor refuses a restore for it. A
+    /// look took it for one that could not be read just now: it refused the
+    /// first restore, was read again at each try, and was told of as one
+    /// that could not be read, and noted so, which kept the next launch from
+    /// telling of it as damaged.
+    #[cfg(feature = "native-runtime")]
     #[test]
-    fn a_record_unread_as_the_app_opened_and_unread_still_refuses_no_restore() {
+    fn a_restore_brings_back_a_session_whose_file_here_became_no_text_after_the_app_opened() {
+        let dir = TempDir::new("restore-beside-no-text-since");
+        let a = Tab::on_store(crate::persist::files_at(&dir.0));
+        a.finish(day(1));
+        let damaged = RecordId {
+            order: stamp(2) * 1000,
+            nonce: 7,
+        };
+        std::fs::write(
+            dir.0
+                .join("history")
+                .join("sessions")
+                .join(format!("{damaged}.json")),
+            [0xff_u8, 0xfe, 0x00, 0x80],
+        )
+        .expect("written");
+        restore(&a, [1, 2]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        assert_eq!(a.shown(), [1, 2]);
+        assert!(a.act(|ctx| ctx.sessions.peek().unread().contains(&damaged)));
+        assert!(a.act(|ctx| ctx.unread_for_now.peek().is_empty()));
+    }
+
+    /// Such a record, found by a look, is not told of as one that could not
+    /// be read, at any try ([`READ_AGAIN_MS`]): the next launch tells of it
+    /// as damaged, once, as it tells of one found so as the app opened. It
+    /// was told of after the last try as one that could not be read, and
+    /// noted as told, so no launch told of it as damaged.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_file_here_that_became_no_text_after_the_app_opened_is_told_of_as_damaged() {
+        crate::testing::run(|| async {
+            let dir = TempDir::new("no-text-since-told");
+            let mut a = Tab::on_store(crate::persist::files_at(&dir.0));
+            a.finish(day(1));
+            let damaged = RecordId {
+                order: stamp(2) * 1000,
+                nonce: 7,
+            };
+            std::fs::write(
+                dir.0
+                    .join("history")
+                    .join("sessions")
+                    .join(format!("{damaged}.json")),
+                [0xff_u8, 0xfe, 0x00, 0x80],
+            )
+            .expect("written");
+            a.act(AppCtx::take_up_changes);
+            let last = u64::from(READ_AGAIN_MS[READ_AGAIN_MS.len() - 1]);
+            a.advance(last + 1_000).await;
+            assert_eq!(a.notices(), [], "not as one that could not be read");
+            assert_eq!(a.shown(), [1]);
+            drop(a);
+            let b = Tab::on_store(crate::persist::files_at(&dir.0));
+            let told = HistoryNotice::Damaged { count: 1 }.text();
+            assert_eq!(b.notices(), [Notice::History(told)]);
+        });
+    }
+
+    /// A record that could not be read as the app opened, and still cannot
+    /// be read as a restore looks at the history, refuses the first restore,
+    /// as one the restore's own look finds so does: it may hold a session
+    /// of the backup, which would be stored a second time. Asked for again,
+    /// the restore goes ahead. It was held as one this build cannot read,
+    /// and refused no restore, though it may read a moment later.
+    #[test]
+    fn a_record_that_cannot_be_read_as_the_app_opens_nor_as_it_restores_refuses_the_first_restore()
+    {
         let store = holding([1]);
         let unread = store.plant_unreadable_at(stamp(2), &day_2_as_a_later_build_stores_it());
         store.held_open.borrow_mut().insert(unread);
         let a = Tab::on(&store);
-        assert!(a.act(|ctx| ctx.sessions.peek().unread().contains(&unread)));
+        restore(&a, [1, 2, 3]);
+        assert!(
+            a.toast()
+                .is_some_and(|toast| toast.text.starts_with("Nothing was restored:")),
+            "{:?}",
+            a.toast()
+        );
+        assert_eq!(days(&store.load_sessions()), [1], "nothing restored");
         restore(&a, [1, 2, 3]);
         assert_eq!(
             a.toast().expect("told").text,
             "Restored 2 sessions and your settings."
         );
         assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+    }
+
+    /// A store holding a session for each of `held`, and one for `busy` it
+    /// cannot read for now, as a file another program holds open for a
+    /// moment cannot be ([`MemoryStore::held_open`]): that one's record.
+    fn holding_busy(held: impl IntoIterator<Item = u64>, busy: u64) -> (Rc<MemoryStore>, RecordId) {
+        let store = holding(held);
+        let raw = serde_json::to_string(&day(busy)).expect("a session writes");
+        // It reads, once it is let go.
+        let id = store.plant_unreadable_at(stamp(busy), &raw);
+        store.held_open.borrow_mut().insert(id);
+        (store, id)
+    }
+
+    /// A record that could not be read as the app opened, as a file another
+    /// program holds open for a moment cannot be, is read at the next look,
+    /// once it can be, and shown, and nothing is told of it meanwhile. It
+    /// was held as one this build cannot read, told of at once as one that
+    /// could not be read just now, and not read again while the app ran.
+    #[test]
+    fn a_record_that_could_not_be_read_as_the_app_opened_is_read_at_the_next_look() {
+        let (store, _) = holding_busy([1], 2);
+        let a = Tab::on(&store);
+        assert_eq!(a.notices(), [], "not told of yet");
+        assert_eq!(a.shown(), [1]);
+        store.held_open.borrow_mut().clear();
+        a.act(AppCtx::take_up_changes);
+        assert_eq!(a.shown(), [1, 2]);
+        assert_eq!(a.notices(), []);
+    }
+
+    /// A window kept in front, with no other copy of the app beside it, may
+    /// not look at the history again for as long as it runs: a record that
+    /// could not be read as the app opened is read again on its own soon
+    /// after ([`READ_AGAIN_MS`]), and shown once it reads.
+    #[test]
+    fn a_record_that_could_not_be_read_as_the_app_opened_is_read_again_soon_on_its_own() {
+        crate::testing::run(|| async {
+            let (store, _) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            a.advance(1_000).await;
+            assert_eq!(a.shown(), [1]);
+            store.held_open.borrow_mut().clear();
+            a.advance(u64::from(READ_AGAIN_MS[0])).await;
+            assert_eq!(a.shown(), [1, 2], "read again on its own");
+            assert_eq!(a.notices(), []);
+        });
+    }
+
+    /// A record that still cannot be read after every try is told of then,
+    /// once, as one that could not be read ([`READ_AGAIN_MS`]): not as the
+    /// app opens, as a moment's failure is over before the first try, nor
+    /// again later, nor at the next launch. It was told of at once, as one
+    /// that could not be read just now, though it may read a moment later.
+    #[test]
+    fn a_record_still_unread_after_every_try_is_told_of_once() {
+        crate::testing::run(|| async {
+            let (store, _) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            assert_eq!(a.notices(), [], "not as the app opens");
+            let last = u64::from(READ_AGAIN_MS[READ_AGAIN_MS.len() - 1]);
+            a.advance(last - 1_000).await;
+            assert_eq!(a.notices(), [], "nor before every try is made");
+            a.advance(2_000).await;
+            let told = HistoryNotice::Unread { count: 1 }.text();
+            assert_eq!(a.notices(), [Notice::History(told.clone())]);
+            a.advance(3 * last).await;
+            assert_eq!(a.notices(), [Notice::History(told)], "once");
+            let b = Tab::on(&store);
+            assert_eq!(b.notices(), [], "nor at the next launch");
+            assert_eq!(b.shown(), [1]);
+        });
+    }
+
+    /// A record that could not be read as the app opened, and is deleted
+    /// in another copy of the app before it reads, is let go of as a look
+    /// finds it deleted: neither shown nor told of, at any try
+    /// ([`READ_AGAIN_MS`]).
+    #[test]
+    fn a_record_unread_for_now_and_deleted_elsewhere_is_let_go_of() {
+        crate::testing::run(|| async {
+            let (store, _) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            store.held_open.borrow_mut().clear();
+            let b = Tab::on(&store);
+            b.delete(2);
+            let last = u64::from(READ_AGAIN_MS[READ_AGAIN_MS.len() - 1]);
+            a.advance(2 * last).await;
+            assert_eq!(a.shown(), [1]);
+            assert_eq!(a.notices(), [], "told of at no try");
+            assert!(a.act(|ctx| ctx.unread_for_now.peek().is_empty()));
+        });
+    }
+
+    /// A record that could not be read as the app opened, and still cannot
+    /// be read as it opens again, is told of then, as one that could not be
+    /// read, and once: the app closed before its tries were made.
+    #[test]
+    fn a_record_still_unread_at_the_next_launch_is_told_of_then() {
+        let (store, _) = holding_busy([1], 2);
+        let a = Tab::on(&store);
+        assert_eq!(a.notices(), [], "not told of yet");
+        drop(a);
+        let b = Tab::on(&store);
+        let told = HistoryNotice::Unread { count: 1 }.text();
+        assert_eq!(b.notices(), [Notice::History(told)]);
+        drop(b);
+        assert_eq!(Tab::on(&store).notices(), [], "told of once");
+    }
+
+    /// A record that could not be read as the app opened, and read at its
+    /// first try, fails no longer: should it fail for a moment again as the
+    /// app next opens, it is not told of then, any more than at its first
+    /// launch. The store remembered it as failing at the last launch, and it
+    /// was told of at once.
+    #[test]
+    fn a_record_read_at_a_try_after_failing_as_the_app_opened_is_not_told_of_as_it_next_opens() {
+        crate::testing::run(|| async {
+            let (store, id) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            store.held_open.borrow_mut().clear();
+            a.advance(u64::from(READ_AGAIN_MS[0]) + 500).await;
+            assert_eq!(a.shown(), [1, 2]);
+            store.held_open.borrow_mut().insert(id);
+            drop(a);
+            let b = Tab::on(&store);
+            assert_eq!(b.notices(), [], "not told of at once");
+            assert_eq!(b.shown(), [1]);
+        });
+    }
+
+    /// The record of day 2 in the files in a folder, a folder in its place
+    /// for now, which cannot be read as one, as a file another program holds
+    /// open for a moment cannot be; the records folder's time of change set
+    /// back each time it is changed, so that the store sees nothing changed
+    /// there ([`Store::history_changed`]).
+    #[cfg(all(unix, feature = "native-runtime"))]
+    struct BusyFile {
+        path: std::path::PathBuf,
+        held: Vec<u8>,
+        records: std::path::PathBuf,
+        changed: std::time::SystemTime,
+    }
+
+    #[cfg(all(unix, feature = "native-runtime"))]
+    impl BusyFile {
+        /// Days 1 and 2 stored in the files in `dir`, as a copy of the app
+        /// stores them, and the record of day 2 held for now.
+        fn of_day_2(dir: &TempDir) -> Self {
+            let a = Tab::on_store(crate::persist::files_at(&dir.0));
+            a.finish(day(1));
+            a.finish(day(2));
+            let id = a.id_of(2);
+            drop(a);
+            let records = dir.0.join("history").join("sessions");
+            let changed = std::fs::metadata(&records)
+                .and_then(|meta| meta.modified())
+                .expect("when it changed");
+            let path = records.join(format!("{id}.json"));
+            let held = std::fs::read(&path).expect("stored");
+            std::fs::remove_file(&path).expect("taken away");
+            std::fs::create_dir(&path).expect("a folder in its place");
+            let busy = Self {
+                path,
+                held,
+                records,
+                changed,
+            };
+            busy.as_it_was();
+            busy
+        }
+
+        /// The record read again, as it was stored.
+        fn let_go(&self) {
+            std::fs::remove_dir(&self.path).expect("the folder taken away");
+            std::fs::write(&self.path, &self.held).expect("the record back");
+            self.as_it_was();
+        }
+
+        /// The records folder's time of change set back.
+        fn as_it_was(&self) {
+            std::fs::File::open(&self.records)
+                .and_then(|records| records.set_modified(self.changed))
+                .expect("its time set back");
+        }
+    }
+
+    /// On the files themselves: a record that could not be read as the app
+    /// opened is read at the next look, and shown, though the store says
+    /// nothing changed: one that could not be read is reason enough to look.
+    /// Nothing is told of it meanwhile. It was held as one this build cannot
+    /// read, told of at once, and never read again while the app ran.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_that_could_not_be_read_as_the_app_opened_is_read_at_the_next_look() {
+        let dir = TempDir::new("busy-at-launch-looked");
+        let busy = BusyFile::of_day_2(&dir);
+        let store = crate::persist::files_at(&dir.0);
+        let a = Tab::on_store(store.clone());
+        assert_eq!(a.shown(), [1]);
+        assert_eq!(a.notices(), [], "not told of yet");
+        busy.let_go();
+        assert!(
+            !store.history_changed(),
+            "nothing changed, as the store sees"
+        );
+        a.act(AppCtx::take_up_changes);
+        assert_eq!(a.shown(), [1, 2]);
+        assert_eq!(a.notices(), []);
+    }
+
+    /// On the files themselves, a window kept in front, with no other copy
+    /// of the app beside it: a record that could not be read as the app
+    /// opened is read again on its own soon after ([`READ_AGAIN_MS`]), and
+    /// shown, though the store says nothing changed.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_that_could_not_be_read_as_the_app_opened_is_read_again_soon_on_its_own() {
+        crate::testing::run(|| async {
+            let dir = TempDir::new("busy-at-launch-again");
+            let busy = BusyFile::of_day_2(&dir);
+            let store = crate::persist::files_at(&dir.0);
+            let mut a = Tab::on_store(store.clone());
+            assert_eq!(a.shown(), [1]);
+            busy.let_go();
+            assert!(
+                !store.history_changed(),
+                "nothing changed, as the store sees"
+            );
+            a.advance(u64::from(READ_AGAIN_MS[0]) + 500).await;
+            assert_eq!(a.shown(), [1, 2], "read again on its own");
+            assert_eq!(a.notices(), []);
+        });
     }
 
     /// A record that could not be read as the app opened, and reads now, is
