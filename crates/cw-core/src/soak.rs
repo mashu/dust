@@ -1347,6 +1347,12 @@ fn settings_survive_storage_and_older_saves() {
             back, settings,
             "seed {seed}: a round trip changed the settings"
         );
+        // Nothing of what this build wrote is kept as a later build's: its
+        // own saves are written as ever.
+        let saved: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&json).expect("an object");
+        let kept = back.clamp().keeping_values_of(&saved).unread_values;
+        assert!(kept.is_empty(), "seed {seed}: kept as unread: {kept:?}");
 
         // An older save: one section is missing entirely. It has to load, and
         // what it does carry has to come back unchanged.
@@ -1371,6 +1377,14 @@ fn settings_survive_storage_and_older_saves() {
             repaired.clone().clamp(),
             repaired,
             "seed {seed}: an older save did not settle"
+        );
+        // Nor anything an older build wrote, though this build reads some
+        // of it as something else, from what the older save lacks.
+        let older_save = object.as_object().expect("an object");
+        let kept = repaired.clone().keeping_values_of(older_save).unread_values;
+        assert!(
+            kept.is_empty(),
+            "seed {seed}: without {dropped:?}, kept as unread: {kept:?}"
         );
         assert!(
             !compute_char_pool(&repaired).is_empty(),

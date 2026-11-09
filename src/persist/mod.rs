@@ -56,7 +56,7 @@ use cw_core::{
 };
 use serde::Deserialize;
 
-use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
+use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, Unopened, done};
 use settings::{load_settings_from, unmarked};
 
 pub trait Store {
@@ -167,12 +167,23 @@ pub trait Store {
     /// cannot be listed, which is no word that anything is missing.
     fn history_listing(&self) -> Pending<Option<Vec<RecordId>>>;
     /// The records `ids`, as they are stored. One that cannot be read
-    /// comes back as its id.
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>>;
+    /// comes back as why ([`record::Unopened`]): it could not be read just
+    /// now, or, where the store can tell, its bytes are no text, damaged.
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>>;
     /// Which of `ids` were deleted by hand: of those missing from the
     /// listing, the ones to let go. Any other was lost in passing, and is
     /// to be stored again: missing is never deleted.
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>>;
+    /// What to tell of `ids`, records listed that could not be read at all
+    /// at any of the app's tries since it found them so
+    /// ([`HistoryLoad::failed`]): of those not told of before, how many,
+    /// as records that could not be read ([`record::HistoryNotice::Unread`]),
+    /// each noted as told so it is told of once, at this launch or a later
+    /// one. Every one of them, where the store notes nothing, as a browser's
+    /// does not: its database reads each record whole, or nothing.
+    fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<record::HistoryNotice>> {
+        record::done(record::unread_notices(ids.iter().map(|_| None)))
+    }
     /// Whether the history may have changed, elsewhere, since this copy
     /// last read or listed it: whether it is worth listing again.
     fn history_changed(&self) -> bool;
@@ -506,6 +517,10 @@ fn read_settings_from(raw: &str) -> Option<TrainingSettings> {
 /// own since, and a copy that wrote all of its settings back would put each
 /// of those back as it was: only what changed here is written, setting by
 /// setting, as a save names them.
+///
+/// What comes of it is read as a store reads its own: a value the store
+/// holds that this build cannot read, a later build's choice, is kept to be
+/// written back as it is ([`TrainingSettings::unread_values`]).
 pub fn merge_settings(
     base: &TrainingSettings,
     ours: &TrainingSettings,
@@ -529,8 +544,7 @@ pub fn merge_settings(
             None => merged.remove(key),
         };
     }
-    serde_json::from_value::<TrainingSettings>(serde_json::Value::Object(merged))
-        .map_or_else(|_| ours.clone(), TrainingSettings::clamp)
+    settings::settings_of_keys(&merged)
 }
 
 #[cfg(test)]
@@ -754,6 +768,36 @@ pub(crate) mod tests {
         let out = merge_settings(&contest, &on(CharSetMode::Koch), &theirs);
         assert_eq!(out.curriculum.char_set_mode, CharSetMode::Koch);
         assert_eq!(out.curriculum.num_groups, 9);
+    }
+
+    /// A merge keeps what the store holds that this build cannot read, a
+    /// later build's choices, as it is stored, beside a change made here.
+    /// It used to read the merge again as this build reads it, and put
+    /// this build's reading of each in its place.
+    #[test]
+    fn a_merge_keeps_what_this_build_cannot_read() {
+        let later = r#"{"filterShape":"notch","filterWidthHz":300,"charSetMode":"morse",
+            "contestKind":"cwt","numGroups":7}"#;
+        let theirs = load_settings_from(later);
+        let base = theirs.clone();
+        let mut ours = base.clone();
+        ours.curriculum.num_groups = 9;
+        let merged = serde_json::to_value(merge_settings(&base, &ours, &theirs)).expect("JSON");
+        assert_eq!(
+            (
+                &merged["filterShape"],
+                &merged["charSetMode"],
+                &merged["contestKind"]
+            ),
+            (&"notch".into(), &"morse".into(), &"cwt".into())
+        );
+        assert_eq!(merged["numGroups"], 9, "the change made here");
+        // Stored by another copy since this one read the store: kept too.
+        let merged = merge_settings(&TrainingSettings::default(), &ours, &theirs);
+        assert_eq!(
+            serde_json::to_value(merged).expect("JSON")["filterShape"],
+            "notch"
+        );
     }
 
     /// A session finished at `timestamp`, a day of its own.

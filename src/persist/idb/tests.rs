@@ -717,6 +717,89 @@ fn what_an_older_build_stores_after_the_move_is_taken_up_once() {
     assert_eq!(fake.records().len(), 2, "taken up once");
 }
 
+/// A session a later build stored in the database, in a record this build
+/// cannot read that says which session it holds, is not taken up a second
+/// time from the history an older build keeps whole, as the page opens nor
+/// as it is listed. As the page opened, the take-up left that record out,
+/// and stored the session again beside it.
+#[test]
+fn a_session_a_later_build_stored_here_is_not_taken_up_from_an_older_build() {
+    let page = Page::holding(&[ago(10)]);
+    let fake = Fake::on(&page);
+    opened(&fake);
+    let theirs = ago(0);
+    let later = format!(
+        r#"{{"format":{},"date":{:?},"timestamp":{},"by":"a later build"}}"#,
+        cw_core::SESSION_FORMAT + 1,
+        theirs.date,
+        theirs.timestamp
+    );
+    let id = RecordId::next(theirs.timestamp, None, &later);
+    fake.shelves().sessions.insert(id.name(), later);
+    page.keep(&[ago(10), theirs.clone()]);
+    let tab = opened(&fake);
+    let load = tab.load();
+    assert_eq!(sessions_of(&load), [ago(10)], "not taken up");
+    assert_eq!(load.later, [(id, SessionKey::of(&theirs))]);
+    assert_eq!(fake.records().len(), 2, "nothing stored");
+    // Another, finished since, which an older build adds.
+    let since = SessionResult {
+        timestamp: theirs.timestamp + 60_000,
+        ..ago(3)
+    };
+    page.keep(&[ago(10), theirs, since]);
+    assert_eq!(done(tab.listing()).map(|listed| listed.len()), Some(3));
+    assert_eq!(fake.records().len(), 3, "only the one an older build added");
+}
+
+/// A session whose record in the database is damaged, JSON that still says
+/// when and on what day it finished but that no build reads, is taken up
+/// beside it from the history an older build keeps whole, as the page opens
+/// and as it is listed, though a look read the record first: the older
+/// build's copy may be the only good one, as a restore takes a backup's.
+/// The take-up took the damaged record for the session, and left the good
+/// copy out.
+#[test]
+fn a_session_whose_record_here_is_damaged_is_taken_up_from_an_older_build_beside_it() {
+    let page = Page::holding(&[ago(10)]);
+    let fake = Fake::on(&page);
+    opened(&fake);
+    let damage = |session: &SessionResult| {
+        let raw = format!(
+            r#"{{"date":{:?},"timestamp":{},"by":"damage"}}"#,
+            session.date, session.timestamp
+        );
+        let id = RecordId::next(session.timestamp, None, &raw);
+        fake.shelves().sessions.insert(id.name(), raw);
+        id
+    };
+    let mine = ago(0);
+    let damaged = damage(&mine);
+    page.keep(&[ago(10), mine.clone()]);
+    let tab = opened(&fake);
+    let load = tab.load();
+    assert_eq!(
+        sessions_of(&load),
+        [ago(10), mine.clone()],
+        "taken up beside it"
+    );
+    assert_eq!(load.unread, [damaged], "left as it is");
+    // Another, damaged once the tab read the history, which a look reads,
+    // and an older build adds after.
+    let since = SessionResult {
+        timestamp: mine.timestamp + 60_000,
+        ..ago(3)
+    };
+    let looked = damage(&since);
+    assert!(done(tab.read(vec![looked]))[0].is_ok(), "read as it is");
+    page.keep(&[ago(10), mine, since]);
+    assert_eq!(
+        done(tab.listing()).map(|listed| listed.len()),
+        Some(5),
+        "as it is listed"
+    );
+}
+
 /// A change is stored whole, deletions remembered by tombstone: a session
 /// deleted reads as deleted to every tab, one put back is back under its
 /// own name, and one lost without a tombstone is not taken for deleted.

@@ -20,7 +20,10 @@ use wasm_bindgen_futures::JsFuture;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::idb::{BrowserHistory, Script, waited_ms};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
-use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done};
+use super::record::{
+    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
+    failed_for_now,
+};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, Locking, OpenSession, SETTINGS_HELD,
     SetAside, Store, over_stored, read_settings_from,
@@ -764,13 +767,16 @@ impl Store for WebStore {
         }
     }
 
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+    /// A browser's database reads each record whole or not at all, and the
+    /// page storage holds text alone: one that cannot be read could not be
+    /// read just now.
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>> {
         match &self.history {
             History::Database(database) => {
                 let database = Rc::clone(database);
-                Box::pin(async move { database.read(ids).await })
+                Box::pin(async move { failed_for_now(database.read(ids).await) })
             }
-            History::Page { whole, .. } => done(whole.read(&ids)),
+            History::Page { whole, .. } => done(failed_for_now(whole.read(&ids))),
         }
     }
 

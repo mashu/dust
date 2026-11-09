@@ -687,7 +687,7 @@ mod tests {
             player.follow_band(&settings);
             assert_eq!(
                 recorder.calls(),
-                vec![Call::Band(cw_core::band::BandKey::of(&settings.band))]
+                vec![Call::Band(cw_core::band::BandKey::of(&settings))]
             );
         });
     }

@@ -19,6 +19,11 @@ impl SessionKey {
     pub fn new(timestamp: u64, date: String) -> Self {
         Self(timestamp, date)
     }
+
+    /// When the session finished.
+    pub fn timestamp(&self) -> u64 {
+        self.0
+    }
 }
 
 /// A session deleted by hand, as the store remembers it beside its record
