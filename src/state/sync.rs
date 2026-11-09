@@ -234,6 +234,22 @@ enum Kept {
     Unknown,
 }
 
+/// What becomes of the sessions put back by hand that sync has yet to
+/// send ([`SyncCtx::revived`], [`SyncState::revived`]) as sync is forgotten
+/// in this copy of the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Notes {
+    /// Forgotten with the rest: sync turned off here, or ended for good,
+    /// as its copy in the drive is gone.
+    Forgotten,
+    /// Kept: sync was turned off in another copy, or on anew there, and the
+    /// history they were put back in is this device's still. They go with
+    /// the sync turned on anew there ([`AppCtx::give_notes_to`]), or with
+    /// the next one turned on here, as noted before it, stamped again after
+    /// its first read of the drive; closed first, this copy loses them.
+    Kept,
+}
+
 /// What `store` keeps for sync now.
 fn read_kept(store: &dyn Store) -> Kept {
     if store.sync_cleared() {
@@ -378,6 +394,7 @@ impl AppCtx {
         let kept = read_kept(&*self.app().store);
         if let Some(why) = self.changed_elsewhere(&kept) {
             self.take_up_change_elsewhere(why);
+            self.give_notes_to(kept);
             return;
         }
         let base = self.sync.base.peek().clone();
@@ -487,7 +504,17 @@ impl AppCtx {
         }
         let kept = read_kept(&*self.app().store);
         if let Some(why) = self.changed_elsewhere(&kept) {
+            // What it took in and did not send waits with what was noted
+            // since, as the rest of what this copy noted does.
+            {
+                let mut noted = self.sync.revived;
+                let mut noted = noted.write();
+                for (&id, &at) in &synced.revived {
+                    note(&mut noted, id, at);
+                }
+            }
             self.take_up_change_elsewhere(why);
+            self.give_notes_to(kept);
             return;
         }
         // A sync the store never took is laid over nothing of another's:
@@ -536,7 +563,12 @@ impl AppCtx {
         };
         let kept = read_kept(&*self.app().store);
         if let Some(why) = self.changed_elsewhere(&kept) {
-            self.take_up_change_elsewhere(why);
+            match kept {
+                // Taken up as this copy keeps what it holds, under the lock,
+                // so that the sessions put back here go with that sync.
+                Kept::State(_) => self.keep_sync_state(),
+                Kept::Cleared | Kept::Unread | Kept::Unknown => self.take_up_change_elsewhere(why),
+            }
             return false;
         }
         let base = self.sync.base.peek().clone();
@@ -597,12 +629,43 @@ impl AppCtx {
 
     /// Turn sync off here, saying `why`: another copy of the app on the
     /// same store turned it off, or on anew. What the store holds is left
-    /// as it is: nothing, or the other copy's.
+    /// as it is: nothing, or the other copy's. The sessions put back by hand
+    /// here that sync has yet to send are kept ([`Notes::Kept`]), for the
+    /// sync turned on anew there ([`Self::give_notes_to`]), or the next one
+    /// turned on here.
     fn take_up_change_elsewhere(self, why: &'static str) {
-        self.forget_sync_here();
+        self.forget_sync_here(Notes::Kept);
         self.set_sync_status(SyncStatus::Off {
             problem: Some(why.into()),
         });
+    }
+
+    /// Lay the sessions put back by hand here that sync has yet to send,
+    /// kept as sync was turned on anew in another copy of the app, over that
+    /// sync's state, `kept`, as the store holds it, and write it: the
+    /// history is the device's, and so the putting back stands against
+    /// whichever sync the store keeps, which sends it next. Each is put back
+    /// after what that sync knows of its record ([`SyncState::stamp_change`]).
+    /// Under the lock on what sync keeps, which the caller holds. Where the
+    /// store holds nothing, or what this build does not read, or will not
+    /// take it, they wait with this copy, for the next sync turned on here.
+    fn give_notes_to(self, kept: Kept) {
+        let Kept::State(mut theirs) = kept else {
+            return;
+        };
+        let notes = self.sync.revived.peek().clone();
+        if notes.is_empty() {
+            return;
+        }
+        for (id, at) in notes {
+            let at = theirs.stamp_change(id, at);
+            note(&mut theirs.revived, id, at);
+        }
+        if let Some(written) = theirs.written()
+            && self.app().store.save_sync(Some(&written)).is_ok()
+        {
+            put(self.sync.revived, BTreeMap::new());
+        }
     }
 
     /// Why sync is no longer as this copy of the app holds it, where
@@ -1102,7 +1165,12 @@ impl AppCtx {
             // Turned off, or on anew, in another copy of the app since: off
             // here as well, saying so, the store left as that copy left it.
             match self.changed_elsewhere(&read_kept(&*self.app().store)) {
-                Some(why) => self.take_up_change_elsewhere(why),
+                Some(why) => {
+                    self.forget_sync_here(Notes::Forgotten);
+                    self.set_sync_status(SyncStatus::Off {
+                        problem: Some(why.into()),
+                    });
+                }
                 None => {
                     self.sync_forget();
                     self.set_sync_status(SyncStatus::Off { problem: None });
@@ -1158,7 +1226,7 @@ impl AppCtx {
     /// on what sync keeps, as every keep is ([`Self::keep_sync_state`]).
     fn sync_forget(self) {
         let ours = self.sync.state.peek().clone();
-        self.forget_sync_here();
+        self.forget_sync_here(Notes::Forgotten);
         let Some(ours) = ours else {
             return;
         };
@@ -1183,8 +1251,9 @@ impl AppCtx {
     }
 
     /// Forget everything sync keeps in this copy of the app, and nothing in
-    /// the store, which other copies share.
-    fn forget_sync_here(self) {
+    /// the store, which other copies share: the sessions put back by hand
+    /// and not yet sent among it, or not ([`Notes`]).
+    fn forget_sync_here(self, notes: Notes) {
         if let Some(link) = self.sync_link() {
             link.auth.forget();
         }
@@ -1192,10 +1261,26 @@ impl AppCtx {
         // it keeps nothing.
         self.give_up_sign_ins();
         self.next_sync_epoch();
+        match notes {
+            Notes::Forgotten => put(self.sync.revived, BTreeMap::new()),
+            Notes::Kept => {
+                let unsent = self
+                    .sync
+                    .state
+                    .peek()
+                    .as_ref()
+                    .map(|state| state.revived.clone())
+                    .unwrap_or_default();
+                let mut noted = self.sync.revived;
+                let mut noted = noted.write();
+                for (id, at) in unsent {
+                    note(&mut noted, id, at);
+                }
+            }
+        }
         put(self.sync.state, None);
         put(self.sync.base, None);
         put(self.sync.found, None);
-        put(self.sync.revived, BTreeMap::new());
         put(self.sync.taking_in, false);
     }
 

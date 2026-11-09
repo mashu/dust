@@ -231,7 +231,12 @@ browser tells each of the write (a `storage` event), and a window as it
 comes back into sight, syncs, or keeps what it keeps. One that finds there
 instead what another tab or window kept as it turned sync on anew turns off
 as well, saying so, rather than write its own over it: opened again, it
-syncs as that one does. So, too, a tab or window takes up what another
+syncs as that one does. A session it put back by hand that sync had yet to
+send is not forgotten with it: it goes with the sync turned on anew in the
+other, or, where sync was turned off there, waits with this tab or window
+for the next sync turned on in it, which sends it as put back after the
+drive's deletion; closed first, the tab or window loses it. One left off
+notes no putting back at all. So, too, a tab or window takes up what another
 synced: when this device last synced, which its card shows, so that coming
 back into sight it does not sync again just after the other did, and a
 sign-in made there, which it signs in with from then on. Neither clears anything from the

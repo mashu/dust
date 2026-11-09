@@ -2703,6 +2703,98 @@ fn a_sign_in_another_copy_made_is_this_copys_too() {
     });
 }
 
+/// A session put back by Undo just as this copy of the app finds sync
+/// turned off in another, a tab or a window, is put back all the same once
+/// sync is turned on here again: the note of it waits with this copy, and
+/// the first sync sends it as put back, after the drive's deletion, here
+/// and everywhere. The note used to go as sync was taken for off, and that
+/// first sync let the session go again.
+#[test]
+fn a_session_put_back_as_sync_is_turned_off_in_another_copy_is_kept_when_turned_on_here() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_turn_off(false));
+        harness.in_app(|| ctx.undo_delete());
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned off in another tab or window of Dust."),
+            "{:?}",
+            status(&harness)
+        );
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        assert_eq!(stamps(&harness), [1, 2], "not let go");
+        assert_eq!(joined_stamps(&remote), [1, 2], "the drive's word");
+    });
+}
+
+/// A session put back by Undo just as this copy of the app finds sync turned
+/// on anew in another, a tab or a window, goes with the sync turned on
+/// there: the history is the device's, and so the putting back stands
+/// against whichever sync the store keeps. That copy's next sync sends it as
+/// put back. The note used to go with this copy's sync, and that copy's next
+/// sync let the session go again, here and everywhere.
+#[test]
+fn a_session_put_back_as_sync_is_turned_on_anew_in_another_copy_goes_with_that_sync() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.sync_turn_off(false));
+        harness.in_app(|| window.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| window.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(harness.in_app(|| window.sync.status.peek().is_on()));
+        harness.in_app(|| ctx.undo_delete());
+        assert!(
+            matches!(&status(&harness), SyncStatus::Off { problem: Some(p) } if p == "Sync was turned on anew in another tab or window of Dust. Open Dust again here to sync."),
+            "{:?}",
+            status(&harness)
+        );
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        harness.in_app(|| window.take_up_store());
+        let there: Vec<u64> = harness.in_app(|| {
+            window
+                .sessions
+                .peek()
+                .iter()
+                .map(|session| session.timestamp)
+                .collect()
+        });
+        assert_eq!(there, [1, 2], "not let go");
+        assert_eq!(stored_stamps(&harness), [1, 2]);
+        assert_eq!(joined_stamps(&remote), [1, 2], "the drive's word");
+    });
+}
+
 /// Move the clock on by `ms` at once, as a long wait does, letting what was
 /// waiting on it run.
 async fn leap(harness: &mut Harness, ms: u64) {
