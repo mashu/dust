@@ -122,8 +122,9 @@ pub enum FilterShape {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgcDecay {
-    /// Holds across the gaps inside a word and lets the band back in a word
-    /// gap: what most CW operators run.
+    /// Holds across the gaps inside a word, at the slowest speed and spacing
+    /// the settings send, and lets the band back in a word gap
+    /// ([`crate::band::agc_timing`]): what most CW operators run.
     #[default]
     Fast,
     /// Holds across word gaps too and comes back over a second or so: the

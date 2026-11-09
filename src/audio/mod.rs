@@ -446,7 +446,7 @@ pub mod fake {
             self.recorder
                 .calls
                 .borrow_mut()
-                .push(Call::Band(cw_core::band::BandKey::of(&settings.band)));
+                .push(Call::Band(cw_core::band::BandKey::of(settings)));
             self.recorder
                 .band_running
                 .set(settings.band.has_background());
@@ -549,7 +549,7 @@ mod tests {
             recorder.calls(),
             vec![
                 Call::New,
-                Call::Band(cw_core::band::BandKey::of(&settings.band)),
+                Call::Band(cw_core::band::BandKey::of(&settings)),
                 Call::Start("K".into()),
             ]
         );

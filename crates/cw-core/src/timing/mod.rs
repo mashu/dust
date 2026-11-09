@@ -21,9 +21,18 @@ pub use plan::{
     CharSpan, DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC, ToneEvent,
     plan_morse_playback_for, plan_transmission,
 };
-pub(crate) use plan::{plan_from, plan_morse_playback_at};
+pub(crate) use plan::{
+    longest_letter_gap_sec, plan_from, plan_morse_playback_at, shortest_word_gap_sec,
+};
 pub(crate) use station::station_speed_grid;
 pub use station::{StationVoice, resolve_station};
+
+/// The pause between the letters the Listen screen sends one at a time, in
+/// milliseconds: from the end of one letter's sound to the start of the
+/// next. The band plays on through it, and the receiver's AGC holds the
+/// band down across it as across the gaps between the letters of a word,
+/// where the settings' word gaps let it ([`crate::band::agc_timing`]).
+pub const LISTEN_LETTER_GAP_MS: u32 = 420;
 
 /// The word-space stretch, inside its range whatever is set.
 fn clamp_extra_spacing(value: f64) -> f64 {

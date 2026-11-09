@@ -140,7 +140,8 @@ pub use stats::{
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{
-    EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC,
-    StationVoice, ToneEvent, Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm,
-    edge_gain, envelope_shape, plan_morse_playback_for, plan_transmission, resolve_station,
+    EnvelopePoint, EnvelopeShape, Interferer, LISTEN_LETTER_GAP_MS, PlannedTransmission,
+    PlaybackPlan, SEND_RELEASE_SEC, StationVoice, ToneEvent, Transmission,
+    compute_after_group_gap_ms, compute_group_gap_for_wpm, edge_gain, envelope_shape,
+    plan_morse_playback_for, plan_transmission, resolve_station,
 };

@@ -2464,7 +2464,7 @@ mod ui_tests {
     fn band_with_width(width_hz: f64) -> cw_core::band::BandKey {
         let mut settings = with_receiver();
         settings.band.filter_width_hz = width_hz;
-        cw_core::band::BandKey::of(&settings.clamp().band)
+        cw_core::band::BandKey::of(&settings.clamp())
     }
 
     #[test]

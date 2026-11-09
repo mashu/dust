@@ -5,13 +5,16 @@
 //! built at random: building it again is a new band. The receiver it is
 //! heard through, its filter and its AGC, is not the band: a rig's filter and
 //! AGC act on whatever is on the air, so moving them retunes the band playing
-//! ([`super::BandMixer::retuned`]) rather than drawing another. The fading is
-//! part of neither: it is applied to the Morse alone, a send at a time
-//! ([`super::Qsb`]), so moving the fading never touches the band.
+//! ([`super::BandMixer::retuned`]) rather than drawing another; so does a
+//! speed that moves how long its AGC holds the band down across a letter gap
+//! ([`agc_timing`]). The fading is part of neither: it is applied to the
+//! Morse alone, a send at a time ([`super::Qsb`]), so moving the fading
+//! never touches the band.
 
+use super::agc::agc_timing;
 use super::calibration::{noise_level, qrn_level};
 use super::memo::Exact;
-use crate::settings::{AgcDecay, BandSettings, FilterShape, STATIONS_MIN};
+use crate::settings::{AgcDecay, FilterShape, STATIONS_MIN, TrainingSettings};
 
 /// Everything the band and its receiver are built from. Two settings with
 /// the same key sound the same; two whose keys are the same band
@@ -50,10 +53,14 @@ struct ReceiverKey {
     agc_enabled: bool,
     /// The AGC's decay; nothing with the AGC off.
     agc_decay: Option<AgcDecay>,
+    /// How long the AGC's hang holds, which the speeds sent size
+    /// ([`agc_timing`]); nothing with the AGC off.
+    agc_hang: Option<Exact>,
 }
 
 impl BandKey {
-    pub fn of(band: &BandSettings) -> Self {
+    pub fn of(settings: &TrainingSettings) -> Self {
+        let band = &settings.band;
         Self {
             band: SourceKey {
                 runs: band.runs_receiver(),
@@ -69,6 +76,9 @@ impl BandKey {
                 filter_shape: band.filter_shape,
                 agc_enabled: band.agc_enabled,
                 agc_decay: band.agc_enabled.then_some(band.agc_decay),
+                agc_hang: band
+                    .agc_enabled
+                    .then(|| Exact(agc_timing(settings, band.agc_decay).0)),
             },
         }
     }
@@ -108,15 +118,16 @@ mod tests {
     use crate::settings::TrainingSettings;
 
     /// Every setting the band is built from moves its key, and nothing else
-    /// does: not the fading, which plays on the Morse, nor the speed, nor
-    /// the RF gain, which the player turns as the band runs.
+    /// does: not the fading, which plays on the Morse, nor the RF gain,
+    /// which the player turns as the band runs, nor a speed but where it
+    /// moves the AGC's hang.
     #[test]
     fn the_band_key_moves_with_what_the_band_is_built_from() {
         let base = TrainingSettings::default();
         let key = |edit: fn(&mut TrainingSettings)| {
             let mut changed = base.clone();
             edit(&mut changed);
-            (BandKey::of(&changed.band), Qsb::of(&changed.band))
+            (BandKey::of(&changed), Qsb::of(&changed.band))
         };
         let (band, qsb) = key(|_| {});
         let mut seen = vec![band];
@@ -170,9 +181,9 @@ mod tests {
         let mut dead = base.clone();
         dead.band.noise_enabled = false;
         dead.band.qrn_enabled = false;
-        let running = BandKey::of(&dead.band);
+        let running = BandKey::of(&dead);
         dead.band.agc_enabled = false;
-        assert!(!BandKey::of(&dead.band).same_band(&running));
+        assert!(!BandKey::of(&dead).same_band(&running));
         let fades: Vec<fn(&mut TrainingSettings)> = vec![
             |s| s.band.qsb_enabled = false,
             |s| s.band.qsb_depth = 0.9,
@@ -185,15 +196,34 @@ mod tests {
             assert!(!fadings.contains(&fading), "fading repeated: {fading:?}");
             fadings.push(fading);
         }
-        // Speed is not a band setting, and the pile-up's spread and level are
-        // the send's, not the band's.
+        // The pile-up's spread and level are the send's, not the band's, and
+        // a speed that leaves the AGC's hang where it was is nothing to
+        // either: out of the box the hang is held under the word gap of the
+        // top speed, which the slowest speed and spacing leave alone.
         for edit in [
-            (|s| s.playback.char_wpm_min = 40.0) as fn(&mut TrainingSettings),
-            |s| s.band.pileup_spread_hz = 500.0,
+            (|s| s.band.pileup_spread_hz = 500.0) as fn(&mut TrainingSettings),
             |s| s.band.pileup_level_db = 3.0,
             |s| s.band.rf_gain_db = -12.0,
+            |s| s.playback.char_wpm_min = 10.0,
+            |s| {
+                s.playback.link_char_to_effective = false;
+                s.playback.effective_wpm_min = 8.0;
+            },
         ] {
             assert_eq!(key(edit), (band, qsb));
+        }
+        // A speed or spacing that moves the hang retunes the receiver, the
+        // band on the air carrying on through it.
+        for edit in [
+            (|s| s.playback.char_wpm_max = 29.0) as fn(&mut TrainingSettings),
+            |s| s.playback.char_wpm_max = 20.0,
+            |s| s.playback.char_wpm_min = 40.0,
+            |s| s.playback.extra_word_space_multiplier = 2.0,
+        ] {
+            let (changed, fading) = key(edit);
+            assert!(changed != band && changed.same_band(&band), "{changed:?}");
+            assert_eq!(changed.change_from(Some(&band)), BandChange::Retune);
+            assert_eq!(fading, qsb);
         }
     }
 
@@ -202,21 +232,25 @@ mod tests {
     /// its own has none to keep clear of the one you are copying.
     #[test]
     fn what_is_switched_off_does_not_move_a_key() {
-        let mut quiet = BandSettings {
-            noise_enabled: false,
-            qrn_enabled: false,
-            qsb_enabled: false,
-            ..BandSettings::default()
-        };
-        let (band, qsb) = (BandKey::of(&quiet), Qsb::of(&quiet));
-        quiet.noise_level = 0.9;
-        quiet.qrn_level = 0.9;
-        quiet.volume_min = 0.2;
-        quiet.qsb_depth = 0.9;
-        quiet.qsb_rate_hz = 1.0;
-        assert_eq!((BandKey::of(&quiet), Qsb::of(&quiet)), (band, qsb));
-        quiet.qsb_enabled = true;
-        quiet.qsb_depth = 0.0;
-        assert_eq!(Qsb::of(&quiet), qsb);
+        let mut quiet = TrainingSettings::default();
+        quiet.band.noise_enabled = false;
+        quiet.band.qrn_enabled = false;
+        quiet.band.qsb_enabled = false;
+        let (band, qsb) = (BandKey::of(&quiet), Qsb::of(&quiet.band));
+        let b = &mut quiet.band;
+        b.noise_level = 0.9;
+        b.qrn_level = 0.9;
+        b.volume_min = 0.2;
+        b.qsb_depth = 0.9;
+        b.qsb_rate_hz = 1.0;
+        assert_eq!((BandKey::of(&quiet), Qsb::of(&quiet.band)), (band, qsb));
+        quiet.band.qsb_enabled = true;
+        quiet.band.qsb_depth = 0.0;
+        assert_eq!(Qsb::of(&quiet.band), qsb);
+        // With the AGC off, no speed moves the key: there is no hang.
+        quiet.band.agc_enabled = false;
+        let off = BandKey::of(&quiet);
+        quiet.playback.char_wpm_min = 8.0;
+        assert_eq!(BandKey::of(&quiet), off);
     }
 }

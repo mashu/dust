@@ -14,11 +14,12 @@
 //!   the band's own hiss, so the hiss alone never works the AGC.
 //! - Under a keyed station the band's hiss sits a steady way down, as far as
 //!   the station stands over the knee, from the first element of the over to
-//!   the last. No swell at the start, no pumping between elements: the hang
-//!   carries the gain across the gaps. Fading too steep for it to carry lets
-//!   the gain come up between elements toward the faded station, as a rig's
-//!   hang AGC lets go of a fading peak. Backing the RF gain off is what makes
-//!   it duck less.
+//!   the last. No swell at the start, no pumping between elements or
+//!   letters: the hang carries the gain across the gaps, sized from the
+//!   longest letter gap the settings send ([`agc_timing`]). Fading too steep
+//!   for it to carry lets the gain come up between elements toward the faded
+//!   station, as a rig's hang AGC lets go of a fading peak. Backing the RF
+//!   gain off is what makes it duck less.
 //! - In a pause the hiss is back, as fast as the decay setting lets it.
 //! - A crash pulls the gain for a moment and lets go, or, louder than the
 //!   station, holds it for a hang as the strongest signal heard; either way
@@ -35,7 +36,8 @@
 
 use super::delay::DelayLine;
 use super::dsp::db_to_gain;
-use crate::settings::AgcDecay;
+use crate::settings::{AgcDecay, TrainingSettings};
+use crate::timing::{LISTEN_LETTER_GAP_MS, longest_letter_gap_sec, shortest_word_gap_sec};
 
 /// How far above the floor's own peaks the knee sits: a level has to stand
 /// 2.2 times (about 7 dB) above the highest the hiss ordinarily reaches
@@ -59,11 +61,13 @@ pub const AGC_MAX_DUCK_DB: f64 = 60.0;
 /// seven milliseconds, well inside the look-ahead. Fast, because a receiver
 /// has to catch a crash before it is deafening.
 pub const AGC_ATTACK_SEC: f64 = 0.002;
-/// How long the gain holds after the last sustained signal at Fast decay:
-/// long enough to carry it across the gaps between elements and characters
-/// (165 ms at 22 WPM), short enough that a word gap or a pause lets the band
-/// back. Operators prefer hang AGC on CW for exactly this: a per-element
-/// pumping AGC is the one everyone dislikes.
+/// The shortest the gain holds after the last sustained signal at Fast
+/// decay: across the gaps between elements and characters at 16 WPM and
+/// over (165 ms at 22 WPM). Settings that send slower, or with Farnsworth
+/// spacing, hold it longer, across their own letter gaps, while a word gap
+/// still lets the band back ([`agc_timing`]). Operators prefer hang AGC on
+/// CW for exactly this: a per-element pumping AGC is the one everyone
+/// dislikes.
 pub const AGC_HANG_SEC: f64 = 0.22;
 /// Once the hang has run out, the time constant the gain recovers with at
 /// Fast decay, in decibels: the way down left shrinks by e every this long,
@@ -73,19 +77,63 @@ pub const AGC_HANG_SEC: f64 = 0.22;
 /// band fully back; between the FAST and MID settings of a typical
 /// transceiver (0.1 and 0.5 s).
 pub const AGC_RELEASE_SEC: f64 = 0.15;
-/// The hang at Slow decay: across a word gap at 15 WPM (0.56 s), so the band
-/// stays down from one word of an over to the next.
+/// The shortest the hang is at Slow decay: across a word gap at 15 WPM
+/// (0.56 s), so the band stays down from one word of an over to the next;
+/// longer across the letter gaps of settings that send slower
+/// ([`agc_timing`]).
 pub const AGC_SLOW_HANG_SEC: f64 = 0.6;
 /// The release at Slow decay, in decibels as at Fast: the band back over a
 /// second or so after the hang, as a typical transceiver's SLOW.
 pub const AGC_SLOW_RELEASE_SEC: f64 = 0.5;
 
-/// The hang and the release `decay` runs the AGC with, in seconds.
+/// The shortest hang and the release `decay` runs the AGC with, in
+/// seconds: what it runs with whatever the settings send ([`agc_timing`]).
 pub fn agc_decay_sec(decay: AgcDecay) -> (f64, f64) {
     match decay {
         AgcDecay::Fast => (AGC_HANG_SEC, AGC_RELEASE_SEC),
         AgcDecay::Slow => (AGC_SLOW_HANG_SEC, AGC_SLOW_RELEASE_SEC),
     }
+}
+
+/// How far past the longest letter gap the settings send the hang reaches:
+/// the detector lets go of an element a few milliseconds after its key-up,
+/// and the next element brings the gain down a few milliseconds into its
+/// rise, so the band stays down across a gap this much shorter than the
+/// hang.
+pub const AGC_LETTER_MARGIN_SEC: f64 = 0.010;
+/// How far short of the shortest word gap the settings send the hang at
+/// Fast stops: time enough after it, the detector's few milliseconds
+/// taken off, for the band to come back a few decibels under the
+/// strongest station before its next word, audibly, rather than a decibel.
+pub const AGC_WORD_MARGIN_SEC: f64 = 0.025;
+
+/// The hang and the release the AGC runs with at `decay` for `settings`, in
+/// seconds. The hang carries the gain across the longest gap between two
+/// letters the settings send, [`AGC_LETTER_MARGIN_SEC`] over it: at their
+/// slowest spacing, Farnsworth's included, a contest's caller slowed down
+/// for you among them, and the Listen screen's pause between the letters it
+/// sends one at a time ([`LISTEN_LETTER_GAP_MS`]), which the band plays on
+/// through. At Fast it stops [`AGC_WORD_MARGIN_SEC`] short of the shortest
+/// word gap they send, so the band still comes back between words, and
+/// where their speeds are too far apart for both the word gap wins; Slow
+/// holds across word gaps by design. Never shorter than the decay's own
+/// ([`agc_decay_sec`]). It follows the settings, not each send: a station
+/// the settings do not send, one of the band's own, may still be let go of
+/// between its letters.
+pub fn agc_timing(settings: &TrainingSettings, decay: AgcDecay) -> (f64, f64) {
+    let (shortest, release) = agc_decay_sec(decay);
+    let listen = f64::from(LISTEN_LETTER_GAP_MS) / 1_000.0;
+    let letters = longest_letter_gap_sec(settings).max(listen) + AGC_LETTER_MARGIN_SEC;
+    let hang = match decay {
+        AgcDecay::Fast => letters.min(shortest_word_gap_sec(settings) - AGC_WORD_MARGIN_SEC),
+        AgcDecay::Slow => letters,
+    };
+    let hang = if hang.is_finite() {
+        hang.max(shortest)
+    } else {
+        shortest
+    };
+    (hang, release)
 }
 
 /// The detector's smoothing: a one-pole average of power with this time
@@ -172,18 +220,19 @@ const SETTLED_POWER: f64 = 1e-30;
 ///
 /// - **Hang.** A level that stays above the knee for [`AGC_QUALIFY_SEC`] is a
 ///   signal, not a click. It sets the gain, and the gain then holds for the
-///   decay's hang after the signal last stood there before recovering at its
-///   release ([`agc_decay_sec`]). Under a keyed station that hold is unbroken
-///   from the first element to the last while the station fades less than
-///   [`AGC_OTHER_SIGNAL_DB`] from one element to the next, as it does on the
-///   band's fading out of the box, so the band sits steadily down for the
-///   whole over and comes back in the pauses. A signal more than
-///   [`AGC_OTHER_SIGNAL_DB`] weaker than the one holding it, and not that
-///   one's own fading tail, is another one: it neither holds the gain where
-///   it is nor lifts it, and once the hang has run out the gain recovers to
-///   where it wants it rather than to one. Were the knee down in the hiss,
-///   the hiss after a station would do neither, and the band would come
-///   back to where the hiss holds it.
+///   hang after the signal last stood there before recovering at the decay's
+///   release: across the longest letter gap the settings send, and never
+///   less than the decay's own ([`agc_timing`]). Under a keyed station that
+///   hold is unbroken from the first element to the last while the station
+///   fades less than [`AGC_OTHER_SIGNAL_DB`] from one element to the next,
+///   as it does on the band's fading out of the box, so the band sits
+///   steadily down for the whole over and comes back in the pauses. A
+///   signal more than [`AGC_OTHER_SIGNAL_DB`] weaker than the one holding
+///   it, and not that one's own fading tail, is another one: it neither
+///   holds the gain where it is nor lifts it, and once the hang has run out
+///   the gain recovers to where it wants it rather than to one. Were the
+///   knee down in the hiss, the hiss after a station would do neither, and
+///   the band would come back to where the hiss holds it.
 /// - **Limiter.** Anything above the knee pulls the gain down within
 ///   [`AGC_ATTACK_SEC`], but if it never qualified for the hang it lets go
 ///   again within [`AGC_LIMIT_RELEASE_SEC`]. A lightning stroke is squashed
@@ -262,14 +311,27 @@ pub struct Agc {
 
 impl Agc {
     /// An AGC with its knee at `knee`, the amplitude of a steady tone, that
-    /// lets the gain back up as `decay` does.
+    /// lets the gain back up as `decay` does, with the decay's shortest
+    /// hang ([`agc_decay_sec`]).
     pub fn new(sample_rate: u32, knee: f64, decay: AgcDecay) -> Self {
+        Self::with_hang(sample_rate, knee, decay, agc_decay_sec(decay).0)
+    }
+
+    /// The same, holding the gain `hang_sec` after the last sustained
+    /// signal, as the settings have it ([`agc_timing`]): the decay's
+    /// shortest hang for one that is no length.
+    pub fn with_hang(sample_rate: u32, knee: f64, decay: AgcDecay, hang_sec: f64) -> Self {
         let sr = f64::from(sample_rate.max(1));
         let coefficient = |seconds: f64| (-1.0 / (seconds * sr)).exp();
         let samples = |seconds: f64| (seconds * sr).round().max(1.0) as u32;
         let knee = if knee > 0.0 { knee } else { f64::INFINITY };
         let lookahead = agc_lookahead_samples(sample_rate);
-        let (hang, release) = agc_decay_sec(decay);
+        let (shortest, release) = agc_decay_sec(decay);
+        let hang = if hang_sec.is_finite() && hang_sec > 0.0 {
+            hang_sec
+        } else {
+            shortest
+        };
         Self {
             knee,
             ceiling_level: knee * db_to_gain(AGC_CEILING_DB),
@@ -676,6 +738,18 @@ mod tests {
             weight: 1.0,
             dash_ratio: 3.0,
         };
+        station_voiced(settings, texts, start, pause, &voice)
+    }
+
+    /// The same, sent by `voice`: its own pitch, speeds and fist.
+    fn station_voiced(
+        settings: &TrainingSettings,
+        texts: &[&str],
+        start: f64,
+        pause: f64,
+        voice: &StationVoice,
+    ) -> Keyed {
+        let voice = *voice;
         let sr = f64::from(SR);
         let mut downs = Vec::new();
         let mut plans = Vec::new();
@@ -1031,6 +1105,259 @@ mod tests {
     /// sends plays: 28 dB over the knee, so even its fades stand well clear
     /// of it.
     const LOUDEST_DB: f64 = 15.0;
+
+    /// `voice` sending `texts`, `pause` seconds apart, as the strongest
+    /// station the band sends, on the band `settings` make; and the gain the
+    /// band's hiss is played at, sample by sample: the gain the look-ahead
+    /// later than the moment it was heard, as the hiss heard in a gap is
+    /// played beside the send.
+    fn hiss_under(
+        settings: &TrainingSettings,
+        voice: &StationVoice,
+        texts: &[&str],
+        pause: f64,
+    ) -> (Keyed, Vec<f64>) {
+        let keyed = station_voiced(settings, texts, 0.3, pause, voice);
+        let loud = db_to_gain(LOUDEST_DB) as f32;
+        let send: Vec<f32> = keyed.samples.iter().map(|sample| sample * loud).collect();
+        let length = send.len() as f64 / f64::from(SR) + 0.5;
+        let (_, gain) = ride(settings, &send, length);
+        let la = agc_lookahead_samples(SR);
+        (keyed, gain[la..].to_vec())
+    }
+
+    /// Each gap between `keyed`'s elements that `pick` keeps, by its
+    /// length in seconds: when it starts, and the most the hiss comes up
+    /// in it, in decibels over where it stood as the gap began.
+    fn gap_swells(keyed: &Keyed, hiss: &[f64], pick: impl Fn(f64) -> bool) -> Vec<(f64, f64)> {
+        keyed
+            .downs
+            .windows(2)
+            .map(|w| (w[0].1, w[1].0))
+            .filter(|(up, down)| pick(down - up))
+            .map(|(up, down)| {
+                let (from, to) = (seconds(up), seconds(down).min(hiss.len()));
+                let swell = hiss[from..to]
+                    .iter()
+                    .map(|gain| db(gain / hiss[from]))
+                    .fold(f64::MIN, f64::max);
+                (up, swell)
+            })
+            .collect()
+    }
+
+    /// Settings sending at `char_wpm` with their spacing at `effective_wpm`,
+    /// tied where the two are one, at `decay`, over the reference hiss.
+    fn sending_at(char_wpm: f64, effective_wpm: f64, decay: AgcDecay) -> TrainingSettings {
+        let mut s = floor_only();
+        let p = &mut s.playback;
+        (p.char_wpm_min, p.char_wpm_max) = (char_wpm, char_wpm);
+        (p.effective_wpm_min, p.effective_wpm_max) = (effective_wpm, effective_wpm);
+        p.link_char_to_effective = char_wpm == effective_wpm;
+        s.band.agc_decay = decay;
+        s.clamp()
+    }
+
+    /// A keyer at `char_wpm`, its spacing at `effective_wpm`.
+    fn keyer(char_wpm: f64, effective_wpm: f64) -> StationVoice {
+        StationVoice {
+            tone_hz: 600.0,
+            char_wpm,
+            effective_wpm,
+            volume: 1.0,
+            weight: 1.0,
+            dash_ratio: 3.0,
+        }
+    }
+
+    /// The hiss stays down across every gap between the letters of a word,
+    /// at a speed and a spacing whose letter gaps run longer than the
+    /// decay's own hang: at 12 WPM, with Farnsworth spacing, at the slowest
+    /// speed at Slow, and at the slowest of the default range from the
+    /// lightest fist it draws. The hang is sized from the settings' longest
+    /// letter gap; it used to be 0.22 s at Fast and 0.6 s at Slow whatever
+    /// the speed, and the hiss swelled up to 25 dB between letters.
+    #[test]
+    fn the_hiss_holds_between_the_letters_of_a_word_at_12_wpm_and_with_farnsworth_spacing() {
+        let fist = TrainingSettings::default().playback.fist_variation;
+        let lightest = StationVoice {
+            weight: 1.0 - fist * 0.18,
+            dash_ratio: 3.0 - fist * 0.45,
+            ..keyer(15.0, 15.0)
+        };
+        let mut default_range = floor_only();
+        default_range.band.agc_decay = AgcDecay::Fast;
+        let cases = [
+            (
+                "12 WPM",
+                sending_at(12.0, 12.0, AgcDecay::Fast),
+                keyer(12.0, 12.0),
+            ),
+            (
+                "20/8 WPM",
+                sending_at(20.0, 8.0, AgcDecay::Fast),
+                keyer(20.0, 8.0),
+            ),
+            (
+                "5 WPM at Slow",
+                sending_at(5.0, 5.0, AgcDecay::Slow),
+                keyer(5.0, 5.0),
+            ),
+            (
+                "20/5 WPM at Slow",
+                sending_at(20.0, 5.0, AgcDecay::Slow),
+                keyer(20.0, 5.0),
+            ),
+            (
+                "15 of 15-30 WPM, the lightest fist",
+                default_range,
+                lightest,
+            ),
+        ];
+        for (name, settings, voice) in cases {
+            let (keyed, hiss) = hiss_under(&settings, &voice, &["PARIS"], 0.0);
+            let dot = 1.2 / voice.char_wpm;
+            let letters = gap_swells(&keyed, &hiss, |gap| gap > 2.0 * dot);
+            assert_eq!(letters.len(), 4, "{name}: PARIS has four letter gaps");
+            for (at, swell) in letters {
+                assert!(
+                    swell <= 1.0,
+                    "{name}: the hiss came up {swell:.1} dB in the letter gap at {at:.2} s"
+                );
+            }
+        }
+    }
+
+    /// The same between the letters of a contest's caller slowed down for
+    /// you under easy habits, as far as one ever slows, and between the
+    /// letters the Listen screen sends one at a time: each a letter gap the
+    /// settings send, which the hang is sized from where their word gaps
+    /// let it.
+    #[test]
+    fn the_hiss_holds_between_a_slowed_callers_letters_and_the_listen_screens() {
+        let mut contest = sending_at(10.0, 10.0, AgcDecay::Fast);
+        contest.curriculum.char_set_mode = crate::settings::CharSetMode::Contest;
+        let slowed = 10.0 * (1.0 - crate::contest::QRS_MOST);
+        let caller = keyer(slowed, slowed);
+        let (keyed, hiss) = hiss_under(&contest, &caller, &["PARIS"], 0.0);
+        let dot = 1.2 / slowed;
+        for (at, swell) in gap_swells(&keyed, &hiss, |gap| gap > 2.0 * dot) {
+            assert!(
+                swell <= 1.0,
+                "a caller slowed to {slowed:.1} WPM: {swell:.1} dB at {at:.2} s"
+            );
+        }
+
+        let listen = sending_at(12.0, 12.0, AgcDecay::Fast);
+        let pause = f64::from(crate::timing::LISTEN_LETTER_GAP_MS) / 1_000.0;
+        let (keyed, hiss) = hiss_under(&listen, &keyer(12.0, 12.0), &["P", "A", "R"], pause);
+        let between = gap_swells(&keyed, &hiss, |gap| gap > pause - 1e-6);
+        assert_eq!(between.len(), 2);
+        for (at, swell) in between {
+            assert!(
+                swell <= 1.0,
+                "the Listen screen at 12 WPM: {swell:.1} dB at {at:.2} s"
+            );
+        }
+    }
+
+    /// However the settings send, the hang is a length, never shorter than
+    /// the decay's own; at Fast never past the shortest word gap, less its
+    /// margin, where that is longer than the decay's own; and Slow's never
+    /// shorter than Fast's. The release is the decay's.
+    #[test]
+    fn agc_timing_keeps_the_hang_within_its_bounds() {
+        use crate::rng::{Rng, SplitMix64};
+        let mut rng = SplitMix64::new(0xA6C);
+        let odd = [f64::NAN, -3.0, 0.0, f64::INFINITY, 1e9];
+        for case in 0..400 {
+            let mut s = TrainingSettings::default();
+            let speed = |rng: &mut SplitMix64| {
+                if rng.f64() < 0.1 {
+                    odd[(rng.f64() * odd.len() as f64) as usize % odd.len()]
+                } else {
+                    rng.pick_in_range(1.0, 90.0)
+                }
+            };
+            s.playback.char_wpm_min = speed(&mut rng);
+            s.playback.char_wpm_max = speed(&mut rng);
+            s.playback.effective_wpm_min = speed(&mut rng);
+            s.playback.effective_wpm_max = speed(&mut rng);
+            s.playback.link_char_to_effective = rng.f64() < 0.5;
+            s.playback.extra_word_space_multiplier = speed(&mut rng) / 10.0;
+            s.playback.fist_variation = speed(&mut rng) / 50.0;
+            if rng.f64() < 0.3 {
+                s.curriculum.char_set_mode = crate::settings::CharSetMode::Contest;
+            }
+            let fast = agc_timing(&s, AgcDecay::Fast);
+            let slow = agc_timing(&s, AgcDecay::Slow);
+            assert_eq!(fast.1, AGC_RELEASE_SEC, "case {case}");
+            assert_eq!(slow.1, AGC_SLOW_RELEASE_SEC, "case {case}");
+            assert!(
+                fast.0.is_finite() && fast.0 >= AGC_HANG_SEC,
+                "case {case}: {fast:?}"
+            );
+            assert!(
+                slow.0.is_finite() && slow.0 >= AGC_SLOW_HANG_SEC,
+                "case {case}: {slow:?}"
+            );
+            let cap = crate::timing::shortest_word_gap_sec(&s) - AGC_WORD_MARGIN_SEC;
+            assert!(
+                fast.0 <= AGC_HANG_SEC.max(cap) + 1e-12,
+                "case {case}: {fast:?} past {cap}"
+            );
+            assert!(slow.0 >= fast.0, "case {case}: {slow:?} under {fast:?}");
+        }
+        // Out of the box the hang is held under the word gap of the top
+        // speed, and at 12 WPM it spans the Listen screen's pause.
+        let default = TrainingSettings::default();
+        let (hang, _) = agc_timing(&default, AgcDecay::Fast);
+        let word = crate::timing::shortest_word_gap_sec(&default);
+        assert!(
+            (hang - (word - AGC_WORD_MARGIN_SEC)).abs() < 1e-12,
+            "{hang}"
+        );
+        assert!(hang > crate::timing::longest_letter_gap_sec(&default));
+        let listen = f64::from(LISTEN_LETTER_GAP_MS) / 1_000.0;
+        let (hang, _) = agc_timing(&sending_at(12.0, 12.0, AgcDecay::Fast), AgcDecay::Fast);
+        assert!(
+            (hang - (listen + AGC_LETTER_MARGIN_SEC)).abs() < 1e-12,
+            "{hang}"
+        );
+        // A receiver built with no length of hang holds the decay's own.
+        for no_length in [f64::NAN, 0.0, -1.0, f64::INFINITY] {
+            let agc = Agc::with_hang(SR, 0.01, AgcDecay::Fast, no_length);
+            assert_eq!(agc.hang, Agc::new(SR, 0.01, AgcDecay::Fast).hang);
+        }
+    }
+
+    /// At Fast the hiss still comes back across a word gap: well back in a
+    /// 12 WPM word gap, and audibly so in the shortest word gap the default
+    /// range sends, its fastest speed from the heaviest fist it draws, where
+    /// the hang is held under it.
+    #[test]
+    fn the_hiss_comes_back_across_a_word_gap_at_fast() {
+        let settings = sending_at(12.0, 12.0, AgcDecay::Fast);
+        let (keyed, hiss) = hiss_under(&settings, &keyer(12.0, 12.0), &["PARIS PARIS"], 0.0);
+        let words = gap_swells(&keyed, &hiss, |gap| gap > 0.6);
+        assert_eq!(words.len(), 1);
+        assert!(words[0].1 >= 10.0, "12 WPM: back {:.1} dB", words[0].1);
+
+        let fist = TrainingSettings::default().playback.fist_variation;
+        let heaviest = StationVoice {
+            weight: 1.0 + fist * 0.18,
+            dash_ratio: 3.0 - fist * 0.45,
+            ..keyer(30.0, 30.0)
+        };
+        let (keyed, hiss) = hiss_under(&floor_only(), &heaviest, &["PARIS PARIS"], 0.0);
+        let words = gap_swells(&keyed, &hiss, |gap| gap > 6.0 * 0.04);
+        assert_eq!(words.len(), 1);
+        assert!(
+            words[0].1 >= 2.5,
+            "30 of 15-30 WPM: back {:.1} dB",
+            words[0].1
+        );
+    }
 
     /// A station fading as the band fades it holds its own hang from its
     /// first element to its last: the hang carries the gain across every gap
