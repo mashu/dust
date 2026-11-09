@@ -756,7 +756,10 @@ pub struct TrainingSettings {
     /// setting still writes what it was read as, so neither a copy of this
     /// build nor sync puts this build's reading of it in its place. Changed
     /// here, the setting is written as it now is
-    /// ([`TrainingSettings::keeping_values_of`]).
+    /// ([`TrainingSettings::keeping_values_of`]), but for the entries of an
+    /// object this build does not read, a later build's share of the
+    /// callers' odds or the styles of a contest it has no name for, which
+    /// stay beside it.
     pub unread_values: std::collections::BTreeMap<String, UnreadValue>,
 }
 
@@ -765,11 +768,13 @@ pub struct TrainingSettings {
 /// under its key when they were read ([`TrainingSettings::unread_values`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnreadValue {
-    /// The value as the save held it.
+    /// The value as the save held it, or, for an object changed here since,
+    /// as it is now written with the entries this build does not read
+    /// beside it.
     pub stored: serde_json::Value,
-    /// What the settings wrote under its key when they were read. While
-    /// they still write it, the setting is as it was read, and `stored`
-    /// goes in its place.
+    /// What the settings wrote under its key when they were read, or last
+    /// changed here. While they still write it, the setting is as it was
+    /// read, and `stored` goes in its place.
     pub read_as: serde_json::Value,
 }
 

@@ -669,8 +669,12 @@ build cannot read under a key it reads, a later build's choice of a filter
 shape or a contest, say (`TrainingSettings::unread_values`): read as this
 build can, it goes back as it was stored, to the file, a backup and sync
 alike, until that setting is changed here, and from then on as chosen here.
-A number past this build's range is not one: it is read, held to the range,
-as it always was. A session is stored
+In a setting of named entries, the callers' odds or their styles in each
+contest, an entry this build does not read, a later build's share or the
+styles of a contest it has no name for, stays as it was stored though the
+rest of that setting is changed here, a card's reset included. A number
+past this build's range is not one: it is read, held to the range, as it
+always was. A session is stored
 once, as the build that stored it wrote it, and never written over, so what
 a later build adds to it stays. Each says the format it is stored in,
 `"format"`: the oldest format a build must know to read it
