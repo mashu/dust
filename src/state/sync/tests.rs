@@ -1843,6 +1843,54 @@ fn undo_while_a_sync_from_before_sync_was_turned_on_anew_ends_outlasts_a_deletio
     });
 }
 
+/// A session put back by Undo while a sync waits on the drive, before it
+/// lists the store, stays: the sync lets go of nothing put back since it
+/// began, though it finds the session listed and its deletion, sent before,
+/// in the drive, with no note of the putting back in what it plans from;
+/// the sync after sends it as put back. That sync used to let it go again,
+/// as the drive's deletion, and the next to forget its putting back, here
+/// and everywhere.
+#[test]
+fn a_session_put_back_while_a_sync_reads_the_drive_is_not_let_go_by_it() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let sent = harness.in_app(|| {
+            ctx.sync
+                .state
+                .peek()
+                .as_ref()
+                .is_some_and(|state| state.drive.deleted(two))
+        });
+        assert!(sent, "the deletion sent");
+
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| ctx.undo_delete());
+        held.hold(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(stamps(&harness), [1, 2], "not let go");
+        let (joined, _) = another_device(&remote, "a long passphrase", &[]);
+        let theirs: Vec<u64> = joined
+            .load_history()
+            .sessions
+            .iter()
+            .map(|(_, s)| s.timestamp)
+            .collect();
+        assert_eq!(theirs, [1, 2], "the drive's word");
+    });
+}
+
 /// What sync noted of a session put back while a sync was under way goes
 /// with everything else sync keeps as sync is turned off here, as one put
 /// back while none was would: turned on again, sync begins from nothing.

@@ -1,7 +1,7 @@
 //! A sync, start to end, against a store and a folder: finding the keyring
 //! as sync is turned on ([`look`], [`join`]), and each sync after
-//! ([`sync_once`]). Nothing here knows which store or folder it has, nor
-//! touches the app: it says what it did, and the app takes it up.
+//! ([`sync_once_with`]). Nothing here knows which store or folder it has,
+//! nor touches the app: it says what it did, and the app takes it up.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -255,6 +255,19 @@ async fn read_packs(
     Ok((unreadable, newer))
 }
 
+/// A sync with nothing put back by hand while it runs, as a test syncs a
+/// device: [`sync_once_with`].
+#[cfg(test)]
+pub async fn sync_once(
+    store: &dyn Store,
+    remote: &dyn Remote,
+    state: &mut SyncState,
+    here: &TrainingSettings,
+    now: u64,
+) -> Result<Synced, SyncFailed> {
+    sync_once_with(store, remote, state, here, now, &BTreeSet::new).await
+}
+
 /// Sync the history in `store` and the settings `here` with the drive
 /// `remote`, as `state` says this device stands, and say what it did. What
 /// it changes of `state` is changed as it goes, whether it ends well or
@@ -264,12 +277,20 @@ async fn read_packs(
 /// before anything is sent: a sync cut short leaves the store as it was or
 /// with all of it, and the next sends what this one did not. Packs read
 /// are noted only once what they hold is in the store.
-pub async fn sync_once(
+///
+/// `put_back_since` says which records were put back by hand here since
+/// the sync began, after it took in the notes it plans from
+/// ([`SyncState::revived`]): none of them is let go, whatever the drive
+/// says. The app notes those as the sync ends, and the next sync sends
+/// them as put back. It is asked once the sync has read all it reads of
+/// the store and the drive, just before it changes the store.
+pub async fn sync_once_with(
     store: &dyn Store,
     remote: &dyn Remote,
     state: &mut SyncState,
     here: &TrainingSettings,
     now: u64,
+    put_back_since: &dyn Fn() -> BTreeSet<RecordId>,
 ) -> Result<Synced, SyncFailed> {
     let key = DataKey::from_hex(&state.key).ok_or(SyncFailed::NoKey)?;
     let keys = Keys::of(&key);
@@ -374,6 +395,11 @@ pub async fn sync_once(
 
     // What the drive holds, taken here.
     let here_bytes = read_here(store, &planned).await;
+    // Put back by hand since this sync began, after it took in the notes
+    // it planned from: not this sync's to let go. Asked after its last
+    // read, as nothing comes between this and the change.
+    let since = put_back_since();
+    planned.let_go.retain(|(id, _)| !since.contains(id));
     let mut change = HistoryChange::default();
     for &id in planned.take.iter().chain(&planned.take_back) {
         if let Some(json) = bytes.get(&id) {

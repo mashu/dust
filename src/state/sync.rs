@@ -5,7 +5,7 @@
 //! into sight, if it has not synced for a while. Never while a session or
 //! a run is under way, which waits on nothing: once it is over.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use dioxus::core::spawn_forever;
@@ -16,7 +16,7 @@ use crate::persist::record::{Pending, RecordId, done};
 use crate::persist::{Store, merge_settings};
 use crate::sync::auth::{Auth, AuthError};
 use crate::sync::remote::{Remote, RemoteError, RemoteFile};
-use crate::sync::run::{Found, SyncFailed, Synced, delete_copy, join, look, sync_once};
+use crate::sync::run::{Found, SyncFailed, Synced, delete_copy, join, look, sync_once_with};
 use crate::sync::seal::{MIN_PASSPHRASE, Stretch};
 use crate::sync::settings::{as_keys, settings_keys};
 use crate::sync::state::SyncState;
@@ -132,7 +132,8 @@ pub struct SyncCtx {
     soon: CopyValue<bool>,
     /// Sessions put back by hand while a sync was under way: noted once it
     /// is over, or by the next, where that one was of a turning on of sync
-    /// gone since.
+    /// gone since. The sync under way as one was put back lets go of none
+    /// of them ([`AppCtx::put_back_since`]).
     revived: CopyValue<BTreeMap<RecordId, u64>>,
 }
 
@@ -500,7 +501,10 @@ impl AppCtx {
                 remote: &*link.remote,
                 current: move || *self.sync.epoch.peek() == epoch,
             };
-            let synced = sync_once(&*store, &remote, &mut state, &here, now_ms()).await;
+            // Put back by hand since it took the notes in: none let go.
+            let since = || self.put_back_since();
+            let synced =
+                sync_once_with(&*store, &remote, &mut state, &here, now_ms(), &since).await;
             self.take_up_sync_off();
             if *self.sync.epoch.peek() != epoch {
                 // Sync was turned off meanwhile, here or in another copy,
@@ -668,7 +672,7 @@ impl AppCtx {
     /// does not take them away again. Each is put back after the deletion
     /// of it this device knows of ([`SyncState::stamp_change`]); while a
     /// sync is under way, after what that sync read and sent as well, as
-    /// it ends.
+    /// it ends, and that sync lets none of them go.
     pub fn sync_revived(self, ids: impl IntoIterator<Item = RecordId>) {
         let now = now_ms();
         let revived: Vec<(RecordId, u64)> = match self.sync.state.peek().as_ref() {
@@ -689,6 +693,15 @@ impl AppCtx {
             self.keep_sync_state();
         }
         self.sync_soon();
+    }
+
+    /// The sessions put back by hand here since the sync under way took in
+    /// the notes made before it: noted for once it is over, and none of
+    /// them that sync's to let go, though the drive holds a deletion of it
+    /// and what the sync plans from has no note of its putting back
+    /// ([`crate::sync::run::sync_once_with`]).
+    fn put_back_since(self) -> BTreeSet<RecordId> {
+        self.sync.revived.peek().keys().copied().collect()
     }
 
     /// Turn sync off here: forget the key and the sign-in. With `and_copy`,

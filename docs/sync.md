@@ -67,7 +67,9 @@ A deletion or a putting back is stamped when it is made, or just after the
 latest of the record the device knows the drive to hold, where that is
 later (`SyncState::stamp_change`): one made after another is the later,
 however far apart the devices' clocks are. One made while a sync is under
-way is stamped again as it ends, after what that sync read and sent. A
+way is stamped again as it ends, after what that sync read and sent, and
+a session put back by hand meanwhile is not let go by that sync, which
+planned with no note of it: the next sends it as put back. A
 putting back noted while sync knows nothing of the drive, as just after it
 is turned on anew, when what it knew before went with it, is stamped again
 after what the drive holds once its first sync reads it.

@@ -1,6 +1,7 @@
 //! Devices syncing through one folder: each a store of its own and a state
 //! of its own, as each install has, the folder shared.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use cw_core::{SessionResult, TrainingSettings};
@@ -8,7 +9,7 @@ use cw_core::{SessionResult, TrainingSettings};
 use super::*;
 use crate::persist::Store;
 use crate::persist::memory::MemoryStore;
-use crate::persist::record::{HistoryChange, Record, RecordId};
+use crate::persist::record::{HistoryChange, Pending, Record, RecordId};
 use crate::persist::tests::at;
 use crate::sync::remote::MemoryRemote;
 use crate::sync::seal::Stretch;
@@ -1133,6 +1134,97 @@ fn a_session_put_back_before_a_new_syncs_first_read_is_put_back_after_the_drives
     let mut joined = Device::keeping(&[]);
     joined.turn_on(&remote, "passphrase").expect("on");
     joined.sync(&remote, 230).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// A folder that does what a test asks as it is first listed: what the
+/// user does here as a sync begins, before that sync lists the store.
+struct ListedAfter<'a> {
+    remote: &'a MemoryRemote,
+    first: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl Remote for ListedAfter<'_> {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        let first = self.first.borrow_mut().take();
+        if let Some(first) = first {
+            first();
+        }
+        self.remote.list()
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        self.remote.get(id)
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        self.remote.create(name, bytes)
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        self.remote.update(id, bytes)
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        self.remote.delete(id)
+    }
+}
+
+/// A session put back by hand here as a sync begins, its deletion sent
+/// before, is not let go by that sync, though the sync finds it listed and
+/// the drive holding its deletion, with no note of the putting back in
+/// what it plans from: a sync lets go of nothing the app says was put back
+/// since it began, and the next sends it as put back. The sync used to let
+/// it go again as the drive's deletion.
+#[test]
+fn a_sync_lets_go_of_nothing_put_back_since_it_began() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let two = phone.id_of(2);
+    let session = phone.session(two);
+    phone.delete(2, 120);
+    phone.sync(&remote, 130).expect("synced");
+
+    // Put back as the next sync begins, and noted once it is over, as the
+    // app notes one.
+    let since = RefCell::new(BTreeSet::new());
+    let store = Rc::clone(&phone.store);
+    let folder = ListedAfter {
+        remote: &remote,
+        first: RefCell::new(Some(Box::new(|| {
+            let json = serde_json::to_string(&session).expect("JSON");
+            let saved = now(store.change_history(HistoryChange {
+                put: vec![Record { id: two, json }],
+                unforget: vec![two],
+                ..HistoryChange::default()
+            }));
+            assert!(saved.kept().is_some());
+            since.borrow_mut().insert(two);
+        }))),
+    };
+    let synced = now(sync_once_with(
+        &*phone.store,
+        &folder,
+        &mut phone.state,
+        &phone.settings,
+        140,
+        &|| since.borrow().clone(),
+    ))
+    .expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "not let go");
+    assert_eq!(synced.let_go, 0);
+    assert!(
+        !phone.state.applied.contains_key(&two),
+        "nor noted as the drive's"
+    );
+    let at = phone.state.stamp_change(two, 150);
+    phone.state.revived.insert(two, at);
+    assert_eq!(phone.sync(&remote, 160).expect("synced").sent, 1);
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 170).expect("synced");
     assert_eq!(joined.stamps(), [1, 2], "the drive's word");
 }
 
