@@ -243,12 +243,15 @@ async fn read_chosen(file: FileData, max_bytes: u64, by_mark: bool) -> ChosenFil
 /// What `file` holds, as text: none where it cannot be read as text, or
 /// cannot be read at all. A computer reads it by its byte order mark where
 /// `by_mark` says ([`text_in`]), on a thread of its own where one starts,
-/// and a browser a slice at a time where it is large, every file by its
-/// mark where it is read whole ([`text_of`]).
+/// and a browser a slice at a time where it is large, as UTF-8, and read
+/// whole, by its mark where `by_mark` says and as UTF-8 elsewhere
+/// (`whole_file_text`). A browser without a promise to read it by, as
+/// Safari before 14, reads it as its file input's reader decodes it, by
+/// its mark whatever `by_mark` says.
 async fn read_text(file: &FileData, by_mark: bool) -> Option<String> {
     #[cfg(test)]
     crate::testing::reading_a_file(&file.name()).await;
-    #[cfg(not(any(feature = "desktop", test)))]
+    #[cfg(not(any(feature = "desktop", feature = "web", test)))]
     let _ = by_mark;
     #[cfg(all(feature = "desktop", not(test)))]
     if let Some(text) = read_apart(file.path(), by_mark).await {
@@ -264,11 +267,11 @@ async fn read_text(file: &FileData, by_mark: bool) -> Option<String> {
         // Through the browser's own promise, which fails with a file it
         // cannot read, as one moved since it was chosen: the file input's
         // reader hears only a file read, and waits for good on any other.
-        // What it reads is decoded as that reader decodes it.
+        // What it reads is decoded as a backup or a word list is.
         let read = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
             .await
             .ok()?;
-        return Some(text_of(&js_sys::Uint8Array::new(&read).to_vec()));
+        return whole_file_text(js_sys::Uint8Array::new(&read).to_vec(), by_mark);
     }
     // A computer's file that could not be read on a thread of its own is
     // read here as one is there, by its mark where `by_mark` says; and so
@@ -315,6 +318,24 @@ fn text_of(bytes: &[u8]) -> String {
         [0xfe, 0xff, rest @ ..] => utf16(rest, u16::from_be_bytes),
         [0xef, 0xbb, 0xbf, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
         _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// What `bytes`, a whole file a browser read, hold as text. A backup is
+/// UTF-8 or nothing, as a computer and a phone read one (`text_in`), and
+/// as the browser reads one too large to read whole ([`read_in_slices`]),
+/// a UTF-8 mark left for the backup's reader to pass over: Dust writes
+/// nothing else. Read `by_mark`, as a word list is, they are decoded by
+/// their byte order mark as the browser's file reader decodes them,
+/// UTF-16 as well ([`text_of`]). A backup used to be read as a word list
+/// is, UTF-16 as well, and a byte that is no UTF-8 read as a mark for a
+/// character, where a computer and a phone refused it.
+#[cfg(any(feature = "web", test))]
+fn whole_file_text(bytes: Vec<u8>, by_mark: bool) -> Option<String> {
+    if by_mark {
+        Some(text_of(&bytes))
+    } else {
+        String::from_utf8(bytes).ok()
     }
 }
 
@@ -610,7 +631,7 @@ pub fn FileButton(
 mod tests {
     use super::{
         ChosenFile, Piece, Pieces, SLICE_BYTES, data_dirs, on_path, picker_script,
-        portal_chooses_files, text_in, text_of, utf8_up_to,
+        portal_chooses_files, text_in, text_of, utf8_up_to, whole_file_text,
     };
     use crate::testing::{PageStep, on_fake_page};
     use serde_json::Value;
@@ -811,8 +832,8 @@ document.body.appendChild = (input) => {
         assert_eq!(utf8_up_to(&film, 4), None, "past the slices before");
     }
 
-    /// A file a browser reads whole is decoded by its byte order mark, as
-    /// the file input's reader decodes one: UTF-16, little-endian or big,
+    /// A word list a browser reads whole is decoded by its byte order mark,
+    /// as the file input's reader decodes one: UTF-16, little-endian or big,
     /// as Windows' Notepad and Excel save "Unicode" text, and else UTF-8,
     /// its own mark left out; a byte, or a pair, that is no character is
     /// read as a mark for one, as the reader reads it. Read through the
@@ -860,6 +881,52 @@ document.body.appendChild = (input) => {
         for by_mark in [true, false] {
             assert_eq!(text_in(words.into(), by_mark).as_deref(), Some(words));
             assert_eq!(text_in(vec![b'C', 0xff, b'Q'], by_mark), None);
+        }
+    }
+
+    /// A backup a browser reads whole is UTF-8 or nothing, as a computer
+    /// and a phone read one, and as the browser reads one too large to read
+    /// whole: saved as UTF-16, or holding a byte that is no UTF-8, it is no
+    /// text, and a UTF-8 one keeps its own mark for the backup's reader to
+    /// pass over. A word list is still read by its byte order mark, UTF-16
+    /// as well. Read whole, a backup was decoded by its mark as a word list
+    /// is, UTF-16 as well, and a byte that is no character read as a mark
+    /// for one.
+    #[test]
+    fn a_backup_a_browser_reads_whole_is_utf8_or_nothing() {
+        let backup = r#"{"savedAt":1,"sessions":[],"note":"é"}"#;
+        let utf16 = |mark: [u8; 2], unit: fn(u16) -> [u8; 2]| -> Vec<u8> {
+            mark.into_iter()
+                .chain(backup.encode_utf16().flat_map(unit))
+                .collect()
+        };
+        let little = utf16([0xff, 0xfe], u16::to_le_bytes);
+        let big = utf16([0xfe, 0xff], u16::to_be_bytes);
+        let marked: Vec<u8> = [0xef, 0xbb, 0xbf]
+            .into_iter()
+            .chain(backup.bytes())
+            .collect();
+        let broken = vec![b'{', 0xff, b'}'];
+        assert_eq!(whole_file_text(little.clone(), false), None, "UTF-16LE");
+        assert_eq!(whole_file_text(big.clone(), false), None, "UTF-16BE");
+        assert_eq!(whole_file_text(broken.clone(), false), None, "no UTF-8");
+        assert_eq!(
+            whole_file_text(marked.clone(), false),
+            Some(format!("\u{feff}{backup}")),
+            "its mark left for the backup's reader"
+        );
+        let cases = [little, big, broken, marked, backup.into()];
+        for bytes in &cases {
+            assert_eq!(
+                whole_file_text(bytes.clone(), false),
+                text_in(bytes.clone(), false),
+                "as a computer reads {bytes:?}"
+            );
+            assert_eq!(
+                whole_file_text(bytes.clone(), true),
+                Some(text_of(bytes)),
+                "a word list, by its mark"
+            );
         }
     }
 
