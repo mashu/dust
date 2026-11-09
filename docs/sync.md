@@ -217,12 +217,12 @@ the next sync. A note another tab or window left out goes only once the
 drive shows it sent, or no more to send, as a browser can hand one tab
 another's write late. Every such write reads what the store keeps for
 sync first, on the app's thread, which is one read of `sync.json`, or of
-`localStorage`, more than writing it whole was. They sync one at a time: a sync asked for while
-another tab or window syncs waits for it, the corner's cloud breathing
-meanwhile, ten minutes at most, then begins from what that one kept.
-Turning sync off with the copy waits for it too, so nothing is written
-into the folder after the copy is deleted. Where nothing locks, as in a
-browser without Web Locks, tabs sync as they come, and the merge alone
+`localStorage`, more than writing it whole was. They sync one at a time: a
+sync asked for while another tab or window syncs waits for it, the corner's
+cloud breathing meanwhile, ten minutes at most, then begins from what that
+one kept. Turning sync off with the copy waits for it too, so nothing is
+written into the folder after the copy is deleted. Where nothing locks, as
+in a browser without Web Locks, tabs sync as they come, and the merge alone
 keeps each one's notes (`docs/platforms.md`).
 
 Turning sync off on one device forgets the key and the sign-in there; the
@@ -241,12 +241,12 @@ drive's deletion; closed first, the tab or window loses it. One left off
 notes no putting back at all. So, too, a tab or window takes up what another
 synced: when this device last synced, which its card shows, so that coming
 back into sight it does not sync again just after the other did, and a
-sign-in made there, which it signs in with from then on. Neither clears anything from the
-store, nor does a tab or window that finds the store so as sync is turned
-off in it, by hand or as the copy is gone from the drive. Turning it off
-with the copy deletes every file of Dust's from the folder, the keyring
-first, and every other device then finds it gone, says so, and turns sync
-off too.
+sign-in made there, which it signs in with from then on. Neither clears
+anything from the store, nor does a tab or window that finds the store so as
+sync is turned off in it, by hand or as the copy is gone from the drive.
+Turning it off with the copy deletes every file of Dust's from the folder,
+the keyring first, and every other device then finds it gone, says so, and
+turns sync off too.
 
 ## Setting up
 
