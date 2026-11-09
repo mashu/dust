@@ -3024,6 +3024,39 @@ mod tests {
         assert_eq!(stamps(&Files::at(&dir.0).load()), [first.timestamp]);
     }
 
+    /// A deletion an older build makes after the move is made here,
+    /// whatever its clock says: here, behind a deletion a clock set a year
+    /// ahead stamped before the move. Only one stamped past every deletion
+    /// taken before was made, so it never was.
+    #[test]
+    fn a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock() {
+        let dir = TempDir::new("older-deleted-clock");
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 10 * DAY), finished(now - 9 * DAY));
+        keep_whole(&dir, &[first.clone(), second.clone()]);
+        // Made before the move, of a session gone since, by a clock a year
+        // ahead.
+        let ahead = Deleted::of(&finished(now - 40 * DAY), now + 365 * DAY);
+        fs::write(
+            dir.0.join(DELETED),
+            serde_json::to_vec(std::slice::from_ref(&ahead)).unwrap(),
+        )
+        .unwrap();
+        let read = Files::at(&dir.0).load();
+        let second_id = read.sessions[1].0;
+        // The older build deletes the second, by a clock that is right.
+        let after = Deleted::of(&second, now - 30 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&first));
+        fs::write(
+            dir.0.join(DELETED),
+            serde_json::to_vec(&[ahead, after]).unwrap(),
+        )
+        .unwrap();
+        let files = Files::at(&dir.0);
+        assert_eq!(stamps(&files.load()), [first.timestamp]);
+        assert_eq!(files.forgotten(&[second_id]), [second_id]);
+    }
+
     /// A move an older build cut short, its records written as it writes
     /// them, with no format, and no layout yet, is made again over them
     /// writing no session twice; and so is a session an older build took
@@ -3457,6 +3490,7 @@ mod tests {
         a_session_a_record_here_holds_is_not_taken_up_from_an_older_build_while_that_record_cannot_be_read,
         a_session_a_later_build_stored_here_is_not_taken_up_from_an_older_build,
         a_deletion_an_older_build_made_after_the_move_is_honoured,
+        a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
         a_pack_and_a_loose_copy_of_one_record_read_as_one,
         a_record_packed_while_the_history_is_listed_is_listed_all_the_same,

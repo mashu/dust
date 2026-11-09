@@ -808,8 +808,12 @@ in `history/` or the database. It opens the history as it was at the move,
 stores its sessions there, up to its own 500, and remembers its deletions
 beside it, but it cannot delete or write over a record. A build that keeps
 records takes up, once, each session an older build stores there that
-finished no earlier than a day before the move and is neither here already
-nor deleted here, and makes here each deletion the older build made since.
+finished no earlier than a day before the newest session the move took
+(`takenThrough` in the layout: the newest no later than the clock said as
+the move was made, so a clock set ahead holds nothing back) and is neither
+here already nor deleted here, and makes here each deletion the older build
+made since, once, by what it is, whatever its clock said (`deletionsTaken`,
+beside `deletedSeen`, which builds before them go by).
 A record here that this build cannot read but that says which session it
 holds counts as that session, and while a record here cannot be read at all
 for now nothing is taken up: it may be the session, and the take-up waits
