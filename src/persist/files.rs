@@ -286,9 +286,10 @@ impl HistoryFiles {
     ///
     /// A record and its tombstone read as deleted, and the deletion cut
     /// short is finished. A record this build cannot read is left where it
-    /// is, and told of once ([`HistoryNotice::Unread`]). A history a newer
-    /// build keeps in a way this one would harm is read, and nothing is
-    /// written to it, not even to tidy up.
+    /// is, and told of once, as a newer Dust's, as damaged, or as one that
+    /// could not be read ([`not_told`]). A history a newer build keeps in a
+    /// way this one would harm is read, and nothing is written to it, not
+    /// even to tidy up.
     pub(super) fn load(&self) -> HistoryLoad {
         self.on_its_thread();
         let mut load = HistoryLoad::default();
