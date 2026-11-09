@@ -148,6 +148,20 @@ impl StoredHistory {
         self.by_key.contains_key(key)
     }
 
+    /// The one record holding `session`, alike in everything a session
+    /// read holds, and so whatever format each record says it was stored
+    /// in ([`cw_core::SESSION_FORMAT`]), which is read and let go: none
+    /// where no record holds it, or more than one does.
+    pub fn holding(&self, session: &SessionResult) -> Option<RecordId> {
+        let mut holding = self
+            .by_key
+            .get(&SessionKey::of(session))?
+            .iter()
+            .filter(|id| self.get(**id) == Some(session));
+        let one = *holding.next()?;
+        holding.next().is_none().then_some(one)
+    }
+
     /// The records of every session finished when and on the day `key`
     /// says.
     #[cfg(test)]
