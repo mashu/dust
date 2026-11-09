@@ -2619,6 +2619,55 @@ mod tests {
         }
     }
 
+    /// Every key a session is written with is a key it reads: the format
+    /// ([`SESSION_FORMAT`]), and every key written only where the session
+    /// holds a value for it, among them. One it did not read would be
+    /// carried along with what it does not ([`UnreadKeys`]), and written a
+    /// second time beside its own, and the record read as no session at
+    /// all, in any build, as a timing's key read leniently once was
+    /// ([`Part::holds`]).
+    #[test]
+    fn every_key_a_session_is_written_with_is_one_it_reads() {
+        let mut session = SessionResult::empty_for_test();
+        session.groups = vec![GroupResult {
+            sent: "KM".into(),
+            received: "KX".into(),
+            correct: false,
+        }];
+        session.group_timings = vec![SessionTiming::default()];
+        session.tally.sent.insert(
+            'K',
+            LetterAccuracy {
+                correct: 1,
+                total: 1,
+            },
+        );
+        session.tally.inserted.insert('X', 1);
+        session.char_set_mode = CharSetMode::Contest;
+        session.alphabet_fingerprint = format!("{CONTEST_MARK}cqww");
+        session.contest = Some(ContestLog(serde_json::json!({ "qsos": [] })));
+        session.length_floor = Some(2);
+        session.typing_locked = true;
+        let written = serde_json::to_value(&session).unwrap();
+        for key in [
+            "format",
+            "letterAccuracy",
+            "inserted",
+            "contest",
+            "lengthFloor",
+            "typingLocked",
+        ] {
+            assert!(written.get(key).is_some(), "written with {key}: {written}");
+        }
+        let read: SessionResult = serde_json::from_value(written).unwrap();
+        assert!(
+            read.unread.session.is_empty(),
+            "carried along: {:?}",
+            read.unread.session
+        );
+        assert_eq!(read, session);
+    }
+
     /// The keys `T`, a struct, reads, as its reader names them.
     fn keys_read<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
         /// Asks a reader for the keys it reads, and gives none of them.
