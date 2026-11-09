@@ -3667,6 +3667,27 @@ mod tests {
         assert_eq!(Tab::on(&store).notices(), [], "told of once");
     }
 
+    /// A record that could not be read as the app opened, and read at its
+    /// first try, fails no longer: should it fail for a moment again as the
+    /// app next opens, it is not told of then, any more than at its first
+    /// launch. The store remembered it as failing at the last launch, and it
+    /// was told of at once.
+    #[test]
+    fn a_record_read_at_a_try_after_failing_as_the_app_opened_is_not_told_of_as_it_next_opens() {
+        crate::testing::run(|| async {
+            let (store, id) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            store.held_open.borrow_mut().clear();
+            a.advance(u64::from(READ_AGAIN_MS[0]) + 500).await;
+            assert_eq!(a.shown(), [1, 2]);
+            store.held_open.borrow_mut().insert(id);
+            drop(a);
+            let b = Tab::on(&store);
+            assert_eq!(b.notices(), [], "not told of at once");
+            assert_eq!(b.shown(), [1]);
+        });
+    }
+
     /// A record that could not be read as the app opened, and reads now, is
     /// taken up by a restore whose backup holds a session from its moment,
     /// and the backup's session is merged with it: stored once, under the

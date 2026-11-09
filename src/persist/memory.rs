@@ -759,10 +759,13 @@ impl MemoryStore {
     }
 
     /// The records `ids`, as they are stored now: one that cannot be read
-    /// comes back as its id.
+    /// comes back as its id. Each read fails no longer, as the files note
+    /// it: one that fails again as the history is next read is not told of
+    /// then.
     fn read_now(&self, ids: Vec<RecordId>) -> Vec<Result<Record, RecordId>> {
         let (records, held_open) = (self.records.borrow(), self.held_open.borrow());
-        ids.into_iter()
+        let read: Vec<Result<Record, RecordId>> = ids
+            .into_iter()
             .map(|id| match records.get(&id) {
                 Some(held) if !self.unlistable.get() && !held_open.contains(&id) => Ok(Record {
                     id,
@@ -770,7 +773,12 @@ impl MemoryStore {
                 }),
                 _ => Err(id),
             })
-            .collect()
+            .collect();
+        let mut failed = self.failed_last.borrow_mut();
+        for record in read.iter().flatten() {
+            failed.remove(&record.id);
+        }
+        read
     }
 
     /// Answer every read asked for ([`Self::reads_later`]), as the store

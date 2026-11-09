@@ -79,8 +79,9 @@ const PACK_EXTENSION: &str = ".jsonl.gz";
 const LAYOUT_FILE: &str = "layout.json";
 const TOLD: &str = "told.json";
 /// The records that could not be read at all as the history was last read
-/// whole, by name ([`HistoryLoad::failed`]): one that still cannot be read
-/// as it is read again, at a later launch, is told of then
+/// whole, by name ([`HistoryLoad::failed`]), and have not read since
+/// ([`HistoryFiles::failing_no_longer`]): one that still cannot be read as
+/// it is read again, at a later launch, is told of then
 /// ([`HistoryFiles::tell`]).
 const FAILING: &str = "failing.json";
 /// What a restore of many sessions at once is called while it runs:
@@ -576,7 +577,8 @@ impl HistoryFiles {
     }
 
     /// The records `ids`, as they are stored, each that can be read: one
-    /// that cannot comes back as its id.
+    /// that cannot comes back as its id. Each read fails no longer
+    /// ([`Self::failing_no_longer`]).
     ///
     /// One a later build packed once the packs were read, and took the
     /// loose copy of before it was read, is in neither place: every one of
@@ -585,11 +587,43 @@ impl HistoryFiles {
     pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
         self.on_its_thread();
         let mut packed = self.packed().unwrap_or_default().records;
-        self.raw_each(ids, &mut packed)
+        let read: Vec<Result<Record, RecordId>> = self
+            .raw_each(ids, &mut packed)
             .into_iter()
             .zip(ids)
             .map(|(json, &id)| json.map(|json| Record { id, json }).ok_or(id))
-            .collect()
+            .collect();
+        self.failing_no_longer(read.iter().flatten().map(|record| record.id));
+        read
+    }
+
+    /// Note that `read`, records just read, fail no longer ([`FAILING`]):
+    /// one of them that fails for a moment again as the history is next
+    /// read whole, at a later launch, is not told of then, as one that
+    /// failed at the last read and has not read since is ([`Self::tell`]).
+    /// Noted only where this build may write to the history, as the note is
+    /// made.
+    fn failing_no_longer(&self, read: impl IntoIterator<Item = RecordId>) {
+        let failing = self.dir.join(FAILING);
+        let Ok(raw) = fs::read(&failing) else {
+            return;
+        };
+        let noted = names_noted(Some(&raw));
+        let mut left: BTreeSet<&String> = noted.iter().collect();
+        let mut changed = false;
+        for id in read {
+            changed |= left.remove(&id.name());
+        }
+        if !changed || !matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved)) {
+            return;
+        }
+        let _ = if left.is_empty() {
+            remove_if_there(&failing)
+        } else {
+            serde_json::to_vec(&left)
+                .map_err(io::Error::other)
+                .and_then(|raw| write_whole(&self.dir, FAILING, &raw))
+        };
     }
 
     /// Write a backup to `out`: `backup`, with every record stored here,
@@ -987,9 +1021,10 @@ impl HistoryFiles {
     /// What to tell of `unread`, the records this build cannot read, each
     /// with what it says of itself, and of `failed`, those that could not
     /// be read at all just now ([`not_told`]): of the second, only those
-    /// that could not be read as the history was last read either
-    /// ([`FAILING`]), as a moment's failure is over by the app's first try
-    /// at reading it again; and nothing, once each has been told of.
+    /// that could not be read as the history was last read either, and have
+    /// not read since ([`FAILING`]), as a moment's failure is over by the
+    /// app's first try at reading it again; and nothing, once each has been
+    /// told of.
     /// `writable` is whether what was told may be noted, so it is told of
     /// once, and what failed, for the next read to tell of.
     ///
@@ -2034,6 +2069,50 @@ mod tests {
         let read = Files::at(&dir.0).load();
         assert_eq!(read.failed, [busy.id]);
         assert_eq!(read.notices, [], "nor at the next launch");
+    }
+
+    /// A record that could not be read as the history was read, and reads
+    /// at one of the app's tries after, fails no longer: should it fail for
+    /// a moment again as the history is next read, at the next launch, it
+    /// is not told of then, as one that failed at the last read and has not
+    /// read since is. The note of what failed lasted until the history was
+    /// read whole again, and such a record was told of at once.
+    #[test]
+    fn a_record_read_at_a_try_after_it_failed_fails_no_longer() {
+        let (dir, files) = history("failed-then-read");
+        files.load();
+        files.apply(&put(&[record(&finished(1_000))]));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let (busy, stuck) = (record(&finished(2_000)), record(&finished(3_000)));
+        for held in [&busy, &stuck] {
+            fs::create_dir(records.join(file_name(held.id))).unwrap();
+        }
+        let read = files.load();
+        assert_eq!(read.failed, [busy.id, stuck.id]);
+        assert_eq!(read.notices, []);
+        // The first reads at the app's next try; the second does not.
+        let path = records.join(file_name(busy.id));
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &busy.json).unwrap();
+        assert_eq!(
+            files.read(&[busy.id, stuck.id]),
+            [Ok(busy.clone()), Err(stuck.id)]
+        );
+        // As the app next opens, the first fails for a moment again: only
+        // the second, which has not read since it failed, is told of.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let read = Files::at(&dir.0).load();
+        assert_eq!(read.failed, [busy.id, stuck.id]);
+        assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
+        // Both read: nothing is noted as failing.
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &busy.json).unwrap();
+        let path = records.join(file_name(stuck.id));
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &stuck.json).unwrap();
+        assert_eq!(files.read(&[busy.id, stuck.id]), [Ok(busy), Ok(stuck)]);
+        assert!(!dir.0.join(HISTORY).join(FAILING).exists(), "noted no more");
     }
 
     /// A record another copy deletes as this one reads the history, once
@@ -3576,6 +3655,7 @@ mod tests {
         a_later_build_reads_what_this_one_could_not,
         a_record_that_could_not_be_read_for_a_moment_is_failed_not_unread,
         a_record_still_unread_after_every_try_is_told_of_once,
+        a_record_read_at_a_try_after_it_failed_fails_no_longer,
         a_record_deleted_elsewhere_as_the_history_is_read_is_not_told_of_as_unreadable,
         a_deletion_is_a_tombstone_beside_the_history,
         a_record_and_its_tombstone_read_as_deleted,
