@@ -810,7 +810,9 @@ beside it, but it cannot delete or write over a record. A build that keeps
 records takes up, once, each session an older build stores there that
 finished no earlier than a day before the newest session the move took
 (`takenThrough` in the layout: the newest no later than the clock said as
-the move was made, so a clock set ahead holds nothing back) and is neither
+the move was made, so a clock set ahead holds nothing back; where it took
+none, the newest it remembers deleting, and where there was no history kept
+whole at all, none, so nothing is cut off) and is neither
 here already nor deleted here, and makes here each deletion the older build
 made since, once, by what it is, whatever its clock said (`deletionsTaken`,
 beside `deletedSeen`, which builds before them go by).

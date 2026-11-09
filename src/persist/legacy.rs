@@ -422,7 +422,8 @@ pub(super) struct Layout {
     /// clock said as it was made, `takenThrough`: a session finished after
     /// it, less a day, is one an older build may have stored since
     /// ([`imported`]). The clock as the move was made could be ahead by
-    /// years, and a session stamped ahead of it by more. None, where an
+    /// years, and a session stamped ahead of it by more. Where the move
+    /// took none, what stands for it ([`taken_through`]). None, where an
     /// earlier build moved the history, and nothing has been taken up
     /// since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -545,10 +546,10 @@ pub(super) fn deleted_of(raw: Option<&[u8]>) -> Vec<Deleted> {
 /// every record is, `now`. `fingerprint` is the history kept whole as it
 /// was read, and `deleted` the deletions it remembers, already done to it,
 /// and so taken. What a later take-up looks at is cut off at the newest
-/// session moved that finished no later than `now`
-/// ([`Layout::taken_through`]): a clock ahead of the time, or a session
-/// stamped ahead of the clock, holds back no session an older build stores
-/// after the move.
+/// session moved that finished no later than `now`, or what stands for it
+/// where it moves none ([`taken_through`]): a clock ahead of the time, or a
+/// session stamped ahead of the clock, holds back no session an older build
+/// stores after the move.
 pub(super) fn moved(
     sessions: &[SessionResult],
     fingerprint: Option<Fingerprint>,
@@ -569,14 +570,7 @@ pub(super) fn moved(
         legacy: fingerprint,
         imported_keys: keys,
         deleted_seen: latest(deleted),
-        taken_through: Some(
-            sessions
-                .iter()
-                .map(|session| session.timestamp)
-                .filter(|&finished| finished <= now)
-                .max()
-                .unwrap_or(now),
-        ),
+        taken_through: Some(taken_through(sessions, fingerprint.is_some(), deleted, now)),
         deletions_taken: Some(DeletionsTaken {
             seen: latest(deleted),
             taken: deleted.iter().map(DeletionSeen::of).collect(),
@@ -585,6 +579,30 @@ pub(super) fn moved(
         unread: serde_json::Map::new(),
     };
     (record::records_for_blob(sessions), layout)
+}
+
+/// The newest of `sessions`, those a move takes, that finished no later
+/// than `now`, the clock as it is made ([`Layout::taken_through`]).
+///
+/// Where it takes none, the newest session the history kept whole says it
+/// deleted, `deleted`, at the clock or before it, stands for it: what an
+/// older copy left open brings back from before that stays out. Where it
+/// says it deleted none either, and the move found no history kept whole
+/// (`kept_whole` false: none was there, or what was there did not read and
+/// was set aside), no session it took can come back, and an older build's
+/// found there after it is one the history here never held: nothing is cut
+/// off. Else the clock: an empty history says nothing of what came before
+/// it.
+fn taken_through(
+    sessions: &[SessionResult],
+    kept_whole: bool,
+    deleted: &[Deleted],
+    now: u64,
+) -> u64 {
+    let newest = |finished: &mut dyn Iterator<Item = u64>| finished.filter(|&at| at <= now).max();
+    newest(&mut sessions.iter().map(|session| session.timestamp))
+        .or_else(|| newest(&mut deleted.iter().map(|gone| gone.timestamp)))
+        .unwrap_or(if kept_whole { now } else { 0 })
 }
 
 /// Of `moved`, the records a move makes, those to write into a store that
@@ -1689,6 +1707,55 @@ mod tests {
         .expect("taken up");
         assert_eq!(put_stamps(&change), [since.timestamp]);
         assert_eq!(next.taken_through, Some(T));
+    }
+
+    /// A move that takes no session, made with the clock ahead, leaves what
+    /// an older build stores after it to be taken up. Where it found no
+    /// history kept whole, nothing it took can come back, and nothing is cut
+    /// off. Where the history kept whole was empty, the newest session it
+    /// says it deleted, at the clock or before it, stands for the newest the
+    /// move took, so what an older copy left open since brings back from
+    /// before it stays out. It was the clock, and nothing was taken up until
+    /// it came round.
+    #[test]
+    fn a_session_an_older_build_stores_after_a_move_of_no_session_made_with_the_clock_ahead_is_taken_up()
+     {
+        let since = finished(T + DAY);
+        let (_, layout) = moved(&[], None, &[], T + 10 * YEAR);
+        let (change, next) = imported(
+            &layout,
+            written(2),
+            std::slice::from_ref(&since),
+            &[],
+            &HashMap::new(),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(put_stamps(&change), [since.timestamp], "none kept whole");
+        assert_eq!(next.taken_through, Some(0));
+
+        let gone = Deleted::of(&finished(T), T + 1);
+        let (_, layout) = moved(&[], written(1), std::slice::from_ref(&gone), T + 10 * YEAR);
+        assert_eq!(layout.taken_through, Some(T));
+        let (change, _) = imported(
+            &layout,
+            written(2),
+            &[finished(T - 2 * DAY), since.clone()],
+            std::slice::from_ref(&gone),
+            &HashMap::new(),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(put_stamps(&change), [since.timestamp], "all deleted");
+    }
+
+    /// An empty history kept whole that remembers no deletion says nothing
+    /// of what came before the move: the clock as it was made stands for
+    /// the newest session it took, as it did.
+    #[test]
+    fn a_move_of_an_empty_history_kept_whole_takes_through_its_clock() {
+        let (_, layout) = moved(&[], written(1), &[], T + 10 * YEAR);
+        assert_eq!(layout.taken_through, Some(T + 10 * YEAR));
     }
 
     /// One session stamped far ahead of the clock as the move was made, by
