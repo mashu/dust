@@ -2244,6 +2244,66 @@ fn a_setting_changed_on_another_device_after_another_copy_synced_is_taken() {
     });
 }
 
+/// A copy of the app on the same store, a tab or a window, that has not
+/// looked at the store since another changed a setting, stored it and
+/// synced it, takes that change as its own sync begins: the sync begins
+/// from the settings the store holds, as it begins from what the other copy
+/// kept for sync, the settings as that copy's sync left them among it. It
+/// used to begin from the settings this copy held, older than those, take
+/// them for a change made now, and send them stamped after the other
+/// copy's, which undid that change everywhere, the two copies undoing each
+/// other's at every sync.
+#[test]
+fn a_copy_behind_on_the_settings_does_not_send_them_back() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let held = harness.in_app(|| ctx.settings.peek().clone());
+        harness.store.save_settings(&held);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // Another window, opened as the app opens: on the stored settings.
+        let opened = harness.in_app(|| {
+            AppCtx::new(
+                harness.app.clone(),
+                harness.store.load_settings(),
+                Default::default(),
+            )
+        });
+        let window = harness.in_app(|| {
+            opened.link_sync(Link {
+                auth: FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
+                remote: Rc::clone(&remote) as Rc<dyn Remote>,
+            })
+        });
+        let before = harness.in_app(|| window.settings.peek().curriculum.num_groups);
+        harness.in_app(|| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = before + 7;
+            ctx.store_settings();
+        });
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // Stamped by the clock: the window's sync is the later.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // The window syncs, not having looked at the store since.
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        let there = harness.in_app(|| window.settings.peek().curriculum.num_groups);
+        assert_eq!(
+            there,
+            before + 7,
+            "the change made in the other window, taken"
+        );
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        let here = harness.in_app(|| ctx.settings.peek().curriculum.num_groups);
+        assert_eq!(here, before + 7, "not taken back here");
+    });
+}
+
 /// A sign-in made in another copy of the app on the same store while this
 /// copy's sync is under way is the one kept: the sync, as it ends, keeps
 /// the sign-in the store holds, as it changed none. It used to keep this

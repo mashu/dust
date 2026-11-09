@@ -934,6 +934,11 @@ impl AppCtx {
         // What it began from, or last kept as it went: what it does is laid
         // over the store as against it.
         let base = Rc::new(RefCell::new(state.clone()));
+        // The settings here are taken for changed where they differ from
+        // those as of the last sync, which may be another copy's, taken up
+        // just now: those another copy stored since are taken up here first,
+        // so that what this copy has yet to see is no change made here.
+        self.take_up_stored_settings();
         let here = self.settings.peek().clone().clamp();
         let store = self.app().store;
         let remote = WhileCurrent {
