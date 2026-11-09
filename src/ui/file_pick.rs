@@ -553,11 +553,10 @@ pub fn FileButton(
     label: &'static str,
     #[props(default)] on_choose: EventHandler<ChosenFile>,
     #[props(default)] on_pick: Option<EventHandler<PickedFile>>,
-    /// Whether a computer and a phone read a file by its byte order mark,
-    /// UTF-16 as well as UTF-8, as a browser reads every file it reads
-    /// whole: a word list, which Windows' Notepad and Excel save as UTF-16
-    /// for "Unicode" text. Else they read it as UTF-8 or not at all, as a
-    /// backup.
+    /// Whether a file is read by its byte order mark, UTF-16 as well as
+    /// UTF-8, on a computer, a phone and in a browser alike: a word list,
+    /// which Windows' Notepad and Excel save as UTF-16 for "Unicode" text.
+    /// Else it is read as UTF-8 or not at all, as a backup.
     #[props(default)]
     by_mark: bool,
 ) -> Element {
