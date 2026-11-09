@@ -454,7 +454,25 @@ mod tests {
         assert_eq!(ours.merged(Some(&ours.clone()), &anew), anew);
         let mut begun_anew = state();
         begun_anew.keyring = "file2".into();
-        assert_eq!(ours.merged(None, &begun_anew), begun_anew);
+        assert_eq!(ours.merged(Some(&ours.clone()), &begun_anew), begun_anew);
+    }
+
+    /// A sync turned on here that the store never took is kept whole over
+    /// another the store holds, as the one last chosen here, as a whole
+    /// write keeps it: so is one turned on anew here since this copy last
+    /// read or kept the store's, which was of the sync before.
+    #[test]
+    fn a_sync_turned_on_here_the_store_never_took_is_kept_whole() {
+        let kept = state();
+        let mut on_here = state();
+        on_here.keyring = "file2".into();
+        on_here.revived = times(&[(1, 10)]);
+        assert_eq!(on_here.merged(None, &kept), on_here, "never kept");
+        assert_eq!(
+            on_here.merged(Some(&kept), &kept),
+            on_here,
+            "turned on anew since"
+        );
     }
 
     /// A state the store never took from this copy, as one just turned on,

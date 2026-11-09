@@ -59,17 +59,25 @@ impl SyncState {
     ///   store's: this copy never changes it, so a key the store no longer
     ///   holds was let go, and stays gone.
     ///
-    /// Of another sync in the store than this copy's, as one turned on anew
-    /// in another copy, the store's is taken as it is: this copy's notes are
-    /// of a sync that is no more.
+    /// Of another sync in the store than this copy's, the store's is taken
+    /// as it is where this copy's sync is the one it last read or kept
+    /// there, as when another copy turned sync on anew: this copy's notes
+    /// are of a sync that is no more. Where the store never took this copy's
+    /// sync, as one just turned on here, this copy's is kept whole, as the
+    /// one last chosen here.
     pub fn merged(&self, base: Option<&SyncState>, theirs: &SyncState) -> SyncState {
+        // What this copy last read or kept of a sync before one turned on
+        // here says nothing of this one.
+        let base = base.filter(|base| base.of_one_sync(self));
         if !self.of_one_sync(theirs) {
-            return theirs.clone();
+            return if base.is_some() {
+                theirs.clone()
+            } else {
+                self.clone()
+            };
         }
         let none = SyncState::default();
-        let base = base
-            .filter(|base| base.of_one_sync(theirs))
-            .unwrap_or(&none);
+        let base = base.unwrap_or(&none);
         let mut drive = theirs.drive.clone();
         drive.join(&self.drive);
         let read: BTreeSet<String> = self.read.union(&theirs.read).cloned().collect();
