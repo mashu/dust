@@ -4294,6 +4294,18 @@ seed, which the same two variables run again (`SoakSeeds`).
   own, looked at as each is lost or charged; points finite;
   verified ≤ raw; `result()` round-trips.
 - Across seeds, a floor of clean, busted, field-error, NIL and lost QSOs.
+  As built after the code review, every floor of the soak is a rate, its
+  QSOs of each kind, in each contest and under each habit, what real and
+  rough habits bring and the copies kept with their sound among them: the
+  fewest that count reached over a range of the default size, in nine
+  ranges measured (the default's, the review's seven and one more; two more
+  were held to the floors they make), scaled to the runs made, less a
+  tolerance of half that fewest growing as the square root of the runs, as
+  a count's spread does. At the default size a floor is half the fewest
+  seen; a moved range is held to the rate rather than to the default's
+  luck, a deep one to nearly as many times the count, and a run of a
+  quarter of the default size or less to nothing; `DUST_SOAK_TALLY=1` with
+  `--nocapture` prints every count, to measure them again.
 - Each seed's (event, now) list replayed twice gives the same run.
 
 **Storage.** A run writes `"charSetMode":"callsign"`, the mark and
