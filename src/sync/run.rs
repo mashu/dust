@@ -1,7 +1,7 @@
 //! A sync, start to end, against a store and a folder: finding the keyring
 //! as sync is turned on ([`look`], [`join`]), and each sync after
-//! ([`sync_once`]). Nothing here knows which store or folder it has, nor
-//! touches the app: it says what it did, and the app takes it up.
+//! ([`sync_once_with`]). Nothing here knows which store or folder it has,
+//! nor touches the app: it says what it did, and the app takes it up.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -255,6 +255,19 @@ async fn read_packs(
     Ok((unreadable, newer))
 }
 
+/// A sync with nothing put back by hand while it runs, kept as it ends, as
+/// a test syncs a device: [`sync_once_with`].
+#[cfg(test)]
+pub async fn sync_once(
+    store: &dyn Store,
+    remote: &dyn Remote,
+    state: &mut SyncState,
+    here: &TrainingSettings,
+    now: u64,
+) -> Result<Synced, SyncFailed> {
+    sync_once_with(store, remote, state, here, now, &BTreeSet::new, &|_| {}).await
+}
+
 /// Sync the history in `store` and the settings `here` with the drive
 /// `remote`, as `state` says this device stands, and say what it did. What
 /// it changes of `state` is changed as it goes, whether it ends well or
@@ -264,12 +277,26 @@ async fn read_packs(
 /// before anything is sent: a sync cut short leaves the store as it was or
 /// with all of it, and the next sends what this one did not. Packs read
 /// are noted only once what they hold is in the store.
-pub async fn sync_once(
+///
+/// `put_back_since` says which records were put back by hand here since
+/// the sync began, after it took in the notes it plans from
+/// ([`SyncState::revived`]): none of them is let go, whatever the drive
+/// says. The app notes those as the sync ends, and the next sync sends
+/// them as put back. It is asked once the sync has read all it reads of
+/// the store and the drive, just before it changes the store.
+///
+/// `keep` keeps `state` as it stands, which the caller does in any case as
+/// the sync ends: it is asked as a pack holding deletions by hand goes,
+/// once they are noted against it ([`send_pack`]), so that an app stopped
+/// before the sync ends knows of the pack all the same.
+pub async fn sync_once_with(
     store: &dyn Store,
     remote: &dyn Remote,
     state: &mut SyncState,
     here: &TrainingSettings,
     now: u64,
+    put_back_since: &dyn Fn() -> BTreeSet<RecordId>,
+    keep: &dyn Fn(&SyncState),
 ) -> Result<Synced, SyncFailed> {
     let key = DataKey::from_hex(&state.key).ok_or(SyncFailed::NoKey)?;
     let keys = Keys::of(&key);
@@ -293,6 +320,19 @@ pub async fn sync_once(
         remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
     )
     .await?;
+    take_unanswered(state, &files, &read, &drive);
+    // A sync that has read nothing of the drive yet, as one just turned on
+    // anew, stamped each putting back it notes knowing nothing of the
+    // drive: what sync knew before it was turned on anew went with it. Each
+    // is stamped again after what the drive holds of its record, as one
+    // noted now would be. One noted once this device knew the drive keeps
+    // its stamp: stamped again, it would beat a later deletion made
+    // elsewhere.
+    if state.read.is_empty() {
+        for (&id, at) in &mut state.revived {
+            *at = drive.stamp_change(id, *at);
+        }
+    }
 
     let listed: BTreeSet<RecordId> = store
         .history_listing()
@@ -361,6 +401,11 @@ pub async fn sync_once(
 
     // What the drive holds, taken here.
     let here_bytes = read_here(store, &planned).await;
+    // Put back by hand since this sync began, after it took in the notes
+    // it planned from: not this sync's to let go. Asked after its last
+    // read, as nothing comes between this and the change.
+    let since = put_back_since();
+    planned.let_go.retain(|(id, _)| !since.contains(id));
     let mut change = HistoryChange::default();
     for &id in planned.take.iter().chain(&planned.take_back) {
         if let Some(json) = bytes.get(&id) {
@@ -455,23 +500,11 @@ pub async fn sync_once(
         .revived
         .retain(|id, _| sent_back.contains(id) && listed.contains(id));
     for pack in packs_of(&state.device, now, put, forget, revive) {
-        send_pack(remote, &keys, state, &pack).await?;
+        send_pack(remote, &keys, state, &pack, &by_hand, keep).await?;
         synced.sent += pack.put.len() + pack.forget.len() + pack.revive.len();
         for revive in &pack.revive {
             if let Some(id) = revive.record_id() {
                 state.revived.remove(&id);
-            }
-        }
-        // A deletion by hand, once the drive holds it, is the drive's,
-        // noted as one taken from it: a putting back the drive holds after
-        // it brings the session back here, as on every other device, rather
-        // than this device sending it again. A twin's is not: its session
-        // is kept under the other name.
-        for forget in &pack.forget {
-            if let Some(id) = forget.record_id()
-                && by_hand.contains(&id)
-            {
-                state.applied.insert(id, forget.at);
             }
         }
     }
@@ -673,20 +706,71 @@ async fn read_here(store: &dyn Store, planned: &Plan) -> BTreeMap<RecordId, Stri
 }
 
 /// Send `pack`, and take it as read: what it holds is here already.
+///
+/// A deletion by hand it holds, of those `by_hand`, is the drive's once the
+/// drive holds it, noted as one taken from it: a putting back the drive
+/// holds after it brings the session back here, as on every other device,
+/// rather than this device sending it again. A twin's is not: its session
+/// is kept under the other name. Until the drive answers, they are noted
+/// against the pack's name ([`SyncState::unanswered`]): made though the
+/// answer was lost, the pack is found at the next sync, and they are the
+/// drive's then ([`take_unanswered`]). The note is kept (`keep`) before the
+/// pack goes, so that it holds though the app stops before the sync ends.
 async fn send_pack(
     remote: &dyn Remote,
     keys: &Keys,
     state: &mut SyncState,
     pack: &Pack,
+    by_hand: &BTreeSet<RecordId>,
+    keep: &dyn Fn(&SyncState),
 ) -> Result<(), SyncFailed> {
     let name =
         pack_name().ok_or_else(|| SyncFailed::Store("this device could not name a file".into()))?;
     let sealed = seal_pack(keys, &name, pack)
         .ok_or_else(|| SyncFailed::Store("this device could not seal what it sends".into()))?;
+    let deletions: BTreeMap<RecordId, u64> = pack
+        .forget
+        .iter()
+        .filter_map(|forget| Some((forget.record_id()?, forget.at)))
+        .filter(|(id, _)| by_hand.contains(id))
+        .collect();
+    if !deletions.is_empty() {
+        state.unanswered.insert(name.clone(), deletions);
+        keep(state);
+    }
     remote.create(&name, sealed).await?;
+    state
+        .applied
+        .extend(state.unanswered.remove(&name).unwrap_or_default());
     state.read.insert(name);
     state.drive.take(pack);
     Ok(())
+}
+
+/// Take up the packs this device sent whose answer never came
+/// ([`SyncState::unanswered`]), as the drive's `files` and the packs `read`
+/// of them into `drive` show them now: one read was made all the same, and
+/// each deletion by hand in it the drive holds, as late or later, is noted
+/// as had the answer come ([`send_pack`]); one the drive does not list was
+/// never made, and what it held is sent again as never sent. One listed
+/// but not read yet waits.
+fn take_unanswered(
+    state: &mut SyncState,
+    files: &[RemoteFile],
+    read: &BTreeSet<String>,
+    drive: &DriveState,
+) {
+    for (name, deletions) in std::mem::take(&mut state.unanswered) {
+        if read.contains(&name) {
+            for (id, at) in deletions {
+                if drive.tombs.get(&id).is_some_and(|&tomb| tomb >= at) {
+                    state.applied.insert(id, at);
+                }
+            }
+        } else if files.iter().any(|file| file.name == name) {
+            state.unanswered.insert(name, deletions);
+        }
+    }
 }
 
 /// Sync everything a device uses beside its history, the settings `here`

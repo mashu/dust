@@ -78,6 +78,15 @@ impl DriveState {
             .filter(|id| !self.deleted(*id))
             .collect()
     }
+
+    /// When a change to the record `id` made at `now` is stamped, as far
+    /// as this says of the drive: at `now`, or just after the latest
+    /// deletion or putting back of it, where that is later
+    /// ([`super::state::SyncState::stamp_change`]).
+    pub fn stamp_change(&self, id: RecordId, now: u64) -> u64 {
+        let seen = self.tombs.get(&id).max(self.revives.get(&id));
+        seen.map_or(now, |&seen| now.max(seen.saturating_add(1)))
+    }
 }
 
 /// `at` for `id` in `times`, where it is later than what is there.

@@ -1,6 +1,7 @@
 use cw_core::{BOARD_MIN_GROUPS, CharSetMode, SessionResult};
 use dioxus::prelude::*;
 
+use crate::format::whole_percent;
 use crate::ui::contest_results::ContestResults;
 use crate::ui::standing::{PlaceBanner, mode_noun, per_group_label, place_line};
 use crate::ui::widgets::{CardHead, GroupResultRow, Icon, IconName, ScoreRing, control_id};
@@ -85,7 +86,9 @@ pub fn ResultsView(
             }
         };
     }
-    let acc_pct = (result.accuracy * 100.0).round();
+    // Whole, as `percent` reads it, so the ring's colour goes by the
+    // figure in it.
+    let acc_pct = whole_percent(result.accuracy);
     let correct = result.groups.iter().filter(|g| g.correct).count();
     // How fast its characters were recognised, keyed along, and how long
     // you paused before each key, copied after: two figures, never one

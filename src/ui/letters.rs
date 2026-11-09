@@ -198,7 +198,7 @@ fn row_view(letter: &CharacterDiagnostic, bands: RecognitionBands, timing: bool)
                     style: "left: {along(MASTERED_MIN_ACCURACY):.1}%;",
                 }
             }
-            span { class: "mono muted stat-value", "{letter.accuracy_pct.round()}%" }
+            span { class: "mono muted stat-value", "{letter.accuracy_pct:.0}%" }
             span { class: "tiny",
                 "{letter_note(letter)}"
                 match trend(letter) {

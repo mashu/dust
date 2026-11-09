@@ -328,22 +328,20 @@ pub fn assisted_runs(sessions: &[SessionResult], of: BoardOf, ranking: Ranking) 
     assisted
 }
 
-/// Where the session finished at `timestamp` stands on the board
-/// ([`board_place_at`]): the first of the history finished then, where
-/// two were.
-pub fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize, usize)> {
-    let index = sessions
-        .iter()
-        .position(|session| session.timestamp == timestamp)?;
-    board_place_at(sessions, index)
-}
-
 /// Where session `index` of `sessions` stands among the sessions of its
 /// own mode on the board, and a contest run among runs of its own contest,
 /// as its own board ranks it ([`Ranking::of`]): its place, and how many
 /// there are. Nothing for a session that is not on it. Found by its place
 /// in the history, two sessions finished at one moment are each placed as
 /// they stand.
+///
+/// A session is placed by its index in the history, never by its moment:
+/// found by the moment it finished, the second of two finished together
+/// would be told the first one's place, so there is no lookup by moment.
+///
+/// ```compile_fail,E0425
+/// let _ = cw_core::board_place;
+/// ```
 pub fn board_place_at(sessions: &[SessionResult], index: usize) -> Option<(usize, usize)> {
     let session = sessions.get(index)?;
     let board = score_board(sessions, BoardOf::of(session), Ranking::of(session));
@@ -577,6 +575,17 @@ mod tests {
     /// A Koch session of twenty groups that earned `per_group` each.
     fn koch(timestamp: u64, per_group: f64) -> SessionResult {
         session(timestamp, per_group * 20.0, 20, CharSetMode::Koch)
+    }
+
+    /// Where the session finished at `timestamp` stands on the board
+    /// ([`board_place_at`]): the first of the history finished then, where
+    /// two were. The tests' own shorthand: the trainer places a session by
+    /// its index.
+    fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize, usize)> {
+        let index = sessions
+            .iter()
+            .position(|session| session.timestamp == timestamp)?;
+        board_place_at(sessions, index)
     }
 
     #[test]

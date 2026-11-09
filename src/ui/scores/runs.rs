@@ -10,7 +10,7 @@
 use cw_core::{ContestKind, RunEntry, StoredLog, contest_runs};
 use dioxus::prelude::*;
 
-use crate::format::{counted, day_and_clock, minutes_seconds};
+use crate::format::{counted, day_and_clock, minutes_seconds, percent};
 use crate::state::SessionPick;
 use crate::ui::figures::History;
 use crate::ui::help;
@@ -165,7 +165,7 @@ fn run_sub(run: &RunEntry, kind: ContestKind) -> String {
     if let StoredLog::Read(summary) = &run.log
         && let Some(share) = summary.error_share()
     {
-        parts.push(format!("{:.0}%\u{a0}errors", (share * 100.0).round()));
+        parts.push(format!("{}\u{a0}errors", percent(share)));
     }
     if run.verified.is_some() {
         parts.push(format!("{:.0}\u{a0}pts", run.points.round()));
@@ -248,6 +248,27 @@ mod tests {
         assert_eq!(
             run_sub(&unread(StoredLog::Unreadable), ContestKind::Wpx),
             "this version cannot read its log"
+        );
+    }
+
+    /// The share of QSOs with an error reads as every share does, a half
+    /// between two whole percents going to the even one: one in eight,
+    /// 12.5%, reads 12%.
+    #[test]
+    fn a_rows_errors_read_as_every_share_does() {
+        let run = RunEntry {
+            log: StoredLog::Read(RunSummary {
+                qsos: 8,
+                clean: 7,
+                rate: Some(48.0),
+                repeated: 0,
+                lost: 0,
+            }),
+            ..entry()
+        };
+        assert_eq!(
+            run_sub(&run, ContestKind::Wpx),
+            "10\u{a0}min · 7/8\u{a0}QSOs · 48/h · 12%\u{a0}errors · 496\u{a0}pts"
         );
     }
 }

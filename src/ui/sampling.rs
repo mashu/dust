@@ -15,6 +15,7 @@
 use cw_core::{CharSetMode, SamplingRow, TrainingSettings, sampling_rows};
 use dioxus::prelude::*;
 
+use crate::format::chance;
 use crate::ui::figures::{History, without_band};
 
 use crate::ui::bigram::id_part;
@@ -99,17 +100,6 @@ fn line(row: &SamplingRow, threshold: f64) -> Line {
     }
 }
 
-/// A share as a percentage, and under one percent as such rather than as
-/// nothing.
-fn percent(share: f64) -> String {
-    let pct = share * 100.0;
-    if pct > 0.0 && pct < 0.5 {
-        "<1%".to_string()
-    } else {
-        format!("{pct:.0}%")
-    }
-}
-
 /// The line under a row's bar: where its rate likely is, and its chance of
 /// coming up next.
 fn line_note(line: &Line) -> String {
@@ -120,7 +110,7 @@ fn line_note(line: &Line) -> String {
         (high * 100.0).max(1.0)
     );
     match line.chance {
-        Some(chance) => format!("{likely} · {} chance next", percent(chance)),
+        Some(next) => format!("{likely} · {} chance next", chance(next)),
         None => format!("{likely} · not drawn now"),
     }
 }
@@ -132,17 +122,13 @@ fn line_label(line: &Line) -> String {
     } else {
         format!(
             "wrong about {}, likely {} to {}",
-            percent(line.guess),
-            percent(line.likely.0),
-            percent(line.likely.1)
+            chance(line.guess),
+            chance(line.likely.0),
+            chance(line.likely.1)
         )
     };
     match line.chance {
-        Some(chance) => format!(
-            "{}: {error}, {} chance next",
-            line.character,
-            percent(chance)
-        ),
+        Some(next) => format!("{}: {error}, {} chance next", line.character, chance(next)),
         None => format!("{}: {error}, not drawn now", line.character),
     }
 }
@@ -184,7 +170,7 @@ fn row_view(line: &Line, top: f64, threshold: f64) -> Element {
                     style: "left: {along(threshold, top):.1}%;",
                 }
             }
-            span { class: "mono muted stat-value", "{percent(line.guess)}" }
+            span { class: "mono muted stat-value", "{chance(line.guess)}" }
             span { class: "tiny", "{line_note(line)}" }
         }
     }
@@ -258,7 +244,7 @@ pub fn NextUpCard(settings: TrainingSettings, #[props(into)] sessions: History) 
     } else {
         "coming up in the next group"
     };
-    let limit = percent(threshold);
+    let limit = chance(threshold);
     rsx! {
         div { class: "card stack-sm",
             CardHead {
@@ -400,8 +386,23 @@ mod tests {
         assert_eq!(line_note(&away), "likely 4–8% wrong · not drawn now");
         let new = line(&row(0.0, 0.0, false), 0.1);
         assert_eq!(line_label(&new), "K: not heard yet, not drawn now");
-        assert_eq!(percent(0.004), "<1%");
-        assert_eq!(percent(0.0), "0%");
+    }
+
+    /// A chance more than nothing never reads 0%: half a percent, which
+    /// whole percents send to the even 0, reads under one percent, in the
+    /// line and to a screen reader alike, as [`chance`] gives every share
+    /// the card shows.
+    #[test]
+    fn a_share_of_half_a_percent_reads_under_one_percent() {
+        let rare = Line {
+            chance: Some(0.005),
+            ..line(&row(190.0, 10.0, true), 0.1)
+        };
+        assert_eq!(line_note(&rare), "likely 4–8% wrong · <1% chance next");
+        assert_eq!(
+            line_label(&rare),
+            "K: wrong about 5%, likely 4% to 8%, <1% chance next"
+        );
     }
 
     /// Most work first: over the threshold, the worst first, then still

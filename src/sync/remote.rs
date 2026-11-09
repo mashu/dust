@@ -82,6 +82,9 @@ mod memory {
         pub failing: RefCell<Option<RemoteError>>,
         /// Every file made or changed from now on fails: the drive is full.
         pub full: Cell<bool>,
+        /// Every file made from now on is made, but the answer is lost on
+        /// its way back: the request fails as one cut off then does.
+        pub answer_lost: Cell<bool>,
         /// How many times each was asked.
         pub lists: Cell<usize>,
         pub gets: Cell<usize>,
@@ -176,6 +179,9 @@ mod memory {
             self.files
                 .borrow_mut()
                 .insert(id.clone(), (name.into(), created, bytes));
+            if self.answer_lost.get() {
+                return done(Err(RemoteError::Failed("the connection was lost".into())));
+            }
             done(Ok(id))
         }
 

@@ -67,7 +67,13 @@ A deletion or a putting back is stamped when it is made, or just after the
 latest of the record the device knows the drive to hold, where that is
 later (`SyncState::stamp_change`): one made after another is the later,
 however far apart the devices' clocks are. One made while a sync is under
-way is stamped again as it ends, after what that sync read and sent.
+way is stamped again as it ends, after what that sync read and sent, and
+a session put back by hand meanwhile is not let go by that sync, which
+planned with no note of it, even where sync is turned off before it ends:
+the next sends it as put back, where sync is on still. A
+putting back noted while sync knows nothing of the drive, as just after it
+is turned on anew, when what it knew before went with it, is stamped again
+after what the drive holds once its first sync reads it.
 
 One session can be two records: a backup restored on one device names each
 session where it finished (`RecordId::placed`), while the device it came
@@ -81,7 +87,12 @@ What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads
 every pack again and comes to the same. A sync cut short leaves the store
 as it was, or with all it took, and the next one sends what this one did
-not.
+not. A pack the drive made though its answer was lost on the way back, or
+though the app stopped before the sync ended, is found there by the next
+sync, and the deletions by hand it holds are the drive's from then on, as
+they would have been had the answer come (`SyncState::unanswered`, kept
+before the pack goes): not sent again, so a putting back made elsewhere
+since still stands. One the drive never made is sent again.
 
 ## Everything else a device uses
 

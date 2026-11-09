@@ -2,7 +2,7 @@ use cw_core::{BoardEntry, Ranking};
 use dioxus::prelude::*;
 
 use super::{mode_label, speed, what_it_was};
-use crate::format::{ago, clock, long_date};
+use crate::format::{ago, clock, long_date, percent};
 use crate::ui::standing::{Medal, rating_label, rating_unit};
 
 /// When a session was set, in full: "Friday 16 October 2026 at 14:32".
@@ -49,7 +49,7 @@ pub(super) fn BestCard(
                 }
                 div { class: "best-chips",
                     span { class: "chip", "{speed(&best)}" }
-                    span { class: "chip good", "{(best.accuracy * 100.0).round()}% accuracy" }
+                    span { class: "chip good", "{percent(best.accuracy)} accuracy" }
                     if show_mode {
                         span { class: "chip",
                             "{best.contest.map_or(mode_label(best.mode), |kind| kind.label())}"

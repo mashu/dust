@@ -110,9 +110,33 @@ pub fn counted_in_words(n: usize, noun: &str) -> String {
 /// 0.125, "38%" for 0.375.
 ///
 /// Not the Auto level's [`auto_level::percent_to_tenth`], which is handed a
-/// value in percent already and gives it to a tenth where it has one.
+/// value in percent already and gives it to a tenth where it has one, nor
+/// [`chance`], which gives a chance over nothing as "<1%" where this gives
+/// 0%.
 pub fn percent(share: f64) -> String {
     format!("{:.0}%", share * 100.0)
+}
+
+/// The number [`percent`] shows for `share`: 12 for 0.125, a half going to
+/// the even one. What is judged by the percent a share reads, as a row
+/// against the aim it is drawn beside, goes by this, so the judgement
+/// agrees with what is shown.
+pub fn whole_percent(share: f64) -> f64 {
+    (share * 100.0).round_ties_even()
+}
+
+/// A chance, from 0 to 1, in whole percent as [`percent`] gives it, but
+/// "<1%" for one over nothing that whole percents would show as 0, half a
+/// percent among them, which goes to the even 0: a chance there is never
+/// reads as none. What comes up next gives each character's chances so,
+/// of a wrong copy and of coming up next, and the Group length and Speed
+/// cards each row's chance of coming up next.
+pub fn chance(share: f64) -> String {
+    if share > 0.0 && whole_percent(share) == 0.0 {
+        "<1%".to_string()
+    } else {
+        percent(share)
+    }
 }
 
 /// A stretch of run time as a clock reads it: "07:42", "60:00".
@@ -222,6 +246,38 @@ mod tests {
         // A share, where the Auto level's is in percent already.
         assert_eq!(percent(0.875), "88%");
         assert_eq!(auto_level::percent_to_tenth(87.5), "87.5%");
+    }
+
+    /// The number a share is judged by is the one it reads, ties and all,
+    /// across the whole range of shares.
+    #[test]
+    fn whole_percent_is_the_number_percent_shows() {
+        let ties = [0.005, 0.015, 0.125, 0.375, 0.625, 0.875];
+        let shares = (0..=100_000).map(|k| f64::from(k) / 100_000.0);
+        for share in shares.chain(ties) {
+            assert_eq!(
+                percent(share),
+                format!("{}%", whole_percent(share)),
+                "{share}"
+            );
+        }
+        assert_eq!(whole_percent(0.125), 12.0);
+        assert_eq!(whole_percent(0.625), 62.0);
+        assert_eq!(whole_percent(0.005), 0.0);
+    }
+
+    /// A chance more than nothing never reads 0%: under half a percent, and
+    /// half a percent, which whole percents send to the even 0, read under
+    /// one percent; a hair over half reads 1%, the rest as [`percent`] reads
+    /// them, and nothing 0%.
+    #[test]
+    fn a_chance_over_nothing_never_reads_none() {
+        assert_eq!(chance(0.004), "<1%");
+        assert_eq!(chance(0.005), "<1%");
+        assert_eq!(chance(0.005_000_01), "1%");
+        assert_eq!(chance(0.015), "2%");
+        assert_eq!(chance(0.125), "12%");
+        assert_eq!(chance(0.0), "0%");
     }
 
     #[test]
