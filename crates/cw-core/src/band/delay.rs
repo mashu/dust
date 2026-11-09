@@ -123,8 +123,14 @@ mod tests {
                     "room for {room}, a delay of {len}, push {i}"
                 );
             }
+            // The pushes have filled every slot of the delay.
+            let whole = whole_room(&roomy, room);
+            assert!(
+                whole[..len].iter().all(|&s| s != 0),
+                "room for {room}, a delay of {len}: the room is seen to hold what was pushed"
+            );
             assert_eq!(
-                whole_room(&roomy, room)[len..],
+                whole[len..],
                 vec![0; room - len],
                 "room for {room}, a delay of {len}"
             );
@@ -184,33 +190,6 @@ mod tests {
         }
     }
 
-    /// A clear does not start the line over: the next sample goes in where
-    /// it would have without one, as a reset, which keeps the room where it
-    /// lies, shows.
-    #[test]
-    fn a_clear_does_not_move_where_the_next_sample_goes() {
-        const MARK: u64 = u64::MAX;
-        for (room, len) in [(1, 1), (2, 2), (3, 3), (5, 4), (8, 7), (9, 9)] {
-            for pushed in 0..2 * len + 1 {
-                let mut kept = DelayLine::with_room(room, len);
-                for i in 0..pushed {
-                    kept.push(sample(i));
-                }
-                let mut cleared = kept.clone();
-                cleared.clear();
-                kept.push(MARK);
-                cleared.push(MARK);
-                let slot =
-                    |line: &DelayLine<u64>| whole_room(line, room).iter().position(|&s| s == MARK);
-                assert_eq!(
-                    slot(&cleared),
-                    slot(&kept),
-                    "room for {room}, a delay of {len}, cleared after {pushed}"
-                );
-            }
-        }
-    }
-
     /// A reset keeps what the room held where it still fits, slot for slot,
     /// beyond the new delay too; what it grows the room by is silence, and
     /// so is what a room it cut grows back.
@@ -228,7 +207,10 @@ mod tests {
                 for new_len in [1, new_room.div_ceil(2), new_room] {
                     let here =
                         format!("room for {room}, then for {new_room}, a delay of {new_len}");
+                    // Filled from the top, where a reset starts a line: where
+                    // one just made starts, its docs leave open.
                     let mut line = DelayLine::new(room);
+                    line.reset(room, room);
                     for i in 0..room {
                         line.push(sample(i));
                     }
@@ -263,8 +245,10 @@ mod tests {
                     let here = format!(
                         "room for {room}, a delay of {len}, reset after {pushed} to {new_len}"
                     );
-                    // The room as the pushes left it: the ith in slot i % len.
+                    // The room as the pushes left it, from the top, where the
+                    // first reset starts them: the ith in slot i % len.
                     let mut line = DelayLine::with_room(room, len);
+                    line.reset(room, len);
                     let mut held = vec![0; room];
                     for i in 0..pushed {
                         line.push(sample(i));
@@ -285,16 +269,20 @@ mod tests {
 
     /// A reset and then a clear, as the mixer does for a stream that starts
     /// again, leave a line just as one made for the new delay and room:
-    /// silence until the first sample pushed since is due, and each slot
-    /// filled as that one fills it.
+    /// the new delay's worth of silence waiting, silence all through the
+    /// room, and silence out until the first sample pushed since is due.
     #[test]
     fn a_reset_then_a_clear_is_a_line_just_made() {
         let lines = [(1, 1), (8, 3), (64, 64), (3_840, 480), (3_840, 441)];
+        // Among them the mixer's own, in the room it makes for the highest
+        // rate: a stream started again at 48 or 44.1 kHz, after one at either.
         let resets = [
             (1, 1),
             (8, 1),
             (8, 8),
             (64, 17),
+            (3_840, 441),
+            (3_840, 480),
             (3_840, 960),
             (3_840, 3_840),
         ];
@@ -307,9 +295,20 @@ mod tests {
                     line.push(sample(i));
                 }
                 line.reset(new_room, new_len);
+                assert!(
+                    whole_room(&line, new_room)[..len.min(new_room)]
+                        .iter()
+                        .all(|&s| s != 0),
+                    "{here}: the room is seen to hold what was pushed"
+                );
                 line.clear();
                 let mut made = DelayLine::with_room(new_room, new_len);
                 assert_eq!(line.len(), made.len(), "{here}");
+                assert_eq!(
+                    line.waiting().collect::<Vec<_>>(),
+                    vec![0; new_len],
+                    "{here}"
+                );
                 assert_eq!(
                     whole_room(&line, new_room),
                     whole_room(&made, new_room),
@@ -319,11 +318,6 @@ mod tests {
                     let pushed = sample(i);
                     assert_eq!(line.push(pushed), made.push(pushed), "{here}, push {i}");
                 }
-                assert_eq!(
-                    whole_room(&line, new_room),
-                    whole_room(&made, new_room),
-                    "{here}"
-                );
             }
         }
     }
@@ -435,6 +429,12 @@ mod tests {
             assert_eq!(line.waiting().collect::<Vec<_>>(), last, "{here}");
             line.reset(room + 2, len);
             assert_eq!(whole_room(&line, room + 2)[room..], [silence; 2], "{here}");
+            assert!(
+                whole_room(&line, room + 2)[..len]
+                    .iter()
+                    .all(|&s| s != silence),
+                "{here}: the room is seen to hold what was pushed"
+            );
             line.clear();
             assert_eq!(
                 whole_room(&line, room + 2),
@@ -460,7 +460,10 @@ mod tests {
 
     /// A plain model of a line: its room slot by slot, a delay over the
     /// first `delay` slots, and the slot the next sample goes in, which moves
-    /// on one a push and back to the top at the end of the delay.
+    /// on one a push, back to the top at the end of the delay, and to the
+    /// top on a reset. Where a line just made or one cleared puts its next
+    /// sample, its docs leave open, and only a reset that keeps the room
+    /// could tell: there the model is given the line's own slot.
     struct Model {
         slots: Vec<u64>,
         delay: usize,
@@ -530,6 +533,7 @@ mod tests {
                 let len = rng.usize_in(1, room);
                 (DelayLine::with_room(room, len), Model::new(room, len))
             };
+            model.next = line.at;
             for turn in 0..rng.usize_in(1, 10) {
                 // From none to a few times round the delay.
                 for push in 0..rng.usize_in(0, 3 * model.delay + 1) {
@@ -544,6 +548,7 @@ mod tests {
                     0 => {
                         line.clear();
                         model.clear();
+                        model.next = line.at;
                     }
                     1 | 2 => {
                         // Half the time in the room it has, as the mixer
