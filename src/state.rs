@@ -3783,6 +3783,110 @@ mod tests {
         });
     }
 
+    /// The record of day 2 in the files in a folder, a folder in its place
+    /// for now, which cannot be read as one, as a file another program holds
+    /// open for a moment cannot be; the records folder's time of change set
+    /// back each time it is changed, so that the store sees nothing changed
+    /// there ([`Store::history_changed`]).
+    #[cfg(all(unix, feature = "native-runtime"))]
+    struct BusyFile {
+        path: std::path::PathBuf,
+        held: Vec<u8>,
+        records: std::path::PathBuf,
+        changed: std::time::SystemTime,
+    }
+
+    #[cfg(all(unix, feature = "native-runtime"))]
+    impl BusyFile {
+        /// Days 1 and 2 stored in the files in `dir`, as a copy of the app
+        /// stores them, and the record of day 2 held for now.
+        fn of_day_2(dir: &TempDir) -> Self {
+            let a = Tab::on_store(crate::persist::files_at(&dir.0));
+            a.finish(day(1));
+            a.finish(day(2));
+            let id = a.id_of(2);
+            drop(a);
+            let records = dir.0.join("history").join("sessions");
+            let changed = std::fs::metadata(&records)
+                .and_then(|meta| meta.modified())
+                .expect("when it changed");
+            let path = records.join(format!("{id}.json"));
+            let held = std::fs::read(&path).expect("stored");
+            std::fs::remove_file(&path).expect("taken away");
+            std::fs::create_dir(&path).expect("a folder in its place");
+            let busy = Self {
+                path,
+                held,
+                records,
+                changed,
+            };
+            busy.as_it_was();
+            busy
+        }
+
+        /// The record read again, as it was stored.
+        fn let_go(&self) {
+            std::fs::remove_dir(&self.path).expect("the folder taken away");
+            std::fs::write(&self.path, &self.held).expect("the record back");
+            self.as_it_was();
+        }
+
+        /// The records folder's time of change set back.
+        fn as_it_was(&self) {
+            std::fs::File::open(&self.records)
+                .and_then(|records| records.set_modified(self.changed))
+                .expect("its time set back");
+        }
+    }
+
+    /// On the files themselves: a record that could not be read as the app
+    /// opened is read at the next look, and shown, though the store says
+    /// nothing changed: one that could not be read is reason enough to look.
+    /// Nothing is told of it meanwhile. It was held as one this build cannot
+    /// read, told of at once, and never read again while the app ran.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_that_could_not_be_read_as_the_app_opened_is_read_at_the_next_look() {
+        let dir = TempDir::new("busy-at-launch-looked");
+        let busy = BusyFile::of_day_2(&dir);
+        let store = crate::persist::files_at(&dir.0);
+        let a = Tab::on_store(store.clone());
+        assert_eq!(a.shown(), [1]);
+        assert_eq!(a.notices(), [], "not told of yet");
+        busy.let_go();
+        assert!(
+            !store.history_changed(),
+            "nothing changed, as the store sees"
+        );
+        a.act(AppCtx::take_up_changes);
+        assert_eq!(a.shown(), [1, 2]);
+        assert_eq!(a.notices(), []);
+    }
+
+    /// On the files themselves, a window kept in front, with no other copy
+    /// of the app beside it: a record that could not be read as the app
+    /// opened is read again on its own soon after ([`READ_AGAIN_MS`]), and
+    /// shown, though the store says nothing changed.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_that_could_not_be_read_as_the_app_opened_is_read_again_soon_on_its_own() {
+        crate::testing::run(|| async {
+            let dir = TempDir::new("busy-at-launch-again");
+            let busy = BusyFile::of_day_2(&dir);
+            let store = crate::persist::files_at(&dir.0);
+            let mut a = Tab::on_store(store.clone());
+            assert_eq!(a.shown(), [1]);
+            busy.let_go();
+            assert!(
+                !store.history_changed(),
+                "nothing changed, as the store sees"
+            );
+            a.advance(u64::from(READ_AGAIN_MS[0]) + 500).await;
+            assert_eq!(a.shown(), [1, 2], "read again on its own");
+            assert_eq!(a.notices(), []);
+        });
+    }
+
     /// A record that could not be read as the app opened, and reads now, is
     /// taken up by a restore whose backup holds a session from its moment,
     /// and the backup's session is merged with it: stored once, under the
