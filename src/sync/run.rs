@@ -255,8 +255,8 @@ async fn read_packs(
     Ok((unreadable, newer))
 }
 
-/// A sync with nothing put back by hand while it runs, as a test syncs a
-/// device: [`sync_once_with`].
+/// A sync with nothing put back by hand while it runs, kept as it ends, as
+/// a test syncs a device: [`sync_once_with`].
 #[cfg(test)]
 pub async fn sync_once(
     store: &dyn Store,
@@ -265,7 +265,7 @@ pub async fn sync_once(
     here: &TrainingSettings,
     now: u64,
 ) -> Result<Synced, SyncFailed> {
-    sync_once_with(store, remote, state, here, now, &BTreeSet::new).await
+    sync_once_with(store, remote, state, here, now, &BTreeSet::new, &|_| {}).await
 }
 
 /// Sync the history in `store` and the settings `here` with the drive
@@ -284,6 +284,11 @@ pub async fn sync_once(
 /// says. The app notes those as the sync ends, and the next sync sends
 /// them as put back. It is asked once the sync has read all it reads of
 /// the store and the drive, just before it changes the store.
+///
+/// `keep` keeps `state` as it stands, which the caller does in any case as
+/// the sync ends: it is asked as a pack holding deletions by hand goes,
+/// once they are noted against it ([`send_pack`]), so that an app stopped
+/// before the sync ends knows of the pack all the same.
 pub async fn sync_once_with(
     store: &dyn Store,
     remote: &dyn Remote,
@@ -291,6 +296,7 @@ pub async fn sync_once_with(
     here: &TrainingSettings,
     now: u64,
     put_back_since: &dyn Fn() -> BTreeSet<RecordId>,
+    keep: &dyn Fn(&SyncState),
 ) -> Result<Synced, SyncFailed> {
     let key = DataKey::from_hex(&state.key).ok_or(SyncFailed::NoKey)?;
     let keys = Keys::of(&key);
@@ -494,7 +500,7 @@ pub async fn sync_once_with(
         .revived
         .retain(|id, _| sent_back.contains(id) && listed.contains(id));
     for pack in packs_of(&state.device, now, put, forget, revive) {
-        send_pack(remote, &keys, state, &pack, &by_hand).await?;
+        send_pack(remote, &keys, state, &pack, &by_hand, keep).await?;
         synced.sent += pack.put.len() + pack.forget.len() + pack.revive.len();
         for revive in &pack.revive {
             if let Some(id) = revive.record_id() {
@@ -708,13 +714,15 @@ async fn read_here(store: &dyn Store, planned: &Plan) -> BTreeMap<RecordId, Stri
 /// is kept under the other name. Until the drive answers, they are noted
 /// against the pack's name ([`SyncState::unanswered`]): made though the
 /// answer was lost, the pack is found at the next sync, and they are the
-/// drive's then ([`take_unanswered`]).
+/// drive's then ([`take_unanswered`]). The note is kept (`keep`) before the
+/// pack goes, so that it holds though the app stops before the sync ends.
 async fn send_pack(
     remote: &dyn Remote,
     keys: &Keys,
     state: &mut SyncState,
     pack: &Pack,
     by_hand: &BTreeSet<RecordId>,
+    keep: &dyn Fn(&SyncState),
 ) -> Result<(), SyncFailed> {
     let name =
         pack_name().ok_or_else(|| SyncFailed::Store("this device could not name a file".into()))?;
@@ -728,6 +736,7 @@ async fn send_pack(
         .collect();
     if !deletions.is_empty() {
         state.unanswered.insert(name.clone(), deletions);
+        keep(state);
     }
     remote.create(&name, sealed).await?;
     state

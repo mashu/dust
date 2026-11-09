@@ -1065,6 +1065,59 @@ fn a_deletion_in_a_pack_whose_upload_went_unanswered_is_the_drives_once_found() 
     assert_eq!(joined.stamps(), [1, 2], "the drive's word");
 }
 
+/// The same where the app stops once the drive has made the pack, before
+/// the sync ends and the app keeps what it came to, as a tab closed then
+/// does: what sync keeps is kept as such a pack goes, its deletions by hand
+/// noted against it, and the app opens again knowing of it, so the next
+/// sync finds the pack there as it would one whose answer was lost. It used
+/// to open with what sync kept before that sync, which knew nothing of the
+/// pack, and sent the deletion again, later than a putting back made
+/// elsewhere since: the session was gone from every device.
+#[test]
+fn a_deletion_in_a_pack_made_as_the_app_stopped_is_the_drives_once_found() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    let session = computer.session(two);
+    phone.delete(2, 120);
+
+    // What the app keeps as the sync asks; stopped before the sync ends, it
+    // opens with what it kept last, from before that sync where the sync
+    // asked nothing.
+    let kept = RefCell::new(phone.state.clone());
+    now(sync_once_with(
+        &*phone.store,
+        &remote,
+        &mut phone.state,
+        &phone.settings,
+        130,
+        &BTreeSet::new,
+        &|state| *kept.borrow_mut() = state.clone(),
+    ))
+    .expect("synced");
+    phone.state = kept.into_inner();
+
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "the pack was made");
+    computer.undo(two, &session, 150);
+    computer.sync(&remote, 155).expect("synced");
+
+    phone.sync(&remote, 160).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    assert!(phone.state.unanswered.is_empty(), "found");
+    computer.sync(&remote, 170).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 180).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
 /// A pack the drive never made, full say, is sent again by the next sync,
 /// its deletions by hand with it: none is taken for the drive's for having
 /// been asked for once.
@@ -1211,6 +1264,7 @@ fn a_sync_lets_go_of_nothing_put_back_since_it_began() {
         &phone.settings,
         140,
         &|| since.borrow().clone(),
+        &|_| {},
     ))
     .expect("synced");
     assert_eq!(phone.stamps(), [1, 2], "not let go");

@@ -252,6 +252,35 @@ impl AppCtx {
         }
     }
 
+    /// Keep `state`, what the sync under way of the turning on of sync
+    /// `epoch` has come to, as it sends deletions by hand: with what it
+    /// took into the store, and the pack it is sending, which the drive may
+    /// make though the app stops before the sync ends
+    /// ([`SyncState::unanswered`]). The sign-in kept is the app's, as the
+    /// sync's end keeps it. Nothing is kept where sync was turned off or on
+    /// anew since, here or in another copy of the app, which the sync's end
+    /// takes up; nor is a failing told of, which the sync's end tells.
+    fn keep_sync_under_way(self, epoch: u64, state: &SyncState) {
+        if *self.sync.epoch.peek() != epoch {
+            return;
+        }
+        let sign_in = match self.sync.state.peek().as_ref() {
+            Some(here)
+                if !*self.sync.stored.peek() || self.sync_changed_elsewhere(here).is_none() =>
+            {
+                here.sign_in.clone()
+            }
+            _ => return,
+        };
+        let mut state = state.clone();
+        state.sign_in = sign_in;
+        if let Some(written) = state.written()
+            && self.app().store.save_sync(Some(&written)).is_ok()
+        {
+            put(self.sync.stored, true);
+        }
+    }
+
     /// Turn sync off here, saying why, where another copy of the app on the
     /// same store, a tab or a window, has turned it off since this one
     /// found or last kept what sync keeps there, or turned it on anew and
@@ -509,8 +538,10 @@ impl AppCtx {
             };
             // Put back by hand since it took the notes in: none let go.
             let since = || self.put_back_since();
+            // Kept as it sends deletions by hand, should the app stop.
+            let keep = |sending: &SyncState| self.keep_sync_under_way(epoch, sending);
             let synced =
-                sync_once_with(&*store, &remote, &mut state, &here, now_ms(), &since).await;
+                sync_once_with(&*store, &remote, &mut state, &here, now_ms(), &since, &keep).await;
             self.take_up_sync_off();
             if *self.sync.epoch.peek() != epoch {
                 // Sync was turned off meanwhile, here or in another copy,
