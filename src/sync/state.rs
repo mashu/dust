@@ -58,8 +58,21 @@ pub struct SyncState {
     /// hand since the one before.
     #[serde(default, with = "times")]
     pub applied: BTreeMap<RecordId, u64>,
+    /// The packs sent whose answer never came, by name, each with the
+    /// deletions by hand it holds and their stamps: the drive may have made
+    /// one all the same. A sync that finds the pack there notes them in
+    /// [`Self::applied`], as the answer would have; one that finds no such
+    /// file drops the pack, never made, and sends them again.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "unanswered"
+    )]
+    pub unanswered: BTreeMap<String, BTreeMap<RecordId, u64>>,
     /// The sessions put back here by hand since the last sync, and when
-    /// ([`super::plan::Here::revived`]).
+    /// ([`super::plan::Here::revived`]): each stamped as it was noted
+    /// ([`Self::stamp_change`]), and those noted before any pack was read
+    /// stamped again once the first is.
     #[serde(default, with = "times")]
     pub revived: BTreeMap<RecordId, u64>,
     /// The deletions by hand a build before this one made here, and noted
@@ -108,8 +121,7 @@ impl SyncState {
     /// change made after another is so the later, however far apart the
     /// clocks of the devices that made them are.
     pub fn stamp_change(&self, id: RecordId, now: u64) -> u64 {
-        let seen = self.drive.tombs.get(&id).max(self.drive.revives.get(&id));
-        seen.map_or(now, |&seen| now.max(seen.saturating_add(1)))
+        self.drive.stamp_change(id, now)
     }
 }
 
@@ -127,10 +139,45 @@ mod times {
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
         input: D,
     ) -> Result<BTreeMap<RecordId, u64>, D::Error> {
-        let named = BTreeMap::<String, u64>::deserialize(input)?;
-        Ok(named
+        Ok(by_id(BTreeMap::<String, u64>::deserialize(input)?))
+    }
+
+    /// `named` by record: a name that is none is passed over.
+    pub fn by_id(named: BTreeMap<String, u64>) -> BTreeMap<RecordId, u64> {
+        named
             .into_iter()
             .filter_map(|(name, at)| Some((RecordId::parse(&name)?, at)))
+            .collect()
+    }
+}
+
+/// The packs whose answer never came, each with its records by name.
+mod unanswered {
+    use super::*;
+
+    /// One pack's deletions, as [`super::times`] writes them.
+    struct Named<'a>(&'a BTreeMap<RecordId, u64>);
+
+    impl Serialize for Named<'_> {
+        fn serialize<S: serde::Serializer>(&self, out: S) -> Result<S::Ok, S::Error> {
+            times::serialize(self.0, out)
+        }
+    }
+
+    pub fn serialize<S: serde::Serializer>(
+        packs: &BTreeMap<String, BTreeMap<RecordId, u64>>,
+        out: S,
+    ) -> Result<S::Ok, S::Error> {
+        out.collect_map(packs.iter().map(|(pack, held)| (pack, Named(held))))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        input: D,
+    ) -> Result<BTreeMap<String, BTreeMap<RecordId, u64>>, D::Error> {
+        let named = BTreeMap::<String, BTreeMap<String, u64>>::deserialize(input)?;
+        Ok(named
+            .into_iter()
+            .map(|(pack, held)| (pack, times::by_id(held)))
             .collect())
     }
 }
@@ -168,20 +215,14 @@ mod drive_state {
 
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(input: D) -> Result<DriveState, D::Error> {
         let named = Named::deserialize(input)?;
-        let parse = |pairs: BTreeMap<String, u64>| {
-            pairs
-                .into_iter()
-                .filter_map(|(name, at)| Some((RecordId::parse(&name)?, at)))
-                .collect()
-        };
         Ok(DriveState {
             puts: named
                 .puts
                 .iter()
                 .filter_map(|name| RecordId::parse(name))
                 .collect(),
-            tombs: parse(named.tombs),
-            revives: parse(named.revives),
+            tombs: times::by_id(named.tombs),
+            revives: times::by_id(named.revives),
         })
     }
 }
@@ -210,6 +251,9 @@ mod tests {
         state.drive.tombs.insert(id, 7);
         state.drive.revives.insert(id, 8);
         state.applied.insert(id, 7);
+        state
+            .unanswered
+            .insert("dust-p-3".into(), BTreeMap::from([(id, 6)]));
         state.revived.insert(id, 9);
         state.deletions_noted = true;
         state.settings = Some(Map::from_iter([("numGroups".to_string(), Value::from(5))]));
