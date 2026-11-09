@@ -24,7 +24,7 @@ use super::legacy::{
 };
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done, read_record,
-    records_for_blob,
+    records_for_blob, unread_notices, unreadable,
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SessionKey, SetAside,
@@ -75,7 +75,8 @@ pub struct MemoryStore {
     /// The history cannot be listed or read.
     pub unlistable: Cell<bool>,
     /// The records listed that cannot be read for now, the way a file
-    /// another program holds open for a moment cannot.
+    /// another program holds open for a moment cannot: as the history is
+    /// read, too, as the files read one that cannot be read at all.
     pub held_open: RefCell<BTreeSet<RecordId>>,
     /// Changes to the history are made only when the test says
     /// ([`Self::settle`]), the way a browser's database makes them a
@@ -454,21 +455,38 @@ impl Store for MemoryStore {
         }
         self.import();
         let tombstones = self.tombstones.borrow();
+        let held_open = self.held_open.borrow();
+        // Each record that holds no session this build reads, with what it
+        // says of itself; none where it could not be read at all, as one
+        // held open cannot be, as the files read it.
+        let mut unread = Vec::new();
         for (id, held) in self.records.borrow().iter() {
             if tombstones.contains_key(id) {
                 continue;
             }
+            if held_open.contains(id) {
+                unread.push((*id, None));
+                continue;
+            }
             match held.session() {
                 Some(session) => load.sessions.push((*id, session)),
-                None => load.unread.push(*id),
+                None => {
+                    let said = unreadable(&held.json);
+                    if said.later
+                        && let Some(key) = &said.key
+                    {
+                        load.later.push((*id, key.clone()));
+                    }
+                    unread.push((*id, Some(said)));
+                }
             }
         }
+        load.unread = unread.iter().map(|(id, _)| *id).collect();
         let mut told = self.told.borrow_mut();
-        let new = load.unread.iter().filter(|id| !told.contains(id)).count();
-        if new > 0 {
-            load.notices.push(HistoryNotice::Unread { count: new });
-            told.extend(load.unread.iter().copied());
-        }
+        let new = unread.iter().filter(|(id, _)| !told.contains(id));
+        load.notices
+            .extend(unread_notices(new.map(|(_, said)| said.as_ref())));
+        told.extend(load.unread.iter().copied());
         // Complete once the move is made: until then, the sessions kept
         // whole are stored, though not here.
         load.complete = self.layout.borrow().is_some();
@@ -1154,7 +1172,7 @@ mod tests {
         let unread = store.plant_unreadable("{\"later\":1}");
         let read = store.load_history();
         assert_eq!(read.unread, [unread]);
-        assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
+        assert_eq!(read.notices, [HistoryNotice::Damaged { count: 1 }]);
         assert!(store.load_history().notices.is_empty(), "told of once");
     }
 

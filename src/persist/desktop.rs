@@ -9,7 +9,9 @@ use std::sync::{Mutex, PoisonError};
 use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::disk::{aside_name, move_aside, save_streamed, shown, sync_dir, temporary, write_whole};
+use super::disk::{
+    aside_name, flush, move_aside, save_streamed, shown, sync_dir, temporary, write_whole,
+};
 use super::files::HistoryFiles;
 use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
@@ -253,7 +255,10 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let written = (|| {
         let mut file = private_file(&tmp)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        flush(&file)?;
+        // Closed before it takes its name: on Windows no one else may open
+        // it while it is open, and another copy reads what sync keeps.
+        drop(file);
         fs::rename(&tmp, dir.join(name))
     })();
     if written.is_err() {
@@ -278,8 +283,48 @@ fn private_file(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// On Windows, the same by the file's access list, set while the file is
+/// still empty: the account the app runs as alone may open it, and it
+/// inherits nothing from its folder ([`super::acl`]). The file is made new,
+/// never one already there, which another account could have made to be
+/// written into, and no one else may open it while it is open, so no one
+/// opens it in the moment before its list is set. Where the list cannot be
+/// set, as on a volume that keeps none (FAT) or a share that will not take
+/// one, the file is made as any other is, new all the same, with its
+/// folder's list, and the log says why: sync goes on as before.
+#[cfg(windows)]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let new = |access: Option<u32>| {
+        let mut options = fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .share_mode(super::acl::SHARED_TO_DELETE_ALONE);
+        if let Some(access) = access {
+            options.access_mode(access);
+        }
+        options.open(path)
+    };
+    let file = match new(Some(super::acl::OPENED_TO_SET_ACCESS)) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            eprintln!(
+                "{} keeps its folder's access list, as it could not be opened to change it: {err}",
+                path.display()
+            );
+            return new(None);
+        }
+        Err(err) => return Err(err),
+    };
+    if let Err(err) = super::acl::keep_to_the_user(&file) {
+        eprintln!("{} keeps its folder's access list: {err}", path.display());
+    }
+    Ok(file)
+}
+
 /// Elsewhere, as any other file is made.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn private_file(path: &Path) -> io::Result<fs::File> {
     fs::File::create(path)
 }
@@ -1997,6 +2042,65 @@ pub(super) mod tests {
         );
         store.save_sync(None).expect("cleared");
         assert_eq!(store.load_sync(), None);
+    }
+
+    /// On Windows, what sync keeps is the user's alone by its access list:
+    /// the account the app runs as alone may open it, and it inherits
+    /// nothing from its folder; and so is one an earlier build left with
+    /// its folder's list, once written again. CI's Windows lint compiles
+    /// this, and runs no test: it is run by hand on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn what_sync_keeps_is_for_the_user_alone_to_read_on_windows() {
+        use crate::persist::acl::{access_list, the_users_alone};
+        let (dir, store) = store("sync-kept");
+        let the_users = the_users_alone().expect("the user's list");
+        let list = || access_list(&fs::File::open(dir.0.join(SYNC)).expect("kept")).expect("read");
+        store.save_sync(Some(r#"{"key":"secret"}"#)).expect("saved");
+        assert_eq!(list(), the_users);
+        assert_eq!(store.load_sync().as_deref(), Some(r#"{"key":"secret"}"#));
+        fs::remove_file(dir.0.join(SYNC)).unwrap();
+        fs::write(dir.0.join(SYNC), "{}").unwrap();
+        assert_ne!(
+            list(),
+            the_users,
+            "a file made as any other is has its folder's list"
+        );
+        store.save_sync(Some("{}")).expect("saved");
+        assert_eq!(list(), the_users);
+        assert_eq!(store.load_sync().as_deref(), Some("{}"));
+        assert!(
+            files(&dir).iter().all(|name| !name.ends_with(".tmp")),
+            "{:?}",
+            files(&dir)
+        );
+        store.save_sync(None).expect("cleared");
+        assert_eq!(store.load_sync(), None);
+    }
+
+    /// On Windows, what sync keeps goes only into a file made for it: one
+    /// already where it is made, another account's say, is never written
+    /// into, and no one else may open the one made while it is open, before
+    /// its list is set or after. CI's Windows lint compiles this, and runs
+    /// no test: it is run by hand on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn what_sync_keeps_goes_into_no_file_already_there_on_windows() {
+        let dir = TempDir::new("sync-new");
+        fs::create_dir_all(&dir.0).unwrap();
+        let theirs = dir.0.join(".sync.json.theirs.tmp");
+        fs::write(&theirs, "theirs").unwrap();
+        let refused = private_file(&theirs).expect_err("not written into");
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists, "{refused}");
+        assert_eq!(fs::read_to_string(&theirs).unwrap(), "theirs");
+        let ours = dir.0.join(".sync.json.ours.tmp");
+        let open = private_file(&ours).expect("made");
+        assert!(
+            fs::File::open(&ours).is_err(),
+            "no one else opens it while it is open"
+        );
+        drop(open);
+        assert!(fs::File::open(&ours).is_ok(), "the user, once it is shut");
     }
 
     /// On Android, a history past 20 MB is about to outgrow Android's own

@@ -29,8 +29,8 @@ use cw_core::SessionResult;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
 use super::record::{
-    self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, key_of, keyed,
-    not_told, read_record, taken_up, tombstone_key,
+    self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unreadable, key_of,
+    keyed, not_told, read_record, taken_up, tombstone_key, unreadable,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -247,8 +247,9 @@ struct Read {
     /// Every session that reads, by its record, in the order of the
     /// history.
     sessions: Vec<(RecordId, SessionResult)>,
-    /// Every record that does not.
-    unread: Vec<RecordId>,
+    /// Every record that does not, with what it says of itself: one that
+    /// holds no text says nothing, as damaged ([`unreadable`]).
+    unread: Vec<(RecordId, Unreadable)>,
     /// What each record holds, as it is stored, where a move is to be made
     /// over them.
     raw: BTreeMap<RecordId, String>,
@@ -365,9 +366,13 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         } else {
             layout
         };
-        if let Some(count) = self.tell(&read.unread, head.told.as_deref()).await {
-            load.notices.push(HistoryNotice::Unread { count });
-        }
+        let unread: Vec<(RecordId, Option<Unreadable>)> = read
+            .unread
+            .iter()
+            .map(|(id, said)| (*id, Some(said.clone())))
+            .collect();
+        load.notices
+            .extend(self.tell(&unread, head.told.as_deref()).await);
         load.complete = layout.is_some();
         self.layout.replace(layout);
         if load.complete {
@@ -377,7 +382,14 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             }
         }
         load.sessions = read.sessions;
-        load.unread = read.unread;
+        for (id, said) in read.unread {
+            if said.later
+                && let Some(key) = said.key
+            {
+                load.later.push((id, key));
+            }
+            load.unread.push(id);
+        }
         Ok(load)
     }
 
@@ -404,7 +416,9 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
                             keys.insert(id, SessionKey::of(&session));
                             read.sessions.push((id, session));
                         }
-                        None => read.unread.push(id),
+                        None => read
+                            .unread
+                            .push((id, raw.as_deref().map(unreadable).unwrap_or_default())),
                     }
                     if keep && let Some(raw) = raw {
                         read.raw.insert(id, raw);
@@ -608,12 +622,20 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         Some(live)
     }
 
-    /// Say how many of `unread`, the records this build cannot read, are
-    /// new to it, `told` being those told of before: none, once each has
-    /// been. They are noted as told, where this build may write.
-    async fn tell(&self, unread: &[RecordId], told: Option<&str>) -> Option<usize> {
-        let new = not_told(unread, told.map(str::as_bytes))?;
-        let names: Vec<String> = unread.iter().map(|id| id.name()).collect();
+    /// What to tell of `unread`, the records this build cannot read, each
+    /// with what it says of itself ([`not_told`]), `told` being those told
+    /// of before: nothing, once each has been. They are noted as told,
+    /// where this build may write.
+    async fn tell(
+        &self,
+        unread: &[(RecordId, Option<Unreadable>)],
+        told: Option<&str>,
+    ) -> Vec<HistoryNotice> {
+        let notices = not_told(unread, told.map(str::as_bytes));
+        if notices.is_empty() {
+            return notices;
+        }
+        let names: Vec<String> = unread.iter().map(|(id, _)| id.name()).collect();
         if self.writable.get()
             && let Ok(raw) = serde_json::to_string(&names)
         {
@@ -624,7 +646,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             // Not noted, it is told of again: no more.
             let _ = self.write(noted).await;
         }
-        Some(new)
+        notices
     }
 
     /// The history as it was read as the page opened. Asked again, as no
@@ -891,12 +913,11 @@ fn not_moved_yet(
     let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
     // What each record here under a name the move does not give holds: a
     // session that needs no record of the move's.
-    let mut elsewhere: HashMap<&str, usize> = HashMap::new();
-    for (id, json) in &read.raw {
-        if !names.contains(id) {
-            *elsewhere.entry(json.as_str()).or_default() += 1;
-        }
-    }
+    let elsewhere = read
+        .raw
+        .iter()
+        .filter(|(id, _)| !names.contains(id))
+        .map(|(_, json)| json);
     legacy::not_moved_yet(
         moved,
         |id| read.raw.contains_key(&id),

@@ -1069,7 +1069,7 @@ pub(crate) const CONTEST_MARK: &str = "contest:";
 pub struct ContestLog(pub serde_json::Value);
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(from = "StoredSession")]
+#[serde(try_from = "StoredSession")]
 pub struct SessionResult {
     pub date: String,
     /// Wall time the session finished, in milliseconds: what history is
@@ -1109,6 +1109,22 @@ pub struct SessionResult {
     /// What the stored session held that this build does not read.
     pub unread: UnreadKeys,
 }
+
+/// The format a stored session is written in: the oldest format a build
+/// must know to read it as it was meant, written in every session as
+/// `"format"` ([`SessionResult`]'s JSON). A session that says none was
+/// stored before builds said one, and is of the first format, 1.
+///
+/// A build reads every format up to its own, and none after: a session
+/// stored in a later one reads as no session, left as it is stored for a
+/// build that reads it, and is told from one that is damaged by what it
+/// says. So it is raised only by a change a build of the format before
+/// would misread or fail to read. A key only added keeps the format, as
+/// earlier builds carry it along ([`UnreadKeys`]). And `timestamp` and
+/// `date` keep their shape in every format: a later build's session is
+/// known by when, and on what day, it finished, by a build that reads no
+/// more of it.
+pub const SESSION_FORMAT: u32 = 1;
 
 /// What a stored session holds that this build does not read: keys a later
 /// build wrote, on the session and on each of its groups and their timings.
@@ -1158,6 +1174,8 @@ const RETIRED_TIMING_KEYS: &[&str] = &["perCharMs", "recognitionMs", "typedAlong
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionOnDisk<'a> {
+    /// The format it is written in ([`SESSION_FORMAT`]), first.
+    format: u32,
     date: &'a str,
     timestamp: u64,
     groups: Vec<WithUnread<'a, GroupResult>>,
@@ -1264,6 +1282,7 @@ impl Serialize for SessionResult {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let none = Map::new();
         SessionOnDisk {
+            format: SESSION_FORMAT,
             date: &self.date,
             timestamp: self.timestamp,
             groups: with_unread(&self.groups, &self.unread.groups, &none),
@@ -1294,6 +1313,11 @@ impl Serialize for SessionResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSession {
+    /// The format it says it is stored in ([`SESSION_FORMAT`]): none on
+    /// what was stored before sessions said one. A key read, never carried
+    /// along unread, as it is written again whatever a session held.
+    #[serde(default)]
+    format: Option<u32>,
     date: String,
     timestamp: u64,
     groups: Vec<ReadWithUnread<GroupResult>>,
@@ -1428,12 +1452,36 @@ fn split_unread<T>(
     (parts, unread)
 }
 
-impl From<StoredSession> for SessionResult {
-    /// A contest run is known by its log, or by its mark once a build that
-    /// knew no contests has saved it without the log. A group answered with
-    /// a skip that holds no character's place, kept by a build that took it
-    /// for an error, is copied whole, as it is scored ([`copied_whole`]).
-    fn from(stored: StoredSession) -> Self {
+/// Why a stored session reads as none: it says a format later than this
+/// build's ([`SESSION_FORMAT`]).
+#[derive(Debug)]
+struct LaterFormat(u32);
+
+impl std::fmt::Display for LaterFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            formatter,
+            "a session stored in format {}, which this build, of format {SESSION_FORMAT}, does not read",
+            self.0
+        )
+    }
+}
+
+impl TryFrom<StoredSession> for SessionResult {
+    type Error = LaterFormat;
+
+    /// No session at all of one stored in a later format than this
+    /// build's ([`SESSION_FORMAT`]). A contest run is known by its log, or by its
+    /// mark once a build that knew no contests has saved it without the
+    /// log. A group answered with a skip that holds no character's place,
+    /// kept by a build that took it for an error, is copied whole, as it is
+    /// scored ([`copied_whole`]).
+    fn try_from(stored: StoredSession) -> Result<Self, LaterFormat> {
+        if let Some(format) = stored.format
+            && format > SESSION_FORMAT
+        {
+            return Err(LaterFormat(format));
+        }
         let run = stored.contest.is_some() || stored.alphabet_fingerprint.starts_with(CONTEST_MARK);
         let mut unread = stored.unread;
         unread.retain(|key, _| !RETIRED_SESSION_KEYS.contains(&key.as_str()));
@@ -1446,7 +1494,7 @@ impl From<StoredSession> for SessionResult {
         }
         let timings = stored.group_timings.into_iter().map(Into::into).collect();
         let (group_timings, unread_timings) = split_unread(timings, RETIRED_TIMING_KEYS);
-        Self {
+        Ok(Self {
             date: stored.date,
             timestamp: stored.timestamp,
             groups,
@@ -1474,7 +1522,7 @@ impl From<StoredSession> for SessionResult {
             },
             length_floor: stored.length_floor,
             typing_locked: stored.typing_locked,
-        }
+        })
     }
 }
 
@@ -2519,6 +2567,105 @@ mod tests {
         let back: SessionResult = serde_json::from_str(&text).expect("reads back");
         assert_eq!(back.group_timings, read.group_timings);
         assert_eq!(back.unread, UnreadKeys::default(), "the other let go of");
+    }
+
+    /// A session a later build stored in a format this build does not
+    /// read, as it says ([`SESSION_FORMAT`]), reads as no session at all,
+    /// however much of it this build's reader would take: read as one, it
+    /// would be shown, scored and written back as this build makes it, and
+    /// what the later format means lost. One that held every key this
+    /// build reads was read as a session, its format carried as a key not
+    /// read.
+    #[test]
+    fn a_session_in_a_later_format_is_read_as_no_session() {
+        let mut stored = serde_json::to_value(SessionResult::empty_for_test()).unwrap();
+        stored["format"] = serde_json::json!(SESSION_FORMAT + 1);
+        let later = stored.to_string();
+        assert!(
+            serde_json::from_str::<SessionResult>(&later).is_err(),
+            "read as a session: {later}"
+        );
+        stored["format"] = serde_json::json!(SESSION_FORMAT);
+        let own = stored.to_string();
+        assert!(serde_json::from_str::<SessionResult>(&own).is_ok(), "{own}");
+    }
+
+    /// Every session says the format it is stored in, once, first, so that
+    /// a later build's is told from one that is damaged. It is a key the
+    /// session reads, never carried as one it does not ([`UnreadKeys`]), so
+    /// it is written once however the session was stored: by this build;
+    /// by an older one, which wrote none; or by one that carried this
+    /// build's along as a key it did not know, written at the end. Written
+    /// twice, a key makes no session of the record, in any build. And a
+    /// session reads the same whatever its record says of its format, as
+    /// two records of one session are told by what they hold.
+    #[test]
+    fn every_session_says_its_format_once() {
+        let session = SessionResult::empty_for_test();
+        let written = serde_json::to_string(&session).unwrap();
+        let says = format!("\"format\":{SESSION_FORMAT}");
+        assert!(
+            written.starts_with(&format!("{{{says},\"date\":")),
+            "{written}"
+        );
+        assert_eq!(written.matches("\"format\"").count(), 1, "{written}");
+        let older = written.replacen(&format!("{says},"), "", 1);
+        let carried = format!("{},{says}}}", older.strip_suffix('}').unwrap());
+        for stored in [&written, &older, &carried] {
+            let read: SessionResult = serde_json::from_str(stored).unwrap();
+            assert_eq!(read, session, "{stored}");
+            assert!(read.unread.session.is_empty(), "carried: {stored}");
+            assert_eq!(serde_json::to_string(&read).unwrap(), written, "{stored}");
+        }
+    }
+
+    /// Every key a session is written with is a key it reads: the format
+    /// ([`SESSION_FORMAT`]), and every key written only where the session
+    /// holds a value for it, among them. One it did not read would be
+    /// carried along with what it does not ([`UnreadKeys`]), and written a
+    /// second time beside its own, and the record read as no session at
+    /// all, in any build, as a timing's key read leniently once was
+    /// ([`Part::holds`]).
+    #[test]
+    fn every_key_a_session_is_written_with_is_one_it_reads() {
+        let mut session = SessionResult::empty_for_test();
+        session.groups = vec![GroupResult {
+            sent: "KM".into(),
+            received: "KX".into(),
+            correct: false,
+        }];
+        session.group_timings = vec![SessionTiming::default()];
+        session.tally.sent.insert(
+            'K',
+            LetterAccuracy {
+                correct: 1,
+                total: 1,
+            },
+        );
+        session.tally.inserted.insert('X', 1);
+        session.char_set_mode = CharSetMode::Contest;
+        session.alphabet_fingerprint = format!("{CONTEST_MARK}cqww");
+        session.contest = Some(ContestLog(serde_json::json!({ "qsos": [] })));
+        session.length_floor = Some(2);
+        session.typing_locked = true;
+        let written = serde_json::to_value(&session).unwrap();
+        for key in [
+            "format",
+            "letterAccuracy",
+            "inserted",
+            "contest",
+            "lengthFloor",
+            "typingLocked",
+        ] {
+            assert!(written.get(key).is_some(), "written with {key}: {written}");
+        }
+        let read: SessionResult = serde_json::from_value(written).unwrap();
+        assert!(
+            read.unread.session.is_empty(),
+            "carried along: {:?}",
+            read.unread.session
+        );
+        assert_eq!(read, session);
     }
 
     /// The keys `T`, a struct, reads, as its reader names them.
