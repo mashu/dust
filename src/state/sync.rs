@@ -262,6 +262,10 @@ enum Notes {
     /// the sync turned on anew there ([`AppCtx::give_notes_to`]), or with
     /// the next one turned on here, as noted before it, stamped again after
     /// its first read of the drive; closed first, this copy loses them.
+    /// Either way each is put back after every deletion of its session that
+    /// sync knows of, or finds at that first read, whenever it was made: a
+    /// deletion another device made after the putting back loses to it, as
+    /// what this copy knew of the drive as it noted it goes with its sync.
     /// Those a sync under way took in go as it ends, those it did not send
     /// alone ([`SyncCtx::hand_back`]): one it sent is no note to keep.
     Kept,

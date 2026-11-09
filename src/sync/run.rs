@@ -329,7 +329,10 @@ pub async fn sync_once_with(
     // is stamped again after what the drive holds of its record, as one
     // noted now would be. One noted once this device knew the drive keeps
     // its stamp: stamped again, it would beat a later deletion made
-    // elsewhere.
+    // elsewhere. Yet one a copy of the app noted under a sync another copy
+    // has since turned off, and kept for the next, is stamped again here
+    // all the same, however long ago it was noted: a deletion made
+    // elsewhere after it loses to it.
     if state.read.is_empty() {
         for (&id, at) in &mut state.revived {
             *at = drive.stamp_change(id, *at);
