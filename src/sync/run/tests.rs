@@ -1092,6 +1092,50 @@ fn a_pack_whose_upload_failed_is_sent_again() {
     assert_eq!(computer.stamps(), [1], "let go");
 }
 
+/// A session put back by hand under a sync turned on anew, before that
+/// sync has read the drive, is put back after the drive's deletion of it,
+/// stamped ahead on another device though that deletion is: the putting
+/// back was stamped knowing nothing of the drive, what sync knew before it
+/// was turned on anew gone with it, and is stamped again once the first
+/// read finds the deletion, as one made after that read would be. It used
+/// to keep the bare stamp of this device's clock, earlier than the
+/// deletion, and its sync let the session go again.
+#[test]
+fn a_session_put_back_before_a_new_syncs_first_read_is_put_back_after_the_drives_deletion() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    // The computer's clock is an hour ahead of the phone's.
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 3_600_110).expect("synced");
+    let two = phone.id_of(2);
+    let session = phone.session(two);
+    computer.delete(2, 3_600_120);
+    computer.sync(&remote, 3_600_130).expect("synced");
+    // Deleted on the phone too, and synced: the drive's deletion known.
+    phone.delete(2, 150);
+    phone.sync(&remote, 160).expect("synced");
+    assert!(phone.state.stamp_change(two, 200) > 3_600_130);
+
+    // Turned on anew, and the session put back before that sync reads.
+    phone.turn_on(&remote, "passphrase").expect("on anew");
+    phone.undo(two, &session, 200);
+    phone.sync(&remote, 210).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "not let go");
+    assert!(
+        phone.state.drive.revives[&two] > phone.state.drive.tombs[&two],
+        "put back after the deletion"
+    );
+    computer.sync(&remote, 3_600_220).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "taken back");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 230).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
 /// A device whose store lost what sync took, though sync remembers reading
 /// it, reads every pack again and takes it back.
 #[test]

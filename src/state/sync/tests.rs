@@ -1787,6 +1787,62 @@ fn undo_while_a_sync_from_before_sync_was_turned_on_anew_ends_keeps_the_session(
     });
 }
 
+/// The same, with the other device's deletion stamped an hour ahead of
+/// this device's clock: the putting back, noted under the sync turned on
+/// anew before it had read anything of the drive, is stamped again after
+/// that sync's first read, as one noted knowing the drive would be, and
+/// stands, here and in the drive. It used to keep the bare stamp of this
+/// device's clock, earlier than the deletion, and was let go again.
+#[test]
+fn undo_while_a_sync_from_before_sync_was_turned_on_anew_ends_outlasts_a_deletion_ahead() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        // Deleted on another device, its clock ahead, and here.
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        let ahead = now_ms() + 3_600_000;
+        delete_in(&other, two, ahead);
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &Default::default(),
+            ahead,
+        ))
+        .expect("synced");
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        keep(&harness, &[5]);
+        held.hold_writes(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+
+        harness.in_app(|| ctx.sync_turn_off(false));
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        harness.in_app(|| ctx.sync_passphrase("a long passphrase".into(), None));
+        harness.advance(100).await;
+        assert!(status(&harness).is_on(), "{:?}", status(&harness));
+        harness.in_app(|| ctx.undo_delete());
+        held.hold_writes(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        assert_eq!(stamps(&harness), [1, 2, 5], "not deleted again");
+        let (joined, _) = another_device(&remote, "a long passphrase", &[]);
+        let theirs: Vec<u64> = joined
+            .load_history()
+            .sessions
+            .iter()
+            .map(|(_, s)| s.timestamp)
+            .collect();
+        assert_eq!(theirs, [1, 2, 5], "the drive's word");
+    });
+}
+
 /// What sync noted of a session put back while a sync was under way goes
 /// with everything else sync keeps as sync is turned off here, as one put
 /// back while none was would: turned on again, sync begins from nothing.

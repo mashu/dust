@@ -70,7 +70,9 @@ pub struct SyncState {
     )]
     pub unanswered: BTreeMap<String, BTreeMap<RecordId, u64>>,
     /// The sessions put back here by hand since the last sync, and when
-    /// ([`super::plan::Here::revived`]).
+    /// ([`super::plan::Here::revived`]): each stamped as it was noted
+    /// ([`Self::stamp_change`]), and those noted before any pack was read
+    /// stamped again once the first is.
     #[serde(default, with = "times")]
     pub revived: BTreeMap<RecordId, u64>,
     /// The deletions by hand a build before this one made here, and noted
@@ -119,8 +121,7 @@ impl SyncState {
     /// change made after another is so the later, however far apart the
     /// clocks of the devices that made them are.
     pub fn stamp_change(&self, id: RecordId, now: u64) -> u64 {
-        let seen = self.drive.tombs.get(&id).max(self.drive.revives.get(&id));
-        seen.map_or(now, |&seen| now.max(seen.saturating_add(1)))
+        self.drive.stamp_change(id, now)
     }
 }
 

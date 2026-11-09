@@ -294,6 +294,18 @@ pub async fn sync_once(
     )
     .await?;
     take_unanswered(state, &files, &read, &drive);
+    // A sync that has read nothing of the drive yet, as one just turned on
+    // anew, stamped each putting back it notes knowing nothing of the
+    // drive: what sync knew before it was turned on anew went with it. Each
+    // is stamped again after what the drive holds of its record, as one
+    // noted now would be. One noted once this device knew the drive keeps
+    // its stamp: stamped again, it would beat a later deletion made
+    // elsewhere.
+    if state.read.is_empty() {
+        for (&id, at) in &mut state.revived {
+            *at = drive.stamp_change(id, *at);
+        }
+    }
 
     let listed: BTreeSet<RecordId> = store
         .history_listing()
