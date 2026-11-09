@@ -88,6 +88,13 @@ jobs:
       - name: Test cw-core
         run: cargo llvm-cov -p cw-core --locked --lcov --output-path lcov-cw-core.info
 
+      # The coverage run leaves doctests out: cargo-llvm-cov runs them only
+      # with its unstable --doctests. Among cw-core's is a compile_fail on
+      # board_place_at that keeps board_place, a lookup by moment, out of
+      # the public API.
+      - name: Doctests of cw-core
+        run: cargo test -p cw-core --doc --locked
+
       - name: Test desktop app
         run: cargo llvm-cov -p dust --features desktop --locked --lcov --output-path lcov-dust.info
 
