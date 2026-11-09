@@ -2,7 +2,7 @@
 
 use crate::numeric::finite_or;
 use crate::rng::Rng;
-use crate::settings::TrainingSettings;
+use crate::settings::{TrainingSettings, WPM_MIN};
 
 /// The operator at the other end: one pitch, one fist, one signal strength.
 ///
@@ -27,17 +27,30 @@ pub struct StationVoice {
 }
 
 /// How far a fist can stray from a keyer's at the top of the setting.
-const WEIGHT_SPREAD: f64 = 0.18;
-const DASH_RATIO_SPREAD: f64 = 0.45;
+pub(super) const WEIGHT_SPREAD: f64 = 0.18;
+pub(super) const DASH_RATIO_SPREAD: f64 = 0.45;
+
+impl StationVoice {
+    /// This voice, its characters and its spacing alike `drop` slower, as a
+    /// contest's caller slows down for you, never slower than the Speed
+    /// card's lowest speed, as MorseRunner keeps a floor under its callers'
+    /// (`DxStn.pas:166-168`).
+    #[must_use]
+    pub(crate) fn slowed(mut self, drop: f64) -> Self {
+        let slow = |wpm: f64| (wpm * (1.0 - drop)).max(WPM_MIN).min(wpm);
+        self.char_wpm = slow(self.char_wpm);
+        self.effective_wpm = slow(self.effective_wpm).min(self.char_wpm);
+        self
+    }
+}
 
 /// Tune in a station, within whatever range the settings allow.
 pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> StationVoice {
     let (char_wpm, effective_wpm) = speeds_from(settings, |min, max| rng.pick_in_range(min, max));
     // Every station is somebody, and on the air most of them are not keyers.
     // Drawn once per station and carried, so a repeat is the same operator
-    // sending again rather than a different one with the same call. A
-    // variation that is no number is none: a keyer.
-    let spread = finite_or(settings.playback.fist_variation, 0.0).clamp(0.0, 1.0);
+    // sending again rather than a different one with the same call.
+    let spread = fist_spread(settings);
     StationVoice {
         tone_hz: resolve_tone_hz(settings, rng),
         char_wpm,
@@ -46,6 +59,45 @@ pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> Stati
         weight: 1.0 + spread * rng.pick_in_range(-WEIGHT_SPREAD, WEIGHT_SPREAD),
         dash_ratio: 3.0 + spread * rng.pick_in_range(-DASH_RATIO_SPREAD, DASH_RATIO_SPREAD),
     }
+}
+
+/// How far the settings let a fist stray from a keyer's, from none to the
+/// most there is: a variation that is no number is none, a keyer.
+pub(super) fn fist_spread(settings: &TrainingSettings) -> f64 {
+    finite_or(settings.playback.fist_variation, 0.0).clamp(0.0, 1.0)
+}
+
+/// The character speed and spacing pairs at the ends of what
+/// [`resolve_station`] draws, as it draws them: each end of the character
+/// speed range, and with a spacing of its own, each end of the spacing's
+/// range brought into the character speed's, each with each end of the
+/// spacing's range, never faster than the characters. Every gap a station
+/// keys is longest or shortest at one of them: a gap grows with the
+/// character speed at a slower spacing, shrinks with it at its own, and
+/// shrinks with the spacing.
+pub(super) fn station_speed_ends(settings: &TrainingSettings) -> Vec<(f64, f64)> {
+    let p = &settings.playback;
+    let ends = |a: f64, b: f64| {
+        let (a, b) = (a.max(1.0), b.max(1.0));
+        (a.min(b), a.max(b))
+    };
+    let (slowest, fastest) = ends(p.char_wpm_min, p.char_wpm_max);
+    if p.link_char_to_effective {
+        return vec![(slowest, slowest), (fastest, fastest)];
+    }
+    let (spaced_slowest, spaced_fastest) = ends(p.effective_wpm_min, p.effective_wpm_max);
+    let chars = [
+        slowest,
+        fastest,
+        spaced_slowest.clamp(slowest, fastest),
+        spaced_fastest.clamp(slowest, fastest),
+    ];
+    chars
+        .into_iter()
+        .flat_map(|char_wpm| {
+            [spaced_slowest, spaced_fastest].map(|spacing| (char_wpm, spacing.min(char_wpm)))
+        })
+        .collect()
 }
 
 /// A station's character speed and the pace of its spacing, `pick` choosing

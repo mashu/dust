@@ -1,16 +1,17 @@
 //! How settings are written to a save, and read back from one, older ones
 //! included.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
-use serde::de::{self, DeserializeOwned, Visitor};
+use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
+use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use super::{
     AutoLevelSettings, BandSettings, CharSetMode, ContestSettings, CurriculumSettings,
-    PlaybackSettings, PracticeWindow, RecognitionBands, TrainingSettings,
+    PlaybackSettings, PracticeWindow, RecognitionBands, TrainingSettings, UnreadValue,
 };
 
 /// Keys earlier builds wrote that no build reads any more. They are let go
@@ -34,6 +35,16 @@ const RETIRED: &[&str] = &[
 /// file that is no save at all, a backup made to be large, cannot swell the
 /// settings past what a browser would store.
 const UNREAD_MAX_BYTES: usize = 16_384;
+
+/// How much of a save's values this build cannot read, under keys it
+/// reads, it keeps, at most, in bytes of JSON: an allowance of its own
+/// beside [`UNREAD_MAX_BYTES`], for the same reasons.
+const UNREAD_VALUES_MAX_BYTES: usize = 16_384;
+
+/// The settings of the device, which a restore keeps as they are here
+/// ([`TrainingSettings::keep_device_settings`]), by the keys a save
+/// holds them under.
+const DEVICE_KEYS: [&str; 3] = ["masterVolume", "paddleSwap", "paddleKeysByPlace"];
 
 /// Settings as they are written: every section flattened into one object,
 /// and Contest written as Callsigns with `contestActive` beside it, a key
@@ -80,8 +91,68 @@ impl Serialize for Unread<'_> {
     }
 }
 
+/// Written with a value this build cannot read kept for a key, that value
+/// goes in the key's place while the setting still writes what it was
+/// read as ([`UnreadValue`]): so a choice a later build made goes back as
+/// it was, to the settings file, a backup, a merge with another copy's
+/// settings and sync alike, until it is changed here. A setting written
+/// as an object that is changed here keeps beside it what a later build
+/// wrote in it that this build does not read ([`beside_what_is_written`]).
+/// With none kept, which is every save this build made itself, they are
+/// written as ever.
 impl Serialize for TrainingSettings {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.unread_values.is_empty() {
+            return self.on_disk().serialize(serializer);
+        }
+        let written = self.written().map_err(S::Error::custom)?;
+        serializer.collect_map(written.into_iter().map(|(key, value)| {
+            let value = match self.unread_values.get(&key) {
+                Some(kept) if kept.read_as == value => kept.stored.clone(),
+                Some(kept) => beside_what_is_written(kept, &value).unwrap_or(value),
+                None => value,
+            };
+            (key, value)
+        }))
+    }
+}
+
+/// What a setting written as an object, `now` that it has been changed
+/// here, is written as with what a later build wrote in it kept beside:
+/// `now`, with each entry of `kept`'s stored object that this build did
+/// not read whole and has not changed here as it was stored. That is one
+/// under a name that neither what it was read as nor `now` holds, such as
+/// a later build's share of the callers' odds or the styles of a contest
+/// this build has no name for; and one this build reads and writes as it
+/// read it, which does not read as itself, such as WPX's styles with a
+/// later build's knob of their own. None where these are not all objects
+/// or no such entry is left: the setting is then written as it now is.
+fn beside_what_is_written(kept: &UnreadValue, now: &Value) -> Option<Value> {
+    let (Value::Object(stored), Value::Object(read_as), Value::Object(now)) =
+        (&kept.stored, &kept.read_as, now)
+    else {
+        return None;
+    };
+    let mut beside = now.clone();
+    let mut kept_any = false;
+    for (name, entry) in stored {
+        let unread = match (read_as.get(name), now.get(name)) {
+            (None, None) => true,
+            (Some(read), Some(written)) => {
+                read == written && !entry.is_null() && !reads_as(entry, read)
+            }
+            _ => false,
+        };
+        if unread {
+            beside.insert(name.clone(), entry.clone());
+            kept_any = true;
+        }
+    }
+    kept_any.then_some(Value::Object(beside))
+}
+
+impl TrainingSettings {
+    fn on_disk(&self) -> SettingsOnDisk<'_> {
         SettingsOnDisk {
             curriculum: &self.curriculum,
             playback: &self.playback,
@@ -92,8 +163,202 @@ impl Serialize for TrainingSettings {
             contest_active: self.curriculum.char_set_mode == CharSetMode::Contest,
             unread: Unread(&self.unread),
         }
-        .serialize(serializer)
     }
+
+    /// Each key these settings write, in the order they write them, with
+    /// what they write under it as this build reads them: no value kept
+    /// for a later build put in.
+    fn written(&self) -> Result<Vec<(String, Value)>, serde_json::Error> {
+        let json = serde_json::to_string(&self.on_disk())?;
+        Ok(serde_json::from_str::<InOrder>(&json)?.0)
+    }
+
+    /// These settings, which are what `save` reads as, clamped, with each
+    /// value of `save` this build could not read kept for its key
+    /// ([`Self::unread_values`]), as much as fits
+    /// [`UNREAD_VALUES_MAX_BYTES`].
+    ///
+    /// A value is kept where it was stored under a key these settings read
+    /// and write, and what they write there is not what was stored, nor is
+    /// it read alone, where no other key of `save` can have made something
+    /// else of it. What this build reads as something else on purpose is
+    /// not kept ([`read_on_purpose`]), and nor is a number where a number is
+    /// written: this build reads it, held to its range as it always was.
+    #[must_use]
+    pub fn keeping_values_of(mut self, save: &Map<String, Value>) -> Self {
+        self.unread_values.clear();
+        let Ok(written) = self.written() else {
+            return self;
+        };
+        let written: BTreeMap<String, Value> = written.into_iter().collect();
+        let read = Self::read_keys();
+        let mut room = UNREAD_VALUES_MAX_BYTES;
+        for (key, stored) in save {
+            if !read.contains(key.as_str()) {
+                continue;
+            }
+            let Some(read_as) = written.get(key) else {
+                continue;
+            };
+            if reads_as(stored, read_as) || read_on_purpose(key, stored) || reads_alone(key, stored)
+            {
+                continue;
+            }
+            // Counted as what no build reads is counted ([`carried`]).
+            let size =
+                serde_json::to_string(stored).map_or(usize::MAX, |json| key.len() + json.len() + 4);
+            if size > room {
+                continue;
+            }
+            room -= size;
+            self.unread_values.insert(
+                key.clone(),
+                UnreadValue {
+                    stored: stored.clone(),
+                    read_as: read_as.clone(),
+                },
+            );
+        }
+        self
+    }
+
+    /// Every value kept for a later build whose setting no longer writes
+    /// what it was read as let go of: that setting was changed here, and is
+    /// written as it is from now on, though it is changed back. Of one
+    /// written as an object, what a later build wrote in it that this build
+    /// does not read is kept on beside what it now writes, which it is now
+    /// read as ([`beside_what_is_written`]).
+    pub(super) fn let_go_of_changed_values(&mut self) {
+        if self.unread_values.is_empty() {
+            return;
+        }
+        let Ok(written) = self.written() else {
+            return;
+        };
+        let written: BTreeMap<String, Value> = written.into_iter().collect();
+        self.unread_values.retain(|key, kept| {
+            let Some(now) = written.get(key) else {
+                return false;
+            };
+            if *now == kept.read_as {
+                return true;
+            }
+            let Some(beside) = beside_what_is_written(kept, now) else {
+                return false;
+            };
+            *kept = UnreadValue {
+                stored: beside,
+                read_as: now.clone(),
+            };
+            true
+        });
+    }
+
+    /// Each value `before` kept for a later build, under a key
+    /// `of_the_reset` names, put back as it was where its setting writes
+    /// again what it was read as and these keep it otherwise or not at all:
+    /// as Undo puts back a card reset ([`Self::restore_section`]), the
+    /// setting is as it was read. What was let go of or kept anew by a
+    /// change since on another card, or from elsewhere, stays as it is.
+    pub(super) fn take_back_values_of(
+        &mut self,
+        before: &Self,
+        of_the_reset: impl Fn(&str) -> bool,
+    ) {
+        let changed: Vec<(&String, &UnreadValue)> = before
+            .unread_values
+            .iter()
+            .filter(|(key, kept)| self.unread_values.get(*key) != Some(*kept) && of_the_reset(key))
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        let Ok(written) = self.written() else {
+            return;
+        };
+        let written: BTreeMap<String, Value> = written.into_iter().collect();
+        for (key, kept) in changed {
+            if written.get(key) == Some(&kept.read_as) {
+                self.unread_values.insert(key.clone(), kept.clone());
+            }
+        }
+    }
+}
+
+/// A JSON object's entries, in the order it holds them.
+struct InOrder(Vec<(String, Value)>);
+
+impl<'de> Deserialize<'de> for InOrder {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entries;
+        impl<'de> Visitor<'de> for Entries {
+            type Value = InOrder;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<InOrder, A::Error> {
+                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some(entry) = map.next_entry()? {
+                    entries.push(entry);
+                }
+                Ok(InOrder(entries))
+            }
+        }
+        deserializer.deserialize_map(Entries)
+    }
+}
+
+/// Whether `stored` reads as `written`, what the settings write in its
+/// place: the same, but that a number reads as any number, as this build
+/// reads a number and holds it to its range; a list entry by entry; and an
+/// object entry by entry, beside whatever more this build writes, its own
+/// settings an older build had none of.
+fn reads_as(stored: &Value, written: &Value) -> bool {
+    match (stored, written) {
+        (Value::Number(_), Value::Number(_)) => true,
+        (Value::Array(stored), Value::Array(written)) => {
+            stored.len() == written.len()
+                && stored
+                    .iter()
+                    .zip(written)
+                    .all(|(stored, written)| reads_as(stored, written))
+        }
+        (Value::Object(stored), Value::Object(written)) => stored.iter().all(|(key, stored)| {
+            written
+                .get(key)
+                .is_some_and(|written| reads_as(stored, written))
+        }),
+        (stored, written) => stored == written,
+    }
+}
+
+/// Whether this build reads `stored`, under `key`, as something else on
+/// purpose, so that writing what it read loses nothing: nothing at all,
+/// such as a practice window saved before one was ever set, which is no
+/// build's choice and is what sync sends for a setting taken away; the
+/// mark Contest is written with, which the character set gives; and a
+/// character set this build names, or the Custom it reads as an order of
+/// the learner's own.
+fn read_on_purpose(key: &str, stored: &Value) -> bool {
+    stored.is_null()
+        || key == "contestActive"
+        || (key == "charSetMode" && ModeSave::deserialize(stored).is_ok())
+}
+
+/// Whether `stored` reads as itself under `key` in a save that holds it
+/// alone. Where a whole save reads it as something else, and alone it
+/// reads as itself, another key of that save made something else of it on
+/// purpose, as an older save's list of its own makes the unlock order, and
+/// nothing of it is lost.
+fn reads_alone(key: &str, stored: &Value) -> bool {
+    let alone = Value::Object(Map::from_iter([(key.to_string(), stored.clone())]));
+    TrainingSettings::deserialize(&alone)
+        .ok()
+        .and_then(|settings| settings.written().ok())
+        .and_then(|written| written.into_iter().find(|(written, _)| written == key))
+        .is_some_and(|(_, read_as)| reads_as(stored, &read_as))
 }
 
 /// A save as it is read: today's settings, and the practice window and
@@ -170,7 +435,8 @@ impl TrainingSettings {
     /// from a backup, and say whether any of them differed. They are set for
     /// the device rather than for the training: how loud it plays, and how
     /// its keyboard and paddles key, which a backup from a phone has no say
-    /// in on a computer.
+    /// in on a computer. A value of them kept here for a later build is
+    /// taken with them, and one the backup kept goes.
     pub fn keep_device_settings(&mut self, here: &Self) -> bool {
         let device = |settings: &Self| {
             (
@@ -183,6 +449,16 @@ impl TrainingSettings {
         self.band.master_volume = here.band.master_volume;
         self.playback.paddle_swap = here.playback.paddle_swap;
         self.playback.paddle_keys_by_place = here.playback.paddle_keys_by_place;
+        for key in DEVICE_KEYS {
+            match here.unread_values.get(key) {
+                Some(kept) => {
+                    self.unread_values.insert(key.to_string(), kept.clone());
+                }
+                None => {
+                    self.unread_values.remove(key);
+                }
+            }
+        }
         differed
     }
 }
@@ -281,6 +557,7 @@ impl From<SettingsSave> for TrainingSettings {
             recognition: save.recognition,
             contest: save.contest,
             unread: carried(save.unread),
+            unread_values: BTreeMap::new(),
         };
         match save.char_set.char_set_mode {
             Some(ModeSave::Today(CharSetMode::Callsign)) if save.char_set.contest_active => {
@@ -349,8 +626,9 @@ impl<'de> Deserialize<'de> for TrainingSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rulebook::CallerOdds;
     use crate::sequences::{PresetId, SequenceChoice};
-    use crate::settings::Aim;
+    use crate::settings::{AgcDecay, Aim, FilterShape, SettingsSection};
 
     fn load(json: serde_json::Value) -> TrainingSettings {
         serde_json::from_value(json).expect("a save should load")
@@ -810,6 +1088,8 @@ mod tests {
 
     /// A restore keeps this device's volume and paddle keys and takes the
     /// rest, the level among them, and says whether the device's differed.
+    /// What of them is kept here for a later build is kept with them, and
+    /// what the backup kept of them goes.
     #[test]
     fn a_restore_keeps_the_settings_of_the_device() {
         let mut here = TrainingSettings::default();
@@ -824,6 +1104,340 @@ mod tests {
         assert!(restored.playback.paddle_swap);
         assert!(restored.playback.paddle_keys_by_place);
         assert!(!restored.clone().keep_device_settings(&here), "the same");
+
+        // A later build's paddle keys here, which this build reads as its
+        // own default; and the backup's own of them.
+        let here = kept(
+            TrainingSettings::default(),
+            serde_json::json!({ "paddleSwap": "auto" }),
+        );
+        let backup = kept(
+            TrainingSettings::default(),
+            serde_json::json!({ "paddleKeysByPlace": "layout", "agcDecay": "medium" }),
+        );
+        let mut restored = backup;
+        assert!(!restored.keep_device_settings(&here), "read the same");
+        let written = serde_json::to_value(&restored).expect("settings write");
+        assert_eq!(written["paddleSwap"], "auto", "this device's");
+        assert_eq!(written["paddleKeysByPlace"], true, "this device's");
+        assert_eq!(written["agcDecay"], "medium", "the backup's");
+        for key in DEVICE_KEYS {
+            assert!(written.get(key).is_some(), "{key} is a key settings write");
+        }
+    }
+
+    /// `settings` with what of `save` they cannot read kept, as the app
+    /// keeps it from what it reads: `settings` stands for what the app
+    /// read of `save`.
+    fn kept(settings: TrainingSettings, save: Value) -> TrainingSettings {
+        let Value::Object(save) = save else {
+            unreachable!("a save is an object")
+        };
+        settings.clamp().keeping_values_of(&save)
+    }
+
+    /// Read from `save` as the app reads it where every key reads.
+    fn read_keeping(save: Value) -> TrainingSettings {
+        kept(load(save.clone()), save)
+    }
+
+    /// A value this build cannot read is kept, and written back in its
+    /// place as it was stored, while the setting is as it was read: kept
+    /// through a change of another setting, and let go of once the setting
+    /// is changed, though it is changed back.
+    #[test]
+    fn a_value_this_build_cannot_read_is_written_back_until_its_setting_changes() {
+        let settings = read_keeping(serde_json::json!({
+            "agcDecay": "medium", "filterShape": "notch", "level": 7,
+        }));
+        assert_eq!(settings.band.agc_decay, AgcDecay::Fast);
+        assert_eq!(
+            settings.unread_values.keys().collect::<Vec<_>>(),
+            ["agcDecay", "filterShape"]
+        );
+        let mut changed = settings.clone();
+        changed.curriculum.num_groups = 9;
+        changed.band.filter_shape = FilterShape::Soft;
+        let changed = changed.clamp();
+        let written = serde_json::to_value(&changed).expect("settings write");
+        assert_eq!(
+            (
+                &written["agcDecay"],
+                &written["filterShape"],
+                &written["numGroups"]
+            ),
+            (&"medium".into(), &"soft".into(), &9.into())
+        );
+        assert_eq!(
+            changed.unread_values.keys().collect::<Vec<_>>(),
+            ["agcDecay"],
+            "let go of once changed"
+        );
+        let mut back = changed;
+        back.band.filter_shape = FilterShape::Sharp;
+        let written = serde_json::to_value(back.clamp()).expect("settings write");
+        assert_eq!(written["filterShape"], "sharp", "this build's choice now");
+
+        // Written with what it keeps, the keys come in the order they ever
+        // did, and every key once.
+        let order = |settings: &TrainingSettings| {
+            let json = serde_json::to_string(settings).expect("settings write");
+            serde_json::from_str::<InOrder>(&json)
+                .expect("an object")
+                .0
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>()
+        };
+        let plain = TrainingSettings {
+            unread_values: BTreeMap::new(),
+            ..settings.clone()
+        };
+        assert_eq!(order(&settings), order(&plain));
+        let pretty = serde_json::to_string_pretty(&settings).expect("settings write");
+        assert_eq!(pretty.matches("\"agcDecay\"").count(), 1, "{pretty}");
+        assert!(pretty.contains("\"agcDecay\": \"medium\""), "{pretty}");
+    }
+
+    /// What this build reads as something else on purpose, or as it
+    /// writes it from another key of an older save, is no later build's,
+    /// and is written as this build reads it; nor is a number, which this
+    /// build reads, held to its range as it always was. A later build's
+    /// share among the callers' odds is kept, and so are the callers'
+    /// styles of a contest this build has no name for.
+    #[test]
+    fn what_is_read_as_something_else_on_purpose_is_not_kept() {
+        let none_kept = |save: Value| {
+            let settings = read_keeping(save.clone());
+            assert!(
+                settings.unread_values.is_empty(),
+                "{save}: {:?}",
+                settings.unread_values
+            );
+            serde_json::to_value(&settings).expect("settings write")
+        };
+        let custom = none_kept(serde_json::json!({
+            "charSetMode": "custom", "customSet": ["Q", "R", "S", "T"],
+            "customSequence": ["U", "V"],
+        }));
+        assert_eq!(custom["charSetMode"], "koch");
+        assert_eq!(
+            custom["customSequence"],
+            serde_json::json!(["Q", "R", "S", "T"])
+        );
+        let contest = none_kept(serde_json::json!({ "charSetMode": "contest" }));
+        assert_eq!(
+            (&contest["charSetMode"], &contest["contestActive"]),
+            (&"callsign".into(), &true.into())
+        );
+        let window = none_kept(serde_json::json!({ "practiceWindow": null }));
+        assert_eq!(window["practiceWindow"], "all");
+        let mark = none_kept(serde_json::json!({ "charSetMode": "koch", "contestActive": true }));
+        assert!(mark.get("contestActive").is_none());
+        let whole = none_kept(serde_json::json!({ "charWpmMin": 22, "charWpmMax": 95 }));
+        assert_eq!(
+            (&whole["charWpmMin"], &whole["charWpmMax"]),
+            (&22.0.into(), &80.0.into())
+        );
+        let call = none_kept(serde_json::json!({ "myCall": "dl1abc" }));
+        assert_eq!(call["myCall"], "DL1ABC");
+        let pileup = none_kept(serde_json::json!({
+            "charSetMode": "koch", "contestStyle": "pileup", "stationsMin": 1, "stationsMax": 3,
+        }));
+        assert_eq!(
+            pileup["stationsMax"], 1,
+            "a range a pile-up opened, put back"
+        );
+        let mut odds = serde_json::to_value(CallerOdds::default()).expect("odds write");
+        odds.as_object_mut().expect("an object").remove("dupe");
+        none_kept(serde_json::json!({ "callerOdds": odds.clone(), "hunterDxPercent": 140 }));
+
+        odds["laterShare"] = 0.5.into();
+        let later = read_keeping(serde_json::json!({ "callerOdds": odds.clone() }));
+        assert_eq!(
+            serde_json::to_value(&later).expect("settings write")["callerOdds"],
+            odds
+        );
+        let styles = serde_json::json!({ "cwt": { "at": [0.25, -0.5], "off": [] } });
+        let later = read_keeping(serde_json::json!({ "callerStyles": styles }));
+        assert!(later.contest.caller_styles.is_empty());
+        assert_eq!(
+            serde_json::to_value(&later).expect("settings write")["callerStyles"],
+            styles
+        );
+    }
+
+    /// A card's reset lets go of a later build's choice it changes, or
+    /// keeps less of it, and Undo brings it back whole with the card: here
+    /// WPX's callers' styles with a knob a later build added, which the
+    /// reset takes away. The styles of a contest this build has no name
+    /// for, which it does not read, the reset leaves as they are, as it
+    /// leaves a later build's own keys.
+    #[test]
+    fn undo_of_a_reset_brings_back_what_the_reset_let_go_of() {
+        let styles = serde_json::json!({
+            "cwt": { "at": [0.25, -0.5], "off": [] },
+            "wpx": { "at": [0.2, 0.1], "off": [], "pace": 0.8 },
+        });
+        let styles_written = |settings: &TrainingSettings| {
+            serde_json::to_value(settings).expect("settings write")["callerStyles"].clone()
+        };
+        let wpx_alone = serde_json::json!({ "wpx": styles["wpx"] });
+        for (stored, after_the_reset) in [
+            (&styles, serde_json::json!({ "cwt": styles["cwt"] })),
+            (&wpx_alone, serde_json::json!({})),
+        ] {
+            let before = read_keeping(serde_json::json!({ "callerStyles": stored }));
+            assert_eq!(
+                before.unread_values.keys().collect::<Vec<_>>(),
+                ["callerStyles"]
+            );
+            let mut reset = before.clone();
+            reset.reset_section(SettingsSection::CharacterSet);
+            assert_eq!(styles_written(&reset), after_the_reset, "{stored}");
+            let mut undone = reset;
+            undone.restore_section(SettingsSection::CharacterSet, &before);
+            assert_eq!(styles_written(&undone), *stored);
+            assert_eq!(undone, before, "{stored}");
+        }
+    }
+
+    /// Undo of a card's reset brings back only what that reset let go of:
+    /// a later build's choice on another card, chosen here since and
+    /// chosen back, stays this build's choice, as every other card stays
+    /// as it is now.
+    #[test]
+    fn undo_of_a_reset_leaves_what_another_card_let_go_of_since() {
+        let styles = serde_json::json!({
+            "cwt": { "at": [0.25, -0.5], "off": [] },
+            "wpx": { "at": [0.2, 0.1], "off": [] },
+        });
+        let before = read_keeping(serde_json::json!({
+            "callerStyles": styles, "agcDecay": "medium",
+        }));
+        assert_eq!(
+            before.unread_values.keys().collect::<Vec<_>>(),
+            ["agcDecay", "callerStyles"]
+        );
+        let mut since = before.clone();
+        since.reset_section(SettingsSection::CharacterSet);
+        // Slow chosen and stored, then Fast chosen back and stored.
+        since.band.agc_decay = AgcDecay::Slow;
+        let mut since = since.clamp();
+        since.band.agc_decay = AgcDecay::Fast;
+        let mut since = since.clamp();
+        let written = |settings: &TrainingSettings, key: &str| {
+            serde_json::to_value(settings).expect("settings write")[key].clone()
+        };
+        assert_eq!(written(&since, "agcDecay"), "fast");
+        since.restore_section(SettingsSection::CharacterSet, &before);
+        assert_eq!(written(&since, "agcDecay"), "fast", "chosen here since");
+        assert_eq!(written(&since, "callerStyles"), styles, "the card's");
+    }
+
+    /// What a later build wrote inside a setting this build writes as an
+    /// object, and does not read, outlasts an edit here of what it does
+    /// read there: a share of the callers' odds of its own beside one
+    /// changed here, and the callers' styles of a contest this build has
+    /// no name for beside WPX's changed here. Written before the next clamp
+    /// or after it, and read again, they are as they were stored.
+    #[test]
+    fn a_later_builds_entries_outlast_an_edit_here_of_the_rest_of_their_setting() {
+        let mut odds = serde_json::to_value(CallerOdds::default()).expect("odds write");
+        odds["laterShare"] = 0.5.into();
+        let styles = serde_json::json!({
+            "cwt": { "at": [0.25, -0.5], "off": [] },
+            "wpx": { "at": [0.2, 0.1], "off": [] },
+        });
+        let read = read_keeping(serde_json::json!({
+            "callerOdds": odds, "callerStyles": styles,
+        }));
+        let mut edited = read;
+        edited.contest.caller_odds.abroad = 0.4;
+        edited.contest.caller_styles.insert(
+            "wpx".into(),
+            crate::settings::StyleChoice {
+                at: [0.3, -0.1],
+                off: vec![1],
+            },
+        );
+        odds["abroad"] = 0.4.into();
+        let mut styles = styles;
+        styles["wpx"] = serde_json::json!({ "at": [0.3, -0.1], "off": [1] });
+        let clamped = edited.clone().clamp();
+        for (when, settings) in [("before a clamp", &edited), ("after one", &clamped)] {
+            let written = serde_json::to_value(settings).expect("settings write");
+            assert_eq!(written["callerOdds"], odds, "{when}");
+            assert_eq!(written["callerStyles"], styles, "{when}");
+            let again = read_keeping(written.clone());
+            assert_eq!(
+                serde_json::to_value(&again).expect("settings write"),
+                written,
+                "{when}, read again"
+            );
+        }
+        assert_eq!(
+            read_keeping(serde_json::to_value(&clamped).expect("settings write")),
+            clamped
+        );
+    }
+
+    /// The same for what a later build wrote inside an entry this build
+    /// reads, a knob of its own in WPX's callers' styles: it stays as
+    /// stored while that entry is not changed here, though CQWW's styles
+    /// are, and goes once WPX's are.
+    #[test]
+    fn a_later_builds_field_in_an_entry_outlasts_an_edit_here_of_another_entry() {
+        let wpx = serde_json::json!({ "at": [0.2, 0.1], "off": [], "pace": 0.8 });
+        let read = read_keeping(serde_json::json!({ "callerStyles": { "wpx": wpx } }));
+        assert_eq!(
+            read.unread_values.keys().collect::<Vec<_>>(),
+            ["callerStyles"]
+        );
+        let styles_written = |settings: &TrainingSettings| {
+            serde_json::to_value(settings).expect("settings write")["callerStyles"].clone()
+        };
+        let style = |at: [f64; 2]| crate::settings::StyleChoice { at, off: vec![] };
+        let mut edited = read;
+        edited
+            .contest
+            .caller_styles
+            .insert("cqww".into(), style([0.1, 0.1]));
+        let styles = serde_json::json!({ "cqww": { "at": [0.1, 0.1], "off": [] }, "wpx": wpx });
+        let clamped = edited.clone().clamp();
+        assert_eq!(styles_written(&edited), styles, "before a clamp");
+        assert_eq!(styles_written(&clamped), styles, "after one");
+        assert_eq!(
+            read_keeping(serde_json::to_value(&clamped).expect("settings write")),
+            clamped
+        );
+        let mut wpx_changed = clamped;
+        wpx_changed
+            .contest
+            .caller_styles
+            .insert("wpx".into(), style([0.1, -0.1]));
+        let wpx_changed = wpx_changed.clamp();
+        assert_eq!(
+            styles_written(&wpx_changed)["wpx"],
+            serde_json::json!({ "at": [0.1, -0.1], "off": [] })
+        );
+        assert!(wpx_changed.unread_values.is_empty());
+    }
+
+    /// Only so much of what this build cannot read is kept: a value whose
+    /// JSON is past the allowance is written as this build reads it.
+    #[test]
+    fn only_so_much_of_what_this_build_cannot_read_is_kept() {
+        let settings = read_keeping(serde_json::json!({
+            "filterShape": "x".repeat(UNREAD_VALUES_MAX_BYTES),
+            "agcDecay": "medium",
+        }));
+        assert_eq!(
+            settings.unread_values.keys().collect::<Vec<_>>(),
+            ["agcDecay"]
+        );
+        let written = serde_json::to_value(&settings).expect("settings write");
+        assert_eq!(written["filterShape"], "sharp");
     }
 
     /// A save from before the stations a pile-up opened were kept in mind,

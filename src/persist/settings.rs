@@ -1,10 +1,23 @@
 //! Stored settings, read as the app may use them: whatever of them still
-//! reads, brought up from older builds' saves, and clamped
-//! ([`load_settings_from`]); and what a file holds, without the mark an
-//! editor may put before it ([`unmarked`]).
+//! reads, brought up from older builds' saves, and clamped, with what of
+//! them this build cannot read kept to be written back
+//! ([`load_settings_from`], [`settings_of_keys`]); and what a file holds,
+//! without the mark an editor may put before it ([`unmarked`]).
 
 use cw_core::{RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, TrainingSettings};
 use serde::Deserialize;
+use serde_json::{Map, Value};
+
+/// The keys a save, `raw`, holds, brought up from older builds' saves:
+/// none where it is no JSON object.
+fn upgraded(raw: &str) -> Option<Map<String, Value>> {
+    let Ok(Value::Object(mut stored)) = serde_json::from_str::<Value>(raw) else {
+        return None;
+    };
+    upgrade_receiver(&mut stored);
+    upgrade_agc_threshold(&mut stored);
+    Some(stored)
+}
 
 /// Load settings without throwing away everything for one bad field.
 ///
@@ -19,30 +32,34 @@ use serde::Deserialize;
 /// end. Each key used to be tried on top of every key kept before it, which
 /// took time in the square of their number: a file of tens of thousands of
 /// keys, a backup made that way, held the app up for minutes.
-fn recover_settings(raw: &str) -> TrainingSettings {
-    let Ok(serde_json::Value::Object(mut stored)) = serde_json::from_str::<serde_json::Value>(raw)
-    else {
-        return TrainingSettings::default();
-    };
-    upgrade_receiver(&mut stored);
-    upgrade_agc_threshold(&mut stored);
-    if let Ok(settings) = TrainingSettings::deserialize(&stored) {
+fn recovered(stored: &Map<String, Value>) -> TrainingSettings {
+    if let Ok(settings) = TrainingSettings::deserialize(stored) {
         return settings;
     }
     let read = TrainingSettings::read_keys();
     let (tried, carried): (Vec<_>, Vec<_>) = stored
-        .into_iter()
+        .iter()
         .partition(|(key, _)| read.contains(key.as_str()));
-    let mut kept = serde_json::Map::new();
+    let mut kept = Map::new();
     for (key, value) in tried {
-        kept.insert(key.clone(), value);
+        kept.insert(key.clone(), value.clone());
         if TrainingSettings::deserialize(&kept).is_err() {
-            kept.remove(&key);
+            kept.remove(key);
         }
     }
     let settings = TrainingSettings::deserialize(&kept).unwrap_or_default();
-    kept.extend(carried);
+    kept.extend(
+        carried
+            .into_iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
     TrainingSettings::deserialize(&kept).unwrap_or(settings)
+}
+
+/// Settings read from `raw` as [`recovered`] reads them, unclamped.
+#[cfg(test)]
+fn recover_settings(raw: &str) -> TrainingSettings {
+    upgraded(raw).map_or_else(TrainingSettings::default, |stored| recovered(&stored))
 }
 
 /// A save from before the receiver was quoted by its 6 dB width has no
@@ -86,9 +103,20 @@ fn upgrade_agc_threshold(stored: &mut serde_json::Map<String, serde_json::Value>
     stored.insert("rfGainDb".into(), serde_json::json!(backed_off));
 }
 
+/// Settings from the keys of a save, `stored`, as the app may use them:
+/// whatever of them still reads, clamped, with each value this build
+/// cannot read kept to be written back as it was stored, until that
+/// setting is changed here ([`TrainingSettings::keeping_values_of`]).
+pub(super) fn settings_of_keys(stored: &Map<String, Value>) -> TrainingSettings {
+    recovered(stored).clamp().keeping_values_of(stored)
+}
+
 /// Stored settings, as the app may use them.
 pub(super) fn load_settings_from(raw: &str) -> TrainingSettings {
-    recover_settings(raw).clamp()
+    upgraded(raw).map_or_else(
+        || TrainingSettings::default().clamp(),
+        |stored| settings_of_keys(&stored),
+    )
 }
 
 /// What a file holds, `raw`, without the mark of its encoding that an
@@ -154,6 +182,16 @@ mod tests {
         let fresh = serde_json::to_string(&TrainingSettings::default())
             .expect("serialize")
             .len();
+        assert!(written < fresh + 20_000, "{written}");
+        // Read as the stores read it, with the value no build reads kept
+        // to be written back, it is as quick, and as small.
+        let started = std::time::Instant::now();
+        let settings = load_settings_from(&raw);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+        let kept: Vec<&String> = settings.unread_values.keys().collect();
+        assert_eq!(kept, ["groupTimeout"]);
+        let written = serde_json::to_string(&settings).expect("serialize").len();
         assert!(written < fresh + 20_000, "{written}");
     }
 
@@ -275,5 +313,87 @@ mod tests {
         let settings = load_settings_from(&serde_json::to_string(&stored).unwrap());
         assert_eq!(settings.playback.char_wpm_min, 80.0);
         assert_eq!(settings.curriculum.num_groups, 1);
+    }
+
+    /// A save a later build wrote: a filter shape, an AGC, a character set,
+    /// a practice window and a contest this build has no name for, with
+    /// that contest's callers' styles, and a speed past this build's range.
+    const LATER_SAVE: &str = r#"{
+        "filterShape": "notch", "filterWidthHz": 300, "agcDecay": "medium",
+        "charSetMode": "morse", "practiceWindow": "last7", "contestKind": "cwt",
+        "callerStyles": {"cwt": {"at": [0.25, -0.5], "off": []}},
+        "charWpmMax": 95, "numGroups": 7
+    }"#;
+
+    /// The keys of `LATER_SAVE` this build cannot read, as it stored them.
+    fn unreadable_in_later_save() -> serde_json::Map<String, serde_json::Value> {
+        let serde_json::Value::Object(save) = serde_json::from_str(LATER_SAVE).expect("JSON")
+        else {
+            unreachable!("an object")
+        };
+        save.into_iter()
+            .filter(|(key, _)| {
+                !matches!(key.as_str(), "filterWidthHz" | "charWpmMax" | "numGroups")
+            })
+            .collect()
+    }
+
+    /// Each value of a save this build cannot read, under a key it reads,
+    /// is read as this build can, and goes back as it was stored, so the
+    /// later build that wrote it still finds it. A number past this
+    /// build's range is not one: it is read, held in the range, as before.
+    /// Each used to go back as what this build read it as.
+    #[test]
+    fn a_value_this_build_cannot_read_goes_back_as_it_was_stored() {
+        let settings = load_settings_from(LATER_SAVE);
+        assert_eq!(settings.band.filter_shape, cw_core::FilterShape::Sharp);
+        assert_eq!(settings.band.agc_decay, cw_core::AgcDecay::Fast);
+        assert_eq!(settings.curriculum.char_set_mode, CharSetMode::Mixed);
+        assert_eq!(
+            settings.curriculum.practice_window,
+            cw_core::PracticeWindow::All
+        );
+        assert_eq!(settings.contest.contest_kind, cw_core::ContestKind::Wpx);
+        assert!(settings.contest.caller_styles.is_empty());
+        assert_eq!(settings.playback.char_wpm_max, 80.0);
+        assert_eq!(settings.curriculum.num_groups, 7);
+
+        let written = serde_json::to_value(&settings).expect("serialize");
+        for (key, stored) in unreadable_in_later_save() {
+            assert_eq!(written[&key], stored, "{key} goes back as it was stored");
+        }
+        assert_eq!(written["charWpmMax"], 80.0, "held in this build's range");
+        assert_eq!(written["numGroups"], 7);
+        // Read again, it is the same.
+        let again = load_settings_from(&serde_json::to_string(&settings).expect("serialize"));
+        assert_eq!(again, settings);
+    }
+
+    /// A value this build cannot read goes back as it was stored until the
+    /// setting is changed here: from then on, as it now is, chosen here,
+    /// though it is chosen back.
+    #[test]
+    fn a_setting_changed_here_goes_as_it_now_is() {
+        let mut settings = load_settings_from(LATER_SAVE);
+        settings.band.filter_shape = cw_core::FilterShape::Soft;
+        settings.playback.char_wpm_max = 40.0;
+        let settings = settings.clamp();
+        let written = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(written["filterShape"], "soft");
+        assert_eq!(written["charWpmMax"], 40.0);
+        for (key, stored) in unreadable_in_later_save() {
+            if key != "filterShape" {
+                assert_eq!(written[&key], stored, "{key} goes back as it was stored");
+            }
+        }
+        let again = load_settings_from(&serde_json::to_string(&settings).expect("serialize"));
+        assert_eq!(again, settings, "the same, read again");
+
+        // Chosen back, it is this build's choice.
+        let mut back = settings;
+        back.band.filter_shape = cw_core::FilterShape::Sharp;
+        let written = serde_json::to_value(back.clamp()).expect("serialize");
+        assert_eq!(written["filterShape"], "sharp");
+        assert_eq!(written["agcDecay"], "medium", "the rest as stored");
     }
 }

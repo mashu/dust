@@ -26,7 +26,7 @@ pub use exchange::{
     send_serial, send_zone,
 };
 pub use kind::{CallerHabits, ContestKind, RunStyle, TuCall};
-pub(crate) use kind::{MS_PER_HOUR, MS_PER_MINUTE};
+pub(crate) use kind::{MS_PER_HOUR, MS_PER_MINUTE, QRS_DROP, QRS_MORE, QRS_MOST};
 pub use odds::{CallerOdds, HUNTER_DX_PERCENT, Odd, OddsCard};
 pub use rules::{
     CallerStyles, ContestRules, FAREWELLS, Fill, Form, GREETING_HOUR, Multiplier, PerSide, Points,

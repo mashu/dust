@@ -38,9 +38,11 @@ mod score;
 mod source;
 mod turn;
 
+#[cfg(test)]
+pub(crate) use crate::rulebook::QRS_MOST;
 pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 #[cfg(test)]
-pub(crate) use caller::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
+pub(crate) use caller::{FLUTTER_DEPTH, FLUTTER_RATE_HZ};
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
 pub use esm::{EntryField, Esm, Fields, QsoState, esm, loggable, message_text, space_to_call};

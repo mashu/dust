@@ -114,9 +114,14 @@ and its own, so a change made on one device and another made on another
 both come through, and no device writes over another's file. A change is
 stamped after the newest stamp of its key the device has taken up, so one
 made after another is the newer, however far apart the devices' clocks
-are. A device joining a sync takes what the drive holds, as a restore takes
-a backup's settings, and adds nothing of its own until it changes
-something.
+are. A setting's value a device's build cannot read, a later build's
+choice, is taken up and sent as it was stored, at its own stamp, never as
+that build reads it: it stays the later build's on every device until a
+device changes that setting; and in a setting of named entries, such as
+the callers' odds, what a later build wrote in an entry stays though a
+device changes another entry. A device joining a sync takes what the drive
+holds, as a restore takes a backup's settings, and adds nothing of its own
+until it changes something.
 
 All that stays each device's own: when it last saved a backup file, which
 is a file on that device, and a session or run it has under way, which is

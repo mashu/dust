@@ -79,6 +79,28 @@ impl DriveState {
             .collect()
     }
 
+    /// Take in what `other` says of the drive, as had every pack it was
+    /// read from been read here too: the records either holds, and the
+    /// latest deletion and putting back of each that either knows. Two
+    /// copies of the app on one device each read packs of their own, and
+    /// what both read is put together ([`super::state::SyncState::merged`]).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "two copies' states are merged from SYNC-1's next step on"
+        )
+    )]
+    pub fn join(&mut self, other: &DriveState) {
+        self.puts.extend(other.puts.iter().copied());
+        for (&id, &at) in &other.tombs {
+            latest(&mut self.tombs, id, at);
+        }
+        for (&id, &at) in &other.revives {
+            latest(&mut self.revives, id, at);
+        }
+    }
+
     /// When a change to the record `id` made at `now` is stamped, as far
     /// as this says of the drive: at `now`, or just after the latest
     /// deletion or putting back of it, where that is later
@@ -431,6 +453,29 @@ mod tests {
 
         let there = drive(&[pack(&[1], &[(1, 50)], &[(1, 60)])]);
         assert_eq!(here.plan(&there).take_back, [id(1)]);
+    }
+
+    /// What two copies of the app read of the drive, put together, says
+    /// what every pack either read says, whichever is taken into which, and
+    /// again and again.
+    #[test]
+    fn what_two_copies_read_of_the_drive_is_joined() {
+        let packs = [
+            pack(&[1, 2, 3], &[], &[]),
+            pack(&[], &[(2, 10), (3, 10)], &[]),
+            pack(&[], &[], &[(3, 20)]),
+            pack(&[4], &[(3, 15), (4, 30)], &[(2, 5)]),
+        ];
+        let (one, other) = (drive(&packs[..2]), drive(&packs[2..]));
+        let mut joined = one.clone();
+        joined.join(&other);
+        assert_eq!(joined, drive(&packs), "every pack's word");
+        let mut the_other_way = other.clone();
+        the_other_way.join(&one);
+        assert_eq!(the_other_way, joined);
+        let mut again = joined.clone();
+        again.join(&one);
+        assert_eq!(again, joined, "taken in twice, the same");
     }
 
     /// Two devices that each sync until neither has anything to do end up

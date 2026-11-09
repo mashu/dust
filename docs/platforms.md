@@ -664,7 +664,19 @@ with a threshold raised under the AGC as the RF gain backed off as far, which
 is how the AGC heard it. A setting a later build added, which this one does
 not read, is kept and written back with the rest, as are the keys a later
 build added to a session, a group, its timing or a counter: a copy of this
-build left open beside a newer one never strips them. A session is stored
+build left open beside a newer one never strips them. So are the keys a later
+build added to what sync keeps, as this build read them. So is a value this
+build cannot read under a key it reads, a later build's choice of a filter
+shape or a contest, say (`TrainingSettings::unread_values`): read as this
+build can, it goes back as it was stored, to the file, a backup and sync
+alike, until that setting is changed here, and from then on as chosen here.
+In a setting of named entries, the callers' odds or their styles in each
+contest, an entry this build does not read, a later build's share or the
+styles of a contest it has no name for, stays as it was stored though the
+rest of that setting is changed here, a card's reset included; so does one it
+reads only in part, a contest's styles with a knob a later build added, until
+that entry is changed here. A number past this build's range is not one: it
+is read, held to the range, as it always was. A session is stored
 once, as the build that stored it wrote it, and never written over, so what
 a later build adds to it stays. Each says the format it is stored in,
 `"format"`: the oldest format a build must know to read it

@@ -660,9 +660,16 @@ impl AppCtx {
             None => {}
         }
         // Only what came from elsewhere: the settings screen leaves its
-        // own values as typed until they are left.
-        if merged != ours {
+        // own values as typed until they are left. What is kept for a later
+        // build is taken up all the same, as is what of it a change here
+        // has let go of (`TrainingSettings::unread_values`), so a setting
+        // chosen back after it is stored is written as chosen.
+        let mut as_typed = merged.clone();
+        as_typed.unread_values.clone_from(&ours.unread_values);
+        if as_typed != ours {
             settings.set(merged.clone());
+        } else if settings.peek().unread_values != merged.unread_values {
+            settings.write().unread_values = merged.unread_values.clone();
         }
         merged
     }

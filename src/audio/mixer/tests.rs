@@ -467,7 +467,7 @@ fn the_preview_pause_lets_the_band_back_at_fast_and_holds_it_at_slow() {
         render(&mut mixer, sent);
         let pause = render(
             &mut mixer,
-            band_preview_gap_ms() as usize * SR as usize / 1_000,
+            band_preview_gap_ms(&settings) as usize * SR as usize / 1_000,
         );
         let last = &pause[pause.len() - SR as usize / 5..];
         -db(power(last) / before)

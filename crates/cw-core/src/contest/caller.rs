@@ -24,8 +24,8 @@ use crate::rulebook::exchange::{
 use crate::rulebook::odds::CallerOdds;
 use crate::rulebook::rules::{ContestRules, STYLE_EVEN, Side};
 use crate::rulebook::serial::{SerialModel, WPX_SERIALS};
-use crate::rulebook::{CallerHabits, RunStyle};
-use crate::settings::{TrainingSettings, WPM_MIN};
+use crate::rulebook::{CallerHabits, QRS_DROP, QRS_MORE, RunStyle};
+use crate::settings::TrainingSettings;
 use crate::timing::{StationVoice, resolve_station};
 
 /// Where a caller is in its QSO with you, as MorseRunner's operators are
@@ -290,15 +290,9 @@ const FLUTTER_STREAM: u64 = u64::MAX;
 const QRS_AFTER: u32 = 3;
 const QRS_AFTER_SKILLED: u32 = 4;
 
-/// How much slower a caller of skill 1, 2 and 3 sends once it slows down,
-/// and how much slower still from its fourth incomplete try on.
-const QRS_DROP: [f64; 3] = [0.20, 0.16, 0.12];
+/// From which incomplete try on a caller slows down further, by
+/// [`QRS_MORE`].
 const QRS_MORE_FROM: u32 = 4;
-const QRS_MORE: f64 = 0.02;
-/// The most a caller slows down for you, at skill 1 from its fourth
-/// incomplete try on: for a test to bound it.
-#[cfg(test)]
-pub(crate) const QRS_MOST: f64 = QRS_DROP[0] + QRS_MORE;
 
 /// Under rough habits, how long the call you sent must be for a careless
 /// operator to take a slip of its call for its own: more than three
@@ -540,7 +534,7 @@ impl Caller {
     /// How it sounds in its next send: its own voice, slowed down while it
     /// slows down for you.
     pub(super) fn sending_voice(&self) -> StationVoice {
-        slowed(self.voice, self.qrs)
+        self.voice.slowed(self.qrs)
     }
 
     /// Where it stands as MorseRunner counts incomplete tries: one that
@@ -971,7 +965,7 @@ impl Caller {
         }
         // Tried often enough without getting its QSO through, it slows down
         // for you, as long as the QSO is on (`DxOper.pas:343-376`).
-        if self.habits == CallerHabits::Easy
+        if self.habits.slow_down_for_you()
             && self.qso_state().is_some_and(CallerState::worked)
             && let Some(drop) = qrs_drop(self.skill, self.incomplete)
         {
@@ -1298,16 +1292,6 @@ fn qrs_drop(skill: u32, incomplete: u32) -> Option<f64> {
     Some(drop + more)
 }
 
-/// `voice`, its characters and its spacing alike `drop` slower, never
-/// slower than the Speed card's lowest speed, as MorseRunner keeps a
-/// floor under its callers' (`DxStn.pas:166-168`).
-fn slowed(mut voice: StationVoice, drop: f64) -> StationVoice {
-    let slow = |wpm: f64| (wpm * (1.0 - drop)).max(WPM_MIN).min(wpm);
-    voice.char_wpm = slow(voice.char_wpm);
-    voice.effective_wpm = slow(voice.effective_wpm).min(voice.char_wpm);
-    voice
-}
-
 /// A caller's flutter, from `rng`: one of its own rate and depth for a
 /// `share` of callers, none for the rest.
 fn draw_flutter(share: f64, rng: &mut impl Rng) -> Option<Qsb> {
@@ -1335,6 +1319,7 @@ mod tests {
     use crate::callsign::{CallSpec, generate_call};
     use crate::contest::ContestKind;
     use crate::rulebook::exchange::read_number;
+    use crate::settings::WPM_MIN;
     use MessagePart::{Again, Cq, Exchange, HisCall, Tu};
 
     fn rules() -> &'static ContestRules {

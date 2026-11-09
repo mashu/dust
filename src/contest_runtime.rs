@@ -798,7 +798,7 @@ mod tests {
                     reply.text
                 );
             }
-            let band = BandKey::of(&settings.band);
+            let band = BandKey::of(&settings);
             assert!(h.calls().iter().all(|call| match call {
                 Call::Band(key) => *key == band,
                 _ => true,

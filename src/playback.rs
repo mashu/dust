@@ -5,11 +5,11 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::band::agc_decay_sec;
+use cw_core::band::agc_timing;
 use cw_core::{
-    AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, HeardTurn, MonoMs, Sampler,
-    Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX, VOLUME_MIN,
-    compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, HeardTurn, LISTEN_LETTER_GAP_MS,
+    MonoMs, Sampler, Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX,
+    VOLUME_MIN, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
     generate_training_group, hear_qsos, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
@@ -22,9 +22,6 @@ use crate::time::{local_hour, mono_ms, seed_rng};
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
 
-/// The pause between letters on the Listen screen.
-const LETTER_GAP_MS: u32 = 420;
-
 /// How many QSOs Hear a QSO plays: a few, enough to hear one follow
 /// another.
 const HEAR_QSOS: u32 = 3;
@@ -32,14 +29,15 @@ const HEAR_QSOS: u32 = 3;
 /// What the band preview calls.
 pub(crate) const BAND_PREVIEW_CALL: &str = "CQ";
 
-/// The pause between the band preview's calls: long enough for the AGC at
-/// Fast to let the band back after the loudest of them. Its hang and five of
+/// The pause between the band preview's calls under `settings`: long
+/// enough for the AGC at Fast to let the band back after the loudest of
+/// them. Its hang, which the speeds sent size ([`agc_timing`]), and five of
 /// its release's time constants bring a 26 dB duck within a fifth of a
 /// decibel, so the hiss is heard coming back a quarter of a second or so
-/// before the next call, which then starts on a gain of its own. At Slow the band is still held down at the end of it,
-/// which is what Slow is.
-pub(crate) fn band_preview_gap_ms() -> u32 {
-    let (hang, release) = agc_decay_sec(AgcDecay::Fast);
+/// before the next call, which then starts on a gain of its own. At Slow
+/// the band is still held down at the end of it, which is what Slow is.
+pub(crate) fn band_preview_gap_ms(settings: &TrainingSettings) -> u32 {
+    let (hang, release) = agc_timing(settings, AgcDecay::Fast);
     ((hang + 5.0 * release) * 1_000.0).round() as u32
 }
 
@@ -112,7 +110,7 @@ where
 /// The Listen screen: `chars`, one at a time.
 pub fn start_letters(ctx: AppCtx, chars: String) {
     start_preview(ctx, Preview::Letters, |lease, settings| {
-        play_chars(lease, settings, chars, LETTER_GAP_MS)
+        play_chars(lease, settings, chars, LISTEN_LETTER_GAP_MS)
     });
 }
 
@@ -141,12 +139,7 @@ pub fn start_sample(ctx: AppCtx, text: String) {
 /// The band-conditions preview, calling until it is stopped.
 pub fn start_band_preview(ctx: AppCtx) {
     start_preview(ctx, Preview::Band, |lease, _| {
-        loop_band_preview(
-            lease,
-            ctx.settings,
-            BAND_PREVIEW_CALL,
-            band_preview_gap_ms(),
-        )
+        loop_band_preview(lease, ctx.settings, BAND_PREVIEW_CALL)
     });
 }
 
@@ -392,14 +385,15 @@ async fn play_sample(
         .map(|_| ())
 }
 
-/// Call `text` over and over, `gap_ms` apart, loud, medium and weak in turn
+/// Call `text` over and over, loud, medium and weak in turn
 /// ([`BAND_PREVIEW_STRENGTHS`]), under the settings as they are at each
-/// call. Ends only when the lease does, or the audio fails.
+/// call, and as far apart as they let the band back between calls
+/// ([`band_preview_gap_ms`]). Ends only when the lease does, or the audio
+/// fails.
 async fn loop_band_preview(
     lease: Lease,
     settings: Signal<TrainingSettings>,
     text: &'static str,
-    gap_ms: u32,
 ) -> Result<(), AudioError> {
     // One station, kept, so moving a band slider changes the band and not
     // the signal you are judging it against: the same pitch and speed every
@@ -421,6 +415,7 @@ async fn loop_band_preview(
             generate_callsign(CALLSIGN_TIER_MAX, rng)
         });
         lease.send(&call, &settings_now, |_| {}).await?;
+        let gap_ms = band_preview_gap_ms(&settings.peek().clone().clamp());
         lease.sleep(gap_ms).await?;
     }
 }
@@ -720,7 +715,7 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             let lease = claim(&h);
-            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
+            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ"));
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             assert!(h.texts().iter().all(|text| text == "CQ"));
@@ -749,7 +744,7 @@ mod tests {
             settings.band.filter_width_hz = cw_core::FILTER_WIDTH_MAX;
             let mut h = Harness::with_settings(settings);
             let lease = claim(&h);
-            let _outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
+            let _outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ"));
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             h.app.player.release();
@@ -781,7 +776,7 @@ mod tests {
             let mut h = Harness::new();
             let lease = claim(&h);
             h.set_behaviour(Behaviour::RefuseToStart);
-            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
+            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ"));
             h.pump();
             assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
             assert!(matches!(
