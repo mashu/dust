@@ -672,9 +672,10 @@ alike, until that setting is changed here, and from then on as chosen here.
 In a setting of named entries, the callers' odds or their styles in each
 contest, an entry this build does not read, a later build's share or the
 styles of a contest it has no name for, stays as it was stored though the
-rest of that setting is changed here, a card's reset included. A number
-past this build's range is not one: it is read, held to the range, as it
-always was. A session is stored
+rest of that setting is changed here, a card's reset included; so does one
+it reads only in part, a contest's styles with a knob a later build added,
+until that entry is changed here. A number past this build's range is not
+one: it is read, held to the range, as it always was. A session is stored
 once, as the build that stored it wrote it, and never written over, so what
 a later build adds to it stays. Each says the format it is stored in,
 `"format"`: the oldest format a build must know to read it

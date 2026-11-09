@@ -758,8 +758,9 @@ pub struct TrainingSettings {
     /// here, the setting is written as it now is
     /// ([`TrainingSettings::keeping_values_of`]), but for the entries of an
     /// object this build does not read, a later build's share of the
-    /// callers' odds or the styles of a contest it has no name for, which
-    /// stay beside it.
+    /// callers' odds or the styles of a contest it has no name for, and
+    /// those it reads only in part and has not changed, which stay beside
+    /// it.
     pub unread_values: std::collections::BTreeMap<String, UnreadValue>,
 }
 

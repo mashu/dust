@@ -119,10 +119,13 @@ impl Serialize for TrainingSettings {
 
 /// What a setting written as an object, `now` that it has been changed
 /// here, is written as with what a later build wrote in it kept beside:
-/// `now`, and each entry of `kept`'s stored object under a name that
-/// neither what it was read as nor `now` holds, which this build did not
-/// read, such as a later build's share of the callers' odds or the styles
-/// of a contest it has no name for. None where these are not all objects
+/// `now`, with each entry of `kept`'s stored object that this build did
+/// not read whole and has not changed here as it was stored. That is one
+/// under a name that neither what it was read as nor `now` holds, such as
+/// a later build's share of the callers' odds or the styles of a contest
+/// this build has no name for; and one this build reads and writes as it
+/// read it, which does not read as itself, such as WPX's styles with a
+/// later build's knob of their own. None where these are not all objects
 /// or no such entry is left: the setting is then written as it now is.
 fn beside_what_is_written(kept: &UnreadValue, now: &Value) -> Option<Value> {
     let (Value::Object(stored), Value::Object(read_as), Value::Object(now)) =
@@ -131,12 +134,21 @@ fn beside_what_is_written(kept: &UnreadValue, now: &Value) -> Option<Value> {
         return None;
     };
     let mut beside = now.clone();
+    let mut kept_any = false;
     for (name, entry) in stored {
-        if !read_as.contains_key(name) && !now.contains_key(name) {
+        let unread = match (read_as.get(name), now.get(name)) {
+            (None, None) => true,
+            (Some(read), Some(written)) => {
+                read == written && !entry.is_null() && !reads_as(entry, read)
+            }
+            _ => false,
+        };
+        if unread {
             beside.insert(name.clone(), entry.clone());
+            kept_any = true;
         }
     }
-    (beside.len() > now.len()).then_some(Value::Object(beside))
+    kept_any.then_some(Value::Object(beside))
 }
 
 impl TrainingSettings {
@@ -242,30 +254,30 @@ impl TrainingSettings {
         });
     }
 
-    /// Each value `before` kept for a later build that these let go of,
-    /// under a key `of_the_reset` names, taken back where its setting
-    /// writes again what it was read as: put back as it was, as Undo puts
-    /// back a card reset ([`Self::restore_section`]), the setting is as it
-    /// was read. A value let go of otherwise, by a change since on another
-    /// card or elsewhere, stays let go of.
+    /// Each value `before` kept for a later build, under a key
+    /// `of_the_reset` names, put back as it was where its setting writes
+    /// again what it was read as and these keep it otherwise or not at all:
+    /// as Undo puts back a card reset ([`Self::restore_section`]), the
+    /// setting is as it was read. What was let go of or kept anew by a
+    /// change since on another card, or from elsewhere, stays as it is.
     pub(super) fn take_back_values_of(
         &mut self,
         before: &Self,
         of_the_reset: impl Fn(&str) -> bool,
     ) {
-        let let_go: Vec<(&String, &UnreadValue)> = before
+        let changed: Vec<(&String, &UnreadValue)> = before
             .unread_values
             .iter()
-            .filter(|(key, _)| !self.unread_values.contains_key(*key) && of_the_reset(key))
+            .filter(|(key, kept)| self.unread_values.get(*key) != Some(*kept) && of_the_reset(key))
             .collect();
-        if let_go.is_empty() {
+        if changed.is_empty() {
             return;
         }
         let Ok(written) = self.written() else {
             return;
         };
         let written: BTreeMap<String, Value> = written.into_iter().collect();
-        for (key, kept) in let_go {
+        for (key, kept) in changed {
             if written.get(key) == Some(&kept.read_as) {
                 self.unread_values.insert(key.clone(), kept.clone());
             }
@@ -1255,46 +1267,39 @@ mod tests {
         );
     }
 
-    /// A card's reset lets go of a later build's choice it changes, and
-    /// Undo brings it back with the card: here a share of the callers'
-    /// odds that a later build wrote as a word. What a later build wrote
-    /// in a setting that this build does not read, the callers' styles of
-    /// a contest it has no name for, the reset leaves as it is, as it
-    /// leaves a later build's own keys, and puts back only WPX's.
+    /// A card's reset lets go of a later build's choice it changes, or
+    /// keeps less of it, and Undo brings it back whole with the card: here
+    /// WPX's callers' styles with a knob a later build added, which the
+    /// reset takes away. The styles of a contest this build has no name
+    /// for, which it does not read, the reset leaves as they are, as it
+    /// leaves a later build's own keys.
     #[test]
     fn undo_of_a_reset_brings_back_what_the_reset_let_go_of() {
         let styles = serde_json::json!({
             "cwt": { "at": [0.25, -0.5], "off": [] },
-            "wpx": { "at": [0.2, 0.1], "off": [] },
+            "wpx": { "at": [0.2, 0.1], "off": [], "pace": 0.8 },
         });
-        let mut odds = serde_json::to_value(CallerOdds::default()).expect("odds write");
-        odds["abroad"] = "often".into();
-        odds["portable"] = 0.5.into();
-        let before = read_keeping(serde_json::json!({
-            "callerStyles": styles, "callerOdds": odds,
-        }));
-        assert_eq!(
-            before.unread_values.keys().collect::<Vec<_>>(),
-            ["callerOdds", "callerStyles"]
-        );
-        let written = |settings: &TrainingSettings, key: &str| {
-            serde_json::to_value(settings).expect("settings write")[key].clone()
+        let styles_written = |settings: &TrainingSettings| {
+            serde_json::to_value(settings).expect("settings write")["callerStyles"].clone()
         };
-        let mut reset = before.clone();
-        reset.reset_section(SettingsSection::CharacterSet);
-        assert_eq!(
-            written(&reset, "callerStyles"),
-            serde_json::json!({ "cwt": styles["cwt"] })
-        );
-        assert_eq!(
-            written(&reset, "callerOdds"),
-            serde_json::to_value(CallerOdds::default()).expect("odds write")
-        );
-        let mut undone = reset;
-        undone.restore_section(SettingsSection::CharacterSet, &before);
-        assert_eq!(written(&undone, "callerStyles"), styles);
-        assert_eq!(written(&undone, "callerOdds"), odds);
-        assert_eq!(undone, before);
+        let wpx_alone = serde_json::json!({ "wpx": styles["wpx"] });
+        for (stored, after_the_reset) in [
+            (&styles, serde_json::json!({ "cwt": styles["cwt"] })),
+            (&wpx_alone, serde_json::json!({})),
+        ] {
+            let before = read_keeping(serde_json::json!({ "callerStyles": stored }));
+            assert_eq!(
+                before.unread_values.keys().collect::<Vec<_>>(),
+                ["callerStyles"]
+            );
+            let mut reset = before.clone();
+            reset.reset_section(SettingsSection::CharacterSet);
+            assert_eq!(styles_written(&reset), after_the_reset, "{stored}");
+            let mut undone = reset;
+            undone.restore_section(SettingsSection::CharacterSet, &before);
+            assert_eq!(styles_written(&undone), *stored);
+            assert_eq!(undone, before, "{stored}");
+        }
     }
 
     /// Undo of a card's reset brings back only what that reset let go of:
@@ -1375,6 +1380,48 @@ mod tests {
             read_keeping(serde_json::to_value(&clamped).expect("settings write")),
             clamped
         );
+    }
+
+    /// The same for what a later build wrote inside an entry this build
+    /// reads, a knob of its own in WPX's callers' styles: it stays as
+    /// stored while that entry is not changed here, though CQWW's styles
+    /// are, and goes once WPX's are.
+    #[test]
+    fn a_later_builds_field_in_an_entry_outlasts_an_edit_here_of_another_entry() {
+        let wpx = serde_json::json!({ "at": [0.2, 0.1], "off": [], "pace": 0.8 });
+        let read = read_keeping(serde_json::json!({ "callerStyles": { "wpx": wpx } }));
+        assert_eq!(
+            read.unread_values.keys().collect::<Vec<_>>(),
+            ["callerStyles"]
+        );
+        let styles_written = |settings: &TrainingSettings| {
+            serde_json::to_value(settings).expect("settings write")["callerStyles"].clone()
+        };
+        let style = |at: [f64; 2]| crate::settings::StyleChoice { at, off: vec![] };
+        let mut edited = read;
+        edited
+            .contest
+            .caller_styles
+            .insert("cqww".into(), style([0.1, 0.1]));
+        let styles = serde_json::json!({ "cqww": { "at": [0.1, 0.1], "off": [] }, "wpx": wpx });
+        let clamped = edited.clone().clamp();
+        assert_eq!(styles_written(&edited), styles, "before a clamp");
+        assert_eq!(styles_written(&clamped), styles, "after one");
+        assert_eq!(
+            read_keeping(serde_json::to_value(&clamped).expect("settings write")),
+            clamped
+        );
+        let mut wpx_changed = clamped;
+        wpx_changed
+            .contest
+            .caller_styles
+            .insert("wpx".into(), style([0.1, -0.1]));
+        let wpx_changed = wpx_changed.clamp();
+        assert_eq!(
+            styles_written(&wpx_changed)["wpx"],
+            serde_json::json!({ "at": [0.1, -0.1], "off": [] })
+        );
+        assert!(wpx_changed.unread_values.is_empty());
     }
 
     /// Only so much of what this build cannot read is kept: a value whose

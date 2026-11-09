@@ -117,9 +117,9 @@ made after another is the newer, however far apart the devices' clocks
 are. A setting's value a device's build cannot read, a later build's
 choice, is taken up and sent as it was stored, at its own stamp, never as
 that build reads it: it stays the later build's on every device until a
-device changes that setting, and an entry a later build added to a setting
-of named entries, such as the callers' odds, stays though a device changes
-the rest of it. A device joining a sync takes what the drive
+device changes that setting; and in a setting of named entries, such as
+the callers' odds, what a later build wrote in an entry stays though a
+device changes another entry. A device joining a sync takes what the drive
 holds, as a restore takes a backup's settings, and adds nothing of its own
 until it changes something.
 
