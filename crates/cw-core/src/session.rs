@@ -1132,19 +1132,29 @@ pub struct SessionResult {
 /// stored in a later one reads as no session, left as it is stored for a
 /// build that reads it, and is told from one that is damaged by what it
 /// says. So it is raised only by a change a build of the format before
-/// would misread or fail to read. A key only added keeps the format, as
-/// earlier builds carry it along ([`UnreadKeys`]). And `timestamp` and
+/// would misread or fail to read. A key only added where earlier builds
+/// carry it along keeps the format ([`UnreadKeys`]); one among the tally's
+/// letters, which are keyed by character, is no such key. And `timestamp` and
 /// `date` keep their shape in every format: a later build's session is
 /// known by when, and on what day, it finished, by a build that reads no
 /// more of it.
 pub const SESSION_FORMAT: u32 = 1;
 
 /// What a stored session holds that this build does not read: keys a later
-/// build wrote, in any object of the session: on the session, on each of
-/// its groups and their timings, inside a timing's times (`"charTimes"`),
-/// and inside each letter's entry of its tally (`"letterAccuracy"`). They
-/// are kept as they were read and written back with the session, so a copy
-/// of an older build left open never strips them from the history.
+/// build wrote on the session, on each of its groups and their timings,
+/// inside a timing's times (`"charTimes"`), and inside each letter's entry
+/// of its tally (`"letterAccuracy"`). They are kept as they were read and
+/// written back with the session, so a copy of an older build left open
+/// never strips them from the history.
+///
+/// The tally's own maps, `"letterAccuracy"` and `"inserted"`, are keyed by
+/// one character each, and nothing else goes there: a key a later build
+/// puts there that is no one character, a prosign's `"<AR>"` or a key that
+/// sums the letters up, makes the whole session one this build cannot
+/// read, told of as damaged. So a change that puts one there raises
+/// [`SESSION_FORMAT`]. What a later build adds of a letter goes inside the
+/// letter's entry, and anything else of the tally beside the tally, as a
+/// key of the session.
 ///
 /// So a key a later build renames is read beside its old name, as an older
 /// build carries the new one along: the new name is to be read as the old
@@ -2753,6 +2763,46 @@ mod tests {
         );
         let again: SessionResult = serde_json::from_str(&text).unwrap();
         assert_eq!(again, read, "the same, read again");
+    }
+
+    /// The tally's own maps, `"letterAccuracy"` and `"inserted"`, are keyed
+    /// by one character each, and this build reads nothing else there: a
+    /// key a later build puts there that is no one character, a prosign's
+    /// `"<AR>"` say, makes the session one this build cannot read, where a
+    /// key inside a letter's entry is kept ([`UnreadKeys`]). So a change
+    /// that puts one there raises [`SESSION_FORMAT`]. A key of one
+    /// character is a letter of the tally, read as one.
+    #[test]
+    fn a_key_of_the_tallys_maps_that_is_no_one_character_makes_no_session() {
+        let mut written = SessionResult::empty_for_test();
+        written.groups = vec![GroupResult {
+            sent: "K".into(),
+            received: "K".into(),
+            correct: true,
+        }];
+        written.group_timings = vec![SessionTiming::default()];
+        written.tally = CopyTally::of("K", "K");
+        let entry = serde_json::json!({ "correct": 1, "total": 1 });
+        for (map, value) in [
+            ("letterAccuracy", entry),
+            ("inserted", serde_json::json!(1)),
+        ] {
+            for key in ["<AR>", "KM", ""] {
+                let mut later = serde_json::to_value(&written).unwrap();
+                later[map][key] = value.clone();
+                let read = serde_json::from_str::<SessionResult>(&later.to_string());
+                assert!(read.is_err(), "{map} with {key:?} read as a session");
+            }
+            let mut later = serde_json::to_value(&written).unwrap();
+            later[map]["\u{c9}"] = value;
+            let read: SessionResult = serde_json::from_str(&later.to_string()).unwrap();
+            let letter = match map {
+                "letterAccuracy" => read.tally.sent.contains_key(&'\u{c9}'),
+                _ => read.tally.inserted.get(&'\u{c9}') == Some(&1),
+            };
+            assert!(letter, "{map}: a letter of the tally");
+            assert_eq!(read.unread, UnreadKeys::default(), "{map}: nothing kept");
+        }
     }
 
     /// The keys of `raw` that `T` does not read: none where it is no object.

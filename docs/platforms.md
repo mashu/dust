@@ -680,8 +680,14 @@ is read, held to the range, as it always was. A session is stored
 once, as the build that stored it wrote it, and never written over, so what
 a later build adds to it stays; and one this build writes again, as a restore
 adds or fills it in, or an Undo puts it back, keeps every key a later build
-added anywhere in it, inside a group's times (`"charTimes"`) and a letter's
-entry of the tally (`"letterAccuracy"`) too. Each says the format it is stored in,
+added to it: on the session, its groups and their timings, inside a group's
+times (`"charTimes"`), and inside a letter's entry of the tally
+(`"letterAccuracy"`). The tally's maps themselves, `"letterAccuracy"` and
+`"inserted"`, are keyed by one character each: a later build's key there that
+is no one character, a prosign's say, makes the session one this build cannot
+read, so a change that puts one there raises the format, and a later build
+puts what it adds of a letter inside the letter's entry, and anything else
+of the tally on the session. Each says the format it is stored in,
 `"format"`: the oldest format a build must know to read it
 (`SESSION_FORMAT`, `crates/cw-core/src/session.rs`), 1 so far, raised only
 by a change an earlier build would misread; one that says none is from
