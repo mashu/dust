@@ -167,6 +167,16 @@ pub trait Store {
     /// listing, the ones to let go. Any other was lost in passing, and is
     /// to be stored again: missing is never deleted.
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>>;
+    /// What to tell of `ids`, records listed that could not be read at all
+    /// at any of the app's tries since it found them so
+    /// ([`HistoryLoad::failed`]): of those not told of before, how many,
+    /// as records that could not be read ([`record::HistoryNotice::Unread`]),
+    /// each noted as told so it is told of once, at this launch or a later
+    /// one. Every one of them, where the store notes nothing, as a browser's
+    /// does not: its database reads each record whole, or nothing.
+    fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<record::HistoryNotice>> {
+        record::done(record::unread_notices(ids.iter().map(|_| None)))
+    }
     /// Whether the history may have changed, elsewhere, since this copy
     /// last read or listed it: whether it is worth listing again.
     fn history_changed(&self) -> bool;

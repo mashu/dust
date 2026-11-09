@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use super::files::{HistoryFiles, THREAD, Watch};
-use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
+use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done};
 use super::saved::HistorySaved;
 
 /// How long a change the files would not take waits, at the head of the
@@ -190,6 +190,14 @@ impl HistoryJobs {
     pub(super) fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
         let found = self.ask(move |files| files.forgotten(&ids));
         Box::pin(async move { found.await.unwrap_or_default() })
+    }
+
+    /// What to tell of `ids`, records that still could not be read at the
+    /// app's last try ([`HistoryFiles::still_unread`]): nothing, where the
+    /// files cannot be reached.
+    pub(super) fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
+        let told = self.ask(move |files| files.still_unread(&ids));
+        Box::pin(async move { told.await.unwrap_or_default() })
     }
 
     /// Whether the history changed elsewhere since this copy last looked:

@@ -13,7 +13,7 @@ use super::disk::{
     aside_name, flush, move_aside, save_streamed, shown, sync_dir, temporary, write_whole,
 };
 use super::files::HistoryFiles;
-use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
@@ -606,6 +606,10 @@ impl Store for DesktopStore {
 
     fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
         self.history.forgotten(ids)
+    }
+
+    fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
+        self.history.still_unread(ids)
     }
 
     fn load_sync(&self) -> Option<String> {

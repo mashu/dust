@@ -676,7 +676,13 @@ so once, as saved by a newer Dust; a build that reads it shows it, and a
 restore leaves out a backup's copy of the session it says it holds. One that
 says no later format and does not read is damaged, as is one whose bytes are
 no text at all: left where it is too, and told of as damaged; a restore
-brings a backup's copy of it back beside it. Settings that do not read at all, a `settings.json` edited by hand
+brings a backup's copy of it back beside it. One that cannot be read at all
+for now, as a file another program holds open for a moment cannot be, is
+neither: it is read again at every look at the history, and on its own two,
+ten and sixty seconds after it was found so; one that still cannot be read
+at the last, or as the app opens again, is told of once, as one that could
+not be read, and a restore asked for meanwhile is refused once, as the
+backup could store its session a second time. Settings that do not read at all, a `settings.json` edited by hand
 and left with a stray comma say, are set aside before the defaults the app
 opens with are written over them: `settings.unreadable-*.json` beside it, or
 `dust_settings_unreadable` in a browser. So are the sessions of a history
@@ -737,6 +743,9 @@ settings (`src/persist/files.rs`):
   …}`, and what the move from `sessions.json` took of it, written last.
 - `told.json`: the records this build cannot read and has said so of,
   each as a newer Dust's, as damaged, or as one that could not be read.
+- `failing.json`: the records that could not be read at all as the history
+  was last read whole, so that one that still cannot be read at the next
+  launch is told of then.
 - `restoring-<n>.json`: held locked while a restore of many sessions stores
   them, so one Dust stopped under is told of as cut short.
 - `packs/*.jsonl.gz`: older records packed together, gzip, a record a line.

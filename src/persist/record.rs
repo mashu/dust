@@ -276,15 +276,21 @@ pub(super) fn not_told(
     unread: &[(RecordId, Option<Unreadable>)],
     told: Option<&[u8]>,
 ) -> Vec<HistoryNotice> {
-    let told: HashSet<String> = told
-        .and_then(|raw| serde_json::from_slice(raw).ok())
-        .unwrap_or_default();
+    let told = names_noted(told);
     unread_notices(
         unread
             .iter()
             .filter(|(id, _)| !told.contains(&id.name()))
             .map(|(_, said)| said.as_ref()),
     )
+}
+
+/// The names of the records a note of them, `raw`, holds, as the note of
+/// those told of holds them: none, where it does not read, or there is
+/// none.
+pub(super) fn names_noted(raw: Option<&[u8]>) -> HashSet<String> {
+    raw.and_then(|raw| serde_json::from_slice(raw).ok())
+        .unwrap_or_default()
 }
 
 /// What to tell of `new`, records this build cannot read found for the
@@ -379,6 +385,14 @@ pub struct HistoryLoad {
     /// Records there that this build cannot read: left where they are, for
     /// a build that can.
     pub unread: Vec<RecordId>,
+    /// Records there that could not be read at all just now, as a file
+    /// another program holds open for a moment cannot be: kept apart from
+    /// `unread`, as they may read a moment later. The app reads them again
+    /// at every look, and soon after on its own
+    /// ([`crate::state::READ_AGAIN_MS`]); one is told of only where it
+    /// could not be read as the history was read before either
+    /// ([`HistoryNotice::Unread`]).
+    pub failed: Vec<RecordId>,
     /// Of `unread`, those a later build stored ([`Unreadable::later`]),
     /// each with the session it says it holds.
     pub later: Vec<(RecordId, SessionKey)>,
@@ -398,7 +412,10 @@ pub struct HistoryLoad {
 #[cfg_attr(feature = "web", allow(dead_code))]
 pub enum HistoryNotice {
     /// `count` records that could not be read at all, found for the first
-    /// time: left where they are, and read again at the next launch.
+    /// time once they still could not be read at the app's last try
+    /// ([`crate::state::READ_AGAIN_MS`]), or as the history was read again
+    /// at a later launch ([`HistoryLoad::failed`]): left where they are, and
+    /// read again at every look, and every launch.
     Unread { count: usize },
     /// `count` records a later build stored, in a format this one does not
     /// read ([`cw_core::SESSION_FORMAT`]), found for the first time. They
@@ -436,8 +453,9 @@ impl HistoryNotice {
         match self {
             Self::Unread { count } => {
                 let (a_session, left, them) = unread_words(*count);
+                let they = if *count == 1 { "it" } else { "they" };
                 format!(
-                    "{a_session} in your history could not be read just now, so {left}. Dust reads {them} again the next time it opens."
+                    "{a_session} in your history could not be read, so {left}. Dust keeps trying, and shows {them} once {they} can be read."
                 )
             }
             Self::Later { count } => {
@@ -757,12 +775,15 @@ mod tests {
     #[test]
     fn what_became_of_the_history_is_said_plainly() {
         let one = HistoryNotice::Unread { count: 1 }.text();
-        assert!(one.starts_with("1 session in your history"), "{one}");
+        assert!(
+            one.starts_with("1 session in your history could not be read,"),
+            "{one}"
+        );
         assert!(one.contains("so it was left as it is."), "{one}");
-        assert!(one.contains("reads it again the next time"), "{one}");
+        assert!(one.contains("shows it once it can be read"), "{one}");
         let many = HistoryNotice::Unread { count: 3 }.text();
         assert!(many.starts_with("3 sessions"), "{many}");
-        assert!(many.contains("reads them again"), "{many}");
+        assert!(many.contains("shows them once they can be read"), "{many}");
         let later = HistoryNotice::Later { count: 1 }.text();
         assert!(
             later.starts_with("1 session in your history was saved by a newer Dust"),

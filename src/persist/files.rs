@@ -55,7 +55,7 @@ use super::disk::{aside_name, flush, move_aside, place_whole, shown, sync_dir, w
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unreadable, key_of, keyed,
-    not_told, read_record, taken_up, tombstone_key, unreadable,
+    names_noted, not_told, read_record, taken_up, tombstone_key, unreadable,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -78,6 +78,11 @@ const PACKS: &str = "packs";
 const PACK_EXTENSION: &str = ".jsonl.gz";
 const LAYOUT_FILE: &str = "layout.json";
 const TOLD: &str = "told.json";
+/// The records that could not be read at all as the history was last read
+/// whole, by name ([`HistoryLoad::failed`]): one that still cannot be read
+/// as it is read again, at a later launch, is told of then
+/// ([`HistoryFiles::tell`]).
+const FAILING: &str = "failing.json";
 /// What a restore of many sessions at once is called while it runs:
 /// `restoring-<n>.json`.
 const JOURNAL_PREFIX: &str = "restoring-";
@@ -286,10 +291,13 @@ impl HistoryFiles {
     ///
     /// A record and its tombstone read as deleted, and the deletion cut
     /// short is finished. A record this build cannot read is left where it
-    /// is, and told of once, as a newer Dust's, as damaged, or as one that
-    /// could not be read ([`not_told`]). A history a newer build keeps in a
-    /// way this one would harm is read, and nothing is written to it, not
-    /// even to tidy up.
+    /// is, and told of once, as a newer Dust's or as damaged ([`not_told`]).
+    /// One that could not be read at all just now failed
+    /// ([`HistoryLoad::failed`]), for the app to read again: told of, once,
+    /// only where it could not be read as the history was last read either
+    /// ([`Self::tell`]). A history a newer build keeps in a way this one
+    /// would harm is read, and nothing is written to it, not even to tidy
+    /// up.
     pub(super) fn load(&self) -> HistoryLoad {
         self.on_its_thread();
         let mut load = HistoryLoad::default();
@@ -359,7 +367,7 @@ impl HistoryFiles {
         let mut keys = self.keys.borrow_mut();
         load.sessions.reserve(live.len());
         // Each record that holds no session this build reads, with what it
-        // says of itself, if it could be read.
+        // says of itself.
         let mut unread = Vec::new();
         for (id, read) in live.into_iter().zip(read) {
             match read {
@@ -374,19 +382,17 @@ impl HistoryFiles {
                         load.later.push((id, key.clone()));
                     }
                     load.unread.push(id);
-                    unread.push((id, Some(said)));
+                    unread.push((id, said));
                 }
-                None => {
-                    load.unread.push(id);
-                    unread.push((id, None));
-                }
+                None => load.failed.push(id),
             }
         }
         drop(keys);
         if unlinked {
             let _ = sync_dir(&self.records());
         }
-        load.notices.extend(self.tell(&unread, writable));
+        load.notices
+            .extend(self.tell(&unread, &load.failed, writable));
         if let Some(layout) = &layout {
             let live = keyed(load.sessions.iter().map(|(id, session)| (*id, session)));
             if let Some(change) = self.import(layout, &live) {
@@ -960,18 +966,87 @@ impl HistoryFiles {
     }
 
     /// What to tell of `unread`, the records this build cannot read, each
-    /// with what it says of itself, where it could be read ([`not_told`]):
-    /// nothing, once each has been told of. `writable` is whether what was
-    /// told may be noted, so it is told of once.
+    /// with what it says of itself, and of `failed`, those that could not
+    /// be read at all just now ([`not_told`]): of the second, only those
+    /// that could not be read as the history was last read either
+    /// ([`FAILING`]), as a moment's failure is over by the app's first try
+    /// at reading it again; and nothing, once each has been told of.
+    /// `writable` is whether what was told may be noted, so it is told of
+    /// once, and what failed, for the next read to tell of.
+    ///
+    /// The note of those told of keeps each that failed and was told of
+    /// before, as the app tells of one that still failed at its last try
+    /// ([`Self::still_unread`]): dropped from it, one would be told of a
+    /// second time.
     fn tell(
         &self,
-        unread: &[(RecordId, Option<Unreadable>)],
+        unread: &[(RecordId, Unreadable)],
+        failed: &[RecordId],
         writable: bool,
     ) -> Vec<HistoryNotice> {
+        let failing = self.dir.join(FAILING);
+        let failed_before = names_noted(fs::read(&failing).ok().as_deref());
+        let told_now: Vec<(RecordId, Option<Unreadable>)> = unread
+            .iter()
+            .map(|(id, said)| (*id, Some(said.clone())))
+            .chain(
+                failed
+                    .iter()
+                    .filter(|id| failed_before.contains(&id.name()))
+                    .map(|id| (*id, None)),
+            )
+            .collect();
         let path = self.dir.join(TOLD);
-        let notices = not_told(unread, fs::read(&path).ok().as_deref());
+        let told = fs::read(&path).ok();
+        let notices = not_told(&told_now, told.as_deref());
+        if !writable {
+            return notices;
+        }
+        if !notices.is_empty() {
+            let told_before = names_noted(told.as_deref());
+            let names: BTreeSet<String> = told_now
+                .iter()
+                .map(|(id, _)| id.name())
+                .chain(
+                    failed
+                        .iter()
+                        .map(|id| id.name())
+                        .filter(|name| told_before.contains(name)),
+                )
+                .collect();
+            if let Ok(raw) = serde_json::to_vec(&names) {
+                let _ = write_whole(&self.dir, TOLD, &raw);
+            }
+        }
+        let failing_now: HashSet<String> = failed.iter().map(|id| id.name()).collect();
+        if failing_now != failed_before {
+            let _ = if failing_now.is_empty() {
+                remove_if_there(&failing)
+            } else {
+                let names: BTreeSet<&String> = failing_now.iter().collect();
+                serde_json::to_vec(&names)
+                    .map_err(io::Error::other)
+                    .and_then(|raw| write_whole(&self.dir, FAILING, &raw))
+            };
+        }
+        notices
+    }
+
+    /// What to tell of `ids`, records listed that could not be read at all
+    /// at any of the app's tries since it found them so: of those not told
+    /// of before, how many ([`HistoryNotice::Unread`]), each noted as told,
+    /// where this build may write, so it is told of once
+    /// ([`super::Store::still_unread`]).
+    pub(super) fn still_unread(&self, ids: &[RecordId]) -> Vec<HistoryNotice> {
+        self.on_its_thread();
+        let path = self.dir.join(TOLD);
+        let told = fs::read(&path).ok();
+        let still: Vec<(RecordId, Option<Unreadable>)> = ids.iter().map(|id| (*id, None)).collect();
+        let notices = not_told(&still, told.as_deref());
+        let writable = matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved));
         if !notices.is_empty() && writable {
-            let names: Vec<String> = unread.iter().map(|(id, _)| id.name()).collect();
+            let mut names: BTreeSet<String> = names_noted(told.as_deref()).into_iter().collect();
+            names.extend(ids.iter().map(|id| id.name()));
             if let Ok(raw) = serde_json::to_vec(&names) {
                 let _ = write_whole(&self.dir, TOLD, &raw);
             }
@@ -1505,6 +1580,10 @@ mod tests {
             wait(self.0.forgotten(ids.to_vec()))
         }
 
+        fn still_unread(&self, ids: &[RecordId]) -> Vec<HistoryNotice> {
+            wait(self.0.still_unread(ids.to_vec()))
+        }
+
         fn changed(&self) -> bool {
             self.0.changed()
         }
@@ -1861,16 +1940,81 @@ mod tests {
             })]
         );
         // One that cannot be read for a moment, as a file another program
-        // has open: read once it can be.
+        // has open: no record this build cannot read, and read once it can
+        // be.
         let busy = record(&finished(3_000));
         fs::create_dir(records.join(file_name(busy.id))).unwrap();
-        assert!(files.load().unread.contains(&busy.id));
+        let read = files.load();
+        assert!(!read.unread.contains(&busy.id), "{:?}", read.unread);
+        assert_eq!(read.failed, [busy.id]);
         assert_eq!(files.read(&[busy.id]), [Err(busy.id)]);
         fs::remove_dir(records.join(file_name(busy.id))).unwrap();
         fs::write(records.join(file_name(busy.id)), &busy.json).unwrap();
         let read = files.load();
         assert_eq!(read.unread, [later]);
+        assert!(read.failed.is_empty());
         assert_eq!(stamps(&read), [3_000]);
+    }
+
+    /// A record that could not be read at all just now, as a file another
+    /// program holds open for a moment cannot be, failed: it is not one
+    /// this build cannot read, and is not told of, as the app reads it
+    /// again. One that still cannot be read at the next launch is told of
+    /// then, once, as one that could not be read; read once it can be, it
+    /// is noted as failing no more. It was held as one this build cannot
+    /// read, and told of at once, though a moment later it read.
+    #[test]
+    fn a_record_that_could_not_be_read_for_a_moment_is_failed_not_unread() {
+        let (dir, files) = history("failed");
+        files.load();
+        files.apply(&put(&[record(&finished(1_000))]));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        // A folder where its file goes, which cannot be read as one.
+        let busy = record(&finished(2_000));
+        fs::create_dir(records.join(file_name(busy.id))).unwrap();
+        let read = files.load();
+        assert_eq!(read.unread, [], "not one this build cannot read");
+        assert_eq!(read.notices, [], "not told of");
+        assert_eq!(read.failed, [busy.id]);
+        assert_eq!(stamps(&read), [1_000]);
+
+        // Still so at the next launch: told of then, once.
+        let read = Files::at(&dir.0).load();
+        assert_eq!(read.failed, [busy.id]);
+        assert!(read.unread.is_empty());
+        assert_eq!(read.notices, [HistoryNotice::Unread { count: 1 }]);
+        let read = Files::at(&dir.0).load();
+        assert_eq!(read.failed, [busy.id]);
+        assert!(read.notices.is_empty(), "told of once");
+
+        // Read once it can be.
+        fs::remove_dir(records.join(file_name(busy.id))).unwrap();
+        fs::write(records.join(file_name(busy.id)), &busy.json).unwrap();
+        let read = files.load();
+        assert_eq!(stamps(&read), [1_000, 2_000]);
+        assert!(read.failed.is_empty());
+        assert!(!dir.0.join(HISTORY).join(FAILING).exists(), "noted no more");
+    }
+
+    /// A record that still cannot be read after every try the app makes is
+    /// told of then, as one that could not be read, and noted as told: once,
+    /// however often the app asks after, and not again at the next launch.
+    #[test]
+    fn a_record_still_unread_after_every_try_is_told_of_once() {
+        let (dir, files) = history("still-unread");
+        files.load();
+        let busy = record(&finished(2_000));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::create_dir_all(records.join(file_name(busy.id))).unwrap();
+        assert_eq!(files.load().notices, [], "not as it is first read");
+        assert_eq!(
+            files.still_unread(&[busy.id]),
+            [HistoryNotice::Unread { count: 1 }]
+        );
+        assert_eq!(files.still_unread(&[busy.id]), [], "once");
+        let read = Files::at(&dir.0).load();
+        assert_eq!(read.failed, [busy.id]);
+        assert_eq!(read.notices, [], "nor at the next launch");
     }
 
     /// A deletion is a tombstone beside the history, by the record's
@@ -3144,6 +3288,8 @@ mod tests {
         old_temporary_files_are_cleared,
         a_record_this_build_cannot_read_is_left_in_place_and_told_of_once,
         a_later_build_reads_what_this_one_could_not,
+        a_record_that_could_not_be_read_for_a_moment_is_failed_not_unread,
+        a_record_still_unread_after_every_try_is_told_of_once,
         a_deletion_is_a_tombstone_beside_the_history,
         a_record_and_its_tombstone_read_as_deleted,
         an_empty_tombstone_still_deletes,

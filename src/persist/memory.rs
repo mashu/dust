@@ -56,6 +56,10 @@ pub struct MemoryStore {
     pub legacy_aside: RefCell<Vec<String>>,
     /// The records this build could not read and has told of.
     told: RefCell<BTreeSet<RecordId>>,
+    /// The records that could not be read at all as the history was last
+    /// read: one that still cannot be read at the next read is told of
+    /// then, as the files tell of it.
+    failed_last: RefCell<BTreeSet<RecordId>>,
     counters: RefCell<BTreeMap<CountersKey, AutoLevelCounters>>,
     /// How many times the settings were written, for a test that cares how
     /// often that happens.
@@ -76,7 +80,8 @@ pub struct MemoryStore {
     pub unlistable: Cell<bool>,
     /// The records listed that cannot be read for now, the way a file
     /// another program holds open for a moment cannot: as the history is
-    /// read, too, as the files read one that cannot be read at all.
+    /// read, too, as the files read one that cannot be read at all
+    /// ([`HistoryLoad::failed`]).
     pub held_open: RefCell<BTreeSet<RecordId>>,
     /// Changes to the history are made only when the test says
     /// ([`Self::settle`]), the way a browser's database makes them a
@@ -457,15 +462,20 @@ impl Store for MemoryStore {
         let tombstones = self.tombstones.borrow();
         let held_open = self.held_open.borrow();
         // Each record that holds no session this build reads, with what it
-        // says of itself; none where it could not be read at all, as one
-        // held open cannot be, as the files read it.
-        let mut unread = Vec::new();
+        // says of itself, and each that could not be read at all, as one
+        // held open cannot be, where it could not be read as the history
+        // was last read either: none of it said.
+        let failed_before = self.failed_last.take();
+        let mut told_of = Vec::new();
         for (id, held) in self.records.borrow().iter() {
             if tombstones.contains_key(id) {
                 continue;
             }
             if held_open.contains(id) {
-                unread.push((*id, None));
+                load.failed.push(*id);
+                if failed_before.contains(id) {
+                    told_of.push((*id, None));
+                }
                 continue;
             }
             match held.session() {
@@ -477,16 +487,18 @@ impl Store for MemoryStore {
                     {
                         load.later.push((*id, key.clone()));
                     }
-                    unread.push((*id, Some(said)));
+                    load.unread.push(*id);
+                    told_of.push((*id, Some(said)));
                 }
             }
         }
-        load.unread = unread.iter().map(|(id, _)| *id).collect();
+        self.failed_last
+            .replace(load.failed.iter().copied().collect());
         let mut told = self.told.borrow_mut();
-        let new = unread.iter().filter(|(id, _)| !told.contains(id));
+        let new = told_of.iter().filter(|(id, _)| !told.contains(id));
         load.notices
             .extend(unread_notices(new.map(|(_, said)| said.as_ref())));
-        told.extend(load.unread.iter().copied());
+        told.extend(told_of.iter().map(|(id, _)| *id));
         // Complete once the move is made: until then, the sessions kept
         // whole are stored, though not here.
         load.complete = self.layout.borrow().is_some();
@@ -587,6 +599,14 @@ impl Store for MemoryStore {
                 }
             }
         }))
+    }
+
+    /// As the files tell of them: once each.
+    fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
+        let mut told = self.told.borrow_mut();
+        let new: Vec<RecordId> = ids.into_iter().filter(|id| !told.contains(id)).collect();
+        told.extend(new.iter().copied());
+        done(unread_notices(new.iter().map(|_| None)))
     }
 
     fn load_sync(&self) -> Option<String> {
