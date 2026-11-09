@@ -3631,6 +3631,26 @@ mod tests {
         });
     }
 
+    /// A record that could not be read as the app opened, and is deleted
+    /// in another copy of the app before it reads, is let go of as a look
+    /// finds it deleted: neither shown nor told of, at any try
+    /// ([`READ_AGAIN_MS`]).
+    #[test]
+    fn a_record_unread_for_now_and_deleted_elsewhere_is_let_go_of() {
+        crate::testing::run(|| async {
+            let (store, _) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            store.held_open.borrow_mut().clear();
+            let b = Tab::on(&store);
+            b.delete(2);
+            let last = u64::from(READ_AGAIN_MS[READ_AGAIN_MS.len() - 1]);
+            a.advance(2 * last).await;
+            assert_eq!(a.shown(), [1]);
+            assert_eq!(a.notices(), [], "told of at no try");
+            assert!(a.act(|ctx| ctx.unread_for_now.peek().is_empty()));
+        });
+    }
+
     /// A record that could not be read as the app opened, and still cannot
     /// be read as it opens again, is told of then, as one that could not be
     /// read, and once: the app closed before its tries were made.

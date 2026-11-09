@@ -2017,6 +2017,47 @@ mod tests {
         assert_eq!(read.notices, [], "nor at the next launch");
     }
 
+    /// A record another copy deletes as this one reads the history, once
+    /// the tombstones were listed and before the record is read, is gone by
+    /// the time it is read: it failed, as one that cannot be read at all
+    /// just now, and is neither told of nor held as one this build cannot
+    /// read. The next look finds it deleted. It was told of as one that
+    /// could not be read, and held for one stored, for as long as the app
+    /// ran.
+    #[test]
+    fn a_record_deleted_elsewhere_as_the_history_is_read_is_not_told_of_as_unreadable() {
+        let (dir, files) = history("deleted-as-read");
+        files.load();
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        let root = dir.0.clone();
+        let (gone, of) = (two.clone(), second);
+        let mut looked = 0;
+        files.meanwhile(move || {
+            looked += 1;
+            // Once the records, the packs and the tombstones are listed,
+            // before any record is read: its tombstone made, and its file
+            // taken away, as another copy deletes it.
+            if looked == 3 {
+                HistoryFiles::at(&root).apply(&forget(&[(&gone, &of)]));
+            }
+        });
+        let read = files.load();
+        assert_eq!(read.notices, [], "not told of");
+        assert_eq!(read.unread, [], "nor held as one this build cannot read");
+        assert_eq!(read.failed, [two.id]);
+        assert_eq!(stamps(&read), [1_000]);
+        assert_eq!(
+            files.listing(),
+            Some(vec![one.id]),
+            "deleted, the next look finds"
+        );
+        let read = files.load();
+        assert!(read.failed.is_empty());
+        assert!(read.notices.is_empty(), "nor told of at the next launch");
+    }
+
     /// A deletion is a tombstone beside the history, by the record's
     /// name, holding what tells the session apart, and one there already,
     /// with what a later build added to it, is never written over; undone,
@@ -3290,6 +3331,7 @@ mod tests {
         a_later_build_reads_what_this_one_could_not,
         a_record_that_could_not_be_read_for_a_moment_is_failed_not_unread,
         a_record_still_unread_after_every_try_is_told_of_once,
+        a_record_deleted_elsewhere_as_the_history_is_read_is_not_told_of_as_unreadable,
         a_deletion_is_a_tombstone_beside_the_history,
         a_record_and_its_tombstone_read_as_deleted,
         an_empty_tombstone_still_deletes,
