@@ -631,15 +631,17 @@ impl HistoryFiles {
         packed: &mut BTreeMap<RecordId, String>,
     ) -> Vec<Option<String>> {
         let records = self.records();
-        let mut read: Vec<Option<String>> =
-            ids.iter().map(|&id| raw_at(&records, id, packed)).collect();
+        let mut read: Vec<Option<String>> = ids
+            .iter()
+            .map(|&id| raw_at(&records, id, packed).text())
+            .collect();
         if read.iter().any(Option::is_none) {
             if let Ok(now) = self.packed() {
                 packed.extend(now.records);
             }
             for (read, &id) in read.iter_mut().zip(ids) {
                 if read.is_none() {
-                    *read = raw_at(&records, id, packed);
+                    *read = raw_at(&records, id, packed).text();
                 }
             }
         }
@@ -706,7 +708,7 @@ impl HistoryFiles {
     /// What is stored for `id`, loose, or else in a pack: none where it
     /// cannot be read.
     fn raw_record(&self, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<String> {
-        raw_at(&self.records(), id, packed)
+        raw_at(&self.records(), id, packed).text()
     }
 
     /// Every record a later build packed together, and what each holds,
@@ -1152,12 +1154,38 @@ impl Watch {
     }
 }
 
-/// What is stored for `id` in `records`, loose, or else in a pack: none
-/// where it cannot be read.
-fn raw_at(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<String> {
-    match fs::read_to_string(records.join(file_name(id))) {
-        Ok(raw) => Some(raw),
-        Err(_) => packed.get(&id).cloned(),
+/// What is stored of a record ([`raw_at`]).
+enum Raw {
+    /// Its text.
+    Text(String),
+    /// So many bytes that are no text, as damage to a disk leaves them: no
+    /// build reads them, now or later.
+    NoText(u64),
+    /// Nothing, for now: it could not be read just then.
+    Failed,
+}
+
+impl Raw {
+    /// What is stored, where it is text.
+    fn text(self) -> Option<String> {
+        match self {
+            Self::Text(raw) => Some(raw),
+            Self::NoText(_) | Self::Failed => None,
+        }
+    }
+}
+
+/// What is stored for `id` in `records`, loose, or else in a pack: a loose
+/// copy that cannot be read, or whose bytes are no text, is looked for
+/// there.
+fn raw_at(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Raw {
+    let in_a_pack = || packed.get(&id).cloned().map(Raw::Text);
+    match fs::read(records.join(file_name(id))) {
+        Ok(bytes) => String::from_utf8(bytes).map_or_else(
+            |bytes| in_a_pack().unwrap_or(Raw::NoText(bytes.as_bytes().len() as u64)),
+            Raw::Text,
+        ),
+        Err(_) => in_a_pack().unwrap_or(Raw::Failed),
     }
 }
 
@@ -1168,12 +1196,18 @@ type ReadOne = (Result<SessionResult, Unreadable>, u64);
 
 /// Record `id`, read from `records` or else from `packed`, and scored as it
 /// reads ([`read_record`]), beside how many bytes are stored of it: none
-/// where it is in neither place, and what it says of itself where it holds
-/// no session that reads.
+/// where it could not be read just then, and what it says of itself where
+/// it holds no session that reads. Bytes that are no text say nothing:
+/// damaged.
 fn read_one(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -> Option<ReadOne> {
-    let raw = raw_at(records, id, packed)?;
-    let read = read_record(&raw).ok_or_else(|| unreadable(&raw));
-    Some((read, raw.len() as u64))
+    match raw_at(records, id, packed) {
+        Raw::Text(raw) => {
+            let read = read_record(&raw).ok_or_else(|| unreadable(&raw));
+            Some((read, raw.len() as u64))
+        }
+        Raw::NoText(bytes) => Some((Err(Unreadable::default()), bytes)),
+        Raw::Failed => None,
+    }
 }
 
 /// Each of `ids`, read as [`read_one`] reads it, in their order. A long
@@ -1756,6 +1790,45 @@ mod tests {
         let read = files.load();
         assert_eq!(read.unread, [unread, another]);
         assert_eq!(read.notices, [HistoryNotice::Damaged { count: 1 }]);
+    }
+
+    /// A record whose bytes are no text, as damage to a disk leaves them, is
+    /// told of as damaged, as one whose text holds no session is: no build
+    /// reads it, now or at the next launch. It was told of as one that could
+    /// not be read just now, which Dust would read again, and noted as told,
+    /// so that was never so. One packed by a later build beside such bytes
+    /// reads from its pack, as before.
+    #[test]
+    fn a_record_whose_bytes_are_no_text_is_told_of_as_damaged() {
+        let (dir, files) = history("no-text");
+        files.load();
+        files.apply(&put(&[record(&finished(1_000))]));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let damaged = RecordId {
+            order: 2_000_000,
+            nonce: 1,
+        };
+        let bytes = b"{\"date\":\"2026-10-30\",\"timestamp\":2000,\"\xff\xfe\":1}";
+        fs::write(records.join(file_name(damaged)), bytes).unwrap();
+        let read = files.load();
+        assert_eq!(read.sessions.len(), 1);
+        assert_eq!(read.unread, [damaged]);
+        assert!(read.later.is_empty());
+        assert_eq!(read.notices, [HistoryNotice::Damaged { count: 1 }]);
+        assert_eq!(
+            fs::read(records.join(file_name(damaged))).unwrap(),
+            bytes,
+            "left as it is"
+        );
+
+        // Packed, it reads from the pack.
+        let third = record(&finished(3_000));
+        let name = format!("{}-{}{PACK_EXTENSION}", third.id, third.id);
+        pack(&dir.0, &name, &[&third], &[]);
+        fs::write(records.join(file_name(third.id)), b"\xff").unwrap();
+        let read = files.load();
+        assert_eq!(stamps(&read), [1_000, 3_000]);
+        assert_eq!(read.unread, [damaged]);
     }
 
     /// What this build could not read stays as it was through every change

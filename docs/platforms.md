@@ -674,8 +674,9 @@ before sessions said it. A build reads every format up to its own. A session
 stored in a later one is a later build's: left where it is, and the app says
 so once, as saved by a newer Dust; a build that reads it shows it, and a
 restore leaves out a backup's copy of the session it says it holds. One that
-says no later format and does not read is damaged: left where it is too, and
-told of as damaged; a restore brings a backup's copy of it back beside it. Settings that do not read at all, a `settings.json` edited by hand
+says no later format and does not read is damaged, as is one whose bytes are
+no text at all: left where it is too, and told of as damaged; a restore
+brings a backup's copy of it back beside it. Settings that do not read at all, a `settings.json` edited by hand
 and left with a stray comma say, are set aside before the defaults the app
 opens with are written over them: `settings.unreadable-*.json` beside it, or
 `dust_settings_unreadable` in a browser. So are the sessions of a history
