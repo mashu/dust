@@ -198,15 +198,21 @@ impl TrainingSettings {
             .retain(|key, kept| written.get(key) == Some(&kept.read_as));
     }
 
-    /// Each value `before` kept for a later build that these let go of
-    /// taken back, where its setting writes again what it was read as: put
-    /// back as it was, as Undo puts back a card reset
-    /// ([`Self::restore_section`]), the setting is as it was read.
-    pub(super) fn take_back_values_of(&mut self, before: &Self) {
+    /// Each value `before` kept for a later build that these let go of,
+    /// under a key `of_the_reset` names, taken back where its setting
+    /// writes again what it was read as: put back as it was, as Undo puts
+    /// back a card reset ([`Self::restore_section`]), the setting is as it
+    /// was read. A value let go of otherwise, by a change since on another
+    /// card or elsewhere, stays let go of.
+    pub(super) fn take_back_values_of(
+        &mut self,
+        before: &Self,
+        of_the_reset: impl Fn(&str) -> bool,
+    ) {
         let let_go: Vec<(&String, &UnreadValue)> = before
             .unread_values
             .iter()
-            .filter(|(key, _)| !self.unread_values.contains_key(*key))
+            .filter(|(key, _)| !self.unread_values.contains_key(*key) && of_the_reset(key))
             .collect();
         if let_go.is_empty() {
             return;
@@ -1228,6 +1234,39 @@ mod tests {
         undone.restore_section(SettingsSection::CharacterSet, &before);
         assert_eq!(styles_written(&undone), styles);
         assert_eq!(undone, before);
+    }
+
+    /// Undo of a card's reset brings back only what that reset let go of:
+    /// a later build's choice on another card, chosen here since and
+    /// chosen back, stays this build's choice, as every other card stays
+    /// as it is now.
+    #[test]
+    fn undo_of_a_reset_leaves_what_another_card_let_go_of_since() {
+        let styles = serde_json::json!({
+            "cwt": { "at": [0.25, -0.5], "off": [] },
+            "wpx": { "at": [0.2, 0.1], "off": [] },
+        });
+        let before = read_keeping(serde_json::json!({
+            "callerStyles": styles, "agcDecay": "medium",
+        }));
+        assert_eq!(
+            before.unread_values.keys().collect::<Vec<_>>(),
+            ["agcDecay", "callerStyles"]
+        );
+        let mut since = before.clone();
+        since.reset_section(SettingsSection::CharacterSet);
+        // Slow chosen and stored, then Fast chosen back and stored.
+        since.band.agc_decay = AgcDecay::Slow;
+        let mut since = since.clamp();
+        since.band.agc_decay = AgcDecay::Fast;
+        let mut since = since.clamp();
+        let written = |settings: &TrainingSettings, key: &str| {
+            serde_json::to_value(settings).expect("settings write")[key].clone()
+        };
+        assert_eq!(written(&since, "agcDecay"), "fast");
+        since.restore_section(SettingsSection::CharacterSet, &before);
+        assert_eq!(written(&since, "agcDecay"), "fast", "chosen here since");
+        assert_eq!(written(&since, "callerStyles"), styles, "the card's");
     }
 
     /// Only so much of what this build cannot read is kept: a value whose
