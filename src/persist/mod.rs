@@ -8,6 +8,8 @@
 //! that cannot read something gives back the most it can, and never writes
 //! over what it could not read.
 
+#[cfg(all(feature = "native-runtime", any(windows, test)))]
+mod acl;
 #[cfg(all(target_os = "android", not(test)))]
 mod android;
 pub mod backup;
@@ -759,6 +761,16 @@ pub(crate) mod tests {
             char_wpm: 20.0,
             ..SessionResult::empty_for_test()
         }
+    }
+
+    /// `session` as builds from before sessions said their format wrote
+    /// it ([`cw_core::SESSION_FORMAT`]): as this build does, with no
+    /// format.
+    pub(crate) fn as_an_older_build_wrote(session: &SessionResult) -> String {
+        let written = serde_json::to_string(session).expect("a session writes");
+        let says = format!("\"format\":{},", cw_core::SESSION_FORMAT);
+        assert!(written.contains(&says), "{written}");
+        written.replacen(&says, "", 1)
     }
 
     /// A save from before the AGC threshold went comes back with a raised

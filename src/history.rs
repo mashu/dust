@@ -19,7 +19,9 @@ use cw_core::SessionResult;
 use dioxus::core::{Runtime, ScopeId};
 
 use crate::persist::SessionKey;
-use crate::persist::record::{HistoryLoad, Pending, Record, RecordId, records_for_blob};
+use crate::persist::record::{
+    HistoryLoad, Pending, Record, RecordId, Unreadable, records_for_blob,
+};
 
 /// The history, oldest first, each session beside its record.
 ///
@@ -37,6 +39,9 @@ pub struct StoredHistory {
     /// Records the store holds that this build cannot read: there all the
     /// same, so none is taken for one missing.
     unread: BTreeSet<RecordId>,
+    /// Of `unread`, those a later build stored, by the session each says
+    /// it holds ([`Unreadable::later`]).
+    later: HashMap<RecordId, SessionKey>,
     by_key: HashMap<SessionKey, Vec<RecordId>>,
     /// One more with each change, so a screen tells a changed history from
     /// the same one without comparing the two.
@@ -48,6 +53,7 @@ impl StoredHistory {
     pub fn from_load(load: HistoryLoad) -> Self {
         let mut history = Self {
             unread: load.unread.into_iter().collect(),
+            later: load.later.into_iter().collect(),
             ..Self::default()
         };
         for (id, session) in load.sessions {
@@ -176,9 +182,15 @@ impl StoredHistory {
         &self.unread
     }
 
-    /// The record `id` is stored, and this build cannot read it.
-    pub fn mark_unread(&mut self, id: RecordId) {
+    /// The record `id` is stored, and this build cannot read it, as `said`
+    /// says of it.
+    pub fn mark_unread(&mut self, id: RecordId, said: &Unreadable) {
         self.unread.insert(id);
+        if said.later
+            && let Some(key) = &said.key
+        {
+            self.later.insert(id, key.clone());
+        }
     }
 
     /// The records `ids`, of those this build could not read, are no
@@ -186,7 +198,14 @@ impl StoredHistory {
     pub fn forget_unread(&mut self, ids: &[RecordId]) {
         for id in ids {
             self.unread.remove(id);
+            self.later.remove(id);
         }
+    }
+
+    /// The sessions records a later build stored here say they hold
+    /// ([`Unreadable::later`]): there all the same.
+    pub fn later_keys(&self) -> impl Iterator<Item = &SessionKey> {
+        self.later.values()
     }
 
     /// The record `id`, which this build could not read, reads after all,
@@ -194,6 +213,7 @@ impl StoredHistory {
     /// in its place.
     pub fn read_after_all(&mut self, id: RecordId, session: SessionResult) {
         self.unread.remove(&id);
+        self.later.remove(&id);
         self.insert(id, session);
     }
 
@@ -448,11 +468,22 @@ mod tests {
         assert_eq!(history.ids(), ids);
         assert!(history.unread().contains(&unread));
         assert_eq!(history.newest_id(), Some(records[2].id));
-        // One found since, that does not read either, is known as such.
+        // One found since, that does not read either, is known as such,
+        // and the session a later build's says it holds by its key.
         let later = RecordId { order: 2, nonce: 9 };
-        history.mark_unread(later);
+        let day = SessionKey::of(&at(2));
+        history.mark_unread(
+            later,
+            &Unreadable {
+                key: Some(day.clone()),
+                later: true,
+            },
+        );
         assert_eq!(history.unread().len(), 2);
         assert_eq!(history.len(), 3, "and is no session here");
+        assert_eq!(history.later_keys().collect::<Vec<_>>(), [&day]);
+        history.forget_unread(&[later]);
+        assert_eq!(history.later_keys().count(), 0, "gone with it");
     }
 
     /// What follows a change done then and there is done at once, with no

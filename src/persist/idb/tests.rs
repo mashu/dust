@@ -792,8 +792,9 @@ fn a_change_the_database_has_no_room_for_keeps_nothing_of_it() {
     assert!(said.contains("reloaded"), "{said}");
 }
 
-/// A record this build cannot read is left where it is, told of once, and
-/// never taken for one missing.
+/// A record this build cannot read, a newer build's as it says
+/// ([`cw_core::SESSION_FORMAT`]), is left where it is, known by the session
+/// it says it holds, told of once, and never taken for one missing.
 #[test]
 fn a_record_this_build_cannot_read_is_left_and_told_of_once() {
     let fake = Fake::default();
@@ -802,12 +803,15 @@ fn a_record_this_build_cannot_read_is_left_and_told_of_once() {
         order: 5_000,
         nonce: 9,
     };
-    fake.shelves()
-        .sessions
-        .insert(id.name(), r#"{"date":"later"}"#.into());
+    let later = format!(
+        r#"{{"format":{},"date":"later","timestamp":5}}"#,
+        cw_core::SESSION_FORMAT + 1
+    );
+    fake.shelves().sessions.insert(id.name(), later);
     let load = opened(&fake).load();
     assert_eq!(load.unread, [id]);
-    assert_eq!(load.notices, [HistoryNotice::Unread { count: 1 }]);
+    assert_eq!(load.later, [(id, SessionKey::new(5, "later".into()))]);
+    assert_eq!(load.notices, [HistoryNotice::Later { count: 1 }]);
     assert_eq!(opened(&fake).load().notices, [], "told once");
     assert!(fake.records().contains_key(&id), "left where it is");
 }
@@ -980,6 +984,36 @@ fn a_database_cleared_under_the_page_has_how_it_is_kept_written_back() {
     }));
     assert_eq!(fake.layout(), layout, "written back");
     assert_eq!(fake.records().into_keys().collect::<Vec<_>>(), [now.id]);
+}
+
+/// A session an older build stored, as it writes one, with no format, is
+/// there under another name for a move made again, wherever the format
+/// would be written: none, or one carried at the end, as an older build
+/// writes back this build's. This build writes the format in every session
+/// ([`cw_core::SESSION_FORMAT`]), so its bytes were never an older
+/// build's, and the move stored the session a second time.
+#[test]
+fn a_move_made_again_writes_no_session_an_older_build_stored_twice() {
+    let held = [ago(9), ago(8), ago(7)];
+    let moved = record::records_for_blob(&held);
+    let older = crate::persist::tests::as_an_older_build_wrote(&held[1]);
+    let carried = format!(
+        "{},\"format\":{}}}",
+        crate::persist::tests::as_an_older_build_wrote(&held[2])
+            .strip_suffix('}')
+            .expect("an object"),
+        cw_core::SESSION_FORMAT
+    );
+    let read = Read {
+        raw: [&older, &carried]
+            .into_iter()
+            .zip([&held[1], &held[2]])
+            .map(|(json, session)| (RecordId::placed(session.timestamp, json), json.clone()))
+            .collect(),
+        ..Read::default()
+    };
+    let left = not_moved_yet(moved.clone(), &read, &BTreeSet::new(), &HashSet::new());
+    assert_eq!(left, [moved[0].clone()]);
 }
 
 /// A move is made over nothing but what is not there already: a record
