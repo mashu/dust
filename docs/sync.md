@@ -68,9 +68,10 @@ latest of the record the device knows the drive to hold, where that is
 later (`SyncState::stamp_change`): one made after another is the later,
 however far apart the devices' clocks are. One made while a sync is under
 way is stamped again as it ends, after what that sync read and sent, and
-a session put back by hand meanwhile is not let go by that sync, which
-planned with no note of it, even where sync is turned off before it ends:
-the next sends it as put back, where sync is on still. A
+a session put back by hand meanwhile, in that tab or window or in another
+on the device, is not let go by that sync, which planned with no note of
+it, even where sync is turned off before it ends: the next sends it as put
+back, where sync is on still. A
 putting back noted while sync knows nothing of the drive, as just after it
 is turned on anew, when what it knew before went with it, is stamped again
 after what the drive holds once its first sync reads it.

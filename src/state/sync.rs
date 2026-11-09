@@ -158,8 +158,9 @@ pub struct SyncCtx {
     /// before it, and has yet to keep what it comes to.
     taking_in: CopyValue<bool>,
     /// Every session put back by hand here while a sync is under way,
-    /// whatever became of sync since: that sync lets none of them go
-    /// ([`AppCtx::put_back_since`]). Emptied as each begins.
+    /// whatever became of sync since: that sync lets none of them go, nor
+    /// any another copy put back meanwhile ([`AppCtx::put_back_since`]).
+    /// Emptied as each begins.
     put_back: CopyValue<BTreeSet<RecordId>>,
 }
 
@@ -868,8 +869,10 @@ impl AppCtx {
             remote: &*link.remote,
             current: move || *self.sync.epoch.peek() == epoch,
         };
-        // Put back by hand since it took the notes in: none let go.
-        let since = || self.put_back_since();
+        // Put back by hand since it took the notes in, here or in another
+        // copy: none let go.
+        let began = state.clone();
+        let since = || self.put_back_since(&began);
         // Kept as it sends deletions by hand, should the app stop.
         let keep = |sending: &SyncState| -> Pending<()> {
             let (sending, base) = (sending.clone(), Rc::clone(&base));
@@ -1065,13 +1068,27 @@ impl AppCtx {
         self.sync_soon();
     }
 
-    /// The sessions put back by hand here since the sync under way took in
-    /// the notes made before it, whatever became of sync since: none of
-    /// them that sync's to let go, though the drive holds a deletion of it
-    /// and what the sync plans from has no note of its putting back
+    /// The sessions put back by hand since the sync under way took in the
+    /// notes made before it, `began`: here, whatever became of sync since,
+    /// and in another copy of the app on the same store, a tab or a window,
+    /// as the note of each it kept there for this sync shows, one this sync
+    /// did not begin with, or at a later stamp. None of them is that sync's
+    /// to let go, though the drive holds a deletion of it and what the sync
+    /// plans from has no note of its putting back
     /// ([`crate::sync::run::sync_once_with`]).
-    fn put_back_since(self) -> BTreeSet<RecordId> {
-        self.sync.put_back.peek().clone()
+    fn put_back_since(self, began: &SyncState) -> BTreeSet<RecordId> {
+        let mut since = self.sync.put_back.peek().clone();
+        if let Kept::State(kept) = read_kept(&*self.app().store)
+            && same_sync(&kept, began)
+        {
+            since.extend(
+                kept.revived
+                    .iter()
+                    .filter(|&(id, &at)| began.revived.get(id).is_none_or(|&was| at > was))
+                    .map(|(&id, _)| id),
+            );
+        }
+        since
     }
 
     /// Turn sync off here: forget the key and the sign-in. With `and_copy`,

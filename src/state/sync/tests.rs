@@ -1931,6 +1931,43 @@ fn a_session_put_back_while_a_sync_reads_the_drive_is_not_let_go_by_it() {
     });
 }
 
+/// The same, with the session deleted and put back in another copy of the
+/// app on the same store, a tab or a window, while this copy's sync waits
+/// on the drive: the sync lets go of nothing put back since it began, in
+/// whichever copy, and the next sync sends it as put back. The sync used to
+/// let it go, as it read nothing of the other copy's putting back, here and
+/// everywhere.
+#[test]
+fn a_session_put_back_in_another_copy_while_this_one_syncs_is_not_let_go_by_it() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.take_up_store());
+        let two = harness
+            .in_app(|| harness.ctx.sessions.peek().id_at(1))
+            .expect("two");
+        harness.in_app(|| window.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        assert!(kept_state(&harness).drive.deleted(two), "the deletion sent");
+
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        harness.in_app(|| window.undo_delete());
+        held.hold(false);
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        harness.in_app(|| ctx.take_up_store());
+        assert_eq!(stored_stamps(&harness), [1, 2], "not let go");
+        assert_eq!(stamps(&harness), [1, 2]);
+        assert_eq!(joined_stamps(&remote), [1, 2], "the drive's word");
+    });
+}
+
 /// The same, with sync turned off here before the sync goes on, the Undo
 /// made before the turning off or after it: the sync under way lets go of
 /// nothing put back since it began, whatever became of sync meanwhile, and
