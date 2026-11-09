@@ -13,7 +13,9 @@ use super::disk::{
     aside_name, flush, move_aside, save_streamed, shown, sync_dir, temporary, write_whole,
 };
 use super::files::HistoryFiles;
-use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId};
+use super::record::{
+    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
+};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
@@ -600,7 +602,7 @@ impl Store for DesktopStore {
         self.history.listing()
     }
 
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>> {
         self.history.read(ids)
     }
 
@@ -1404,7 +1406,7 @@ pub(super) mod tests {
             put: vec![record],
             ..HistoryChange::default()
         }));
-        let read: [Result<Record, RecordId>; 1] = now(store.read_records(vec![moved]))
+        let read: [Result<Record, Unopened>; 1] = now(store.read_records(vec![moved]))
             .try_into()
             .expect("one");
         let [Ok(held)] = read else {

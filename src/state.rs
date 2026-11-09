@@ -35,7 +35,7 @@ use crate::persist::backup::{
     Backup, BackupFile, Filled, NotSaved, backup_name, filled_in, merge_sessions,
 };
 use crate::persist::record::{
-    HistoryChange, HistoryLoad, Record, RecordId, read_record, unreadable,
+    HistoryChange, HistoryLoad, Record, RecordId, Unopened, Unreadable, read_record, unreadable,
 };
 use crate::persist::{
     CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
@@ -842,6 +842,22 @@ impl AppCtx {
         if gone {
             sessions.write().forget_unread(&unread_gone);
         }
+        // One whose bytes are no text is damaged, as the history read whole
+        // takes it: held as one no build reads, not read again, and told of
+        // as damaged at the next launch.
+        let damaged: Vec<RecordId> = read
+            .iter()
+            .filter_map(|record| match record {
+                Err(Unopened::Damaged(id)) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        if !damaged.is_empty() {
+            let mut history = sessions.write();
+            for id in damaged {
+                history.mark_unread(id, &Unreadable::default());
+            }
+        }
         let changes = {
             let history = sessions.peek();
             read.iter().any(|record| match record {
@@ -907,23 +923,31 @@ impl AppCtx {
 
     /// Note what a look found of the records the store could not read for
     /// now ([`Self::unread_for_now`]): each read now is one no more, as is
-    /// each no longer listed, `gone`, and each listed that could not be
-    /// read is one, and is read again soon ([`Self::read_again_soon`]).
-    /// One that is no more refuses no restore, and is told of no more, for
-    /// having been so: should it fail again, that is a failure of its own.
-    fn note_unread_for_now(self, read: &[Result<Record, RecordId>], gone: &[RecordId]) {
+    /// each found damaged and each no longer listed, `gone`, and each
+    /// listed that could not be read just now is one, and is read again
+    /// soon ([`Self::read_again_soon`]). One that is no more refuses no
+    /// restore, and is told of no more, for having been so: should it fail
+    /// again, that is a failure of its own.
+    fn note_unread_for_now(self, read: &[Result<Record, Unopened>], gone: &[RecordId]) {
         let mut unread_for_now = self.unread_for_now;
         let (over, joined) = {
             let held = unread_for_now.peek();
             let over: Vec<RecordId> = read
                 .iter()
-                .filter_map(|record| record.as_ref().ok().map(|record| record.id))
+                .filter_map(|record| match record {
+                    Ok(record) => Some(record.id),
+                    Err(Unopened::Damaged(id)) => Some(*id),
+                    Err(Unopened::Failed(_)) => None,
+                })
                 .chain(gone.iter().copied())
                 .filter(|id| held.contains(id))
                 .collect();
             let joined: Vec<RecordId> = read
                 .iter()
-                .filter_map(|record| record.as_ref().err().copied())
+                .filter_map(|record| match record {
+                    Err(Unopened::Failed(id)) => Some(*id),
+                    _ => None,
+                })
                 .filter(|id| !held.contains(id))
                 .collect();
             (over, joined)
@@ -2112,9 +2136,9 @@ fn backup_mark(store: &dyn Store) -> Option<u64> {
 
 /// What a look at the store found ([`AppCtx::sync_with_store`]).
 struct Looked {
-    /// Each record listed that was not here, as it is stored, or its id
-    /// where it could not be read.
-    read: Vec<Result<Record, RecordId>>,
+    /// Each record listed that was not here, as it is stored, or why it
+    /// could not be read.
+    read: Vec<Result<Record, Unopened>>,
     /// Each record here, the store had taken, that was no longer listed.
     missing: Vec<RecordId>,
     /// Of those, the ones deleted by hand.
@@ -3528,6 +3552,77 @@ mod tests {
             "Restored 1 session and your settings."
         );
         assert_eq!(a.shown(), [1, 2]);
+    }
+
+    /// So does one whose bytes became no text after the app opened: a look
+    /// that finds it takes it for one no build reads, as the app's launch
+    /// does, and neither reads it again nor refuses a restore for it. A
+    /// look took it for one that could not be read just now: it refused the
+    /// first restore, was read again at each try, and was told of as one
+    /// that could not be read, and noted so, which kept the next launch from
+    /// telling of it as damaged.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_restore_brings_back_a_session_whose_file_here_became_no_text_after_the_app_opened() {
+        let dir = TempDir::new("restore-beside-no-text-since");
+        let a = Tab::on_store(crate::persist::files_at(&dir.0));
+        a.finish(day(1));
+        let damaged = RecordId {
+            order: stamp(2) * 1000,
+            nonce: 7,
+        };
+        std::fs::write(
+            dir.0
+                .join("history")
+                .join("sessions")
+                .join(format!("{damaged}.json")),
+            [0xff_u8, 0xfe, 0x00, 0x80],
+        )
+        .expect("written");
+        restore(&a, [1, 2]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        assert_eq!(a.shown(), [1, 2]);
+        assert!(a.act(|ctx| ctx.sessions.peek().unread().contains(&damaged)));
+        assert!(a.act(|ctx| ctx.unread_for_now.peek().is_empty()));
+    }
+
+    /// Such a record, found by a look, is not told of as one that could not
+    /// be read, at any try ([`READ_AGAIN_MS`]): the next launch tells of it
+    /// as damaged, once, as it tells of one found so as the app opened. It
+    /// was told of after the last try as one that could not be read, and
+    /// noted as told, so no launch told of it as damaged.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_file_here_that_became_no_text_after_the_app_opened_is_told_of_as_damaged() {
+        crate::testing::run(|| async {
+            let dir = TempDir::new("no-text-since-told");
+            let mut a = Tab::on_store(crate::persist::files_at(&dir.0));
+            a.finish(day(1));
+            let damaged = RecordId {
+                order: stamp(2) * 1000,
+                nonce: 7,
+            };
+            std::fs::write(
+                dir.0
+                    .join("history")
+                    .join("sessions")
+                    .join(format!("{damaged}.json")),
+                [0xff_u8, 0xfe, 0x00, 0x80],
+            )
+            .expect("written");
+            a.act(AppCtx::take_up_changes);
+            let last = u64::from(READ_AGAIN_MS[READ_AGAIN_MS.len() - 1]);
+            a.advance(last + 1_000).await;
+            assert_eq!(a.notices(), [], "not as one that could not be read");
+            assert_eq!(a.shown(), [1]);
+            drop(a);
+            let b = Tab::on_store(crate::persist::files_at(&dir.0));
+            let told = HistoryNotice::Damaged { count: 1 }.text();
+            assert_eq!(b.notices(), [Notice::History(told)]);
+        });
     }
 
     /// A record that could not be read as the app opened, and still cannot

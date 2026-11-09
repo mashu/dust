@@ -23,8 +23,8 @@ use super::legacy::{
     self, Aside, BlobHistory, BlobKeys, Fingerprint, Layout, parse_sessions, read_history,
 };
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done, read_record,
-    records_for_blob, unread_notices, unreadable,
+    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
+    failed_for_now, read_record, records_for_blob, unread_notices, unreadable,
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SessionKey, SetAside,
@@ -288,7 +288,7 @@ struct Answer {
 /// waits on them.
 struct Reads {
     ids: Vec<RecordId>,
-    read: Option<Vec<Result<Record, RecordId>>>,
+    read: Option<Vec<Result<Record, Unopened>>>,
     waker: Option<Waker>,
 }
 
@@ -551,9 +551,11 @@ impl Store for MemoryStore {
         ))
     }
 
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+    /// Each that cannot be read could not be read just now: the memory
+    /// store holds text alone, as a browser's does.
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>> {
         if let Some(page) = &self.page {
-            return done(page.read(&ids));
+            return done(failed_for_now(page.read(&ids)));
         }
         if !self.reads_later.get() {
             return done(self.read_now(ids));
@@ -762,16 +764,16 @@ impl MemoryStore {
     /// comes back as its id. Each read fails no longer, as the files note
     /// it: one that fails again as the history is next read is not told of
     /// then.
-    fn read_now(&self, ids: Vec<RecordId>) -> Vec<Result<Record, RecordId>> {
+    fn read_now(&self, ids: Vec<RecordId>) -> Vec<Result<Record, Unopened>> {
         let (records, held_open) = (self.records.borrow(), self.held_open.borrow());
-        let read: Vec<Result<Record, RecordId>> = ids
+        let read: Vec<Result<Record, Unopened>> = ids
             .into_iter()
             .map(|id| match records.get(&id) {
                 Some(held) if !self.unlistable.get() && !held_open.contains(&id) => Ok(Record {
                     id,
                     json: held.json.clone(),
                 }),
-                _ => Err(id),
+                _ => Err(Unopened::Failed(id)),
             })
             .collect();
         let mut failed = self.failed_last.borrow_mut();
@@ -1199,7 +1201,10 @@ mod tests {
         now(store.change_history(put(std::slice::from_ref(&one))));
         store.unlistable.set(true);
         assert_eq!(now(store.history_listing()), None);
-        assert_eq!(now(store.read_records(vec![one.id])), [Err(one.id)]);
+        assert_eq!(
+            now(store.read_records(vec![one.id])),
+            [Err(Unopened::Failed(one.id))]
+        );
         store.unlistable.set(false);
         assert!(store.history_changed());
         assert_eq!(now(store.history_listing()), Some(vec![one.id]));

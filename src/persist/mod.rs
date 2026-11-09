@@ -50,7 +50,7 @@ use cw_core::{
 };
 use serde::Deserialize;
 
-use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, Unopened};
 use settings::{load_settings_from, unmarked};
 
 pub trait Store {
@@ -161,8 +161,9 @@ pub trait Store {
     /// cannot be listed, which is no word that anything is missing.
     fn history_listing(&self) -> Pending<Option<Vec<RecordId>>>;
     /// The records `ids`, as they are stored. One that cannot be read
-    /// comes back as its id.
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>>;
+    /// comes back as why ([`record::Unopened`]): it could not be read just
+    /// now, or, where the store can tell, its bytes are no text, damaged.
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>>;
     /// Which of `ids` were deleted by hand: of those missing from the
     /// listing, the ones to let go. Any other was lost in passing, and is
     /// to be stored again: missing is never deleted.

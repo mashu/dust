@@ -54,8 +54,8 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::disk::{aside_name, flush, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unreadable, held_key, key_of,
-    keyed, names_noted, not_told, read_record, taken_up, tombstone_key, unreadable,
+    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unopened, Unreadable, held_key,
+    key_of, keyed, names_noted, not_told, read_record, taken_up, tombstone_key, unreadable,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -577,23 +577,29 @@ impl HistoryFiles {
     }
 
     /// The records `ids`, as they are stored, each that can be read: one
-    /// that cannot comes back as its id. Each read fails no longer
-    /// ([`Self::failing_no_longer`]).
+    /// that cannot comes back as why ([`Unopened`]): it could not be read
+    /// just now, or its bytes are no text, damaged, as the history read
+    /// whole takes such a record ([`Raw::record`]). Each read fails no
+    /// longer ([`Self::failing_no_longer`]).
     ///
     /// One a later build packed once the packs were read, and took the
     /// loose copy of before it was read, is in neither place: every one of
     /// `ids` is read first, and the packs again only then, for all those in
     /// neither place ([`Self::raw_each`]).
-    pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
+    pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, Unopened>> {
         self.on_its_thread();
         let mut packed = self.packed().unwrap_or_default().records;
-        let read: Vec<Result<Record, RecordId>> = self
+        let read: Vec<Result<Record, Unopened>> = self
             .raw_each(ids, &mut packed)
             .into_iter()
             .zip(ids)
-            .map(|(json, &id)| json.map(|json| Record { id, json }).ok_or(id))
+            .map(|(raw, &id)| raw.record(id))
             .collect();
-        self.failing_no_longer(read.iter().flatten().map(|record| record.id));
+        self.failing_no_longer(read.iter().filter_map(|read| match read {
+            Ok(record) => Some(record.id),
+            Err(Unopened::Damaged(id)) => Some(*id),
+            Err(Unopened::Failed(_)) => None,
+        }));
         read
     }
 
@@ -663,14 +669,14 @@ impl HistoryFiles {
             let read = self.raw_each(part, &mut packed);
             part.iter()
                 .zip(read)
-                .map(|(&id, json)| json.map(|json| Record { id, json }).ok_or(id))
+                .map(|(&id, raw)| raw.text().map(|json| Record { id, json }).ok_or(id))
                 .collect::<Vec<_>>()
         });
         backup.write(out, stored, |id| listing.gone.contains(&id))
     }
 
     /// What is stored for each of `ids`, in their order, loose or else in
-    /// `packed`, the packs as last read: none for one that cannot be read.
+    /// `packed`, the packs as last read ([`raw_at`]).
     ///
     /// A later build packs records by writing the pack before it takes
     /// their loose copies away, so one packed once `packed` was read, and
@@ -680,23 +686,16 @@ impl HistoryFiles {
     /// those in neither place, which are looked for again: one packed while
     /// they were read, in however many passes, is found. `packed` takes in
     /// what the packs hold by then.
-    fn raw_each(
-        &self,
-        ids: &[RecordId],
-        packed: &mut BTreeMap<RecordId, String>,
-    ) -> Vec<Option<String>> {
+    fn raw_each(&self, ids: &[RecordId], packed: &mut BTreeMap<RecordId, String>) -> Vec<Raw> {
         let records = self.records();
-        let mut read: Vec<Option<String>> = ids
-            .iter()
-            .map(|&id| raw_at(&records, id, packed).text())
-            .collect();
-        if read.iter().any(Option::is_none) {
+        let mut read: Vec<Raw> = ids.iter().map(|&id| raw_at(&records, id, packed)).collect();
+        if read.iter().any(|raw| !raw.is_text()) {
             if let Ok(now) = self.packed() {
                 packed.extend(now.records);
             }
             for (read, &id) in read.iter_mut().zip(ids) {
-                if read.is_none() {
-                    *read = raw_at(&records, id, packed).text();
+                if !read.is_text() {
+                    *read = raw_at(&records, id, packed);
                 }
             }
         }
@@ -1303,6 +1302,21 @@ impl Raw {
             Self::NoText(_) | Self::Failed => None,
         }
     }
+
+    fn is_text(&self) -> bool {
+        matches!(self, Self::Text(_))
+    }
+
+    /// What a read of record `id` hands back of what is stored
+    /// ([`HistoryFiles::read`]): bytes that are no text are a damaged
+    /// record's, as the history read whole takes them ([`read_one`]).
+    fn record(self, id: RecordId) -> Result<Record, Unopened> {
+        match self {
+            Self::Text(json) => Ok(Record { id, json }),
+            Self::NoText(_) => Err(Unopened::Damaged(id)),
+            Self::Failed => Err(Unopened::Failed(id)),
+        }
+    }
 }
 
 /// What is stored for `id` in `records`, loose, or else in a pack: a loose
@@ -1626,7 +1640,7 @@ mod tests {
             wait(self.0.listing())
         }
 
-        fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, RecordId>> {
+        fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, Unopened>> {
             wait(self.0.read(ids.to_vec()))
         }
 
@@ -1954,6 +1968,8 @@ mod tests {
             bytes,
             "left as it is"
         );
+        // So a look that reads it finds it.
+        assert_eq!(files.read(&[damaged]), [Err(Unopened::Damaged(damaged))]);
 
         // Packed, it reads from the pack.
         let third = record(&finished(3_000));
@@ -2001,7 +2017,7 @@ mod tests {
         let read = files.load();
         assert!(!read.unread.contains(&busy.id), "{:?}", read.unread);
         assert_eq!(read.failed, [busy.id]);
-        assert_eq!(files.read(&[busy.id]), [Err(busy.id)]);
+        assert_eq!(files.read(&[busy.id]), [Err(Unopened::Failed(busy.id))]);
         fs::remove_dir(records.join(file_name(busy.id))).unwrap();
         fs::write(records.join(file_name(busy.id)), &busy.json).unwrap();
         let read = files.load();
@@ -2096,7 +2112,7 @@ mod tests {
         fs::write(&path, &busy.json).unwrap();
         assert_eq!(
             files.read(&[busy.id, stuck.id]),
-            [Ok(busy.clone()), Err(stuck.id)]
+            [Ok(busy.clone()), Err(Unopened::Failed(stuck.id))]
         );
         // As the app next opens, the first fails for a moment again: only
         // the second, which has not read since it failed, is told of.
@@ -3585,7 +3601,11 @@ mod tests {
         fs::remove_file(&packed).unwrap();
         std::os::unix::fs::symlink(dir.0.join("nowhere"), &packed).unwrap();
         assert_eq!(files.listing(), Some(vec![one.id, two.id]));
-        assert_eq!(files.read(&[one.id]), [Err(one.id)], "read nowhere");
+        assert_eq!(
+            files.read(&[one.id]),
+            [Err(Unopened::Failed(one.id))],
+            "read nowhere"
+        );
     }
 
     /// A pack that cannot be opened leaves a backup to what the app holds:

@@ -399,6 +399,32 @@ impl HistoryChange {
     }
 }
 
+/// A record a read could not hand back ([`super::Store::read_records`]),
+/// by why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unopened {
+    /// It could not be read at all just now, as a file another program
+    /// holds open for a moment cannot be: it may read a moment later, as
+    /// one that fails as the history is read whole may ([`HistoryLoad::failed`]).
+    Failed(RecordId),
+    /// It was read, and its bytes are no text, as damage to a disk leaves
+    /// them: no build reads it, now or later, as the history read whole
+    /// finds such a record damaged ([`HistoryLoad::unread`]). Only files
+    /// hold bytes that are no text: a browser holds text alone.
+    #[cfg_attr(not(feature = "native-runtime"), allow(dead_code))]
+    Damaged(RecordId),
+}
+
+/// `read`, as a store that reads each record whole or not at all, and holds
+/// text alone, answers a read ([`super::Store::read_records`]): a record it
+/// could not read could not be read just now ([`Unopened::Failed`]).
+#[cfg(any(feature = "web", test))]
+pub(super) fn failed_for_now(read: Vec<Result<Record, RecordId>>) -> Vec<Result<Record, Unopened>> {
+    read.into_iter()
+        .map(|read| read.map_err(Unopened::Failed))
+        .collect()
+}
+
 /// The history as a store read it ([`super::Store::load_history`]).
 #[derive(Debug, Default, PartialEq)]
 pub struct HistoryLoad {

@@ -26,7 +26,9 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use super::files::{HistoryFiles, THREAD, Watch};
-use super::record::{HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, done};
+use super::record::{
+    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
+};
 use super::saved::HistorySaved;
 
 /// How long a change the files would not take waits, at the head of the
@@ -174,13 +176,17 @@ impl HistoryJobs {
         Box::pin(async move { listed.await.flatten() })
     }
 
-    /// The records `ids`, as stored ([`HistoryFiles::read`]).
-    pub(super) fn read(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+    /// The records `ids`, as stored ([`HistoryFiles::read`]): none read,
+    /// for now, where the files cannot be reached.
+    pub(super) fn read(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>> {
         let asked = ids.clone();
         let read = self.ask(move |files| files.read(&asked));
         Box::pin(async move {
-            read.await
-                .unwrap_or_else(|| ids.into_iter().map(Err).collect())
+            read.await.unwrap_or_else(|| {
+                ids.into_iter()
+                    .map(|id| Err(Unopened::Failed(id)))
+                    .collect()
+            })
         })
     }
 
@@ -370,7 +376,10 @@ mod tests {
         assert_eq!(wait(after).expect("listed"), [records[1].id, records[2].id]);
         assert_eq!(wait(forgotten), [records[0].id]);
         let read = wait(jobs.read(vec![records[1].id, records[0].id]));
-        assert_eq!(read, [Ok(records[1].clone()), Err(records[0].id)]);
+        assert_eq!(
+            read,
+            [Ok(records[1].clone()), Err(Unopened::Failed(records[0].id))]
+        );
         assert!(!jobs.changed(), "its own changes are none to take up");
     }
 
