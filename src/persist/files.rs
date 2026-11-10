@@ -900,7 +900,7 @@ impl HistoryFiles {
 
     /// Whether the history kept whole changed since it was last taken up.
     fn legacy_changed(&self, layout: &Layout) -> bool {
-        fingerprint_of(&self.root.join(SESSIONS)).is_ok_and(|now| now != layout.legacy)
+        fingerprint_of(&self.root.join(SESSIONS)).is_ok_and(|now| now != layout.taken_up())
     }
 
     /// Make the move from the history kept whole, `sessions.json`, and say

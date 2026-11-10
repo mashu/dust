@@ -943,7 +943,10 @@ none, the newest it remembers deleting, and where there was no history kept
 whole at all, none, so nothing is cut off) and is neither
 here already nor deleted here, and makes here each deletion the older build
 made since, once, by what it is, whatever its clock said (`deletionsTaken`,
-beside `deletedSeen`, which builds before them go by).
+beside `deletedSeen`, which builds before them go by). A change there that
+a build before those rules took up first, by its own, is taken up again by
+them: such a build moves `legacy` on, and leaves `takenLegacy`, this
+build's note of what it took, as it was.
 A record here that a later build stored counts as the session it says it
 holds; a damaged one does not, though it may still say one, and the older
 build's copy is taken up beside it, as a restore brings a backup's back

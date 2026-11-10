@@ -435,9 +435,42 @@ pub(super) struct Layout {
     /// layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) deletions_taken: Option<DeletionsTaken>,
+    /// The history kept whole as this build's take-up last took it,
+    /// `takenLegacy`: a build before its rules, which takes up a change
+    /// there by its own, moves [`Self::legacy`] on and carries this as it
+    /// is, so this build takes that change up again by its own
+    /// ([`Self::taken_up`]). None, where an earlier build wrote the layout;
+    /// noted as none where there was no history kept whole.
+    #[serde(
+        default,
+        deserialize_with = "noted",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) taken_legacy: Option<Option<Fingerprint>>,
     /// What a later build added.
     #[serde(flatten)]
     pub(super) unread: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Layout {
+    /// The history kept whole as this build last took it up: its own note
+    /// ([`Self::taken_legacy`]), or, where an earlier build wrote the
+    /// layout, the one every build moves on ([`Self::legacy`]). A change
+    /// there since is taken up by [`imported`], though a build before this
+    /// one's rules took it up first.
+    pub(super) fn taken_up(&self) -> Option<Fingerprint> {
+        self.taken_legacy.unwrap_or(self.legacy)
+    }
+}
+
+/// A key a layout holds, as it holds it, a null among it: none only where
+/// it holds no such key ([`Layout::taken_legacy`]).
+fn noted<'de, D, T>(read: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(read).map(Some)
 }
 
 /// The deletions an older build made that the history here has taken, by
@@ -577,6 +610,7 @@ pub(super) fn moved(
             taken: deleted.iter().map(DeletionSeen::of).collect(),
             unread: serde_json::Map::new(),
         }),
+        taken_legacy: Some(fingerprint),
         unread: serde_json::Map::new(),
     };
     (record::records_for_blob(sessions), layout)
@@ -685,9 +719,17 @@ fn as_moved(json: &str) -> String {
 /// A deletion the older build made is made here too, of every record with
 /// its key, as it would have been there, once: each taken is noted
 /// ([`Layout::deletions_taken`]), whatever its stamp says. Where a layout
-/// notes none, as an earlier build wrote it, or a build that notes none has
-/// taken deletions up since ([`DeletionsTaken::seen`]), each made no later
-/// than the latest taken is taken, as such builds take them.
+/// notes none, as an earlier build wrote it, each made no later than the
+/// latest taken is taken, as such builds take them; where a build that
+/// notes none has taken deletions up since ([`DeletionsTaken::seen`]),
+/// each it took, made after what this build had seen and no later than the
+/// latest taken now. One stamped no later than what this build had seen,
+/// and not noted, it did not take, and is made here.
+///
+/// A change a build before these rules took up first, by its own, is
+/// taken up again by them: such a build moves [`Layout::legacy`] on, and
+/// leaves this build's note of what it took as it was
+/// ([`Layout::taken_up`]).
 ///
 /// The change and the layout to write once it is made, or none where
 /// there is nothing new.
@@ -699,7 +741,7 @@ pub(super) fn imported(
     live: &HashMap<SessionKey, Vec<RecordId>>,
     gone: &HashSet<SessionKey>,
 ) -> Option<(HistoryChange, Layout)> {
-    if fingerprint == layout.legacy {
+    if fingerprint == layout.taken_up() {
         return None;
     }
     let taken: HashSet<&SessionKey> = layout.imported_keys.iter().collect();
@@ -741,15 +783,19 @@ pub(super) fn imported(
         .as_ref()
         .map(|noted| noted.taken.clone())
         .unwrap_or_default();
-    let by_stamp = layout
-        .deletions_taken
-        .as_ref()
-        .is_none_or(|noted| noted.seen != layout.deleted_seen);
-    if by_stamp {
+    // Taken by a build that takes them by when they were made, each made
+    // after the latest it had taken and moved on to the latest it took: of
+    // a layout that notes none, each made no later than that; of one this
+    // build noted them in, each made after what it had seen as it did, no
+    // later than that. One made no later than what it had seen that it did
+    // not note, made since with a clock behind, no such build took.
+    let seen = layout.deletions_taken.as_ref().map(|noted| noted.seen);
+    if seen != Some(layout.deleted_seen) {
         made.extend(
             deleted
                 .iter()
                 .filter(|gone| gone.at <= layout.deleted_seen)
+                .filter(|gone| seen.is_none_or(|seen| gone.at > seen))
                 .map(DeletionSeen::of),
         );
     }
@@ -763,6 +809,7 @@ pub(super) fn imported(
     }
     let mut next = layout.clone();
     next.legacy = fingerprint;
+    next.taken_legacy = Some(fingerprint);
     next.imported_keys.extend(keys);
     next.deleted_seen = layout.deleted_seen.max(latest(deleted));
     next.taken_through = Some(through);
@@ -1903,14 +1950,15 @@ mod tests {
     /// A build that takes deletions up by when they were made alone, as
     /// builds before this one do, may take some up between two of this
     /// build's take-ups, and leave the deletions this one noted as it found
-    /// them: each it took, made no later than the latest it took, is taken,
-    /// and none is made again, of a session put back here since.
+    /// them: each it took, made after what this build had seen and no later
+    /// than the latest it took, as such a build takes them, is taken, and
+    /// none is made again, of a session put back here since.
     #[test]
     fn deletions_an_earlier_build_took_up_since_are_not_made_again() {
         let (first, second) = (finished(T), finished(T + DAY));
         let records = record::records_for_blob(&[first.clone(), second.clone()]);
         let noted = Deleted::of(&first, T + 5);
-        let since = Deleted::of(&second, T + 1);
+        let since = Deleted::of(&second, T + 7);
         let layout = earlier(serde_json::json!({
             "layout": 1,
             "compatible": 1,
@@ -1932,6 +1980,99 @@ mod tests {
         assert!(change.forget.is_empty(), "{:?}", change.forget);
         let taken = next.deletions_taken.expect("noted").taken;
         assert!(taken.contains(&DeletionSeen::of(&since)));
+    }
+
+    /// The layout as a build before this one's take-up rules writes it back
+    /// once it has taken up the history kept whole as `fingerprint` by its
+    /// own (0.16.3 to 0.16.9): `legacy` moved on, and `deletedSeen` to the
+    /// latest of `deleted`; what it does not know, this build's notes among
+    /// it, carried as it was read.
+    fn taken_up_by_an_older_build(
+        layout: &Layout,
+        fingerprint: Option<Fingerprint>,
+        deleted: &[Deleted],
+    ) -> Layout {
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&layout.written().expect("written")).expect("JSON");
+        raw["legacy"] = serde_json::to_value(fingerprint).expect("JSON");
+        let seen = layout.deleted_seen.max(latest(deleted));
+        raw["deletedSeen"] = serde_json::json!(seen);
+        earlier(raw)
+    }
+
+    /// A change to the history kept whole that a build before this one's
+    /// take-up rules took up first, by its own, is taken up again here by
+    /// this build's: a session an older build stored after a move made long
+    /// after the sessions it took is taken up, though that build's cut-off,
+    /// a day before the move, left it out; and a deletion an older build
+    /// made with its clock behind, stamped below the latest it took, is
+    /// made, though that build makes only those stamped after it. The
+    /// change used to read as taken up already, its `legacy` that build's
+    /// note of it, and neither was ever taken up here.
+    #[test]
+    fn a_change_a_build_before_this_ones_rules_took_up_first_is_taken_up_again_here() {
+        let older = [finished(T), finished(T + DAY), finished(T + 2 * DAY)];
+        let noted = Deleted::of(&finished(T - DAY), T);
+        let (records, layout) = moved(
+            &older,
+            written(1),
+            std::slice::from_ref(&noted),
+            T + 10 * YEAR,
+        );
+        let since = finished(T + 3 * DAY);
+        let mut whole = older.to_vec();
+        whole.push(since.clone());
+        let looked = taken_up_by_an_older_build(&layout, written(2), std::slice::from_ref(&noted));
+        let (change, next) = imported(
+            &looked,
+            written(2),
+            &whole,
+            std::slice::from_ref(&noted),
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(put_stamps(&change), [since.timestamp]);
+        assert_eq!(next.legacy, written(2));
+        assert!(
+            imported(
+                &next,
+                written(2),
+                &whole,
+                std::slice::from_ref(&noted),
+                &live_of(&records),
+                &HashSet::new(),
+            )
+            .is_none(),
+            "once"
+        );
+
+        // A deletion stamped behind what this build had seen, which the
+        // older build, taking up a later one too, passes over.
+        let behind = Deleted::of(&older[2], T - 5);
+        let later = Deleted::of(&older[1], T + 9);
+        let deleted = [noted, behind.clone(), later.clone()];
+        let looked = taken_up_by_an_older_build(&layout, written(3), &deleted);
+        let mut live = live_of(&records);
+        // The older build made the later deletion here as it took it up.
+        live.remove(&later.key());
+        let (change, next) = imported(
+            &looked,
+            written(3),
+            &older[..1],
+            &deleted,
+            &live,
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(change.forget, [(records[2].id, behind)]);
+        assert_eq!(next.deletions_taken.expect("noted").taken.len(), 3);
+
+        // Noted as none where there was no history kept whole, and read so.
+        let (_, none) = moved(&[], None, &[], T);
+        assert_eq!(none.taken_legacy, Some(None));
+        let raw = none.written().expect("written");
+        assert_eq!(Gate::of(Some(&raw)), Gate::Open(none));
     }
 
     /// What the take-up took is kept through every write of the layout: by

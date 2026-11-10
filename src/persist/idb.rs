@@ -579,7 +579,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         let (layout, held) = self.layout.borrow().clone()?;
         let raw = self.shelf.get(self.keys.history).ok()?;
         let fingerprint = raw.as_deref().map(fingerprint_of);
-        if fingerprint == layout.legacy {
+        if fingerprint == layout.taken_up() {
             return None;
         }
         let sessions = raw
@@ -879,7 +879,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         };
         self.glue
             .legacy_len(self.keys.history)
-            .is_ok_and(|len| len != layout.legacy.map(|held| held.len))
+            .is_ok_and(|len| len != layout.taken_up().map(|held| held.len))
     }
 
     /// The deletions an older build remembers: none, where they cannot be
