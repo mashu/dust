@@ -2310,6 +2310,55 @@ mod tests {
         assert!(whole.forgotten(&[one.id]).is_empty());
     }
 
+    /// A session a tab knows by a name the history kept whole no longer
+    /// gives it, as one named just after the one before it, finished with
+    /// the clock set back, is named at its own stamp once another tab has
+    /// deleted that one, is deleted all the same as the tab deletes it by
+    /// the name it knows: found by what it holds. It goes from the history
+    /// kept whole, the deletion is remembered by its key, and no tab shows
+    /// it again.
+    #[test]
+    fn a_session_deleted_by_a_name_the_history_no_longer_gives_it_goes() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let (here, there) = (whole_on(&shelf), whole_on(&shelf));
+        here.load();
+        let (third, second) = (finished(3_000), finished(2_000));
+        let three = next_after(&third, None);
+        // Finished with the clock set back: named just after the newest.
+        let two = next_after(&second, Some(three.id));
+        assert!(two.id.order > three.id.order);
+        here.apply(&HistoryChange {
+            put: vec![three.clone(), two.clone()],
+            ..HistoryChange::default()
+        });
+        // A tab that opens now reads them by the same names.
+        assert_eq!(
+            there
+                .load()
+                .sessions
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            [three.id, two.id]
+        );
+        let gone_three = Deleted::of(&third, 5);
+        here.apply(&HistoryChange {
+            forget: vec![(three.id, gone_three.clone())],
+            ..HistoryChange::default()
+        });
+        // Deleted there by the name it was read by, not looked at since.
+        let gone_two = Deleted::of(&second, 7);
+        let saved = there.apply(&HistoryChange {
+            forget: vec![(two.id, gone_two.clone())],
+            ..HistoryChange::default()
+        });
+        assert!(saved.kept().is_some(), "{saved:?}");
+        assert_eq!(kept_whole(&shelf), Vec::<u64>::new(), "gone");
+        assert_eq!(remembered(&shelf), [gone_three, gone_two]);
+        assert!(whole_on(&shelf).load().sessions.is_empty());
+        assert_eq!(here.listing(), Some(Vec::new()));
+    }
+
     /// A change another tab made to the history kept whole is still to
     /// take up after a look that could not list it, however often it is
     /// asked of, until a look that can takes it up. Asking noted it as
