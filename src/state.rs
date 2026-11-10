@@ -250,9 +250,15 @@ pub struct AppCtx {
     /// A restore, or the Undo of one, is under way: from its being asked
     /// for until what became of it has been told ([`Self::restore_backup`]).
     restore_under_way: CopyValue<bool>,
+    /// How many restores have been asked for: each is known by its number
+    /// until it is told of ([`Self::restore_told`]).
+    restores_asked: CopyValue<u64>,
+    /// The restore under way, by its number, until what became of it has
+    /// been told: none while an Undo is, or nothing is.
+    current_restore: CopyValue<Option<u64>>,
     /// The restores asked for while another, or an Undo, was under way,
-    /// each made in turn once the one before it is over.
-    restores_waiting: CopyValue<VecDeque<Backup>>,
+    /// each by its number, made in turn once the one before it is over.
+    restores_waiting: CopyValue<VecDeque<(u64, Backup)>>,
     /// Sync with the user's own Google Drive, where it is on
     /// ([`self::sync`]).
     pub sync: SyncCtx,
@@ -324,6 +330,8 @@ impl AppCtx {
                 reading_again: CopyValue::new(false),
                 restore_refused_for: CopyValue::new(BTreeSet::new()),
                 restore_under_way: CopyValue::new(false),
+                restores_asked: CopyValue::new(0),
+                current_restore: CopyValue::new(None),
                 restores_waiting: CopyValue::new(VecDeque::new()),
                 sync,
                 app: CopyValue::new(app),
@@ -1599,7 +1607,34 @@ impl AppCtx {
     /// back as well; merged with one that still holds what the Undo takes
     /// back, it would take that for sessions already here, and the Undo
     /// delete them.
-    pub fn restore_backup(self, backup: Backup) {
+    ///
+    /// Gives back the number it is known by until what became of it has
+    /// been told ([`Self::restore_told`]).
+    pub fn restore_backup(self, backup: Backup) -> u64 {
+        let mut asked = self.restores_asked;
+        let ticket = *asked.peek() + 1;
+        asked.set(ticket);
+        self.restore_in_turn(ticket, backup);
+        ticket
+    }
+
+    /// Whether what became of the restore asked for under `ticket` has been
+    /// told ([`Self::restore_backup`]): it is neither waiting its turn nor
+    /// under way, whatever else is, as the Undo of it, which may follow at
+    /// once.
+    pub fn restore_told(self, ticket: u64) -> bool {
+        ticket <= *self.restores_asked.peek()
+            && *self.current_restore.peek() != Some(ticket)
+            && !self
+                .restores_waiting
+                .peek()
+                .iter()
+                .any(|(waiting, _)| *waiting == ticket)
+    }
+
+    /// Restore `backup`, asked for under `ticket` ([`Self::restore_backup`]),
+    /// once no other restore, nor Undo, is under way.
+    fn restore_in_turn(self, ticket: u64, backup: Backup) {
         // The last restore asked for: the one before it is undone no more,
         // and its message, while it is up, offers no Undo that would do
         // nothing.
@@ -1611,10 +1646,12 @@ impl AppCtx {
         let mut under_way = self.restore_under_way;
         if *under_way.peek() {
             let mut waiting = self.restores_waiting;
-            waiting.write().push_back(backup);
+            waiting.write().push_back((ticket, backup));
             return;
         }
         under_way.set(true);
+        let mut current = self.current_restore;
+        current.set(Some(ticket));
         self.sync_with_store(move |listed| {
             if listed {
                 self.restore_beside(backup);
@@ -1759,17 +1796,22 @@ impl AppCtx {
     /// next would be merged with a history that still holds what the store
     /// let go, and take it for a session lost in passing, to be stored
     /// again.
+    ///
+    /// The restore over is told of from now ([`Self::restore_told`]), and
+    /// the next is under way, not told of until it is over in turn.
     fn restore_over(self) {
         let mut under_way = self.restore_under_way;
         let mut waiting = self.restores_waiting;
         let next = waiting.write().pop_front();
-        let Some(next) = next else {
+        let mut current = self.current_restore;
+        current.set(next.as_ref().map(|(ticket, _)| *ticket));
+        let Some((ticket, next)) = next else {
             under_way.set(false);
             return;
         };
         spawn_forever(async move {
             under_way.set(false);
-            self.restore_backup(next);
+            self.restore_in_turn(ticket, next);
         });
     }
 
@@ -3067,6 +3109,35 @@ mod tests {
         assert_eq!(a.shown(), [1, 2, 5]);
     }
 
+    /// A restore is told of, by the number it was asked for under, once
+    /// what became of it has been said: not while it waits for another, nor
+    /// while it is under way. The Undo of it, under way after, leaves it
+    /// told of.
+    #[test]
+    fn a_restore_is_told_of_once_what_became_of_it_is_said() {
+        let store = holding([5]);
+        let mut a = Tab::on(&store);
+        let told = |a: &Tab, ticket| a.act(|ctx| ctx.restore_told(ticket));
+        store.deferred.set(true);
+        let first = restore(&a, [1, 2]);
+        let second = restore(&a, [1, 2, 3]);
+        assert!(!told(&a, first), "under way");
+        assert!(!told(&a, second), "waiting its turn");
+        store.settle();
+        a.pump();
+        assert!(told(&a, first), "told of");
+        assert!(!told(&a, second), "under way in its turn");
+        store.settle();
+        a.pump();
+        assert!(told(&a, second), "told of in its turn");
+        a.act(AppCtx::undo_restore);
+        assert!(a.act(AppCtx::restore_under_way), "the Undo under way");
+        assert!(told(&a, second), "told of all the same");
+        store.settle();
+        a.pump();
+        assert_eq!(days(&store.load_sessions()), [1, 2, 5], "undone");
+    }
+
     /// A restore's message offers its Undo no more once another restore is
     /// asked for, though it stays up while the other is under way: the
     /// Undo would undo nothing, and a click on it did nothing, without a
@@ -3449,8 +3520,9 @@ mod tests {
         assert_eq!(a.act(|ctx| *ctx.last_backup.peek()), Some(stamp(30)));
     }
 
-    /// Restore the backup holding a session for each of `days`, in `tab`.
-    fn restore(tab: &Tab, days: impl IntoIterator<Item = u64>) {
+    /// Restore the backup holding a session for each of `days`, in `tab`:
+    /// the number the restore is asked for under.
+    fn restore(tab: &Tab, days: impl IntoIterator<Item = u64>) -> u64 {
         let sessions = days.into_iter().map(day).collect();
         tab.act(|ctx| {
             ctx.restore_backup(Backup {
@@ -3459,7 +3531,7 @@ mod tests {
                 sessions,
                 left_out: 0,
             })
-        });
+        })
     }
 
     /// A restore asked for while the store cannot be listed restores

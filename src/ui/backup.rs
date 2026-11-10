@@ -261,10 +261,11 @@ impl Restoring {
                     return;
                 }
             };
-            // Said on the card until the store has said what became of it,
-            // as a browser's database takes a moment to.
-            ctx.restore_backup(backup);
-            while ctx.restore_under_way() {
+            // Said on the card until the store has said what became of this
+            // restore, as a browser's database takes a moment to: of this
+            // one, not of an Undo clicked as soon as it is told of.
+            let ticket = ctx.restore_backup(backup);
+            while !ctx.restore_told(ticket) {
                 crate::time::sleep_ms(crate::time::POLL_MS).await;
             }
             if chosen_last() {

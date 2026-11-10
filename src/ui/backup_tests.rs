@@ -542,6 +542,37 @@ fn the_card_says_a_backup_is_under_way_until_it_is_restored() {
     });
 }
 
+/// The card stops saying a backup is being read once its own restore has
+/// been told of, though the restore's Undo is clicked at once, before the
+/// card looks again: an Undo under way is no restore of the card's. The
+/// card went on saying it read the backup until the Undo was over.
+#[test]
+fn the_card_says_its_restore_is_over_though_an_undo_follows_at_once() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.store.deferred.set(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(100).await;
+        assert!(ui.has("Reading dust-backup.json…"), "{}", ui.html());
+        // Told, and its Undo clicked, with no time passing for the card.
+        ui.store.settle();
+        ui.settle();
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        ui.click("toast-undo");
+        ui.advance(100).await;
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        assert_eq!(stored_dates(&ui), ["2026-09-04", "2026-09-05"], "undone");
+    });
+}
+
 /// A backup chosen while another is being restored is restored once that
 /// is over, merged with the history it restored: its message says what it
 /// brought itself, and its Undo takes back that alone. Merged with a
