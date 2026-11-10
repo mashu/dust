@@ -667,6 +667,9 @@ pub enum PageStep {
     Wait { script: String },
     /// A key pressed or let go, with nothing focused.
     Key(PageKey),
+    /// An input method ends a composition: what it composed is taken, or
+    /// dropped.
+    CompositionEnd,
     /// The window loses the focus.
     Blur,
 }
@@ -769,6 +772,19 @@ impl PageKey {
     pub fn composing(self) -> Self {
         Self {
             is_composing: true,
+            ..self
+        }
+    }
+
+    /// Taken by an input method with no composition under way yet: a
+    /// dead key, or the key that begins a composition, which a browser
+    /// hands over before the composition begins, so not as composing, but
+    /// with the key code of a key the input method took, as Safari,
+    /// Chrome on a Mac and the macOS build hand over a dead key.
+    pub fn taken_by_input_method(self) -> Self {
+        Self {
+            is_composing: false,
+            key_code: 229,
             ..self
         }
     }

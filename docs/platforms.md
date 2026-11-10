@@ -458,7 +458,11 @@ What no test runs: the web build's audio (`src/audio/web`), which needs a
 browser's Web Audio, and the platform audio code, which needs the phone —
 the iOS audio session, Android's volume keys and output latency. The
 mixer, the receiver stream and the timing of a send that they hand their
-work to are tested natively.
+work to are tested natively. Nor does any test run a real input method:
+the keys of a composition, a dead key's among them, are made up in Node
+as Safari, Chrome and the macOS build are known to hand them over, so a
+paddle key that is dead, and a `[` typed in Pinyin or Kana, are checked
+by hand on a Mac, an iPhone and in Safari.
 
 ## Desktop bundles
 

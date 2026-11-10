@@ -10,6 +10,8 @@ use crate::testing::{PageKey, PageStep, on_fake_page};
 #[derive(Clone, Debug)]
 enum Step {
     Key(PageKey),
+    /// An input method ends a composition.
+    CompositionEnd,
     /// The window loses the focus.
     Blur,
     /// The settings read the keys by place, or not ([`by_place_script`]).
@@ -20,6 +22,7 @@ impl Step {
     fn on_page(&self) -> PageStep {
         match self {
             Self::Key(key) => PageStep::Key(key.clone()),
+            Self::CompositionEnd => PageStep::CompositionEnd,
             Self::Blur => PageStep::Blur,
             Self::ByPlace(by_place) => PageStep::run(by_place_script(*by_place)),
         }
@@ -59,6 +62,7 @@ fn keys_as_the_web_build_does(steps: &[Step]) {
     // Unset, the page's flag reads the keys by place, as a new install does.
     let mut reading = Reading::DEFAULT;
     let mut web = Contacts::default();
+    let mut input_methods = InputMethods::default();
     let mut handed = Contacts::default();
     for (step, heard) in steps.iter().zip(&heard[1..]) {
         let kept = match step {
@@ -69,12 +73,19 @@ fn keys_as_the_web_build_does(steps: &[Step]) {
                     meta: key.meta_key,
                 };
                 let paddle = paddle_for_press(&key.key, &key.code, held, reading);
+                let left = input_methods.left_to_it(
+                    paddle.is_some(),
+                    key.key == "Dead",
+                    key.is_composing,
+                    Some(key.key_code),
+                );
                 if let Some(paddle) = paddle
                     && !key.repeat
+                    && !left
                 {
                     web.press(paddle, &key.code);
                 }
-                paddle.is_some()
+                paddle.is_some() && !left
             }
             Step::Key(key) => {
                 let reads_as = paddle_for_key(&key.key, &key.code, reading);
@@ -84,8 +95,13 @@ fn keys_as_the_web_build_does(steps: &[Step]) {
                 }
                 opened.is_some()
             }
+            Step::CompositionEnd => {
+                input_methods.ended();
+                false
+            }
             Step::Blur => {
                 web.open_all();
+                input_methods.ended();
                 false
             }
             Step::ByPlace(by_place) => {
@@ -206,4 +222,172 @@ fn the_page_hands_a_key_over_once_and_nothing_once_taken_off() {
     );
     assert!(heard[4].sent.is_empty() && !heard[4].prevented);
     assert!(heard[5].sent.is_empty());
+}
+
+/// What the page should do with a step: the words it hands the app, and
+/// whether it keeps the page's own default.
+type Does = (Step, &'static [[&'static str; 3]], bool);
+
+fn does(step: impl Into<Step>, sent: &'static [[&'static str; 3]], prevented: bool) -> Does {
+    (step.into(), sent, prevented)
+}
+
+/// Nothing handed over, and the page's default left alone.
+const NOTHING: &[[&str; 3]] = &[];
+
+/// Take `steps` on a page with the paddle script on it, the keys read by
+/// place or not as `by_place` says, and check that it does with each what
+/// is expected of it.
+fn hands_over(by_place: bool, steps: &[Does]) {
+    let mut page = vec![
+        PageStep::run(PAGE_PADDLES_SCRIPT),
+        PageStep::run(by_place_script(by_place)),
+    ];
+    page.extend(steps.iter().map(|(step, ..)| step.on_page()));
+    let Some(heard) = on_fake_page(&page) else {
+        return;
+    };
+    for ((step, sent, prevented), heard) in steps.iter().zip(&heard[2..]) {
+        let sent: Vec<serde_json::Value> =
+            sent.iter().map(|word| serde_json::json!(word)).collect();
+        assert_eq!(
+            (&heard.sent, heard.prevented),
+            (&sent, *prevented),
+            "by place {by_place}: {step:?}"
+        );
+    }
+}
+
+/// Pinyin, or Kana, composing what a letter began: a `[` or a `]` turns a
+/// page of candidates there.
+fn pinyin() -> Vec<Does> {
+    vec![
+        does(down("n", "KeyN").taken_by_input_method(), NOTHING, false),
+        does(down("[", "BracketLeft").composing(), NOTHING, false),
+        does(
+            up("[", "BracketLeft").composing(),
+            &[["up", "[", "BracketLeft"]],
+            true,
+        ),
+        does(down("]", "BracketRight").composing(), NOTHING, false),
+        does(
+            up("]", "BracketRight").composing(),
+            &[["up", "]", "BracketRight"]],
+            true,
+        ),
+        does(Step::CompositionEnd, NOTHING, false),
+    ]
+}
+
+/// Within a composition no paddle key opened, Pinyin's or Kana's begun with
+/// a letter, a press of a paddle's key is the input method's: it keys
+/// nothing and is left to the page, by place or not; its release is heard,
+/// as every release is. A dead paddle key still keys by place, as a French
+/// keyboard's dit key and a Portuguese one's dah key, which Safari, Chrome
+/// on a Mac and the macOS build hand over with the input method's key code:
+/// its first press, which opens a composition of its own, and each press of
+/// either paddle within that one, a squeeze among them, until it ends or
+/// another key is typed in it. Not by place, the dead key types, and is no
+/// paddle's.
+#[test]
+fn the_page_leaves_a_composition_no_paddle_key_opened_to_the_input_method() {
+    let mut by_place = pinyin();
+    by_place.extend([
+        // A French keyboard's dit key, dead.
+        does(
+            down("Dead", "BracketLeft").taken_by_input_method(),
+            &[["down", "Dead", "BracketLeft"]],
+            true,
+        ),
+        does(
+            up("Dead", "BracketLeft").composing(),
+            &[["up", "Dead", "BracketLeft"]],
+            true,
+        ),
+        does(
+            down("Dead", "BracketLeft").composing(),
+            &[["down", "Dead", "BracketLeft"]],
+            true,
+        ),
+        does(
+            down("$", "BracketRight").composing(),
+            &[["down", "$", "BracketRight"]],
+            true,
+        ),
+        does(
+            up("Dead", "BracketLeft").composing(),
+            &[["up", "Dead", "BracketLeft"]],
+            true,
+        ),
+        does(
+            up("$", "BracketRight"),
+            &[["up", "$", "BracketRight"]],
+            true,
+        ),
+        does(Step::CompositionEnd, NOTHING, false),
+        // A composition begun by no key the page heard.
+        does(down("[", "BracketLeft").composing(), NOTHING, false),
+        does(
+            up("[", "BracketLeft").composing(),
+            &[["up", "[", "BracketLeft"]],
+            true,
+        ),
+        does(Step::CompositionEnd, NOTHING, false),
+        // A Portuguese keyboard's dah key, dead, and a letter typed in the
+        // composition it opens, which is the input method's from then on.
+        does(
+            down("Dead", "BracketRight").taken_by_input_method(),
+            &[["down", "Dead", "BracketRight"]],
+            true,
+        ),
+        does(
+            down("+", "BracketLeft").composing(),
+            &[["down", "+", "BracketLeft"]],
+            true,
+        ),
+        does(
+            up("+", "BracketLeft").composing(),
+            &[["up", "+", "BracketLeft"]],
+            true,
+        ),
+        does(
+            up("Dead", "BracketRight").composing(),
+            &[["up", "Dead", "BracketRight"]],
+            true,
+        ),
+        does(down("a", "KeyA").composing(), NOTHING, false),
+        does(down("+", "BracketLeft").composing(), NOTHING, false),
+        does(
+            up("+", "BracketLeft").composing(),
+            &[["up", "+", "BracketLeft"]],
+            true,
+        ),
+        does(Step::CompositionEnd, NOTHING, false),
+    ]);
+    hands_over(true, &by_place);
+    keys_as_the_web_build_does(
+        &by_place
+            .into_iter()
+            .map(|(step, ..)| step)
+            .collect::<Vec<_>>(),
+    );
+    let mut typed = pinyin();
+    typed.extend([
+        does(
+            down("Dead", "BracketLeft").taken_by_input_method(),
+            NOTHING,
+            false,
+        ),
+        does(down("Dead", "BracketLeft").composing(), NOTHING, false),
+        does(down("$", "BracketRight").composing(), NOTHING, false),
+        does(up("Dead", "BracketLeft").composing(), NOTHING, false),
+        does(up("$", "BracketRight"), NOTHING, false),
+        does(Step::CompositionEnd, NOTHING, false),
+    ]);
+    hands_over(false, &typed);
+    let typed: Vec<Step> = [Step::ByPlace(false)]
+        .into_iter()
+        .chain(typed.into_iter().map(|(step, ..)| step))
+        .collect();
+    keys_as_the_web_build_does(&typed);
 }

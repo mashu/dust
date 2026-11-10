@@ -178,6 +178,9 @@ pub fn App() -> Element {
                 paddle.keydown(e);
             },
             onkeyup: move |e| paddle.keyup(e),
+            // A composition ended in any field: a paddle's key pressed in
+            // the next is the input method's, unless a paddle key opens it.
+            oncompositionend: move |_| paddle.composition_ended(),
             div { class: shell_class,
                 header { class: "header-bar",
                     div { class: "brand",
