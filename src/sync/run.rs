@@ -286,10 +286,14 @@ pub async fn sync_once(
 ///
 /// `put_back_since` says which records were put back by hand here since
 /// the sync began, after it took in the notes it plans from
-/// ([`SyncState::revived`]): none of them is let go, whatever the drive
-/// says. The app notes those as the sync ends, and the next sync sends
-/// them as put back. It is asked once the sync has read all it reads of
-/// the store and the drive, just before it changes the store.
+/// ([`SyncState::revived`]): none of them is let go, or taken back,
+/// whatever the drive says, and a deletion's note of one is of a deletion
+/// before that putting back, as for one put back before the sync. The app
+/// notes those as the sync ends, and the next sync sends them as put back.
+/// It is asked as the sync has listed the history, so that one deleted by
+/// hand again by then is sent as deleted by hand, and again once the sync
+/// has read all it reads of the store and the drive, just before it
+/// changes the store.
 ///
 /// `keep` keeps `state` as it stands, which the caller does in any case as
 /// the sync ends: it is asked as a pack holding deletions by hand goes,
@@ -354,13 +358,15 @@ pub async fn sync_once_with(
     // Every deletion by hand of a session the listing left out was made by
     // then, by the clock, unless the clock was set ahead as it was made.
     let listed_at = clock().max(now);
+    let put_back_by_then = put_back_since();
     // A deletion the drive holds is the last word here only while the
     // session stays gone: one listed here again, or put back here by hand
-    // since the last sync, and deleted after, was deleted by hand, which
-    // the drive is to hear of, or which a deletion it holds accounts for.
-    state
-        .applied
-        .retain(|id, _| !listed.contains(id) && !state.revived.contains_key(id));
+    // since the last sync, or since this one took in its notes, and deleted
+    // after, was deleted by hand, which the drive is to hear of, or which a
+    // deletion it holds accounts for.
+    state.applied.retain(|id, _| {
+        !listed.contains(id) && !state.revived.contains_key(id) && !put_back_by_then.contains(id)
+    });
     // Once, at the first sync after an update from a build that noted no
     // deletion by hand: those it made that the drive holds, noted. Not
     // spent at a sync at which the store could not say which those are:
@@ -417,10 +423,14 @@ pub async fn sync_once_with(
     // What the drive holds, taken here.
     let here_bytes = read_here(store, &planned).await;
     // Put back by hand since this sync began, after it took in the notes
-    // it planned from: not this sync's to let go. Asked after its last
-    // read, as nothing comes between this and the change.
+    // it planned from: not this sync's to let go, nor to take back, as each
+    // is back here already, or was deleted by hand again since, after the
+    // deletion a note of it accounts for. Asked after its last read, as
+    // nothing comes between this and the change.
     let since = put_back_since();
     planned.let_go.retain(|(id, _)| !since.contains(id));
+    planned.take_back.retain(|id| !since.contains(id));
+    state.applied.retain(|id, _| !since.contains(id));
     let mut change = HistoryChange::default();
     for &id in planned.take.iter().chain(&planned.take_back) {
         if let Some(json) = bytes.get(&id) {

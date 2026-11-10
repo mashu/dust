@@ -64,8 +64,10 @@ than send it again. One a device deleted by hand after the drive's
 deletion, by its own clock, is the later word, and is sent all the same:
 a putting back made between the two loses to it on every device. Deleted
 by hand again after it is put back here, it is a deletion by hand as any
-other, whatever was noted of the one before. A putting back as late as a
-deletion stands, here as in the drive. Missing is never deleted: a record
+other, whatever was noted of the one before: so too where both were made
+while a sync waited on the drive, before it listed the history, which that
+sync then sends. A putting back as late as a deletion stands, here as in
+the drive. Missing is never deleted: a record
 is let go only for a deletion. A device updated from a build that noted no
 deletion by hand notes those it made that the drive holds, put back since
 or not, at its first sync at which the store can say which they are, and

@@ -1247,7 +1247,9 @@ impl AppCtx {
     /// as the note of each it kept there for this sync shows, one this sync
     /// did not begin with, or at a later stamp. None of them is that sync's
     /// to let go, though the drive holds a deletion of it and what the sync
-    /// plans from has no note of its putting back
+    /// plans from has no note of its putting back, nor to take back; and
+    /// one deleted by hand again is that sync's to send as deleted by hand,
+    /// whatever deletion of it the sync noted before
     /// ([`crate::sync::run::sync_once_with`]).
     fn put_back_since(self, began: &SyncState) -> BTreeSet<RecordId> {
         let mut since = self.sync.put_back.peek().clone();

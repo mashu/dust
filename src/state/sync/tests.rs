@@ -3671,6 +3671,99 @@ fn a_deletion_made_while_a_sync_reads_the_drive_outlasts_an_earlier_putting_back
     });
 }
 
+/// A session deleted here and sent, put back on another device, then put
+/// back here by Undo while this copy's sync waits on the drive and deleted
+/// by hand again in another window, later by the clock than the other
+/// device's putting back: the deletion here is the last word, and stands.
+/// The sync, which planned from the deletion it had noted as the drive's
+/// and knew nothing of the Undo, took the new deletion for that one, put
+/// back since in the drive, and took the session back on every device.
+#[test]
+fn a_deletion_by_hand_after_an_undo_during_a_sync_outlasts_an_earlier_putting_back() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        harness.advance(1_000).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.take_up_store());
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let theirs = harness.in_app(|| ctx.settings.peek().clone().clamp());
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        let two = harness
+            .in_app(|| ctx.sessions.peek().id_at(1))
+            .expect("two");
+        // 2 deleted here and sent; the other device lets it go.
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.pump();
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(1_000).await;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        // This copy's next sync waits on the drive. Meanwhile the other
+        // device puts 2 back, and syncs; then 2 is put back here by Undo and,
+        // later still, deleted by hand in the other window.
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        put_back_in(&other, &mut other_state, two, &at(2), now_ms());
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        harness.in_app(|| ctx.undo_delete());
+        harness.pump();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        harness.in_app(|| window.take_up_store());
+        harness.in_app(|| window.delete_sessions(&[two]));
+        harness.pump();
+        held.hold(false);
+        harness.advance(1_000).await;
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        for copy in [ctx, window, ctx] {
+            harness.in_app(|| copy.take_up_store());
+            harness.in_app(|| copy.sync_now());
+            harness.advance(1_000).await;
+        }
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        assert_eq!(
+            stored_stamps(&harness),
+            [1],
+            "deleted by hand here, the last word"
+        );
+        assert_eq!(joined_stamps(&remote), [1], "the drive's word");
+        assert_eq!(held_by(&other), [1], "the other device");
+    });
+}
+
 /// What the store keeps for sync now, which it holds.
 fn kept_state(harness: &Harness) -> SyncState {
     let raw = harness.store.sync.borrow().clone().expect("kept");
