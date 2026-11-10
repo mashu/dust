@@ -177,6 +177,9 @@ pub struct MemoryStore {
     locks: Rc<RefCell<BTreeSet<Lock>>>,
     /// The store takes no lock, as a browser without Web Locks takes none.
     pub unlockable: Cell<bool>,
+    /// How many times a lock was asked for ([`Store::try_lock`]), held or
+    /// not, for a test that cares how often a copy asks.
+    pub lock_tries: Cell<usize>,
     /// The store takes only the locks a browser takes, each a Web Lock of
     /// the site's ([`Lock::web_name`]), as a browser's tabs share them: none
     /// on what sync keeps.
@@ -792,6 +795,7 @@ impl Store for MemoryStore {
 
     /// Answered at once, as by a computer's or a phone's store.
     fn try_lock(&self, lock: Lock) -> Pending<Locking> {
+        self.lock_tries.set(self.lock_tries.get() + 1);
         if self.unlockable.get() || self.browser.get() && lock.web_name().is_none() {
             return done(Locking::Unlockable);
         }
