@@ -2154,6 +2154,13 @@ impl AppCtx {
     /// backup it restores holds them. And an Undo is under way as a
     /// restore is, until the store has said what became of it: a restore
     /// asked for meanwhile waits for it.
+    ///
+    /// Asked for while a session or a run has the app, its message still
+    /// up, it is made once that is over, as a restore is
+    /// ([`Self::restore_backup`]), and the user is told so: it puts settings
+    /// back, the level among them, which a session is not to have changed
+    /// beneath it. It is under way meanwhile, so a restore asked for after
+    /// it waits behind it.
     pub fn undo_restore(self) {
         let mut before_restore = self.before_restore;
         let Some(restored) = before_restore.write().take() else {
@@ -2161,6 +2168,30 @@ impl AppCtx {
         };
         let mut under_way = self.restore_under_way;
         under_way.set(true);
+        if self.session_running() {
+            let what = if self.contest.peek().is_some() {
+                "run"
+            } else {
+                "session"
+            };
+            self.toasts.show(format!(
+                "The restore will be undone once this {what} is over."
+            ));
+            spawn_forever(async move {
+                while self.session_running() {
+                    sleep_ms(RESTORE_WAIT_MS).await;
+                }
+                self.undo_now(restored);
+            });
+            return;
+        }
+        self.undo_now(restored);
+    }
+
+    /// Undo `restored` now ([`Self::undo_restore`]), as the history holds
+    /// it now: the Undo is under way.
+    fn undo_now(self, restored: Restored) {
+        let mut before_restore = self.before_restore;
         let at = now_ms();
         let mut change = HistoryChange::default();
         let (mut gone, mut back) = (Vec::new(), Vec::new());
@@ -3306,6 +3337,54 @@ mod tests {
         a.act(AppCtx::undo_restore);
         assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
         assert_eq!(a.shown(), [1, 2, 5]);
+    }
+
+    /// The Undo of a restore asked for while a session or a run has the app
+    /// waits for it to be over, as a restore does: it puts back settings,
+    /// the level among them, which a session is not to have changed beneath
+    /// it. A restore asked for meanwhile waits behind it. The Undo was made
+    /// at once, under the session.
+    #[test]
+    fn an_undo_of_a_restore_asked_during_a_session_waits_for_it() {
+        crate::testing::run(|| async {
+            let store = holding([5]);
+            let mut a = Tab::on(&store);
+            let level = |a: &Tab| a.act(|ctx| ctx.settings.peek().curriculum.level);
+            let at_level = |level| {
+                let mut settings = TrainingSettings::default();
+                settings.curriculum.level = level;
+                settings
+            };
+            a.act(|ctx| {
+                let mut settings = ctx.settings;
+                settings.set(at_level(3));
+            });
+            a.act(|ctx| {
+                ctx.restore_backup(Backup {
+                    saved_at: 0,
+                    settings: Some(at_level(9)),
+                    sessions: vec![day(1)],
+                    left_out: 0,
+                })
+            });
+            assert_eq!(level(&a), 9);
+            let on = |a: &Tab, screen| {
+                a.act(|ctx| {
+                    let mut shown = ctx.screen;
+                    shown.set(screen);
+                })
+            };
+            on(&a, Screen::Training);
+            a.act(AppCtx::undo_restore);
+            a.advance(3_000).await;
+            assert_eq!(level(&a), 9, "not under the session");
+            assert_eq!(days(&store.load_sessions()), [1, 5], "nor what it restored");
+            on(&a, Screen::Results);
+            a.advance(2_000).await;
+            assert_eq!(level(&a), 3, "undone once it is over");
+            assert_eq!(days(&store.load_sessions()), [5]);
+            assert_eq!(a.shown(), [5]);
+        });
     }
 
     /// A restore made while another, asked for after it, waits its turn

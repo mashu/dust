@@ -433,6 +433,44 @@ fn a_backup_read_during_a_session_is_restored_once_it_is_over() {
     });
 }
 
+/// The Undo of a restore, clicked while a session is under way, its
+/// message still up, waits for the session to be over, and says so: it
+/// puts back the settings, the level among them, which a session is not to
+/// have changed beneath it. It was made at once, under the session.
+#[test]
+fn an_undo_clicked_during_a_session_waits_for_it_to_be_over() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let level = ui.with_app(|ctx| ctx.settings.peek().curriculum.level);
+        let mut saved = test_settings();
+        saved.curriculum.level = 9;
+        let file = write_backup(&saved, &all, 0);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(20).await;
+        assert_eq!(stored_dates(&ui).len(), 5);
+        ui.click("nav-practice");
+        ui.click("btn-start-training");
+        assert!(ui.shows("toast-undo"), "{}", ui.html());
+        ui.click("toast-undo");
+        assert!(
+            ui.has("The restore will be undone once this session is over."),
+            "{}",
+            ui.html()
+        );
+        ui.advance(3_000).await;
+        assert_eq!(stored_dates(&ui).len(), 5, "not under the session");
+        assert_eq!(ui.with_app(|ctx| ctx.settings.peek().curriculum.level), 9);
+        ui.click("btn-end-session");
+        ui.advance(3_000).await;
+        assert_eq!(stored_dates(&ui).len(), 2, "undone once it is over");
+        assert_eq!(
+            ui.with_app(|ctx| ctx.settings.peek().curriculum.level),
+            level
+        );
+    });
+}
+
 /// A file that is no backup, read while its tab is left, is said in a
 /// message, as the card is not there to say it; the card, opened again,
 /// says nothing of it.
