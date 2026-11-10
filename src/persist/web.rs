@@ -24,7 +24,7 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::idb::{BrowserHistory, Script, waited_ms};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
 use super::marks::MARKS_JS;
-use super::progress::{BOOT_NOTE_AFTER_MS, BOOT_NOTE_ID, LoadProgress};
+use super::progress::{BOOT_NOTE_ID, LoadProgress, boot_note_now};
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
     failed_for_now,
@@ -148,8 +148,10 @@ const LOOK_MS: u32 = 250;
 
 /// What `opening` comes to; or none, once the database has kept it waiting
 /// for [`STALLED_MS`], looked at every [`LOOK_MS`] while it waits. Once the
-/// page has shown its boot screen for [`BOOT_NOTE_AFTER_MS`], each look
-/// says on it how far the read has come, as `progress` counts it.
+/// page has shown its boot screen for
+/// [`BOOT_NOTE_AFTER_MS`](super::progress::BOOT_NOTE_AFTER_MS), each look
+/// says on it how far the read has come, as `progress` counts it
+/// ([`boot_note_now`]).
 async fn unless_stalled<T>(opening: impl Future<Output = T>, progress: &LoadProgress) -> Option<T> {
     let mut opening = pin!(opening);
     loop {
@@ -164,8 +166,8 @@ async fn unless_stalled<T>(opening: impl Future<Output = T>, progress: &LoadProg
         }
         // The page's own clock, which starts as the page loads: the boot
         // screen shows from its first frame.
-        if crate::time::mono_ms() >= BOOT_NOTE_AFTER_MS {
-            boot_note(&progress.now().said());
+        if let Some(said) = boot_note_now(crate::time::mono_ms(), progress) {
+            boot_note(&said);
         }
         if waited_ms() > STALLED_MS {
             return None;

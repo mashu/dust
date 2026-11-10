@@ -111,9 +111,36 @@ impl HistoryProgress {
     }
 }
 
+/// What a browser's boot screen says `page_ms` into the page's life, by
+/// the page's own clock, of the read `progress` counts: nothing for the
+/// first [`BOOT_NOTE_AFTER_MS`], and how far it has come after.
+#[cfg(any(feature = "web", test))]
+pub fn boot_note_now(page_ms: u64, progress: &LoadProgress) -> Option<String> {
+    (page_ms >= BOOT_NOTE_AFTER_MS).then(|| progress.now().said())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A browser's boot screen says nothing for the page's first second,
+    /// and how far the read, or the move, has come after it.
+    #[test]
+    fn a_browsers_boot_screen_says_how_far_the_history_has_got_past_a_second() {
+        let progress = LoadProgress::default();
+        progress.reading(Some(3));
+        progress.step();
+        assert_eq!(boot_note_now(999, &progress), None, "nothing yet");
+        assert_eq!(
+            boot_note_now(1_000, &progress).as_deref(),
+            Some("Reading your history… 1 of 3")
+        );
+        progress.moving(None);
+        assert_eq!(
+            boot_note_now(1_250, &progress).as_deref(),
+            Some("Moving your history…")
+        );
+    }
 
     /// The boot screen says how far the read, or the move, has come, so
     /// many of so many; and without a count where none is kept: before the
