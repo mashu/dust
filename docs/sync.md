@@ -73,16 +73,18 @@ deletion by hand notes those it made that the drive holds, put back since
 or not, at its first sync at which the store can say which they are, and
 looks again at each sync until then.
 A deletion or a putting back is stamped when it is made (a deletion by
-hand when its tombstone says, though it is sent later, or as the sync that
-sends it listed the history, where a clock set ahead said later: one made
-while that sync waited on the drive is stamped as made, after a putting
-back made elsewhere before it), or just after the latest of the record the
-device knew the drive to hold by then, where that is later
-(`SyncState::stamp_change`): one made after another is the later, however
-far apart the devices' clocks are. But where a sync read the drive
-and did not send a deletion by hand, as the store could not say which were
-deleted, as the sync listed the history before the deletion was made, or
-as it was cut short as it sent, the deletion is stamped after what that
+hand when its tombstone says, though it is sent later: one made while the
+sync that sends it waited on the drive, before it listed the history, is
+stamped as made, after a putting back made elsewhere before it; or as that
+sync began, where its tombstone says it was made after that sync listed
+the history, as a clock set ahead and set right since says, so that a
+putting back made elsewhere while the sync waited stands), or just after
+the latest of the record the device knew the drive to hold by then, where
+that is later (`SyncState::stamp_change`): one made after another is the
+later, however far apart the devices' clocks are. But where a sync read the
+drive and did not send a deletion by hand, as the store could not say which
+were deleted, as the sync listed the history before the deletion was made,
+or as it was cut short as it sent, the deletion is stamped after what that
 sync read as well: a putting back made elsewhere after it by the clock,
 read there, loses to it. A putting back made while a sync is under way is
 stamped again as it ends, after what that sync read and sent, so that it
