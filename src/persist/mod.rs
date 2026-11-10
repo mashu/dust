@@ -162,7 +162,11 @@ pub trait Store {
     /// written, or the history does, go: once this copy's mark is as safe
     /// as the store makes a mark, and, where it could not be written, once
     /// it is. Those `left` are let go of as they are, for the next look.
-    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>);
+    /// What it hands back is done once those carried have gone, or are
+    /// left waiting for a write of this copy's mark that goes in: at once
+    /// on a computer or a phone, and in a browser a moment later, once its
+    /// tab's mark is in place.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) -> Pending<()>;
     /// How far the history read as the app opens has come, while it is
     /// still being read, or moved from where an older build kept it whole:
     /// none once it is in, and [`Store::load_history`] hands it over at

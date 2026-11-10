@@ -13,14 +13,16 @@
 // `hold(name)` holds the Web Lock `name`, and keeps the mark of the same name
 // in `localStorage` only while the lock is held. It hands back `write`, which
 // takes the mark's text, or, given none, takes the mark away and lets go of
-// the lock; and `inPlace`, which gives a promise that settles once the mark
+// the lock; `inPlace`, which gives a promise that settles once the mark
 // holds the text it was last given, in `localStorage`, or is taken away: at
 // once where it does, once its lock is granted and the text goes in, or with
 // the next write that goes in. A write may not: page storage with no room
 // left for the site takes none, and the mark then holds what it held before,
-// until one does. It hands back null in a browser without Web Locks, or one
-// that keeps nothing for the site, where nothing is marked, so no running
-// tab is ever taken for one cut off.
+// until one does. And `tried`, which gives a promise that settles once the
+// text was tried, at once or once the lock is granted, with whether the mark
+// holds it, or was taken away. It hands back null in a browser without Web
+// Locks, or one that keeps nothing for the site, where nothing is marked, so
+// no running tab is ever taken for one cut off.
 //
 // A lock asked for is not held at once: the browser grants it a moment later,
 // and only then does a page looking for marks see it, held or waiting. A mark
@@ -42,7 +44,9 @@
 // whose sessions this tab's own mark, `own` as `hold` handed it back, holds
 // now, as it was last written, or the history does, go once that mark is in
 // place (`inPlace`), holding them in their place; at once where the tab has
-// no mark of its own.
+// no mark of its own. The promise it hands back settles once they have
+// gone, or once that mark was tried and did not take its text (`tried`):
+// they then wait, held, for a write that goes in.
 //
 // `options.locks` and `options.storage`, for a test: the Web Locks and the
 // page storage to use, in place of the page's.
@@ -73,13 +77,21 @@ const hold = (name) => {
   let gone = false;
   // The last text tried did not go in.
   let failed = false;
-  // What waits for the mark to be in place.
+  // What waits for the mark to be in place, and what waits for its text to
+  // be tried.
   let waiting = [];
+  let trying = [];
   const settle = () => {
-    if (!gone && (!placed || failed)) return;
-    const ready = waiting;
-    waiting = [];
-    for (const done of ready) done();
+    if (!gone && !placed) return;
+    const holds = gone || !failed;
+    if (holds) {
+      const ready = waiting;
+      waiting = [];
+      for (const done of ready) done();
+    }
+    const told = trying;
+    trying = [];
+    for (const tell of told) tell(holds);
   };
   const put = () => {
     try {
@@ -116,7 +128,12 @@ const hold = (name) => {
       waiting.push(done);
       settle();
     });
-  return { write, inPlace };
+  const tried = () =>
+    new Promise((tell) => {
+      trying.push(tell);
+      settle();
+    });
+  return { write, inPlace, tried };
 };
 
 // The lock `name`, asked for only if no tab holds it nor waits for it, and
@@ -175,8 +192,15 @@ const letGoOf = (key, remove) => {
 const release = async (carried, left, own) => {
   for (const key of left) letGoOf(key, false);
   if (carried.length === 0) return;
-  if (own) await own.inPlace();
-  for (const key of carried) letGoOf(key, true);
+  const letGo = () => {
+    for (const key of carried) letGoOf(key, true);
+  };
+  if (!own) {
+    letGo();
+    return;
+  }
+  const going = own.inPlace().then(letGo);
+  if (await own.tried()) await going;
 };
 
 return { hold, take, release };

@@ -659,7 +659,10 @@ A session the store has yet to take, for want of room say, rides along in
 every mark after it until it is stored (`OpenSession::unstored`), so a copy
 that stops first leaves it to the next launch all the same.
 A session cut off is kept from its mark as Exit would have kept it, in the
-history and towards its level's run, and the app says that it was. Closing
+history and towards its level's run, and the app says that it was. It is
+kept once the marks that carried it have gone, so its level counts it once;
+only while this copy's mark will not take a write is it kept before then,
+and a copy that stops in between may count it again. Closing
 the desktop window, or leaving or reloading the page, ends a session there
 and then as Exit does, so nothing is left to find, and stores the settings
 with it, a level it earned included. On desktop and

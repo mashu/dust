@@ -504,7 +504,8 @@ impl AppCtx {
     /// until what they carry is held with this copy's mark, at once, before
     /// the store is taken up, which on a computer or a phone is a look on a
     /// thread of its own, and in a browser a moment later still; then they
-    /// go ([`Store::release_cut_off`]). Until the history holds it
+    /// go ([`Store::release_cut_off`]), and only once they have is anything
+    /// kept, a level counted included. Until the history holds it
     /// ([`keep_cut_off`]), this copy's mark does, and nothing else: a copy
     /// that stops before its mark holds it leaves the marks to the next
     /// copy to look.
@@ -524,7 +525,7 @@ impl AppCtx {
             let left: Vec<MarkId> = own.into_iter().map(|taken| taken.id).collect();
             let store = self.app().store;
             if others.is_empty() {
-                store.release_cut_off(Vec::new(), left);
+                store.release_cut_off(Vec::new(), left).await;
                 return;
             }
             let (carried, cut): (Vec<MarkId>, Vec<CutOff>) = others
@@ -534,8 +535,13 @@ impl AppCtx {
             self.carry_cut_off(&cut);
             // Held by this copy's mark now, or by the history: the marks
             // that carried it go, before its level is counted, so that it
-            // is counted once.
-            store.release_cut_off(carried, left);
+            // is counted once. A browser takes them away a moment later,
+            // once its tab's mark is in place, and that is waited for here.
+            // While this copy's mark will not take a write, they wait for
+            // one that does, and what they carry is kept meanwhile: a copy
+            // that stops first leaves them to the next, which keeps each
+            // session once, and may count its level again.
+            store.release_cut_off(carried, left).await;
             // Kept whether or not the store could be listed: its marks are
             // let go of already, so what they carry is kept here, as this
             // copy's mark holds it, or nowhere. Stored twice at worst, never
@@ -4621,6 +4627,61 @@ mod tests {
         };
         tab.act(|ctx| ctx.mark_so_far(&open, so_far));
         tab.act(AppCtx::mark_kept);
+    }
+
+    /// A session of groups cut off counts towards its level's run only once
+    /// the mark that carried it, with the settings it ran on, is gone, as a
+    /// browser takes it away a moment after it is asked to: a copy that
+    /// stops before then leaves the mark to the next, which counts it then,
+    /// and one that stops after leaves it in its own mark, as a session
+    /// counted already. It used to be counted while the mark was still
+    /// there, and a copy that stopped in between had it counted twice.
+    #[test]
+    fn a_session_cut_off_counts_towards_its_level_only_once_its_mark_is_gone() {
+        let mut settings = TrainingSettings::default();
+        settings.auto_level.auto_adjust_level = true;
+        settings.auto_level.auto_adjust_above_threshold_count = 3;
+        settings.curriculum.num_groups = 2;
+        let key = cw_core::CountersKey::of(&settings);
+        let mut session = day(2);
+        session.accuracy = 1.0;
+        session.groups = vec![cw_core::GroupResult {
+            sent: "KM".into(),
+            received: "KM".into(),
+            correct: true,
+        }];
+        let store = Rc::new(MemoryStore::default());
+        let tab = Tab::on(&store);
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: session,
+            settings: Some(settings),
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        drop(tab);
+
+        store.releases_later.set(true);
+        let mut next = Tab::on(&store);
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert!(store.taken().is_some(), "its mark not gone yet");
+        assert_eq!(
+            store.load_auto_counters(&key),
+            cw_core::AutoLevelCounters::default(),
+            "not counted while its mark is there"
+        );
+        assert_eq!(days(&store.load_sessions()), Vec::<u64>::new(), "nor kept");
+        assert_eq!(
+            store.open().map(|open| days(&open.unstored)),
+            Some(vec![2]),
+            "held by this copy's mark meanwhile"
+        );
+        store.answer_releases();
+        next.pump();
+        assert_eq!(store.taken(), None, "gone");
+        assert_eq!(store.load_auto_counters(&key).above, 1, "counted once");
+        assert_eq!(days(&store.load_sessions()), [2], "and kept");
+        assert_eq!(next.shown(), [2]);
     }
 
     /// A mark one copy took stays held by it, whatever another copy lets go

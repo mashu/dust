@@ -644,8 +644,9 @@ impl Store for DesktopStore {
 
     /// Those `left` are let go of there and then, their files left as they
     /// are; those `carried` go once this copy's mark is on the disk for
-    /// good ([`Self::release_carried`]).
-    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) {
+    /// good ([`Self::release_carried`]): there and then too, but where its
+    /// mark could not be written, as they wait for a write that is.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) -> Pending<()> {
         {
             let named = |ids: &[MarkId], mark: &HeldMark| ids.iter().any(|id| id.name() == mark.id);
             let mut taken = self.taken.borrow_mut();
@@ -658,6 +659,7 @@ impl Store for DesktopStore {
             self.releasing.borrow_mut().extend(going);
         }
         self.release_carried();
+        done(())
     }
 
     /// While the history read as the app started is still on its way from
@@ -1150,7 +1152,7 @@ pub(super) mod tests {
         // Carried by the first, which has no mark of its own: the history
         // holds what it carried.
         let carried = taken.into_iter().map(|taken| taken.id).collect();
-        first.release_cut_off(carried, Vec::new());
+        now(first.release_cut_off(carried, Vec::new()));
         let left = fs::read_dir(dir.0.join(OPEN)).unwrap().count();
         assert_eq!(left, 0, "nothing left behind");
     }
@@ -1296,7 +1298,7 @@ pub(super) mod tests {
             ..open_at(3)
         };
         took.mark_open(Some(carrying.clone()));
-        took.release_cut_off(vec![carried], vec![left]);
+        now(took.release_cut_off(vec![carried], vec![left]));
         assert!(
             took.mark_path(&cut_id, "json").exists(),
             "kept, as this copy's mark holds nothing of it"

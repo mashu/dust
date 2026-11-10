@@ -134,6 +134,12 @@ pub struct MemoryStore {
     /// The mark a copy of the app took as cut off, held until that copy
     /// lets go of it ([`Store::release_cut_off`]).
     taken: RefCell<Option<OpenSession>>,
+    /// A mark let go of as carried goes only when the test says
+    /// ([`Self::answer_releases`]), the way a browser takes it away a
+    /// moment after it is asked to, once its tab's own mark is in place.
+    pub releases_later: Cell<bool>,
+    /// The lettings go of a mark carried asked for and not yet made.
+    asked_releases: RefCell<Vec<Rc<RefCell<Release>>>>,
     /// What became of the marks, in order ([`MarkEvent`]).
     pub mark_log: RefCell<Vec<MarkEvent>>,
     /// The history kept whole in a browser's page storage, through this
@@ -354,6 +360,14 @@ struct Forgotten {
     waker: Option<Waker>,
 }
 
+/// A letting go of a mark carried, made later
+/// ([`MemoryStore::releases_later`]), and what waits on it.
+#[derive(Default)]
+struct Release {
+    made: bool,
+    waker: Option<Waker>,
+}
+
 impl Store for MemoryStore {
     fn load_theme(&self) -> String {
         self.theme.borrow().clone()
@@ -515,25 +529,39 @@ impl Store for MemoryStore {
     }
 
     /// One let go of as it was is the mark again, unless a copy has marked
-    /// a session since; one carried goes. A letting go that names no mark,
-    /// a copy's that took none, lets go of none: the mark a copy took is
-    /// held by it still.
-    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) {
+    /// a session since; one carried goes, at once, or once the test says
+    /// ([`Self::releases_later`]). A letting go that names no mark, a
+    /// copy's that took none, lets go of none: the mark a copy took is held
+    /// by it still.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) -> Pending<()> {
         self.mark_log.borrow_mut().push(MarkEvent::Released {
             carried: carried.len(),
             left: left.len(),
         });
         let named = |ids: &[MarkId]| ids.iter().any(|id| id.name() == MARK);
-        if !named(&carried) && !named(&left) {
-            return;
+        if named(&left) {
+            if let Some(taken) = self.taken.take() {
+                let mut marked = self.marked.borrow_mut();
+                if marked.is_none() {
+                    *marked = Some(taken);
+                }
+            }
+        } else if named(&carried) {
+            if self.releases_later.get() {
+                let release = Rc::new(RefCell::new(Release::default()));
+                self.asked_releases.borrow_mut().push(release.clone());
+                return Box::pin(std::future::poll_fn(move |asked| {
+                    let mut release = release.borrow_mut();
+                    if release.made {
+                        return Poll::Ready(());
+                    }
+                    release.waker = Some(asked.waker().clone());
+                    Poll::Pending
+                }));
+            }
+            self.taken.take();
         }
-        let Some(taken) = self.taken.take() else {
-            return;
-        };
-        let mut marked = self.marked.borrow_mut();
-        if named(&left) && marked.is_none() {
-            *marked = Some(taken);
-        }
+        done(())
     }
 
     fn history_progress(&self) -> Option<HistoryProgress> {
@@ -972,6 +1000,21 @@ impl MemoryStore {
             let ids = std::mem::take(&mut answer.ids);
             answer.gone = Some(self.tombstoned(ids));
             if let Some(waker) = answer.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
+    /// Make every letting go of a mark carried asked for
+    /// ([`Self::releases_later`]): the mark goes, and what waits on each is
+    /// woken.
+    pub fn answer_releases(&self) {
+        let asked = std::mem::take(&mut *self.asked_releases.borrow_mut());
+        for release in asked {
+            self.taken.take();
+            let mut release = release.borrow_mut();
+            release.made = true;
+            if let Some(waker) = release.waker.take() {
                 waker.wake();
             }
         }

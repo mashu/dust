@@ -741,20 +741,26 @@ impl Store for WebStore {
     /// at once where it has none (`src/persist/marks.js`): every write of a
     /// mark in place goes into `localStorage` then and there, or, where the
     /// page storage has no room for it, leaves the marks it carries for
-    /// waiting on one that does.
-    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) {
+    /// waiting on one that does. Done once they have gone, or once this
+    /// page's mark was tried and they wait.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) -> Pending<()> {
         let Some(marks) = self.marks() else {
-            return;
+            return done(());
         };
         let names = |ids: &[MarkId]| -> js_sys::Array {
             ids.iter().map(|id| JsValue::from_str(id.name())).collect()
         };
         let own = self.open_held.borrow().clone().unwrap_or(JsValue::NULL);
-        let _ = call(
+        let releasing = call(
             marks,
             "release",
             &[names(&carried).into(), names(&left).into(), own],
         );
+        Box::pin(async move {
+            if let Some(releasing) = releasing {
+                let _ = JsFuture::from(js_sys::Promise::resolve(&releasing)).await;
+            }
+        })
     }
 
     /// The history read as the page opened ([`preload`]); or, kept in the

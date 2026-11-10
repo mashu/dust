@@ -217,6 +217,59 @@ dioxus.send([localStorage.getItem("dust_open_session_a"), localStorage.getItem("
     );
 }
 
+/// A letting go is over once the tab's own mark has been tried with the
+/// text that carries what it lets go of, and not before: where that went
+/// in, the marks carried are gone by then; where it did not, they stay,
+/// held, and go with the next write that goes in, while the app goes on to
+/// keep what they carried. It used to be over only once they had gone,
+/// which a page storage with no room left might never let them.
+#[test]
+fn a_letting_go_is_over_once_the_tabs_own_mark_was_tried() {
+    let Some(sent) = on_page(
+        r#"const ran = fakeLocks.tab();
+await leftBy(ran, "dust_open_session_a");
+fakeLocks.close(ran);
+const ours = marks(fakeLocks.tab());
+await ours.take();
+// Another tab looks for marks, and holds the look a while.
+const looking = fakeLocks.tab();
+let looked;
+looking.request("dust_open_session_look", () => new Promise((done) => { looked = done; }));
+await settle();
+const own = ours.hold("dust_open_session_b");
+own.write('{"startedAt":9,"run":false,"unstored":["a"]}');
+let over = false;
+ours.release(["dust_open_session_a"], [], own).then(() => {
+  over = true;
+});
+await settle();
+dioxus.send(over);
+localStorage.setItem = () => {
+  throw new DOMException("no room left", "QuotaExceededError");
+};
+looked();
+await settle();
+dioxus.send([over, localStorage.getItem("dust_open_session_a"), localStorage.getItem("dust_open_session_b")]);
+delete localStorage.setItem;
+own.write('{"startedAt":9,"run":false,"unstored":["a","b"]}');
+await settle();
+dioxus.send([localStorage.getItem("dust_open_session_a"), localStorage.getItem("dust_open_session_b")]);"#,
+    ) else {
+        return;
+    };
+    assert_eq!(sent[0], json!(false), "not over before the mark is tried");
+    assert_eq!(
+        sent[1],
+        json!([true, r#"{"startedAt":7,"run":false}"#, null]),
+        "over once it was tried, the mark carried kept"
+    );
+    assert_eq!(
+        sent[2],
+        json!([null, r#"{"startedAt":9,"run":false,"unstored":["a","b"]}"#]),
+        "gone with the write that went in"
+    );
+}
+
 /// A tab with no mark of its own lets go of a mark it carried at once, as
 /// what it carried is in the history: as it does where its own mark has
 /// gone, as a mark goes once there is nothing left for it to carry.
