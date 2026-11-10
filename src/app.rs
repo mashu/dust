@@ -2507,8 +2507,12 @@ mod ui_tests {
             let (mut ui, recorder) = Ui::app_with_settings(test_settings());
             ui.click("btn-listen-to-letters");
             ui.click("btn-play-all");
-            assert!(ui.run_until(20_000, |_| recorder.texts().len() >= 2).await);
-            assert_eq!(recorder.texts()[..2], ["K".to_string(), "M".to_string()]);
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            assert!(
+                recorder.texts()[0].starts_with("KM"),
+                "the pool, as one send: {:?}",
+                recorder.texts()
+            );
         });
     }
 

@@ -27,12 +27,13 @@ pub(crate) use plan::{
 pub(crate) use station::station_speed_grid;
 pub use station::{StationVoice, resolve_station};
 
-/// The pause between the letters the Listen screen sends one at a time, in
+/// The pause between the letters the Listen screen plays one at a time, in
 /// milliseconds: from the end of one letter's last element to the start of
-/// the next, as the player says each is heard, so on the clock the band
-/// plays to. The band plays on through it, and the receiver's AGC holds the
-/// band down across it as across the gaps between the letters of a word,
-/// where the settings' word gaps let it ([`crate::band::agc_timing`]).
+/// the next, laid out in the one send they go as, so on the clock the band
+/// plays to, on every player. The band plays on through it, and the
+/// receiver's AGC holds the band down across it as across the gaps between
+/// the letters of a word, where the settings' word gaps let it
+/// ([`crate::band::agc_timing`]).
 pub const LISTEN_LETTER_GAP_MS: u32 = 420;
 
 /// The word-space stretch, inside its range whatever is set.

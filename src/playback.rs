@@ -347,12 +347,16 @@ fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, SplitMix6
     (resolve_station(settings, &mut rng), rng)
 }
 
-/// Play `chars` one at a time, each heard `gap_ms` after the last one's
-/// last element ends, as the player says it is heard: on the clock the band
-/// plays to, so the gap the AGC's hang is sized for is the gap the band
-/// hears ([`LISTEN_LETTER_GAP_MS`]). Waited out once a send was over, the
-/// pause would run on past it by the send's tail, the device's delay and a
-/// poll, on the band.
+/// Play `chars` one at a time, each `gap_ms` after the last one's last
+/// element ends: as one send, the letters laid out in it
+/// ([`letters_apart`]), so the pause is on the player's own clock, the one
+/// the band plays to, on every player, whatever its latency, its lead, its
+/// poll or its callback, and the gap the AGC's hang is sized for is the gap
+/// the band hears ([`LISTEN_LETTER_GAP_MS`]). Sent one at a time, each
+/// asked for only once the last had been heard out, a letter a device too
+/// far behind its output could no longer have heard on time was heard late.
+/// A Stop ends the one send, wherever it is, and a send the audio fails is
+/// tried again whole, from its first letter, as every send is.
 async fn play_chars(
     lease: Lease,
     settings: TrainingSettings,
@@ -362,23 +366,56 @@ async fn play_chars(
     // One operator for the whole run: a different pitch per letter would make
     // the screen harder to learn from, not more realistic.
     let (voice, _) = new_station(&settings);
-    let mut heard_at = None;
-    for ch in chars.chars() {
-        let transmission = Transmission::alone(ch.to_string(), voice);
-        let plan = plan_transmission(&transmission, &settings);
-        let asked = lease.ask_to_send();
-        let mut ends = None;
-        lease
-            .send_planned(asked, &plan, &transmission, &settings, heard_at, |news| {
-                if let SendNews::Started(start) = news {
-                    let last = start.char_ends_ms.iter().copied().max().unwrap_or(0);
-                    ends = Some(start.heard_at().plus(u64::from(last)));
-                }
-            })
-            .await?;
-        heard_at = ends.map(|ends| ends.plus(u64::from(gap_ms)));
+    let plan = letters_apart(&chars, &settings, voice, f64::from(gap_ms) / 1_000.0);
+    if plan.wanted.chars.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let transcript = Transmission::alone(chars, voice);
+    let asked = lease.ask_to_send();
+    lease
+        .send_planned(asked, &plan, &transcript, &settings, None, |_| {})
+        .await
+        .map(|_| ())
+}
+
+/// `chars` sent by `voice` one at a time, as one send: each letter planned
+/// alone, as it would be sent alone, the first where it falls, and each
+/// after it `gap_sec` after the last one's last element ends. A character
+/// with no Morse is left out.
+fn letters_apart(
+    chars: &str,
+    settings: &TrainingSettings,
+    voice: StationVoice,
+    gap_sec: f64,
+) -> cw_core::PlannedTransmission {
+    let mut run = plan_transmission(&Transmission::alone(String::new(), voice), settings);
+    let mut next: Option<f64> = None;
+    for (at, ch) in chars.char_indices() {
+        let letter =
+            plan_transmission(&Transmission::alone(ch.to_string(), voice), settings).wanted;
+        let (Some(first), Some(last)) = (letter.chars.first(), letter.chars.last()) else {
+            continue;
+        };
+        let by = next.map_or(0.0, |next| next - first.start_sec);
+        run.wanted
+            .events
+            .extend(letter.events.iter().cloned().map(|mut tone| {
+                tone.start_sec += by;
+                tone
+            }));
+        run.wanted.chars.extend(letter.chars.iter().map(|span| {
+            let mut span = *span;
+            span.at += at;
+            span.start_sec += by;
+            span.end_sec += by;
+            span
+        }));
+        run.wanted.duration_sec = letter.duration_sec + by;
+        run.wanted.resolved_char_wpm = letter.resolved_char_wpm;
+        run.wanted.resolved_effective_wpm = letter.resolved_effective_wpm;
+        next = Some(last.end_sec + by + gap_sec);
+    }
+    run
 }
 
 /// Send one short sample once — the keying-envelope test chips.
@@ -658,6 +695,9 @@ mod tests {
         }
     }
 
+    /// The Listen screen's letters go as one send, one letter at a time:
+    /// each in its own span, in order, the next its pause after the last
+    /// one's last element ends.
     #[test]
     fn listening_plays_one_character_at_a_time() {
         run(|| async {
@@ -667,23 +707,26 @@ mod tests {
             h.pump();
             assert!(h.run_until(10_000, |_| outcome.borrow().is_some()).await);
             assert_eq!(*outcome.borrow(), Some(Ok(())));
-            assert_eq!(h.texts(), vec!["K".to_string(), "M".to_string()]);
+            assert_eq!(h.texts(), vec!["KM".to_string()], "one send");
+            let starts = h.recorder.starts();
+            let chars = &starts[0].plan.wanted.chars;
+            assert_eq!(chars.iter().map(|span| span.at).collect::<Vec<_>>(), [0, 1]);
+            assert!((chars[1].start_sec - chars[0].end_sec - 0.2).abs() < 1e-9);
         });
     }
 
-    /// The Listen screen's letters are each heard their pause after the
-    /// last one's last element ends ([`LISTEN_LETTER_GAP_MS`]), on the clock
-    /// the band plays to, as the AGC's hang is sized for: however long the
-    /// device takes to play a send out and say it is over. The pause was
-    /// waited out only once a send was heard to its end, its tail, the
-    /// device's delay and a poll among it, and so ran some 80 ms longer on
-    /// the band than the hang it was sized for, which let the band up
-    /// between the letters.
+    /// The Listen screen's letters are laid out in their one send each
+    /// [`LISTEN_LETTER_GAP_MS`] after the last one's last element ends, and
+    /// the send ends with the last letter, so the pause is on the clock the
+    /// band plays to, as the AGC's hang is sized for, on every player. Sent
+    /// one at a time, the pause was waited out first only once a send was
+    /// heard to its end, and then asked of the player from as soon as it
+    /// was told so, which a device far enough behind its output could no
+    /// longer keep.
     #[test]
     fn listening_hears_each_letter_its_pause_after_the_last_one_ends() {
         run(|| async {
             let mut h = Harness::new();
-            h.recorder.latency_sec.set(0.25);
             let lease = claim(&h);
             let gap = LISTEN_LETTER_GAP_MS;
             let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), gap));
@@ -691,22 +734,94 @@ mod tests {
             assert!(h.run_until(10_000, |_| outcome.borrow().is_some()).await);
             assert_eq!(*outcome.borrow(), Some(Ok(())));
             let starts = h.recorder.starts();
-            assert_eq!(starts.len(), 3);
-            // When each is heard, and when its last element ends there.
-            let mut heard = (starts[0].at.0 as f64) + 250.0;
-            for pair in starts.windows(2) {
-                let ends = heard + pair[0].plan.wanted.chars[0].end_sec * 1_000.0;
-                let asked = pair[1].heard_in.expect("asked to be heard at a time");
-                heard = pair[1].at.0 as f64 + asked * 1_000.0;
+            assert_eq!(starts.len(), 1, "one send");
+            let plan = &starts[0].plan.wanted;
+            assert_eq!(plan.chars.len(), 3);
+            for pair in plan.chars.windows(2) {
+                let apart = (pair[1].start_sec - pair[0].end_sec) * 1_000.0;
                 assert!(
-                    (heard - ends - f64::from(gap)).abs() <= 1.0,
-                    "heard {:.0} ms after the last one ended",
-                    heard - ends
+                    (apart - f64::from(gap)).abs() < 1e-6,
+                    "laid {apart:.3} ms after the last one ended"
                 );
             }
+            let last = plan.chars[2].end_sec;
+            assert!(
+                plan.duration_sec >= last,
+                "the send ends with its last letter"
+            );
+            let keyed = plan
+                .events
+                .iter()
+                .map(|tone| tone.start_sec + tone.keyed_sec)
+                .fold(0.0, f64::max);
+            assert!(
+                (keyed - last).abs() < 1e-9,
+                "the last key-up is the last letter's"
+            );
         });
     }
 
+    /// The Listen screen's letters are heard their pause apart when the
+    /// player plays them, however far behind its output the ear is, up to
+    /// the most a player believes (half a second), and however the player is
+    /// asked for them: each letter's first element is heard the pause after
+    /// the last one's last element ends. Sent one at a time, each asked for
+    /// only once the last had been heard out, a letter the device could no
+    /// longer have heard on time played as soon as it could, and so later
+    /// than its pause: 435 ms at 0.42 s, 529 ms at 0.5 s.
+    #[test]
+    fn listening_letters_are_heard_their_pause_apart_however_late_the_ear() {
+        for latency in [0.0, 0.25, 0.42, 0.5] {
+            run(move || async move {
+                let mut h = Harness::new();
+                h.recorder.latency_sec.set(latency);
+                let lease = claim(&h);
+                let gap = LISTEN_LETTER_GAP_MS;
+                let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), gap));
+                h.pump();
+                assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
+                assert_eq!(*outcome.borrow(), Some(Ok(())));
+                // Where each letter is heard, from every send the player was
+                // handed: the test player waits for the moment asked, if that
+                // is still to come, then its latency.
+                let letters: Vec<(f64, f64)> = h
+                    .recorder
+                    .starts()
+                    .iter()
+                    .flat_map(|start| {
+                        let wait = start
+                            .heard_in
+                            .map_or(0.0, |asked| (asked - latency).max(0.0));
+                        let heard = start.at.0 as f64 + (wait + latency) * 1_000.0;
+                        start
+                            .plan
+                            .wanted
+                            .chars
+                            .iter()
+                            .map(|span| {
+                                (
+                                    heard + span.start_sec * 1_000.0,
+                                    heard + span.end_sec * 1_000.0,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                assert_eq!(letters.len(), 3, "{latency} s behind: K, M and U");
+                for pair in letters.windows(2) {
+                    let apart = pair[1].0 - pair[0].1;
+                    assert!(
+                        (apart - f64::from(gap)).abs() <= 1.0,
+                        "{latency} s behind: heard {apart:.0} ms after the last one ended"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Leaving the Listen screen part way through its letters ends the one
+    /// send there and then: nothing more is played, and the run says it was
+    /// stopped, well before the letters it had yet to play would have ended.
     #[test]
     fn listening_stops_when_the_user_leaves() {
         run(|| async {
@@ -715,15 +830,23 @@ mod tests {
             let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), 400));
             h.pump();
             assert!(h.run_until(5_000, |h| h.texts().len() == 1).await);
+            let plan = h.recorder.starts()[0].plan.wanted.clone();
+            // Into the run, between its first letter and its last.
+            h.advance(300).await;
+            assert!(outcome.borrow().is_none(), "still playing");
             h.app.player.release();
+            assert!(h.run_until(100, |_| outcome.borrow().is_some()).await);
+            assert!(plan.duration_sec > 1.0, "{} s to play", plan.duration_sec);
+            assert_eq!(*outcome.borrow(), Some(Err(AudioError::Cancelled)));
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), 1, "nothing is played after leaving");
-            assert_eq!(*outcome.borrow(), Some(Err(AudioError::Cancelled)));
         });
     }
 
+    /// The audio failing gives up on the Listen screen's letters whole,
+    /// tried again as the one send it is, never letter by letter.
     #[test]
-    fn listening_gives_up_on_the_first_character_the_audio_fails() {
+    fn listening_gives_up_on_its_letters_as_the_audio_fails() {
         run(|| async {
             let mut h = Harness::new();
             let lease = claim(&h);
@@ -737,8 +860,8 @@ mod tests {
                     "Audio stream: device is gone".into()
                 )))
             );
-            // It gave up on the first character rather than grinding through both.
-            assert!(h.texts().iter().all(|text| text == "K"));
+            assert!(!h.texts().is_empty(), "tried");
+            assert!(h.texts().iter().all(|text| text == "KM"), "whole");
         });
     }
 
