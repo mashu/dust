@@ -4617,6 +4617,95 @@ fn a_setting_set_by_hand_during_a_sync_to_what_an_older_sync_took_stays() {
     });
 }
 
+/// Two copies of the app on a store that takes no lock, whose syncs run at
+/// once, as in `a_setting_set_by_hand_during_a_sync_to_what_an_older_sync_took_stays`:
+/// B's reads the drive as another device has set 3 groups, A's after that
+/// device set 4 groups and turned the noise on or off, later; while A's
+/// sync is under way the user sets 3 groups by hand in A, later than both;
+/// B's sync ends first, then A's. The change by hand stays, and so does the
+/// noise as the other device left it, the later word on it. With a second
+/// setting taken, what the sync's end comes to differs from what it had, so
+/// a setting set by hand to what B's older sync took, had it given way, is
+/// set back as the sync ends; with that one alone, it was not.
+#[test]
+fn a_setting_set_by_hand_to_an_older_take_stays_where_the_sync_takes_another_beside_it() {
+    run(|| async {
+        let mut harness = Harness::new();
+        harness.store.browser.set(true);
+        harness.store.hears_news.set(true);
+        harness.store.unlockable.set(true);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (a, held_a) = turned_on_held(&mut harness, &remote, &auth).await;
+        harness.advance(1_000).await;
+        let shown = harness.in_app(|| a.settings.peek().clone().clamp());
+        let noise = !shown.band.qrn_enabled;
+        harness.store.write_settings(&shown).expect("stored");
+        harness.in_app(|| a.take_up_store());
+        let held_b = Held::of(&remote);
+        let b = another_copy_through(
+            &harness,
+            Rc::clone(&held_b) as Rc<dyn Remote>,
+            FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| b.take_up_store());
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let mut theirs = shown.clone();
+        theirs.curriculum.num_groups = 3;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // B's sync reads the drive, 3, and waits on its first write.
+        held_b.hold_writes(true);
+        harness.in_app(|| b.sync_now());
+        harness.advance(200).await;
+        // The other device sets 4, and turns the noise over, later, and syncs.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        theirs.curriculum.num_groups = 4;
+        theirs.band.qrn_enabled = noise;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        // A's sync reads the drive, and waits on its first write.
+        held_a.hold_writes(true);
+        harness.in_app(|| a.sync_now());
+        harness.advance(200).await;
+        // Later than both, the user sets 3 by hand in A.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        harness.in_app(|| {
+            let mut settings = a.settings;
+            settings.write().curriculum.num_groups = 3;
+            a.store_settings();
+        });
+        harness.pump();
+        // B's sync ends first, then A's.
+        held_b.hold_writes(false);
+        harness.advance(500).await;
+        held_a.hold_writes(false);
+        harness.advance(500).await;
+        let at_its_end = harness.in_app(|| {
+            let settings = a.settings.peek();
+            (settings.curriculum.num_groups, settings.band.qrn_enabled)
+        });
+        assert_eq!(
+            at_its_end,
+            (3, noise),
+            "A as its sync ended: set by hand there, and the noise as turned there"
+        );
+    });
+}
+
 /// A setting changed by hand here while this copy's sync waits on its
 /// write, past its reading, and set back by hand to what it was as that
 /// sync began: the last word, later than the change made on another device
