@@ -38,7 +38,8 @@ use crate::persist::record::{
     HistoryChange, HistoryLoad, Record, RecordId, Unopened, Unreadable, read_record, unreadable,
 };
 use crate::persist::{
-    CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
+    CutOff, Deleted, HistorySaved, Lock, LockHeld, Locking, OpenSession, SessionKey, SetAside,
+    SoFar, Store, merge_settings,
 };
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::time::{POLL_MS, now_ms, sleep_ms};
@@ -62,6 +63,11 @@ pub const READ_AGAIN_MS: [u32; 3] = [2_000, 10_000, 60_000];
 /// before it looks again, to be made once that is over
 /// ([`AppCtx::restore_backup`]).
 const RESTORE_WAIT_MS: u32 = 1_000;
+
+/// How long a restore asked for while another copy of the app has every
+/// copy's restores waits before it tries again ([`Lock::Restore`]): as a
+/// sync waits for another copy's.
+const RESTORE_LOCK_POLL_MS: u32 = 250;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -262,12 +268,24 @@ pub struct AppCtx {
     /// been told: none while an Undo is, or nothing is.
     current_restore: CopyValue<Option<u64>>,
     /// The restore asked for last while another, or an Undo, was under way,
-    /// or a session or run had the app, by its number: made once that is
-    /// over. One asked for after takes its place, and it is never made.
+    /// a session or run had the app, or another copy of the app had every
+    /// copy's restores, by its number: made once that is over. One asked
+    /// for after takes its place, and it is never made.
     restores_waiting: CopyValue<Option<(u64, Backup)>>,
-    /// A task waits for the session or run under way to be over, to make
-    /// the restore waiting then ([`Self::restore_after_session`]).
-    restore_after_session: CopyValue<bool>,
+    /// A task waits to make the restore waiting, once no session or run has
+    /// the app and no other copy has every copy's restores
+    /// ([`Self::restore_when_free`]).
+    restore_waiter: CopyValue<bool>,
+    /// The lock on every copy's restores, held by this copy from a
+    /// restore's start until no restore, nor Undo, is under way, waiting or
+    /// offered ([`Lock::Restore`], [`Self::let_go_of_restores`]).
+    restore_lock: CopyValue<Option<LockHeld>>,
+    /// Another copy of the app has every copy's restores, and the restore
+    /// waiting waits for it ([`Self::restore_blocked`]).
+    restore_blocked: CopyValue<bool>,
+    /// The message offering the Undo of the last restore, which it is
+    /// offered for no longer than that is up ([`Self::undo_offered_no_more`]).
+    undo_toast: CopyValue<Option<u64>>,
     /// Sync with the user's own Google Drive, where it is on
     /// ([`self::sync`]).
     pub sync: SyncCtx,
@@ -342,10 +360,16 @@ impl AppCtx {
                 restores_asked: CopyValue::new(0),
                 current_restore: CopyValue::new(None),
                 restores_waiting: CopyValue::new(None),
-                restore_after_session: CopyValue::new(false),
+                restore_waiter: CopyValue::new(false),
+                restore_lock: CopyValue::new(None),
+                restore_blocked: CopyValue::new(false),
+                undo_toast: CopyValue::new(None),
                 sync,
                 app: CopyValue::new(app),
             };
+            ctx.toasts.when_offered_no_more(move |action, serial| {
+                ctx.undo_offered_no_more(action, serial)
+            });
             ctx.hear_history_news();
             ctx.hear_sync_news();
             ctx.read_again_soon();
@@ -1442,10 +1466,12 @@ impl AppCtx {
             );
             match saved.problem() {
                 Some(problem) => toasts.show(problem),
-                None => toasts.show_with(
-                    format!("{} deleted", counted(count, "session")),
-                    ToastAction::UndoDelete,
-                ),
+                None => {
+                    toasts.show_with(
+                        format!("{} deleted", counted(count, "session")),
+                        ToastAction::UndoDelete,
+                    );
+                }
             }
         });
     }
@@ -1651,6 +1677,13 @@ impl AppCtx {
             .is_some_and(|(waiting, _)| *waiting == ticket)
     }
 
+    /// Whether the restore asked for under `ticket` waits for another copy
+    /// of the app, a tab or a window, whose restore, or the Undo of it, has
+    /// every copy's restores ([`Lock::Restore`]): as the card says.
+    pub fn restore_blocked(self, ticket: u64) -> bool {
+        *self.restore_blocked.peek() && self.waits(ticket)
+    }
+
     /// The restore asked for under `ticket`, where it still waits its turn,
     /// is made no more: another backup was chosen in its place, to be asked
     /// for once it is read.
@@ -1658,46 +1691,135 @@ impl AppCtx {
         if self.waits(ticket) {
             let mut waiting = self.restores_waiting;
             waiting.set(None);
+            self.let_go_of_restores();
         }
     }
 
     /// Restore `backup`, asked for under `ticket` ([`Self::restore_backup`]),
-    /// now, or once no other restore, nor Undo, is under way and no session
-    /// or run has the app: the last asked for until then, in place of any
-    /// asked for before.
+    /// now, or once no other restore, nor Undo, is under way, no session or
+    /// run has the app, and no other copy of the app has every copy's
+    /// restores: the last asked for until then, in place of any asked for
+    /// before.
+    ///
+    /// One copy at a time: a restore holds every copy's restores from its
+    /// start until neither it nor its Undo is under way or offered
+    /// ([`Lock::Restore`]). A restore made in another copy beside this one,
+    /// while its Undo was offered, took what both bring back for sessions
+    /// already here, and this one's Undo then deleted them.
     fn restore_in_turn(self, ticket: u64, backup: Backup) {
-        // The last restore asked for: the one before it is undone no more,
-        // and its message, while it is up, offers no Undo that would do
-        // nothing.
+        let mut under_way = self.restore_under_way;
+        let mut current = self.current_restore;
+        if *under_way.peek() || self.session_running() {
+            self.wait_turn(ticket, backup);
+            self.offer_no_undo();
+            if !*under_way.peek() {
+                self.restore_when_free();
+            }
+            return;
+        }
+        // Under way from now, before the Undo of the one before is offered
+        // no more: this copy keeps every copy's restores across.
+        under_way.set(true);
+        current.set(Some(ticket));
+        self.offer_no_undo();
+        self.with_restore_lock(move |taken| {
+            // Another copy has them; or, as a browser grants a lock a
+            // moment after it is asked for, a session began meanwhile.
+            if !taken || self.session_running() {
+                under_way.set(false);
+                current.set(None);
+                self.wait_turn(ticket, backup);
+                if !taken {
+                    let mut blocked = self.restore_blocked;
+                    blocked.set(true);
+                }
+                self.restore_when_free();
+                return;
+            }
+            self.restore_held(backup);
+        });
+    }
+
+    /// The restore before is undone no more, as another is asked for, and
+    /// its message, while it is up, offers no Undo that would do nothing.
+    fn offer_no_undo(self) {
         let mut before_restore = self.before_restore;
         if before_restore.peek().is_some() {
             before_restore.set(None);
             self.toasts.withdraw(ToastAction::UndoRestore);
         }
-        let mut under_way = self.restore_under_way;
+    }
+
+    /// The restore asked for under `ticket` waits its turn, unless one asked
+    /// for after it waits already, as one taken from the queue as a session
+    /// began may find: that one is made in its place.
+    fn wait_turn(self, ticket: u64, backup: Backup) {
+        let mut waiting = self.restores_waiting;
+        let later = waiting
+            .peek()
+            .as_ref()
+            .is_some_and(|(waiting, _)| *waiting > ticket);
+        if !later {
+            waiting.set(Some((ticket, backup)));
+        }
         let mut current = self.current_restore;
-        if *under_way.peek() || self.session_running() {
-            // Waiting, unless one asked for after it waits already, as one
-            // taken from the queue as a session began may find: that one is
-            // made in its place.
-            let mut waiting = self.restores_waiting;
-            let later = waiting
-                .peek()
-                .as_ref()
-                .is_some_and(|(waiting, _)| *waiting > ticket);
-            if !later {
-                waiting.set(Some((ticket, backup)));
-            }
-            if *current.peek() == Some(ticket) {
-                current.set(None);
-            }
-            if !*under_way.peek() {
-                self.restore_after_session();
-            }
+        if *current.peek() == Some(ticket) {
+            current.set(None);
+        }
+    }
+
+    /// `then`, told whether this copy has every copy's restores now
+    /// ([`Lock::Restore`]): it holds them already, or takes them, or the
+    /// store takes no such lock, and goes on without, as copies did before
+    /// they locked; or another copy has them.
+    fn with_restore_lock(self, then: impl FnOnce(bool) + 'static) {
+        if self.restore_lock.peek().is_some() {
+            then(true);
             return;
         }
-        under_way.set(true);
-        current.set(Some(ticket));
+        let mut held = self.restore_lock;
+        let taking = self.app().store.try_lock(Lock::Restore);
+        settle_or_spawn(taking, move |locking| match locking {
+            Locking::Held(lock) => {
+                held.set(Some(lock));
+                then(true);
+            }
+            Locking::Unlockable => then(true),
+            Locking::Busy => then(false),
+        });
+    }
+
+    /// Let go of every copy's restores ([`Lock::Restore`]), unless a
+    /// restore or an Undo is under way here, a restore waits, or an Undo is
+    /// offered.
+    fn let_go_of_restores(self) {
+        let busy = *self.restore_under_way.peek()
+            || self.restores_waiting.peek().is_some()
+            || self.before_restore.peek().is_some();
+        if !busy && self.restore_lock.peek().is_some() {
+            let mut held = self.restore_lock;
+            held.set(None);
+        }
+    }
+
+    /// The message offering the Undo of a restore, `serial`, offers it no
+    /// more: taken down, as one is after a while, or put in the place of by
+    /// another message. The restore is undone no more, as there is nothing
+    /// left to undo it with, and every copy's restores are let go of.
+    fn undo_offered_no_more(self, action: ToastAction, serial: u64) {
+        let mut undo_toast = self.undo_toast;
+        if action != ToastAction::UndoRestore || *undo_toast.peek() != Some(serial) {
+            return;
+        }
+        undo_toast.set(None);
+        let mut before_restore = self.before_restore;
+        before_restore.set(None);
+        self.let_go_of_restores();
+    }
+
+    /// Restore `backup`, now, every copy's restores held
+    /// ([`Self::restore_in_turn`]).
+    fn restore_held(self, backup: Backup) {
         self.sync_with_store(move |listed| {
             if listed {
                 self.restore_beside(backup);
@@ -1867,8 +1989,10 @@ impl AppCtx {
         let Some((ticket, next)) = next else {
             under_way.set(false);
             if waiting.peek().is_some() {
-                self.restore_after_session();
+                self.restore_when_free();
             }
+            // Kept while its Undo is offered.
+            self.let_go_of_restores();
             return;
         };
         spawn_forever(async move {
@@ -1877,25 +2001,52 @@ impl AppCtx {
         });
     }
 
-    /// Make the restore waiting once the session or run that has the app is
-    /// over, as one that ends under it would change its settings, the level
-    /// among them: in a task of its own, looking again every
-    /// [`RESTORE_WAIT_MS`], and one task however many restores are asked
-    /// for meanwhile. No task waits where no session runs: a restore is made
-    /// then and there.
-    fn restore_after_session(self) {
-        let mut waits = self.restore_after_session;
+    /// Make the restore waiting once it may be: once the session or run
+    /// that has the app is over, as one made under it would change its
+    /// settings, the level among them; and once no other copy of the app
+    /// has every copy's restores ([`Lock::Restore`]), as the card says
+    /// meanwhile ([`Self::restore_blocked`]). In a task of its own, looking
+    /// again every [`RESTORE_WAIT_MS`] while a session runs, and every
+    /// [`RESTORE_LOCK_POLL_MS`] while another copy has the restores, and
+    /// one task however many restores are asked for meanwhile. No task
+    /// waits where neither holds a restore back: it is made then and
+    /// there.
+    fn restore_when_free(self) {
+        let mut waits = self.restore_waiter;
         if *waits.peek() {
             return;
         }
         waits.set(true);
         spawn_forever(async move {
-            while self.session_running() {
-                sleep_ms(RESTORE_WAIT_MS).await;
+            let (mut blocked, mut held) = (self.restore_blocked, self.restore_lock);
+            loop {
+                // Withdrawn; or a restore or an Undo under way, which makes
+                // it as it ends.
+                if self.restores_waiting.peek().is_none() || *self.restore_under_way.peek() {
+                    break;
+                }
+                if self.session_running() {
+                    sleep_ms(RESTORE_WAIT_MS).await;
+                    continue;
+                }
+                if held.peek().is_some() {
+                    break;
+                }
+                let taking = self.app().store.try_lock(Lock::Restore);
+                match taking.await {
+                    Locking::Held(lock) => {
+                        held.set(Some(lock));
+                        break;
+                    }
+                    Locking::Unlockable => break,
+                    Locking::Busy => {
+                        blocked.set(true);
+                        sleep_ms(RESTORE_LOCK_POLL_MS).await;
+                    }
+                }
             }
+            blocked.set(false);
             waits.set(false);
-            // Unless a restore or an Undo got under way meanwhile, which
-            // makes it as it ends.
             if !*self.restore_under_way.peek() {
                 let mut waiting = self.restores_waiting;
                 let next = waiting.write().take();
@@ -1903,6 +2054,7 @@ impl AppCtx {
                     self.restore_in_turn(ticket, next);
                 }
             }
+            self.let_go_of_restores();
         });
     }
 
@@ -2133,7 +2285,9 @@ impl AppCtx {
                 filled,
                 settings: before,
             }));
-            self.toasts.show_with(text, ToastAction::UndoRestore);
+            let serial = self.toasts.show_with(text, ToastAction::UndoRestore);
+            let mut undo_toast = self.undo_toast;
+            undo_toast.set(Some(serial));
         } else {
             self.toasts.show(text);
         }
@@ -2166,6 +2320,10 @@ impl AppCtx {
         let Some(restored) = before_restore.write().take() else {
             return;
         };
+        // Its message offers what is under way now: taken down, it says no
+        // more of it.
+        let mut undo_toast = self.undo_toast;
+        undo_toast.set(None);
         let mut under_way = self.restore_under_way;
         under_way.set(true);
         if self.session_running() {
@@ -2223,12 +2381,19 @@ impl AppCtx {
         let (mut sessions, toasts) = (self.sessions, self.toasts);
         self.change_history(change, move |saved| {
             if let Some(why) = why_not_stored(&saved) {
-                // Still to undo, unless another restore was asked for
-                // meanwhile.
+                // Still to undo, and offered again, unless another restore
+                // was asked for meanwhile: offered, as an Undo held with
+                // nothing to undo it with would hold every copy's restores
+                // for good.
+                let said = format!("The restore could not be undone: {why}.");
                 if self.restores_waiting.peek().is_none() {
                     before_restore.set(Some(restored));
+                    let serial = toasts.show_with(said, ToastAction::UndoRestore);
+                    let mut undo_toast = self.undo_toast;
+                    undo_toast.set(Some(serial));
+                } else {
+                    toasts.show(said);
                 }
-                toasts.show(format!("The restore could not be undone: {why}."));
                 self.restore_over();
                 return;
             }
@@ -2612,15 +2777,36 @@ impl Toast {
     }
 }
 
+/// What is told as a message stops offering what it offered
+/// ([`Toasts::when_offered_no_more`]): the offer, and which message it was.
+type OfferedNoMore = Rc<dyn Fn(ToastAction, u64)>;
+
 /// Where messages are raised and shown: one at a time, the newest in place
 /// of whatever was up.
 #[derive(Clone, Copy, PartialEq)]
-pub struct Toasts(Signal<Option<Toast>>);
+pub struct Toasts {
+    shown: Signal<Option<Toast>>,
+    /// Told as a message stops offering what it offered: taken down, its
+    /// offer withdrawn, or another raised in its place.
+    no_more: CopyValue<Option<OfferedNoMore>>,
+}
 
 impl Toasts {
     /// Messages for the scope this is made in.
     pub fn new() -> Self {
-        Self(Signal::new(None))
+        Self {
+            shown: Signal::new(None),
+            no_more: CopyValue::new(None),
+        }
+    }
+
+    /// Have `told` told as each message stops offering what it offered, by
+    /// what that was and which message it was ([`Self::show_with`]): taken
+    /// down, as each is after a while, its offer withdrawn, or another
+    /// raised in its place.
+    pub fn when_offered_no_more(self, told: impl Fn(ToastAction, u64) + 'static) {
+        let mut no_more = self.no_more;
+        no_more.set(Some(Rc::new(told)));
     }
 
     pub fn show(self, text: impl Into<String>) {
@@ -2633,45 +2819,68 @@ impl Toasts {
         self.raise(text.into(), None, true);
     }
 
-    /// A message with something to do about it.
-    pub fn show_with(self, text: impl Into<String>, action: ToastAction) {
-        self.raise(text.into(), Some(action), false);
+    /// A message with something to do about it: which message it is, as
+    /// it is told of once it offers it no more
+    /// ([`Self::when_offered_no_more`]).
+    pub fn show_with(self, text: impl Into<String>, action: ToastAction) -> u64 {
+        self.raise(text.into(), Some(action), false)
     }
 
-    fn raise(self, text: String, action: Option<ToastAction>, long: bool) {
+    fn raise(self, text: String, action: Option<ToastAction>, long: bool) -> u64 {
         static RAISED: AtomicU64 = AtomicU64::new(0);
-        let mut shown = self.0;
+        let serial = RAISED.fetch_add(1, Ordering::Relaxed);
+        let mut shown = self.shown;
+        let was = shown.peek().clone();
         shown.set(Some(Toast {
             text,
             action,
             long,
-            serial: RAISED.fetch_add(1, Ordering::Relaxed),
+            serial,
         }));
+        self.offers_no_more(was.as_ref());
+        serial
+    }
+
+    /// Tell that `toast`, gone, offers what it offered no more.
+    fn offers_no_more(self, toast: Option<&Toast>) {
+        let Some((action, serial)) = toast.and_then(|toast| Some((toast.action?, toast.serial)))
+        else {
+            return;
+        };
+        let told = self.no_more.peek().clone();
+        if let Some(told) = told {
+            told(action, serial);
+        }
     }
 
     /// The message up now. Read from a component, it subscribes it.
     pub fn current(self) -> Option<Toast> {
-        self.0.cloned()
+        self.shown.cloned()
     }
 
     /// The message up, where it offers `action`, offers it no more: what it
     /// says stays up, with nothing to do about it.
     pub fn withdraw(self, action: ToastAction) {
-        let mut shown = self.0;
+        let mut shown = self.shown;
         let offers = shown
             .peek()
             .as_ref()
-            .is_some_and(|toast| toast.action == Some(action));
-        if offers && let Some(toast) = shown.write().as_mut() {
-            toast.action = None;
+            .filter(|toast| toast.action == Some(action))
+            .cloned();
+        if let Some(toast) = offers {
+            if let Some(up) = shown.write().as_mut() {
+                up.action = None;
+            }
+            self.offers_no_more(Some(&toast));
         }
     }
 
     /// Take `toast` down, unless a newer one has taken its place.
     pub fn dismiss(self, toast: &Toast) {
-        let mut shown = self.0;
+        let mut shown = self.shown;
         if shown.peek().as_ref() == Some(toast) {
             shown.set(None);
+            self.offers_no_more(Some(toast));
         }
     }
 }
@@ -3179,10 +3388,12 @@ mod tests {
 
     /// Two tabs restoring one backup, neither having seen the other's,
     /// store each session of it once: each is the same record wherever it
-    /// is restored.
+    /// is restored. So they do where the store takes no lock on restores,
+    /// as a browser without Web Locks takes none, and both are made at once.
     #[test]
     fn two_tabs_restoring_one_backup_store_each_session_once() {
         let store = holding([3]);
+        store.unlockable.set(true);
         let (mut a, mut b) = (Tab::on(&store), Tab::on(&store));
         // Neither can see what the other stored as it restores: both are
         // asked for before either is made, as a browser's database makes
@@ -3384,6 +3595,75 @@ mod tests {
             assert_eq!(level(&a), 3, "undone once it is over");
             assert_eq!(days(&store.load_sessions()), [5]);
             assert_eq!(a.shown(), [5]);
+        });
+    }
+
+    /// A restore asked for in another copy of the app, a tab or a window,
+    /// while this one's Undo is offered waits for it, and is made once the
+    /// Undo is over, merged with the history it left: what both backups
+    /// hold is here. Made beside it, it took the session both restore for
+    /// one already here, and this copy's Undo then deleted it, lost though
+    /// both backups held it.
+    #[test]
+    fn a_restore_in_another_copy_waits_while_this_ones_undo_is_offered() {
+        crate::testing::run(|| async {
+            let store = holding([5]);
+            let (a, mut b) = (Tab::on(&store), Tab::on(&store));
+            restore(&a, [1]);
+            assert_eq!(
+                a.toast().and_then(|toast| toast.action),
+                Some(ToastAction::UndoRestore)
+            );
+            let waiting = restore(&b, [1, 2]);
+            b.advance(1_000).await;
+            assert_eq!(days(&store.load_sessions()), [1, 5], "waits for the Undo");
+            assert!(b.act(|ctx| ctx.restore_blocked(waiting)), "and says why");
+            a.act(AppCtx::undo_restore);
+            assert_eq!(days(&store.load_sessions()), [5], "undone");
+            b.advance(1_000).await;
+            assert_eq!(
+                days(&store.load_sessions()),
+                [1, 2, 5],
+                "what both backups hold"
+            );
+            assert_eq!(b.shown(), [1, 2, 5]);
+            assert_eq!(
+                b.toast().expect("told").text,
+                "Restored 2 sessions and your settings."
+            );
+        });
+    }
+
+    /// A copy lets go of every copy's restores as its Undo is offered no
+    /// more, its message gone, as another message takes its place: a
+    /// restore in another copy waits no longer. Nor does one wait for a
+    /// copy whose restore was refused, which offers no Undo.
+    #[test]
+    fn restores_are_let_go_of_as_the_undo_is_offered_no_more() {
+        crate::testing::run(|| async {
+            let store = holding([5]);
+            let (a, mut b) = (Tab::on(&store), Tab::on(&store));
+            restore(&a, [1]);
+            let waiting = restore(&b, [1, 2]);
+            b.advance(1_000).await;
+            assert!(b.act(|ctx| ctx.restore_blocked(waiting)));
+            a.act(|ctx| ctx.toasts.show("Something else."));
+            b.advance(1_000).await;
+            assert_eq!(days(&store.load_sessions()), [1, 2, 5]);
+            assert!(!b.act(|ctx| ctx.restore_blocked(waiting)));
+            assert_eq!(
+                b.toast().expect("told").text,
+                "Restored 1 session and your settings."
+            );
+
+            // Refused: nothing is held.
+            let c = Tab::on(&store);
+            b.act(|ctx| ctx.toasts.show("Something else."));
+            store.full.set(true);
+            restore(&c, [3]);
+            store.full.set(false);
+            restore(&b, [3]);
+            assert_eq!(days(&store.load_sessions()), [1, 2, 3, 5]);
         });
     }
 
@@ -4380,9 +4660,15 @@ mod tests {
         restore(&a, [1, 2]);
         store.full.set(true);
         a.act(AppCtx::undo_restore);
+        let toast = a.toast().expect("told");
         assert!(
-            a.toast()
-                .is_some_and(|toast| toast.text.starts_with("The restore could not be undone:"))
+            toast.text.starts_with("The restore could not be undone:"),
+            "{toast:?}"
+        );
+        assert_eq!(
+            toast.action,
+            Some(ToastAction::UndoRestore),
+            "offered again"
         );
         assert_eq!(a.shown(), [1, 2, 3]);
         store.full.set(false);
@@ -4428,10 +4714,14 @@ mod tests {
 
     /// Another tab restored the same backup first: the sessions were in
     /// the store already, so this tab's restore added none of them, and
-    /// undoing it takes none out. Undoing the first takes them out.
+    /// undoing it takes none out. Undoing the first takes them out. The
+    /// store takes no lock on restores, as a browser without Web Locks
+    /// takes none: with one, this tab's restore waits until the first's
+    /// Undo is offered no more.
     #[test]
     fn undoing_a_restore_leaves_what_another_tabs_restore_added() {
         let store = holding([3]);
+        store.unlockable.set(true);
         let (a, b) = (Tab::on(&store), Tab::on(&store));
         restore(&b, [1, 2]);
         restore(&a, [1, 2]);

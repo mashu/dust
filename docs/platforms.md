@@ -666,7 +666,12 @@ after it is asked for, so a change kept under one would wait, and be lost
 with a tab closed in that moment. A sync that finds another copy's under
 way waits for it, ten minutes at most, then goes on without it, as copies
 do where the store takes no lock at all: a browser without Web Locks, or a
-folder that takes none, on some network shares.
+folder that takes none, on some network shares. A restore of a backup
+holds `restore.lock` beside them (in a browser the Web Lock
+`dust_restore`) from its start until neither it nor its Undo is under way
+or offered, so a restore in another copy waits for its Undo rather than
+take what both bring back for sessions already here, which the Undo would
+then delete; where the store takes no lock, restores are made as they come.
 
 Updating the app does not clear any of it. The `localStorage` keys
 (`dust_settings`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
@@ -923,7 +928,13 @@ card:
   differed. Undo, in the message that follows,
   puts both back as they were: what the restore added taken out, and what it
   filled in as it was, while whatever another window kept or deleted
-  meanwhile stands. A file that is not a backup, or larger than 1 GB, is
+  meanwhile stands. A restore asked for while a session or run is under
+  way is made once it is over, and so is an Undo clicked then, as the
+  message says: either changes the settings, the level among them. One
+  window restores at a time: a restore asked for in another window while
+  this one's, or its Undo, is under way or still offered waits for it, its
+  card saying so, and is made over what the Undo left. A failed Undo is
+  offered again. A file that is not a backup, or larger than 1 GB, is
   refused, and the card says why. One past 50 MB takes a while to read, and
   the card says so as it reads it; in a browser that says it has less
   room left for the site than the file holds, the card says so first, as a

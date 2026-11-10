@@ -2081,9 +2081,16 @@ pub(super) mod tests {
         drop(run);
         let run = held(&second, Lock::SyncRun, "free once let go of");
         drop((run, state));
+        // Restores, a lock apart, one window's at a time.
+        let restores = held(&first, Lock::Restore, "restores are a lock apart");
+        let busy = now(second.try_lock(Lock::Restore));
+        assert!(matches!(busy, Locking::Busy), "{busy:?}");
+        drop(restores);
+        let restores = held(&second, Lock::Restore, "free once let go of");
+        drop(restores);
         assert_eq!(second.load_sync().as_deref(), Some(kept), "left as it is");
         let names = files(&dir);
-        for name in ["sync-run.lock", "sync.lock", SYNC] {
+        for name in ["sync-run.lock", "sync.lock", "restore.lock", SYNC] {
             assert!(names.iter().any(|held| held == name), "{name}: {names:?}");
         }
         let _ = held(&first, Lock::SyncRun, "locked again where it stayed");

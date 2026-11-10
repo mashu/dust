@@ -24,6 +24,10 @@ pub enum Lock {
     /// and written back by one copy at a time: held only across work that
     /// waits on nothing.
     SyncState,
+    /// One restore of a backup at a time, of every copy on the store, with
+    /// its Undo: held from a restore's start until its Undo is over, or
+    /// offered no more ([`crate::state::AppCtx::restore_backup`]).
+    Restore,
 }
 
 impl Lock {
@@ -46,6 +50,7 @@ impl Lock {
         match self {
             Self::SyncRun => Some("dust_sync_run"),
             Self::SyncState => None,
+            Self::Restore => Some("dust_restore"),
         }
     }
 
@@ -61,6 +66,7 @@ impl Lock {
         match self {
             Self::SyncRun => "sync-run.lock",
             Self::SyncState => "sync.lock",
+            Self::Restore => "restore.lock",
         }
     }
 }
@@ -115,7 +121,7 @@ mod tests {
     /// locks there does; a browser takes no lock on what sync keeps.
     #[test]
     fn every_lock_has_a_name_of_its_own() {
-        let locks = [Lock::SyncRun, Lock::SyncState];
+        let locks = [Lock::SyncRun, Lock::SyncState, Lock::Restore];
         let files: std::collections::BTreeSet<&str> = locks.map(Lock::file_name).into();
         assert_eq!(files.len(), locks.len(), "{files:?}");
         assert!(
@@ -124,5 +130,6 @@ mod tests {
         );
         assert_eq!(Lock::SyncRun.web_name(), Some("dust_sync_run"));
         assert_eq!(Lock::SyncState.web_name(), None);
+        assert_eq!(Lock::Restore.web_name(), Some("dust_restore"));
     }
 }

@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 
 use crate::persist::backup::{read_backup, write_backup};
 use crate::persist::memory::MemoryStore;
-use crate::persist::{OpenSession, Store};
+use crate::persist::{Lock, OpenSession, Store};
 use crate::testing::{Ui, run, stored_session, test_settings};
 
 /// `count` sessions a day apart, oldest first, the way the store keeps
@@ -468,6 +468,36 @@ fn an_undo_clicked_during_a_session_waits_for_it_to_be_over() {
             ui.with_app(|ctx| ctx.settings.peek().curriculum.level),
             level
         );
+    });
+}
+
+/// A backup chosen while another window's restore, or the Undo of it, has
+/// every window's restores waits for it, and the card says so: it is
+/// restored once that window lets go, and the card says no more of it.
+#[test]
+fn a_backup_chosen_while_another_window_restores_waits_for_it() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        let elsewhere = ui.store.hold_lock(Lock::Restore);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(1_000).await;
+        assert!(
+            ui.has("Waiting for a restore in another window…"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(stored_dates(&ui).len(), 2, "not restored meanwhile");
+        drop(elsewhere);
+        ui.advance(1_000).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Waiting"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 5);
     });
 }
 

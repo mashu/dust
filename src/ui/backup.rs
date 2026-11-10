@@ -46,6 +46,11 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
 /// backup of the app takes, which then backs up none of it.
 const OUTGROWN: &str = "Your history here is past 20 MB, and Android's own backup of an app stops at 25 MB: save a backup file now and then, so a lost or new phone still has every session.";
 
+/// What the card says while a backup read waits for another window's
+/// restore, or the Undo of it, which has every window's restores
+/// ([`AppCtx::restore_blocked`]).
+const WAITING_ELSEWHERE: &str = "Waiting for a restore in another window…";
+
 /// What a restore does: no more, and no less.
 const RESTORING: &str = "adds the sessions missing here and takes its settings, level included, though not this device's volume and paddle keys. Undo, in the message that follows, puts both back";
 
@@ -249,12 +254,22 @@ impl Restoring {
             // restore, as a browser's database takes a moment to: of this
             // one, not of an Undo clicked as soon as it is told of. Another
             // file chosen while it still waits its turn is restored in its
-            // place, once read: this one is made no more.
+            // place, once read: this one is made no more. While it waits for
+            // another window's restore, or the Undo of it, the card says so.
+            let reading = under_way.peek().clone();
             let ticket = ctx.restore_backup(backup);
             while !ctx.restore_told(ticket) {
                 if !chosen_last() {
                     ctx.withdraw_restore(ticket);
                     return;
+                }
+                let said = if ctx.restore_blocked(ticket) {
+                    Some(WAITING_ELSEWHERE.to_string())
+                } else {
+                    reading.clone()
+                };
+                if *under_way.peek() != said {
+                    under_way.set(said);
                 }
                 crate::time::sleep_ms(crate::time::POLL_MS).await;
             }
