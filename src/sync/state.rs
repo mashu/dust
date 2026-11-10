@@ -352,6 +352,39 @@ mod tests {
         }
     }
 
+    /// Of one sync, as where neither copy's last sync is the later, the
+    /// settings as of it, with when each was changed, are this copy's where
+    /// it changed them, as a sync under way here takes the drive's before it
+    /// ends, and keeps what it took as it sends a deletion: laid over a
+    /// state another copy wrote since, which changed none of them, they
+    /// stay. Where this copy changed none of them, they are the other's.
+    #[test]
+    fn of_one_sync_the_settings_are_this_copys_where_it_changed_them() {
+        let mut base = state();
+        base.last = Some(100);
+        base.settings = Some(groups(5));
+        base.stamps = BTreeMap::from([("numGroups".to_string(), 90)]);
+        let mut ours = base.clone();
+        ours.settings = Some(groups(7));
+        ours.stamps = BTreeMap::from([("numGroups".to_string(), 190)]);
+        let mut theirs = base.clone();
+        theirs.revived = times(&[(1, 10)]);
+        let merged = ours.merged(Some(&base), &theirs);
+        assert_eq!(merged.last, Some(100));
+        assert_eq!(
+            (merged.settings, merged.stamps),
+            (ours.settings.clone(), ours.stamps.clone()),
+            "this copy's, changed since"
+        );
+        assert_eq!(merged.revived, theirs.revived, "and the other's note");
+        let merged = theirs.merged(Some(&base), &ours);
+        assert_eq!(
+            (merged.settings, merged.stamps),
+            (ours.settings.clone(), ours.stamps.clone()),
+            "the other's, where this copy changed none"
+        );
+    }
+
     /// What another copy's write leaves out stays, as a tab can read what
     /// sync keeps from before another tab's last write, and write without
     /// what that one noted; it goes only on evidence. A putting back goes
