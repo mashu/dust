@@ -453,13 +453,17 @@ pub(super) struct Layout {
 }
 
 impl Layout {
-    /// The history kept whole as this build last took it up: its own note
-    /// ([`Self::taken_legacy`]), or, where an earlier build wrote the
-    /// layout, the one every build moves on ([`Self::legacy`]). A change
-    /// there since is taken up by [`imported`], though a build before this
-    /// one's rules took it up first.
-    pub(super) fn taken_up(&self) -> Option<Fingerprint> {
-        self.taken_legacy.unwrap_or(self.legacy)
+    /// The history kept whole as this build last took it up, its own note
+    /// ([`Self::taken_legacy`]): none, where an earlier build wrote the
+    /// layout, which this build has not taken up by its rules then, though
+    /// that build moved [`Self::legacy`] on as it took it up by its own. So
+    /// [`imported`] takes it up once by this build's, and notes what it
+    /// took; it takes no session twice, as it leaves out those it took
+    /// before and those here, nor any from before the move. A change since
+    /// is taken up by it, though a build before this one's rules took it up
+    /// first.
+    pub(super) fn taken_up(&self) -> Option<Option<Fingerprint>> {
+        self.taken_legacy
     }
 }
 
@@ -741,7 +745,7 @@ pub(super) fn imported(
     live: &HashMap<SessionKey, Vec<RecordId>>,
     gone: &HashSet<SessionKey>,
 ) -> Option<(HistoryChange, Layout)> {
-    if fingerprint == layout.taken_up() {
+    if Some(fingerprint) == layout.taken_up() {
         return None;
     }
     let taken: HashSet<&SessionKey> = layout.imported_keys.iter().collect();
@@ -2093,6 +2097,41 @@ mod tests {
         assert_eq!(none.taken_legacy, Some(None));
         let raw = none.written().expect("written");
         assert_eq!(Gate::of(Some(&raw)), Gate::Open(Box::new(none)));
+    }
+
+    /// A change to the history kept whole that a build before this one's
+    /// take-up rules looked at first is taken up here by this build's rules
+    /// where such a build made the move as well, as every build from 0.16.3
+    /// to 0.16.9 did: the layout holds no note of this build's
+    /// (`takenLegacy`), and `legacy` is that build's, moved on as it took
+    /// the change up by its own rules, which left out a session stored
+    /// since that finished long before its move's clock. Gone by `legacy`,
+    /// the change read as taken up, and the session was never taken up.
+    #[test]
+    fn a_change_an_older_build_took_up_first_is_taken_up_here_where_it_made_the_move() {
+        let first = finished(T);
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 10 * YEAR,
+            "legacy": written(1),
+            "importedKeys": [[T, first.date]],
+            "deletedSeen": 0,
+        }));
+        let since = finished(T + DAY);
+        let records = record::records_for_blob(std::slice::from_ref(&first));
+        // The older build's look: nothing taken, `legacy` moved on.
+        let looked = taken_up_by_an_older_build(&layout, written(2), &[]);
+        let (change, _) = imported(
+            &looked,
+            written(2),
+            &[first, since.clone()],
+            &[],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(put_stamps(&change), [since.timestamp]);
     }
 
     /// What the take-up took is kept through every write of the layout: by
