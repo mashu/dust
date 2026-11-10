@@ -4550,6 +4550,48 @@ mod tests {
         assert!(a.act(|ctx| ctx.unread_for_now.peek().is_empty()));
     }
 
+    /// On the files themselves, through the app: a record a build before
+    /// formats noted in told.json, which reads at one launch here and is
+    /// damaged at the next, is told of as damaged, as one with no such note is.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_an_older_build_told_of_damaged_later_is_told_of_as_damaged() {
+        for older_noted in [false, true] {
+            let dir = TempDir::new(if older_noted {
+                "probe-p5-noted"
+            } else {
+                "probe-p5-plain"
+            });
+            let a = Tab::on_store(crate::persist::files_at(&dir.0));
+            a.finish(day(1));
+            a.finish(day(2));
+            let id = a.id_of(2);
+            drop(a);
+            if older_noted {
+                let told = dir.0.join("history").join("told.json");
+                std::fs::write(&told, serde_json::to_vec(&[id.name()]).unwrap()).unwrap();
+            }
+            assert_eq!(
+                Tab::on_store(crate::persist::files_at(&dir.0)).shown(),
+                [1, 2]
+            );
+            let path = dir
+                .0
+                .join("history")
+                .join("sessions")
+                .join(format!("{id}.json"));
+            std::fs::write(&path, "{ cut short").unwrap();
+            let b = Tab::on_store(crate::persist::files_at(&dir.0));
+            assert_eq!(b.shown(), [1]);
+            let damaged = HistoryNotice::Damaged { count: 1 }.text();
+            assert_eq!(
+                b.notices(),
+                [Notice::History(damaged)],
+                "told of as damaged (older build's note: {older_noted})"
+            );
+        }
+    }
+
     /// Such a record, found by a look, is not told of as one that could not
     /// be read, at any try ([`READ_AGAIN_MS`]): the next launch tells of it
     /// as damaged, once, as it tells of one found so as the app opened. It

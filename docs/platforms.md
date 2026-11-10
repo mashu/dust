@@ -879,7 +879,13 @@ settings (`src/persist/files.rs`):
 - `told.json`: the records this build cannot read and has said so of,
   each as a newer Dust's or as damaged. A build before records' formats
   notes there every record it could not open, a moment's failure among
-  them, and those stay.
+  them, and every one it could not make out, and those stay.
+- `damaged-told.json`: the records this build has said are damaged, or a
+  newer Dust's, until each reads again or is gone: one that reads, then is
+  damaged once more, is told of again, whatever a build before noted of it
+  in `told.json`. No such build writes it; until this build first does,
+  `told.json` stands for it, so a record such a build told of that this one
+  cannot read either is not told of twice.
 - `unread-told.json`: the records this build has said could not be read,
   a failure that outlasted its tries, until each reads again or is gone:
   one that reads, then fails once more, is told of again, whatever a build
