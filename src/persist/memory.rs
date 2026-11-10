@@ -22,13 +22,14 @@ use super::backup::{BackupFile, NotSaved};
 use super::legacy::{
     self, Aside, BlobHistory, BlobKeys, Fingerprint, Layout, parse_sessions, read_history,
 };
+use super::progress::{HistoryProgress, LoadProgress};
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
     done, failed_for_now, read_record, records_for_blob, unread_notices, unreadable,
 };
 use super::{
-    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Lock, LockHeld, Locking,
-    OpenSession, SessionKey, SetAside, Store, saved_as, saved_now,
+    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Lock, LockHeld, Locking, MarkId,
+    OpenSession, SessionKey, SetAside, Store, TakenMark, saved_as, saved_now,
 };
 
 #[derive(Default)]
@@ -134,6 +135,17 @@ pub struct MemoryStore {
     marked: RefCell<Option<OpenSession>>,
     /// Another copy of the app is running the session marked open.
     pub open_elsewhere: Cell<bool>,
+    /// The mark a copy of the app took as cut off, held until that copy
+    /// lets go of it ([`Store::release_cut_off`]).
+    taken: RefCell<Option<OpenSession>>,
+    /// A mark let go of as carried goes only when the test says
+    /// ([`Self::answer_releases`]), the way a browser takes it away a
+    /// moment after it is asked to, once its tab's own mark is in place.
+    pub releases_later: Cell<bool>,
+    /// The lettings go of a mark carried asked for and not yet made.
+    asked_releases: RefCell<Vec<Rc<RefCell<Release>>>>,
+    /// What became of the marks, in order ([`MarkEvent`]).
+    pub mark_log: RefCell<Vec<MarkEvent>>,
     /// The history kept whole in a browser's page storage, through this
     /// copy's own adapter to it, as each tab has its own: none, where the
     /// history is kept by record here ([`Self::in_page`]).
@@ -166,7 +178,30 @@ pub struct MemoryStore {
     /// the site's ([`Lock::web_name`]), as a browser's tabs share them: none
     /// on what sync keeps.
     pub browser: Cell<bool>,
+    /// The history is being read as the app opens, and is in only once the
+    /// test says ([`Self::release_history`]): until then the store says how
+    /// far the read has come ([`Self::progress`]), and nothing may wait on
+    /// it.
+    history_held: Cell<bool>,
+    /// How far a read held has come, for the test to move on.
+    pub progress: LoadProgress,
 }
+
+/// What became of the marks of a [`MemoryStore`], for a test to follow.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarkEvent {
+    /// A copy's mark written, carrying the sessions finished at these times
+    /// ([`OpenSession::unstored`]).
+    Marked(Vec<u64>),
+    /// A copy's mark taken away.
+    Unmarked,
+    /// The marks a copy took let go of: so many as carried, so many as
+    /// they were ([`Store::release_cut_off`]).
+    Released { carried: usize, left: usize },
+}
+
+/// The name of the one mark a [`MemoryStore`] keeps.
+const MARK: &str = "mark";
 
 /// A lock a copy of the app holds on a [`MemoryStore`], let go of as this
 /// is dropped.
@@ -329,6 +364,14 @@ struct Forgotten {
     waker: Option<Waker>,
 }
 
+/// A letting go of a mark carried, made later
+/// ([`MemoryStore::releases_later`]), and what waits on it.
+#[derive(Default)]
+struct Release {
+    made: bool,
+    waker: Option<Waker>,
+}
+
 impl Store for MemoryStore {
     fn load_theme(&self) -> String {
         self.theme.borrow().clone()
@@ -462,20 +505,79 @@ impl Store for MemoryStore {
     }
 
     fn mark_open(&self, open: Option<OpenSession>) {
+        self.mark_log.borrow_mut().push(match &open {
+            Some(open) => MarkEvent::Marked(
+                open.unstored
+                    .iter()
+                    .map(|session| session.timestamp)
+                    .collect(),
+            ),
+            None => MarkEvent::Unmarked,
+        });
         *self.marked.borrow_mut() = open;
     }
 
+    /// The one mark, as a copy that stopped left it, held by the copy that
+    /// takes it: none while another copy runs it, or another took it.
     fn take_cut_off(&self) -> CutOffTaking {
-        let cut = if self.open_elsewhere.get() {
-            None
-        } else {
-            self.marked.take().map(CutOff::Marked)
-        };
+        let free = !self.open_elsewhere.get() && self.taken.borrow().is_none();
+        let taken = if free { self.marked.take() } else { None };
+        if let Some(open) = &taken {
+            self.taken.replace(Some(open.clone()));
+        }
+        let cut = taken.map(|open| TakenMark {
+            id: MarkId::new(MARK),
+            cut: CutOff::Marked(open),
+        });
         Box::pin(std::future::ready(cut.into_iter().collect()))
+    }
+
+    /// One let go of as it was is the mark again, unless a copy has marked
+    /// a session since; one carried goes, at once, or once the test says
+    /// ([`Self::releases_later`]). A letting go that names no mark, a
+    /// copy's that took none, lets go of none: the mark a copy took is held
+    /// by it still.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) -> Pending<()> {
+        self.mark_log.borrow_mut().push(MarkEvent::Released {
+            carried: carried.len(),
+            left: left.len(),
+        });
+        let named = |ids: &[MarkId]| ids.iter().any(|id| id.name() == MARK);
+        if named(&left) {
+            if let Some(taken) = self.taken.take() {
+                let mut marked = self.marked.borrow_mut();
+                if marked.is_none() {
+                    *marked = Some(taken);
+                }
+            }
+        } else if named(&carried) {
+            if self.releases_later.get() {
+                let release = Rc::new(RefCell::new(Release::default()));
+                self.asked_releases.borrow_mut().push(release.clone());
+                return Box::pin(std::future::poll_fn(move |asked| {
+                    let mut release = release.borrow_mut();
+                    if release.made {
+                        return Poll::Ready(());
+                    }
+                    release.waker = Some(asked.waker().clone());
+                    Poll::Pending
+                }));
+            }
+            self.taken.take();
+        }
+        done(())
+    }
+
+    fn history_progress(&self) -> Option<HistoryProgress> {
+        self.history_held.get().then(|| self.progress.now())
     }
 
     /// The history by record, the move made first, as the files make it.
     fn load_history(&self) -> HistoryLoad {
+        assert!(
+            !self.history_held.get(),
+            "the history was waited on while it was still being read"
+        );
         if let Some(page) = &self.page {
             return page.load();
         }
@@ -772,6 +874,22 @@ impl MemoryStore {
         self.marked.borrow().clone()
     }
 
+    /// The mark a copy took as cut off, while it holds it.
+    pub fn taken(&self) -> Option<OpenSession> {
+        self.taken.borrow().clone()
+    }
+
+    /// Have the history read as the app opens take its time, as a long one
+    /// does: in only once [`Self::release_history`] says so.
+    pub fn hold_history(&self) {
+        self.history_held.set(true);
+    }
+
+    /// The history held is in ([`Self::hold_history`]).
+    pub fn release_history(&self) {
+        self.history_held.set(false);
+    }
+
     /// Every session stored that reads, in the order of the history,
     /// deleted ones left out: what the next launch would show. A session
     /// comes back as it went in.
@@ -893,6 +1011,21 @@ impl MemoryStore {
             let ids = std::mem::take(&mut answer.ids);
             answer.gone = Some(self.tombstoned(ids));
             if let Some(waker) = answer.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
+    /// Make every letting go of a mark carried asked for
+    /// ([`Self::releases_later`]): the mark goes, and what waits on each is
+    /// woken.
+    pub fn answer_releases(&self) {
+        let asked = std::mem::take(&mut *self.asked_releases.borrow_mut());
+        for release in asked {
+            self.taken.take();
+            let mut release = release.borrow_mut();
+            release.made = true;
+            if let Some(waker) = release.waker.take() {
                 waker.wake();
             }
         }

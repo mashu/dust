@@ -53,6 +53,7 @@ use flate2::read::GzDecoder;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::disk::{aside_name, flush, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
+use super::progress::LoadProgress;
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unopened, Unreadable,
     held_key, key_of, keyed, names_noted, not_told, read_record, taken_up, tombstone_at,
@@ -138,6 +139,9 @@ pub(super) struct HistoryFiles {
     /// every change since: what the app asks, on its own thread, of how
     /// large the history has grown ([`Self::size`]).
     size: Arc<AtomicU64>,
+    /// How far the read of the whole history, or the move before it, has
+    /// come, for the app's own thread to ask as it opens ([`Self::load`]).
+    progress: Arc<LoadProgress>,
     /// The records each pack held when it last opened, by the pack's name:
     /// what one that cannot be opened for now holds, for all this copy
     /// knows ([`Self::packed`]).
@@ -238,6 +242,7 @@ impl HistoryFiles {
             keys: RefCell::new(HashMap::new()),
             on_worker: false,
             size: Arc::new(AtomicU64::new(0)),
+            progress: Arc::default(),
             pack_records: RefCell::new(HashMap::new()),
             #[cfg(test)]
             elsewhere: RefCell::new(None),
@@ -248,6 +253,12 @@ impl HistoryFiles {
     /// history is read and changed, for the app's own thread to ask.
     pub(super) fn size(&self) -> Arc<AtomicU64> {
         self.size.clone()
+    }
+
+    /// How far the read of the whole history has come, counted as it goes,
+    /// for the app's own thread to ask.
+    pub(super) fn progress(&self) -> Arc<LoadProgress> {
+        self.progress.clone()
     }
 
     /// The store's folder.
@@ -353,7 +364,8 @@ impl HistoryFiles {
             live.push(id);
         }
         let records = self.records();
-        let mut read = read_each(&records, &live, &listing.packed);
+        self.progress.reading(Some(live.len() as u64));
+        let mut read = read_each(&records, &live, &listing.packed, &self.progress);
         // One a later build packed once the packs were read, and took the
         // loose copy of before it was read, is in neither place: it is
         // looked for again, once, in the packs as they are by now.
@@ -934,7 +946,9 @@ impl HistoryFiles {
         let (records, layout) =
             legacy::moved(&sessions, fingerprint, &deleted, crate::time::now_ms());
         let moving = self.not_moved_yet(records).map_err(|err| err.to_string())?;
-        place_each(&self.records(), &moving, &self.size).map_err(|err| err.to_string())?;
+        self.progress.moving(Some(moving.len() as u64));
+        place_each(&self.records(), &moving, &self.size, &self.progress)
+            .map_err(|err| err.to_string())?;
         sync_if_there(&self.records()).map_err(|err| err.to_string())?;
         layout
             .written()
@@ -1369,15 +1383,21 @@ fn read_one(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -
     }
 }
 
-/// Each of `ids`, read as [`read_one`] reads it, in their order. A long
-/// history is read on as many as [`READERS`] threads at once, a part each,
-/// as it is read whole at every launch.
+/// Each of `ids`, read as [`read_one`] reads it, in their order, each
+/// counted in `progress` once read. A long history is read on as many as
+/// [`READERS`] threads at once, a part each, as it is read whole at every
+/// launch.
 fn read_each(
     records: &Path,
     ids: &[RecordId],
     packed: &BTreeMap<RecordId, String>,
+    progress: &LoadProgress,
 ) -> Vec<Option<ReadOne>> {
-    let one = |id: &RecordId| read_one(records, *id, packed);
+    let one = |id: &RecordId| {
+        let read = read_one(records, *id, packed);
+        progress.step();
+        read
+    };
     let threads = thread::available_parallelism()
         .map_or(1, NonZeroUsize::get)
         .min(READERS);
@@ -1434,19 +1454,25 @@ fn place(records: &Path, record: &Record, size: &AtomicU64) -> io::Result<Record
     )))
 }
 
-/// Store each of `records` in `dir` ([`place`]), on as many as [`WRITERS`]
-/// threads at once, a part each, as the move to records stores a whole
-/// history while the app's first window waits on it: one after another,
-/// each waiting for its own flush of the disk, three thousand sessions
-/// kept it waiting for seconds, on a slow disk for a minute.
+/// Store each of `records` in `dir` ([`place`]), each counted in `progress`
+/// once stored, on as many as [`WRITERS`] threads at once, a part each, as
+/// the move to records stores a whole history while the app waits on it,
+/// its boot screen up: one after another, each waiting for its own flush of
+/// the disk, three thousand sessions kept it waiting for seconds, on a slow
+/// disk for a minute.
 ///
 /// Each record is flushed before it takes its name, as ever, so a move
 /// cut short leaves every record whole or not there at all, in whatever
 /// order they were stored, and is made again to the same records before
 /// its layout is written. Each record has a place of its own, so no two
 /// parts ever reach for the same name.
-fn place_each(dir: &Path, records: &[Record], size: &AtomicU64) -> io::Result<()> {
-    let one = |record: &Record| place(dir, record, size).map(|_| ());
+fn place_each(
+    dir: &Path,
+    records: &[Record],
+    size: &AtomicU64,
+    progress: &LoadProgress,
+) -> io::Result<()> {
+    let one = |record: &Record| place(dir, record, size).map(|_| progress.step());
     if records.len() < 2 {
         return records.iter().try_for_each(one);
     }
@@ -1873,6 +1899,43 @@ mod tests {
             "the first as it was"
         );
         assert_eq!(files.load().sessions.len(), 2, "and both kept");
+    }
+
+    /// The move from a history kept whole, and the read of the records it
+    /// made, each say how far they have come as they go, for the boot screen
+    /// to say: so many sessions moved of so many, then so many records read
+    /// of so many.
+    #[test]
+    fn the_move_and_the_read_say_how_far_they_have_got() {
+        use crate::persist::progress::HistoryProgress;
+        let (dir, files) = raw_history("how-far");
+        let sessions: Vec<SessionResult> = (1..=40).map(finished).collect();
+        keep_whole(&dir, &sessions);
+        let progress = files.progress();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (progress, seen) = (Arc::clone(&progress), Arc::clone(&seen));
+            *files.elsewhere.borrow_mut() = Some(Box::new(move || {
+                seen.lock().unwrap().push(progress.now());
+            }));
+        }
+        assert_eq!(files.load().sessions.len(), 40);
+        let moved = HistoryProgress {
+            moving: true,
+            count: Some((40, 40)),
+        };
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.first(),
+            Some(&moved),
+            "as the folders are listed after the move"
+        );
+        let read = HistoryProgress {
+            moving: false,
+            count: Some((40, 40)),
+        };
+        assert_eq!(progress.now(), read);
+        assert_eq!(read.said(), "Reading your history… 40 of 40");
     }
 
     /// The history reads in the order of its records, however they were
@@ -2848,8 +2911,8 @@ mod tests {
     }
 
     /// A history of three thousand sessions kept whole is moved to records
-    /// in a moment, the first time this layout opens: the app's first
-    /// window waits on it.
+    /// in a moment, the first time this layout opens: the app waits on it,
+    /// its boot screen up.
     #[test]
     #[ignore = "a timing, on a disk of its own: run by hand"]
     fn three_thousand_sessions_kept_whole_move_in_a_moment() {

@@ -237,6 +237,7 @@ impl Glue for Fake {
         answer(self.failing().map(|()| Head {
             layout: shelves.meta.get("layout").cloned(),
             told: shelves.meta.get("told").cloned(),
+            count: Some(shelves.sessions.len() as u64),
         }))
     }
 
@@ -937,6 +938,60 @@ fn a_history_of_any_length_is_read_whole() {
     let load = opened(&fake).load();
     assert_eq!(load.sessions.len(), count);
     assert!(load.sessions.windows(2).all(|pair| pair[0].0 < pair[1].0));
+}
+
+/// Reading the database as the page opens says how far it has come, a page
+/// of records at a time, of as many as the database says it holds, for the
+/// page's boot screen to say; a move from the page storage, made whole in
+/// one change, says it is being made, with no count.
+#[test]
+fn reading_the_database_counts_its_pages() {
+    use crate::persist::progress::{HistoryProgress, LoadProgress};
+    let fake = Fake::default();
+    let tab = opened(&fake);
+    let long = ago(1);
+    let put: Vec<Record> = (0..(2 * PAGE + 500) as u64)
+        .map(|at| {
+            record_of(&SessionResult {
+                timestamp: long.timestamp - at,
+                ..long.clone()
+            })
+        })
+        .collect();
+    let count = put.len() as u64;
+    done(tab.apply(HistoryChange {
+        put,
+        ..HistoryChange::default()
+    }));
+    let progress = std::sync::Arc::new(LoadProgress::default());
+    let opened = done(BrowserHistory::open_with(
+        fake.clone(),
+        false,
+        fake.page,
+        KEYS,
+        std::sync::Arc::clone(&progress),
+    ));
+    assert_eq!(opened.expect("opened").load().sessions.len() as u64, count);
+    assert_eq!(
+        progress.now(),
+        HistoryProgress {
+            moving: false,
+            count: Some((count, count)),
+        }
+    );
+
+    let moving = Fake::default();
+    moving.page.keep(&[ago(3), ago(2)]);
+    let progress = std::sync::Arc::new(LoadProgress::default());
+    let opened = done(BrowserHistory::open_with(
+        moving.clone(),
+        false,
+        moving.page,
+        KEYS,
+        std::sync::Arc::clone(&progress),
+    ));
+    assert_eq!(opened.expect("opened").load().sessions.len(), 2);
+    assert_eq!(progress.now().said(), "Moving your history…");
 }
 
 /// A backup holds every record the database does, each as it is stored,

@@ -23,8 +23,11 @@ mod files;
 mod idb;
 mod legacy;
 mod lock;
+#[cfg(any(feature = "web", test))]
+mod marks;
 #[cfg(test)]
 pub mod memory;
+pub mod progress;
 pub mod record;
 mod saved;
 mod session;
@@ -52,6 +55,7 @@ use cw_core::{
 };
 use serde::Deserialize;
 
+use progress::HistoryProgress;
 use record::{Deletions, HistoryChange, HistoryLoad, Pending, Record, RecordId, Unopened, done};
 use settings::{load_settings_from, unmarked};
 
@@ -146,9 +150,32 @@ pub trait Store {
     /// stopped while it was marked was cut off ([`Store::take_cut_off`]).
     fn mark_open(&self, open: Option<OpenSession>);
     /// The sessions or runs copies of the app left marked open, and stopped
-    /// under: closed, crashed, killed, reloaded. Taken, so each is told of
-    /// once; one a copy is still running is left to it.
+    /// under: closed, crashed, killed, reloaded. One a copy is still running
+    /// is left to it, and so is one another copy took. Each taken is held by
+    /// this copy, and left where it is, until this copy lets go of it
+    /// ([`Store::release_cut_off`]): so each is told of once, and one this
+    /// copy stops under before it holds what the mark carried is taken
+    /// again by the next copy to look.
     fn take_cut_off(&self) -> CutOffTaking;
+    /// Let go of the marks this copy took ([`Store::take_cut_off`]). Those
+    /// `carried`, whose sessions this copy's mark holds now, as it was last
+    /// written, or the history does, go: once this copy's mark is as safe
+    /// as the store makes a mark, and, where it could not be written, once
+    /// it is. Those `left` are let go of as they are, for the next look.
+    /// What it hands back is done once those carried have gone, or are
+    /// left waiting for a write of this copy's mark that goes in: at once
+    /// on a computer or a phone, and in a browser a moment later, once its
+    /// tab's mark is in place.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) -> Pending<()>;
+    /// How far the history read as the app opens has come, while it is
+    /// still being read, or moved from where an older build kept it whole:
+    /// none once it is in, and [`Store::load_history`] hands it over at
+    /// once, and none where the store reads it then and there. Asked
+    /// without waiting on the read: the app shows its boot screen until the
+    /// history is in, and nothing of it acts on a history half read.
+    fn history_progress(&self) -> Option<HistoryProgress> {
+        None
+    }
     /// The whole history, by record ([`record`]): moved first, where an
     /// older build kept it whole, and with whatever an older build stored
     /// there since taken up.
@@ -404,10 +431,35 @@ impl CutOff {
     }
 }
 
+/// A mark of a session or run cut off, by its name in the store: what a copy
+/// that took it lets go of it by ([`Store::release_cut_off`]). The mark's
+/// file name on a computer or a phone, its key in a browser.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MarkId(String);
+
+impl MarkId {
+    fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The mark's name in its store.
+    fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A mark of a session or run cut off, as a copy of the app took it, held
+/// by that copy until it lets go of it ([`Store::take_cut_off`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TakenMark {
+    pub id: MarkId,
+    pub cut: CutOff,
+}
+
 /// The sessions cut off, being looked for: already, or still, where only the
 /// platform can tell which copies are running, as in a browser. Every one,
-/// for what each kept so far.
-pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<CutOff>>>>;
+/// for what each kept so far, by the mark it was told of in.
+pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<TakenMark>>>>;
 
 /// A backup file on its way: saved already, as a browser hands one over, or
 /// still being written on the history's own thread, as on a computer or a
@@ -457,9 +509,10 @@ pub fn default_store() -> Rc<dyn Store> {
 }
 
 /// Start reading the history as the app starts, on a thread of its own, so
-/// that the app's window comes up meanwhile and opens on it: the store the
-/// app opens takes what was read ([`default_store`]). A browser has its
-/// own, which the page waits on before the app starts ([`web::preload`]).
+/// that the app's window comes up meanwhile, on its boot screen, and opens
+/// on it once it is in ([`Store::history_progress`]): the store the app
+/// opens takes what was read ([`default_store`]). A browser has its own,
+/// which the page waits on before the app starts ([`web::preload`]).
 #[cfg(feature = "native-runtime")]
 pub fn preload() {
     desktop::preload();

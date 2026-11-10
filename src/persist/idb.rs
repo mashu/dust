@@ -6,7 +6,7 @@
 //! every key and value a string, so that what a build writes comes back
 //! byte for byte, and makes each change one transaction, whole or not at
 //! all ([`Glue`]). It opens before the app does, and the whole history is
-//! read then, a page at a time ([`BrowserHistory::open`]).
+//! read then, a page at a time ([`BrowserHistory::open_with`]).
 //!
 //! A browser kept the history whole before, in its page storage under
 //! `dust_sessions`. That is moved in once, in one transaction, which two
@@ -23,11 +23,13 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use cw_core::SessionResult;
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
+use super::progress::LoadProgress;
 use super::record::{
     self, Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId,
     Unreadable, key_of, keyed, not_told, read_record, taken_up, tombstone_at, tombstone_key,
@@ -109,11 +111,13 @@ impl Refused {
 
 /// What the database holds beside the records, as text: how the history is
 /// kept, and the records this build could not read and has told of. Each
-/// none where none is held.
+/// none where none is held. And how many records there are, where the
+/// database says.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Head {
     pub(super) layout: Option<String>,
     pub(super) told: Option<String>,
+    pub(super) count: Option<u64>,
 }
 
 /// The name of every record, and of every tombstone.
@@ -222,6 +226,9 @@ pub(super) struct BrowserHistory<G, S> {
     /// The stamp of the last change, and how many changes other tabs had
     /// told of, when this copy last looked.
     seen: RefCell<Option<Looked>>,
+    /// How far the read as the page opens, or the move before it, has come
+    /// ([`Self::open_with`]).
+    progress: Arc<LoadProgress>,
 }
 
 /// What a look at the history saw ([`BrowserHistory::changed`]).
@@ -266,11 +273,24 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     ///
     /// Or why the page storage is to keep the history this visit instead:
     /// the database would not take the move, or could not be read.
+    #[cfg(test)]
     pub(super) async fn open(
         glue: G,
         read_only: bool,
         shelf: S,
         keys: BlobKeys,
+    ) -> Result<Self, NotOpened> {
+        Self::open_with(glue, read_only, shelf, keys, Arc::default()).await
+    }
+
+    /// The same, counting in `progress` how far the read, or the move
+    /// before it, has come, for the page's boot screen to say.
+    pub(super) async fn open_with(
+        glue: G,
+        read_only: bool,
+        shelf: S,
+        keys: BlobKeys,
+        progress: Arc<LoadProgress>,
     ) -> Result<Self, NotOpened> {
         let history = Self {
             glue,
@@ -282,6 +302,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             aside: RefCell::new(Vec::new()),
             session_keys: RefCell::new(HashMap::new()),
             seen: RefCell::new(None),
+            progress,
         };
         let mut tries = 0;
         let made = loop {
@@ -322,6 +343,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             }
             Err(refusal) => return Err(refused(refusal)),
         };
+        self.progress.reading(head.count);
         let gate = if read_only {
             Gate::Newer
         } else {
@@ -407,13 +429,15 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// Every record in the database, read a page at a time, in order, but
     /// those deleted, `gone`, which read as deleted. `keep` keeps what each
     /// holds as it is stored, for a move made over them. A name that names
-    /// no record is left alone.
+    /// no record is left alone. Each page read is counted ([`Self::progress`]).
     async fn read_all(&self, gone: &BTreeSet<RecordId>, keep: bool) -> Result<Read, Refused> {
         let mut read = Read::default();
         let mut after = None;
+        let mut so_far = 0;
         loop {
             let page = self.glue.page(after.clone(), PAGE).await?;
             let more = page.len() == PAGE;
+            so_far += page.len() as u64;
             {
                 let mut keys = self.session_keys.borrow_mut();
                 for (name, raw) in page {
@@ -442,6 +466,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
                     }
                 }
             }
+            self.progress.so_far(so_far);
             if !more {
                 return Ok(read);
             }
@@ -477,6 +502,8 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             ));
             return Ok(None);
         };
+        // Made whole in one change, and not to be counted as it goes.
+        self.progress.moving(None);
         let fingerprint = raw.as_deref().map(fingerprint_of);
         let sessions = match raw.as_deref().map(legacy::read_history) {
             None => Vec::new(),
@@ -1143,6 +1170,7 @@ mod script {
                 Ok(Head {
                     layout: field(&head, "layout").as_string(),
                     told: field(&head, "told").as_string(),
+                    count: field(&head, "count").as_f64().map(|count| count as u64),
                 })
             })
         }
