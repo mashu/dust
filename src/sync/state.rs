@@ -381,20 +381,37 @@ mod tests {
     }
 
     /// Of one sync, as where neither copy's last sync is the later, the
-    /// settings as of it, with when each was changed, are this copy's where
-    /// it changed them, as a sync under way here takes the drive's before it
-    /// ends, and keeps what it took as it sends a deletion: laid over a
-    /// state another copy wrote since, which changed none of them, they
-    /// stay. Where this copy changed none of them, they are the other's.
+    /// settings as of it go together setting by setting at the later stamp
+    /// of each, as any two copies' do (`settings_by_stamp`), and at one
+    /// stamp they are this copy's where it changed them: laid over a state
+    /// another copy wrote since, which changed none of them, this copy's
+    /// changes stay, one made at a later stamp and one at the stamp the
+    /// setting had, as where two devices set it at once, stamped alike, and
+    /// the drive told them apart by what they hold. Where this copy changed
+    /// none of them, they are the other's. Gone to the other copy at one
+    /// stamp whatever changed, the second change was lost.
     #[test]
     fn of_one_sync_the_settings_are_this_copys_where_it_changed_them() {
+        let settings = |groups: u64, size: u64| {
+            Map::from_iter([
+                ("numGroups".to_string(), Value::from(groups)),
+                ("groupSizeTarget".to_string(), Value::from(size)),
+            ])
+        };
+        let stamped = |groups: u64, size: u64| {
+            BTreeMap::from([
+                ("numGroups".to_string(), groups),
+                ("groupSizeTarget".to_string(), size),
+            ])
+        };
         let mut base = state();
         base.last = Some(100);
-        base.settings = Some(groups(5));
-        base.stamps = BTreeMap::from([("numGroups".to_string(), 90)]);
+        base.settings = Some(settings(5, 5));
+        base.stamps = stamped(90, 60);
+        // Changed here: one at a later stamp, one at the stamp it had.
         let mut ours = base.clone();
-        ours.settings = Some(groups(7));
-        ours.stamps = BTreeMap::from([("numGroups".to_string(), 190)]);
+        ours.settings = Some(settings(7, 4));
+        ours.stamps = stamped(190, 60);
         let mut theirs = base.clone();
         theirs.revived = times(&[(1, 10)]);
         let merged = ours.merged(Some(&base), &theirs);
@@ -402,7 +419,7 @@ mod tests {
         assert_eq!(
             (merged.settings, merged.stamps),
             (ours.settings.clone(), ours.stamps.clone()),
-            "this copy's, changed since"
+            "this copy's, changed since, at a later stamp and at one"
         );
         assert_eq!(merged.revived, theirs.revived, "and the other's note");
         let merged = theirs.merged(Some(&base), &ours);
