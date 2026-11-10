@@ -54,12 +54,12 @@ impl SyncState {
     ///   in it is noted, or put back since. A note at an older stamp than
     ///   this copy last saw is one written without having read it, as a
     ///   stamp only ever rises. A putting back sent or spent goes whoever
-    ///   holds it. A deletion goes on that evidence only where the other
-    ///   copy left it out: two copies syncing at once can read the drive
-    ///   between them as putting its session back after one let it go,
-    ///   though no sync here took it back, and without the note the next
-    ///   would take the session for one deleted by hand and send its
-    ///   deletion.
+    ///   holds it. A deletion goes on that evidence only where a copy left
+    ///   it out, this one or the other, never where both hold it: two
+    ///   copies syncing at once can read the drive between them as putting
+    ///   its session back after one let it go, though no sync here took it
+    ///   back, and without the note the next would take the session for one
+    ///   deleted by hand and send its deletion.
     /// - The settings as of the last sync, with when each was changed, go
     ///   together, as of the later sync; of one sync, this copy's where it
     ///   changed them. The sign-in is this copy's where it signed in again

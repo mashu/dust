@@ -418,6 +418,23 @@ mod tests {
         );
     }
 
+    /// A deletion's note this copy dropped goes on the evidence asked of one
+    /// the other copy dropped, and only on it.
+    #[test]
+    fn a_deletion_this_copy_left_out_goes_on_evidence_alone() {
+        let mut base = state();
+        base.applied = times(&[(5, 50), (6, 60)]);
+        let mut ours = base.clone();
+        ours.applied.clear();
+        ours.drive.revives.insert(id(6), 61);
+        let merged = ours.merged(Some(&base), &base);
+        assert_eq!(
+            merged.applied,
+            times(&[(5, 50)]),
+            "6 put back in the drive; 5 not yet"
+        );
+    }
+
     /// What a later build keeps for sync, which this one does not know, is
     /// written back as it was read, and as two copies' states are merged,
     /// as the store holds it, since this copy never changes it: so a later
