@@ -669,18 +669,24 @@ impl AppCtx {
         }
     }
 
-    /// When the sessions the records the store could not read for now
-    /// would hold finished, by their names, as a restore finds them
-    /// ([`Self::restore_beside`]): of those not told of yet as records that
-    /// could not be read, which are read again soon.
-    pub fn unread_for_now_finished(self) -> HashSet<u64> {
+    /// Up until when the sessions the records the store could not read for
+    /// now may hold finished, by their names: of those not told of yet as
+    /// records that could not be read, which are read again soon. A record
+    /// holding a session that finished at a time is named then or after:
+    /// at its stamp, or just after the newest record, where the clock was
+    /// set back behind that one's ([`RecordId::next`]); where it finished,
+    /// as one from elsewhere goes ([`RecordId::placed`]); or in the place
+    /// of a record of the same session ([`RecordId::beside`]). So each
+    /// session finished at or before the latest of these may be one of
+    /// theirs. None where there is none.
+    pub fn unread_for_now_finished(self) -> Option<u64> {
         let told = self.told_unread_for_now.peek();
         self.unread_for_now
             .peek()
             .iter()
             .filter(|id| !told.contains(id))
             .map(|id| id.order / 1000)
-            .collect()
+            .max()
     }
 
     /// Hold `waiting`, sessions cut off held back for a record the store
@@ -720,9 +726,9 @@ impl AppCtx {
         let mut waiting = self.cut_off_waiting;
         let ready: Vec<SoFar> = {
             let mut held = waiting.write();
-            let (still, ready) = std::mem::take(&mut *held)
-                .into_iter()
-                .partition(|so_far| unread.contains(&so_far.result.timestamp));
+            let (still, ready) = std::mem::take(&mut *held).into_iter().partition(|so_far| {
+                unread.is_some_and(|through| so_far.result.timestamp <= through)
+            });
             *held = still;
             ready
         };
@@ -1964,8 +1970,9 @@ impl AppCtx {
     ///
     /// Each other record here this build could not read, as the app opened
     /// or as a look found it, that is named for when a session of the
-    /// backup not here finished is read again first, as that session may
-    /// be its own:
+    /// backup not here finished, or after, as a record of a session that
+    /// finished with the clock set back is ([`RecordId::next`]), is read
+    /// again first, as that session may be its own:
     /// - one that reads now, as one another program was still writing in
     ///   place as it was read does, is taken up, the backup's session
     ///   merged with it, and the user told;
@@ -1981,16 +1988,18 @@ impl AppCtx {
     fn restore_beside(self, backup: Backup) {
         let (again, later) = {
             let history = self.sessions.peek();
-            let finished: HashSet<u64> = backup
+            // A record holding a session is named when it finished or after
+            // ([`Self::unread_for_now_finished`]).
+            let first = backup
                 .sessions
                 .iter()
                 .filter(|session| !history.has_key(&SessionKey::of(session)))
                 .map(|session| session.timestamp)
-                .collect();
+                .min();
             let again: Vec<RecordId> = history
                 .unread()
                 .iter()
-                .filter(|id| finished.contains(&(id.order / 1000)))
+                .filter(|id| first.is_some_and(|first| id.order / 1000 >= first))
                 .copied()
                 .collect();
             (again, history.later_keys().cloned().collect())
@@ -4817,6 +4826,73 @@ mod tests {
         });
     }
 
+    /// On the files themselves, the record named as the app names it: day 3
+    /// finished, then day 2 with the clock set back, its record named just
+    /// after day 3's, and held for now as the next copy tells of its
+    /// session as cut off. Kept once, from its record.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_named_after_a_later_one_held_as_its_session_is_told_of_as_cut_off_is_kept_once() {
+        crate::testing::run(|| async {
+            let dir = TempDir::new("busy-cut-off-behind");
+            let a = Tab::on_store(crate::persist::files_at(&dir.0));
+            a.finish(day(3));
+            a.finish(day(2));
+            let id = a.id_of(2);
+            drop(a);
+            assert_ne!(id.order / 1000, stamp(2), "named after day 3's record");
+            let records = dir.0.join("history").join("sessions");
+            let changed = std::fs::metadata(&records)
+                .and_then(|meta| meta.modified())
+                .expect("when it changed");
+            let path = records.join(format!("{id}.json"));
+            let held = std::fs::read(&path).expect("stored");
+            std::fs::remove_file(&path).expect("taken away");
+            std::fs::create_dir(&path).expect("a folder in its place");
+            let busy = BusyFile {
+                path,
+                held,
+                records,
+                changed,
+            };
+            busy.as_it_was();
+            let stopped = Tab::on_store(crate::persist::files_at(&dir.0));
+            let open = stopped.act(|ctx| ctx.mark_running(false));
+            let so_far = SoFar {
+                result: day(2),
+                settings: None,
+            };
+            stopped.act(|ctx| ctx.mark_so_far(&open, so_far));
+            stopped.act(AppCtx::mark_kept);
+            drop(stopped);
+            let mut next = Tab::on_store(crate::persist::files_at(&dir.0));
+            next.act(AppCtx::tell_of_cut_off);
+            next.advance(100).await;
+            busy.let_go();
+            next.act(AppCtx::take_up_changes);
+            next.advance(100).await;
+            let launched = Tab::on_store(crate::persist::files_at(&dir.0));
+            assert_eq!(launched.shown(), [3, 2], "once, from its record");
+            assert_eq!(next.shown(), [3, 2]);
+        });
+    }
+
+    /// A record damaged as the app opened, as one another program was still
+    /// writing in place is, named just after the newest as a session that
+    /// finished with the clock behind it is (RecordId::next), and whole now,
+    /// is taken up by a restore whose backup holds its session: each once.
+    #[test]
+    fn a_restore_takes_up_a_record_named_after_a_later_one_that_reads_now() {
+        let store = holding([3]);
+        let unread = store.plant_unreadable("{ cut short");
+        assert_eq!(unread.order, stamp(3) * 1000 + 1, "named after day 3's");
+        let a = Tab::on(&store);
+        assert_eq!(a.shown(), [3]);
+        store.mend(unread, &serde_json::to_string(&day(2)).expect("writes"));
+        restore(&a, [2, 3]);
+        assert_eq!(days(&store.load_sessions()), [3, 2], "each once");
+    }
+
     /// A record that could not be read as the app opened, and reads now, is
     /// taken up by a restore whose backup holds a session from its moment,
     /// and the backup's session is merged with it: stored once, under the
@@ -5423,6 +5499,39 @@ mod tests {
             next.advance(u64::from(tries) + 1_000).await;
             assert_eq!(next.shown(), [1, 2], "kept once it is told of");
             assert_eq!(carried(&store), None);
+        });
+    }
+
+    /// A session cut off whose record its copy named just after the newest,
+    /// as a session that finished with the clock behind the newest record's
+    /// stamp is named (RecordId::next), waits too while that record cannot
+    /// be read for now, and is kept once, from its record. It was kept at
+    /// once beside it, and held twice once the record read.
+    #[test]
+    fn a_session_cut_off_whose_record_is_named_after_a_later_one_is_kept_once() {
+        crate::testing::run(|| async {
+            let store = holding([3]);
+            let raw = serde_json::to_string(&day(2)).expect("a session writes");
+            // Named as keep_finished names day 2 finished once day 3 was
+            // stored, the clock behind it: just after the newest.
+            let busy = store.plant_unreadable(&raw);
+            assert_eq!(busy.order, stamp(3) * 1000 + 1);
+            assert_ne!(busy.order / 1000, stamp(2), "not named at its stamp");
+            store.held_open.borrow_mut().insert(busy);
+            cut_off_keeping(&store, day(2));
+            let mut next = Tab::on(&store);
+            assert!(next.act(|ctx| ctx.unread_for_now.peek().contains(&busy)));
+            next.act(AppCtx::tell_of_cut_off);
+            next.advance(100).await;
+            store.held_open.borrow_mut().clear();
+            next.act(AppCtx::take_up_changes);
+            next.advance(100).await;
+            assert_eq!(
+                days(&store.load_sessions()),
+                [3, 2],
+                "once, from its record"
+            );
+            assert_eq!(next.shown(), [3, 2]);
         });
     }
 

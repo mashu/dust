@@ -49,12 +49,12 @@ pub fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
 /// stored, is not kept again, nor one deleted by hand under the record it
 /// would be stored as. Two marks that carry one session store it once:
 /// each is stored where it finished ([`RecordId::placed`]). One that a
-/// record the store could not read for now may hold, as it finished when
-/// that record's session did, waits with this copy's mark until the record
-/// reads, when the history holds it, or is no more, or is told of as one
-/// that could not be read, when it is kept beside it
-/// ([`AppCtx::wait_for_unread`]): kept at once, it would be held twice once
-/// the record read.
+/// record the store could not read for now may hold, as it finished no
+/// later than such a record is named ([`AppCtx::unread_for_now_finished`]),
+/// waits with this copy's mark until the record reads, when the history
+/// holds it, or is no more, or is told of as one that could not be read,
+/// when it is kept beside it ([`AppCtx::wait_for_unread`]): kept at once,
+/// it would be held twice once the record read.
 pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
     let store = ctx.app().store;
     // Each as it is to be stored, on today's scale, as every session of the
@@ -78,7 +78,7 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
             if history.has_key(&key) || !keys.insert(key) {
                 continue;
             }
-            if unread.contains(&result.timestamp) {
+            if unread.is_some_and(|through| result.timestamp <= through) {
                 waiting.push(SoFar { result, settings });
                 continue;
             }

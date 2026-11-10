@@ -698,7 +698,10 @@ and a copy that stops in between may count it again. One the store holds
 already in a record that cannot be read for now, as its copy stored it
 just before it stopped, waits with this copy's mark until that record
 reads, and is then the record's; it is kept beside it only once the record
-is no more, or is told of as one that could not be read. Closing
+is no more, or is told of as one that could not be read. A record is named
+when its session finished or after, just after a later one where the clock
+was set back, so every session cut off that finished no later than such a
+record is named waits so. Closing
 the desktop window, or leaving or reloading the page, ends a session there
 and then as Exit does, so nothing is left to find, and stores the settings
 with it, a level it earned included. On desktop and
