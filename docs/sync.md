@@ -72,10 +72,12 @@ or not, at its first sync at which the store can say which they are, and
 looks again at each sync until then.
 A deletion or a putting back is stamped when it is made (a deletion by
 hand when its tombstone says, though it is sent later, or as the sync that
-sends it began, where a clock set ahead said later), or just after the
-latest of the record the device knew the drive to hold by then, where that
-is later (`SyncState::stamp_change`): one made after another is the later,
-however far apart the devices' clocks are. But where a sync read the drive
+sends it listed the history, where a clock set ahead said later: one made
+while that sync waited on the drive is stamped as made, after a putting
+back made elsewhere before it), or just after the latest of the record the
+device knew the drive to hold by then, where that is later
+(`SyncState::stamp_change`): one made after another is the later, however
+far apart the devices' clocks are. But where a sync read the drive
 and did not send a deletion by hand, as the store could not say which were
 deleted, as the sync listed the history before the deletion was made, or
 as it was cut short as it sent, the deletion is stamped after what that

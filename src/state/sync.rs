@@ -1043,7 +1043,7 @@ impl AppCtx {
             Box::pin(async move { self.keep_sync_under_way(epoch, &sending, &base).await })
         };
         let synced =
-            sync_once_with(&*store, &remote, &mut state, &here, now_ms(), &since, &keep).await;
+            sync_once_with(&*store, &remote, &mut state, &here, &now_ms, &since, &keep).await;
         if *self.sync.epoch.peek() != epoch {
             // Sync was turned off meanwhile, here or in another copy, or
             // turned on anew: what this sync stored is taken up, and none of

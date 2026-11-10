@@ -1405,7 +1405,7 @@ fn a_deletion_in_a_pack_made_as_the_app_stopped_is_the_drives_once_found() {
         &remote,
         &mut phone.state,
         &phone.settings,
-        130,
+        &|| 130,
         &BTreeSet::new,
         &|state| {
             *kept.borrow_mut() = state.clone();
@@ -1576,7 +1576,7 @@ fn a_sync_lets_go_of_nothing_put_back_since_it_began() {
         &folder,
         &mut phone.state,
         &phone.settings,
-        140,
+        &|| 140,
         &|| since.borrow().clone(),
         &|_| done(()),
     ))
