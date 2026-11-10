@@ -4066,66 +4066,78 @@ mod tests {
     /// finds a session begun before it could start, waits for the session,
     /// under way no more: one asked for during the session takes its place,
     /// and it is told of then, though it is never made. The one asked for
-    /// last is made once the session is over, and it alone.
+    /// last is made once the session is over, and it alone: asked once the
+    /// one taken from the queue has found the session, or before, while the
+    /// task that takes it up is still to run, which then finds the later one
+    /// waiting, and waits no more itself. Put back in the queue all the
+    /// same, it took the later one's place, and was made in its stead.
     #[test]
     fn a_restore_whose_turn_comes_as_a_session_begins_waits_and_gives_way_to_a_later_one() {
-        crate::testing::run(|| async {
-            let store = holding([5]);
-            let mut a = Tab::on(&store);
-            // Drawn once, as a page is, so that it can be drawn again.
-            a.dom.rebuild_in_place();
-            store.deferred.set(true);
-            restore(&a, [1]);
-            let second = restore(&a, [2]);
-            // The first, as it ends, takes the second from the queue, in a
-            // task of its own; the app's screen is drawn again before that
-            // task runs, as a page that shows the history is, and the
-            // button that starts a session can be pressed in between.
-            let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            a.act(|ctx| {
-                let watcher = dioxus::core::ReactiveContext::new_with_callback(
-                    move || {
-                        if !fired.swap(true, Ordering::Relaxed) {
-                            dioxus::core::needs_update_any(ScopeId::ROOT);
-                        }
-                    },
-                    ScopeId::ROOT,
-                    std::panic::Location::caller(),
-                );
-                watcher.run_in(|| {
-                    let _ = ctx.sessions.read();
+        for before_its_task in [false, true] {
+            crate::testing::run(|| async move {
+                let store = holding([5]);
+                let mut a = Tab::on(&store);
+                // Drawn once, as a page is, so that it can be drawn again.
+                a.dom.rebuild_in_place();
+                store.deferred.set(true);
+                restore(&a, [1]);
+                let second = restore(&a, [2]);
+                // The first, as it ends, takes the second from the queue, in a
+                // task of its own; the app's screen is drawn again before that
+                // task runs, as a page that shows the history is, and the
+                // button that starts a session can be pressed in between.
+                let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                a.act(|ctx| {
+                    let watcher = dioxus::core::ReactiveContext::new_with_callback(
+                        move || {
+                            if !fired.swap(true, Ordering::Relaxed) {
+                                dioxus::core::needs_update_any(ScopeId::ROOT);
+                            }
+                        },
+                        ScopeId::ROOT,
+                        std::panic::Location::caller(),
+                    );
+                    watcher.run_in(|| {
+                        let _ = ctx.sessions.read();
+                    });
                 });
+                store.deferred.set(false);
+                store.settle();
+                a.dom.process_events();
+                assert_eq!(
+                    a.act(|ctx| *ctx.current_restore.peek()),
+                    Some(second),
+                    "its turn"
+                );
+                show_screen(&a, Screen::Training);
+                // Asked before the task that takes the second up has run.
+                let early = before_its_task.then(|| restore(&a, [3]));
+                a.dom.render_immediate(&mut dioxus::core::NoOpMutations);
+                a.pump();
+                assert!(a.act(AppCtx::restore_waits), "waits for the session");
+                assert_eq!(a.act(|ctx| *ctx.current_restore.peek()), None);
+                let third = early.unwrap_or_else(|| restore(&a, [3]));
+                assert!(
+                    a.act(|ctx| ctx.restore_told(second)),
+                    "told of as the third takes its place (before its task: {before_its_task})"
+                );
+                assert!(!a.act(|ctx| ctx.restore_told(third)));
+                a.advance(3_000).await;
+                assert_eq!(
+                    days(&store.load_sessions()),
+                    [1, 5],
+                    "not under the session"
+                );
+                show_screen(&a, Screen::Results);
+                a.advance(2_000).await;
+                assert!(a.act(|ctx| ctx.restore_told(third)));
+                assert_eq!(
+                    days(&store.load_sessions()),
+                    [1, 3, 5],
+                    "the third alone (before its task: {before_its_task})"
+                );
             });
-            store.deferred.set(false);
-            store.settle();
-            a.dom.process_events();
-            assert_eq!(
-                a.act(|ctx| *ctx.current_restore.peek()),
-                Some(second),
-                "its turn"
-            );
-            show_screen(&a, Screen::Training);
-            a.dom.render_immediate(&mut dioxus::core::NoOpMutations);
-            a.pump();
-            assert!(a.act(AppCtx::restore_waits), "waits for the session");
-            assert_eq!(a.act(|ctx| *ctx.current_restore.peek()), None);
-            let third = restore(&a, [3]);
-            assert!(
-                a.act(|ctx| ctx.restore_told(second)),
-                "told of as the third takes its place"
-            );
-            assert!(!a.act(|ctx| ctx.restore_told(third)));
-            a.advance(3_000).await;
-            assert_eq!(
-                days(&store.load_sessions()),
-                [1, 5],
-                "not under the session"
-            );
-            show_screen(&a, Screen::Results);
-            a.advance(2_000).await;
-            assert!(a.act(|ctx| ctx.restore_told(third)));
-            assert_eq!(days(&store.load_sessions()), [1, 3, 5], "the third alone");
-        });
+        }
     }
 
     /// A restore asked for while another is under way, still waiting as a
