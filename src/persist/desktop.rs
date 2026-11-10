@@ -276,10 +276,6 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
 /// it ends. A lock file is never deleted: a copy deleting one could do so
 /// under another that has it open and locked, while a third made it anew and
 /// locked that, and two copies would hold the lock at once. It holds nothing.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "sync takes its locks from SYNC-1L's next step on")
-)]
 fn lock_file(dir: &Path, name: &str) -> Locking {
     let opened = fs::create_dir_all(dir).and_then(|()| {
         fs::OpenOptions::new()

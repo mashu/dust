@@ -329,6 +329,7 @@ impl AppCtx {
                 app: CopyValue::new(app),
             };
             ctx.hear_history_news();
+            ctx.hear_sync_news();
             ctx.read_again_soon();
             ctx.sync_at_launch();
             ctx
@@ -736,6 +737,28 @@ impl AppCtx {
         self.preview.set(Preview::Idle);
     }
 
+    /// Take up the settings another tab, window or copy of the app stored
+    /// since this one last read or wrote them, merged with those here as
+    /// [`Self::store_settings`] merges them, writing nothing: as the app
+    /// looks at the store ([`Self::sync_with_store`]), and as a sync begins,
+    /// which takes what differs here from the settings as of the last sync,
+    /// another copy's or this one's, for a change made here
+    /// ([`self::sync`]).
+    fn take_up_stored_settings(self) {
+        let settings_read = self.app().store.read_settings();
+        self.tell_of_set_aside();
+        let (mut settings, mut stored) = (self.settings, self.stored_settings);
+        if let Some(theirs) = settings_read
+            && theirs != *stored.peek()
+        {
+            let merged = merge_settings(&stored.peek(), &settings.peek().clone().clamp(), &theirs);
+            if *settings.peek() != merged {
+                settings.set(merged);
+            }
+            stored.set(theirs);
+        }
+    }
+
     /// Bring the history and the settings here in line with the store's,
     /// then do `then`, told whether the store could be listed: at once
     /// wherever the store answers at once, as every store but a browser's
@@ -751,8 +774,7 @@ impl AppCtx {
     /// one stored ([`StoredHistory::unread`]). One listed that could not be
     /// read at all for now is read again, at this look and the next, until
     /// it reads or is no longer listed ([`Self::unread_for_now`]). The
-    /// settings are merged as [`Self::store_settings`] merges them, writing
-    /// nothing.
+    /// settings are taken up as well ([`Self::take_up_stored_settings`]).
     ///
     /// A restore and a backup go by what the store holds, not by what this
     /// copy last saw of it: a restore merged with a history another copy
@@ -762,18 +784,7 @@ impl AppCtx {
     /// cannot be listed, nothing is taken up, and `then` is told so.
     fn sync_with_store(self, then: impl FnOnce(bool) + 'static) {
         let store = self.app().store;
-        let settings_read = store.read_settings();
-        self.tell_of_set_aside();
-        let (mut settings, mut stored) = (self.settings, self.stored_settings);
-        if let Some(theirs) = settings_read
-            && theirs != *stored.peek()
-        {
-            let merged = merge_settings(&stored.peek(), &settings.peek().clone().clamp(), &theirs);
-            if *settings.peek() != merged {
-                settings.set(merged);
-            }
-            stored.set(theirs);
-        }
+        self.take_up_stored_settings();
         // A backup another copy saved since is the last one here too, so a
         // restore of an older one never takes the mark back past it.
         let mut last_backup = self.last_backup;

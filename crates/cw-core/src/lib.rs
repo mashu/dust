@@ -40,6 +40,7 @@ mod speed;
 mod stats;
 mod streak;
 mod timing;
+mod unknown;
 
 pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, SKIPPED, align_group};
 pub use auto_level::{

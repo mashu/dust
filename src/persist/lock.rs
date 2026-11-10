@@ -38,6 +38,10 @@ impl Lock {
     /// another wrote late whatever lock it holds, as the browser hands each
     /// tab the other tabs' writes when it gets to it, which sync's merge
     /// allows for ([`crate::sync::state::SyncState::merged`]).
+    #[cfg_attr(
+        not(any(feature = "web", test)),
+        expect(dead_code, reason = "only a browser takes Web Locks")
+    )]
     pub fn web_name(self) -> Option<&'static str> {
         match self {
             Self::SyncRun => Some("dust_sync_run"),
@@ -49,6 +53,10 @@ impl Lock {
     /// (`sync.json`): a file of its own, rather than that one locked, as
     /// on Windows a file locked cannot be read through another handle, and
     /// every copy reads what sync keeps.
+    #[cfg_attr(
+        not(any(feature = "native-runtime", test)),
+        expect(dead_code, reason = "only a computer's or a phone's store locks files")
+    )]
     pub fn file_name(self) -> &'static str {
         match self {
             Self::SyncRun => "sync-run.lock",

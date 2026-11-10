@@ -19,13 +19,6 @@ use serde_json::{Map, Value};
 use super::plan::DriveState;
 use crate::persist::record::RecordId;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "two copies' states are merged from SYNC-1's next step on"
-    )
-)]
 mod merge;
 
 /// The layout of what sync keeps.
