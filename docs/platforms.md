@@ -735,7 +735,8 @@ folder that takes none, on some network shares. Two copies syncing at once
 each plan from what sync kept as they began, which the merge as each ends
 does not change: one can send again the deletion of a session the other
 let go here, undoing everywhere a putting back made on another device, or
-take back a session deleted here by hand meanwhile. A restore of a backup
+take back a session deleted here by hand meanwhile. Of the settings each
+took, the later word on each, by its stamp, is the one kept here. A restore of a backup
 holds `restore.lock` beside them (in a browser the Web Lock
 `dust_restore`) from its start until neither it nor its Undo is under way
 or offered, so a restore in another copy waits for its Undo rather than

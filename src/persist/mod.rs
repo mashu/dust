@@ -619,6 +619,28 @@ pub fn merge_settings(
     settings::settings_of_keys(&merged)
 }
 
+/// `settings` with each setting `keys` names as `from` holds it, and the
+/// rest as they are, read as [`merge_settings`] reads what it comes to: as
+/// a merge lays one copy's change over another's, setting by setting.
+pub fn settings_with(
+    settings: &TrainingSettings,
+    from: &TrainingSettings,
+    keys: &std::collections::BTreeSet<String>,
+) -> TrainingSettings {
+    let keys_of = |settings: &TrainingSettings| match serde_json::to_value(settings) {
+        Ok(serde_json::Value::Object(keys)) => keys,
+        _ => serde_json::Map::new(),
+    };
+    let (mut merged, from_keys) = (keys_of(settings), keys_of(from));
+    for key in keys {
+        match from_keys.get(key) {
+            Some(value) => merged.insert(key.clone(), value.clone()),
+            None => merged.remove(key),
+        };
+    }
+    settings::settings_of_keys(&merged)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

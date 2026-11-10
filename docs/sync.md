@@ -256,7 +256,10 @@ window that has not looked since another changed a setting and synced it
 takes that change up, rather than send its own older value back as a change
 made there. And it ends on them: a setting another tab or window stored
 while it synced stays over what the sync took, as one changed in the tab or
-window syncing does, and goes with the next sync. A note another tab or
+window syncing does, and goes with the next sync. One that the other's own
+sync took and stored meanwhile, as two sync at once where nothing locks
+(below), is that sync's word on it: the later word of the two, by its
+stamp, is the one kept, as the drive keeps the newest of each. A note another tab or
 window left out goes only once the drive shows it sent, or no more to send,
 as a browser can hand one tab another's write late; and the note of a
 deletion the drive holds, which a sync drops as its session is put back

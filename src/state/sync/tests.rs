@@ -3866,6 +3866,118 @@ fn a_putting_back_elsewhere_after_a_deletion_by_hand_made_during_a_sync_stands()
     });
 }
 
+/// Two copies of the app on a store that takes no lock (as Safari before
+/// 15.4, a share without locks, or once a sync's ten minutes are out), whose
+/// syncs run at once: one reads the drive as another device has set 3
+/// groups, the other after that device set 4, later. Whichever ends first,
+/// the later change, 4, is the one kept everywhere.
+fn overlapping_syncs_keep_the_later_setting(older_ends_first: bool) {
+    run(|| async move {
+        let mut harness = Harness::new();
+        harness.store.browser.set(true);
+        harness.store.hears_news.set(true);
+        harness.store.unlockable.set(true);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (a, held_a) = turned_on_held(&mut harness, &remote, &auth).await;
+        harness.advance(1_000).await;
+        // The settings stored, so that the other copy opens on them.
+        let shown = harness.in_app(|| a.settings.peek().clone().clamp());
+        harness.store.write_settings(&shown).expect("stored");
+        harness.in_app(|| a.take_up_store());
+        let held_b = Held::of(&remote);
+        let b = another_copy_through(
+            &harness,
+            Rc::clone(&held_b) as Rc<dyn Remote>,
+            FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| b.take_up_store());
+        let groups = |harness: &Harness| {
+            harness
+                .store
+                .read_settings()
+                .map(|s| s.curriculum.num_groups)
+        };
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let mut theirs = shown.clone();
+        theirs.curriculum.num_groups = 3;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // B's sync reads the drive, 3, and waits on its first write.
+        held_b.hold_writes(true);
+        harness.in_app(|| b.sync_now());
+        harness.advance(200).await;
+        // The other device sets 4, later, and syncs.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        theirs.curriculum.num_groups = 4;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        // A's sync reads the drive, 4, and waits on its first write.
+        held_a.hold_writes(true);
+        harness.in_app(|| a.sync_now());
+        harness.advance(200).await;
+        let (first, then) = if older_ends_first {
+            (&held_b, &held_a)
+        } else {
+            (&held_a, &held_b)
+        };
+        first.hold_writes(false);
+        harness.advance(500).await;
+        then.hold_writes(false);
+        harness.advance(500).await;
+        // A quiet end: each copy syncs in turn, then the other device.
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        for _ in 0..2 {
+            for copy in [a, b] {
+                harness.in_app(|| copy.take_up_store());
+                harness.in_app(|| copy.sync_now());
+                harness.advance(2_000).await;
+            }
+        }
+        let synced = now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        let there = synced
+            .settings
+            .map_or(theirs.curriculum.num_groups, |s| s.curriculum.num_groups);
+        for copy in [a, b] {
+            harness.in_app(|| copy.take_up_store());
+        }
+        let here = [a, b].map(|copy| harness.in_app(|| copy.settings.peek().curriculum.num_groups));
+        assert_eq!(groups(&harness), Some(4), "the store: the later change");
+        assert_eq!(here, [4, 4], "the copies");
+        assert_eq!(there, 4, "the other device");
+    });
+}
+
+#[test]
+fn overlapping_syncs_keep_the_later_setting_where_the_one_that_read_the_older_ends_first() {
+    overlapping_syncs_keep_the_later_setting(true);
+}
+
+#[test]
+fn overlapping_syncs_keep_the_later_setting_where_the_one_that_read_the_newer_ends_first() {
+    overlapping_syncs_keep_the_later_setting(false);
+}
+
 /// What the store keeps for sync now, which it holds.
 fn kept_state(harness: &Harness) -> SyncState {
     let raw = harness.store.sync.borrow().clone().expect("kept");

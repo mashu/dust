@@ -22,7 +22,7 @@ use dioxus::prelude::*;
 use super::AppCtx;
 use crate::history::settle_or_spawn;
 use crate::persist::record::{Pending, RecordId, done};
-use crate::persist::{Lock, LockHeld, Locking, Store, merge_settings};
+use crate::persist::{Lock, LockHeld, Locking, Store, merge_settings, settings_with};
 use crate::sync::auth::{Auth, AuthError};
 use crate::sync::remote::{Remote, RemoteError, RemoteFile};
 use crate::sync::run::{Found, SyncFailed, Synced, delete_copy, join, look, sync_once_with};
@@ -288,6 +288,50 @@ fn read_kept(store: &dyn Store) -> Kept {
 /// joined to the same keyring. One turned on anew is of another device.
 fn same_sync(kept: &SyncState, ours: &SyncState) -> bool {
     kept.device == ours.device && kept.keyring == ours.keyring
+}
+
+/// The settings here as a sync ends, `now`, with each setting that another
+/// copy of the app's sync took and stored while this one ran, and that this
+/// copy took up from the store, set back to `here`, as this sync began,
+/// where this sync's word on it is as late or later by its stamp: the end
+/// of the sync then lays this sync's take over it, as the drive's settings
+/// go by the newest of each, rather than keep that copy's for a change made
+/// there and send it again as a later one. Where the other's word is the
+/// later, it stands. As that copy's sync left it, a setting is one it took
+/// from the drive, or sent: `theirs` is what the store kept for sync as
+/// this sync's end read it, before laying this one's over it, `began` what
+/// this sync began from, and `stamps` when each setting was last changed,
+/// as of this sync. Two such syncs run at once only where nothing locks
+/// ([`RUN_LOCK_WAIT_MS`]).
+fn given_way(
+    here: &cw_core::TrainingSettings,
+    now: &cw_core::TrainingSettings,
+    began: &SyncState,
+    theirs: &SyncState,
+    stamps: &BTreeMap<String, u64>,
+) -> cw_core::TrainingSettings {
+    let Some(took) = &theirs.settings else {
+        return now.clone();
+    };
+    if theirs.settings == began.settings {
+        return now.clone();
+    }
+    let before = began.settings.clone().unwrap_or_default();
+    let (here_keys, now_keys) = (as_keys(here), as_keys(now));
+    let given: BTreeSet<String> = settings_keys(took)
+        .into_iter()
+        .filter(|(key, value)| {
+            before.get(key) != Some(value)
+                && now_keys.get(key) == Some(value)
+                && here_keys.get(key) != Some(value)
+                && stamps.get(key) >= theirs.stamps.get(key)
+        })
+        .map(|(key, _)| key)
+        .collect();
+    if given.is_empty() {
+        return now.clone();
+    }
+    settings_with(now, here, &given)
 }
 
 /// Note `id` as put back by hand at `at` in `notes`: at the later, where it
@@ -567,8 +611,15 @@ impl AppCtx {
     /// meanwhile, here or in another copy: off here as well, then.
     /// Under the lock on what sync keeps, as every keep is
     /// ([`Self::keep_sync_state`]): a putting back noted while it waits for
-    /// it waits with it.
-    async fn keep_synced(self, epoch: u64, base: &SyncState, synced: SyncState) {
+    /// it waits with it. Gives back what the store kept for this sync as it
+    /// read it, before laying this one's over it: another copy's sync that
+    /// ended meanwhile among it ([`given_way`]).
+    async fn keep_synced(
+        self,
+        epoch: u64,
+        base: &SyncState,
+        synced: SyncState,
+    ) -> Option<SyncState> {
         let _held = lock_state(&*self.app().store).await;
         // Asked before what sync keeps is read, so that nothing comes
         // between that read and the write.
@@ -581,7 +632,7 @@ impl AppCtx {
                 self.note_waiting(&synced.revived);
                 self.keep_now();
             }
-            return;
+            return None;
         }
         let kept = read_kept(&*self.app().store);
         if let Some(why) = self.changed_elsewhere(&kept) {
@@ -590,7 +641,7 @@ impl AppCtx {
             self.note_waiting(&synced.revived);
             self.take_up_change_elsewhere(why);
             self.give_notes_to(kept);
-            return;
+            return None;
         }
         // A sync the store never took is laid over nothing of another's:
         // kept whole over another sync the store holds, as the one last
@@ -625,7 +676,8 @@ impl AppCtx {
             let at = merged.stamp_change(id, at);
             note(&mut merged.revived, id, at);
         }
-        self.write_kept(merged, theirs);
+        self.write_kept(merged, theirs.clone());
+        theirs
     }
 
     /// Of the sessions put back by hand while a sync was under way, here or
@@ -1133,7 +1185,8 @@ impl AppCtx {
                 });
             }
             Ok(synced) => {
-                self.keep_synced(epoch, &base, state).await;
+                let stamps = state.stamps.clone();
+                let stored = self.keep_synced(epoch, &base, state).await;
                 self.take_up_synced(&synced);
                 // Turned off, or on anew, in another copy meanwhile: off here
                 // as well, its settings left as they are.
@@ -1146,9 +1199,15 @@ impl AppCtx {
                 // meanwhile stays, and goes with the next sync. So does one
                 // another copy stored meanwhile, taken up first: laid over
                 // what this copy held, which knew nothing of it, and stored,
-                // what the sync took would undo it.
+                // what the sync took would undo it. But one that another
+                // copy's sync took and stored meanwhile gives way to this
+                // sync's word on it, where that is as late or later.
                 self.take_up_stored_settings();
                 let now = self.settings.peek().clone().clamp();
+                let now = match &stored {
+                    Some(theirs) => given_way(&here, &now, &base, theirs, &stamps),
+                    None => now,
+                };
                 let (kept, synced_as) = match synced.settings {
                     Some(taken) => (merge_settings(&here, &now, &taken), taken),
                     None => (now.clone(), here),
