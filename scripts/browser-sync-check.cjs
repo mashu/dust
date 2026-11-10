@@ -12,6 +12,10 @@
 // says nothing in the clear; the passphrase is never kept; and the
 // history, the settings and the theme of one device reach the other. A build made
 // without a web client ID offers no sync, and the check says so and passes.
+// The fake Google answers on Google's own addresses, so the pages' content
+// security policies hold as they would with the real one: the app's page
+// refuses a connection anywhere else, and no page, the sign-in page among
+// them, breaches its policy.
 //
 // Playwright is found the way Node finds any package, NODE_PATH included.
 'use strict';
@@ -134,8 +138,30 @@ function answerSignIn(route) {
   return route.fulfill({ status: 302, headers: { location: back } });
 }
 
+/// Every breach of a page's content security policy in `context`, its
+/// popups included, said into `breaches`: what was refused, under which
+/// directive, and where.
+async function watchPolicy(context, breaches) {
+  await context.exposeBinding('__dustBreach', ({ page }, breach) => {
+    breaches.push(`${page ? page.url() : 'a page'}: ${breach}`);
+  });
+  await context.addInitScript(() => {
+    document.addEventListener('securitypolicyviolation', e => {
+      window.__dustBreach(`${e.effectiveDirective} refused ${e.blockedURI || 'inline'} at ${e.sourceFile || 'the page'}:${e.lineNumber}`);
+    });
+  });
+}
+
+/// Where the check asks the page's policy to refuse a connection.
+const ELSEWHERE = 'https://example.invalid/';
+
+/// The breaches of `d`'s pages, but for the one the check asked for.
+const breached = d => d.breaches.filter(breach => !breach.includes(ELSEWHERE));
+
 async function device(browser, origin, name) {
   const context = await browser.newContext();
+  const breaches = [];
+  await watchPolicy(context, breaches);
   const elsewhere = [];
   await context.route(() => true, route => {
     const url = new URL(route.request().url());
@@ -154,7 +180,7 @@ async function device(browser, origin, name) {
   await page.goto(`${origin}${BASE}`);
   await page.click('#nav-stats');
   await page.click('#seg-history');
-  return { context, page, elsewhere };
+  return { context, page, elsewhere, breaches };
 }
 
 async function turnOn(page, repeat) {
@@ -175,7 +201,22 @@ async function turnOn(page, repeat) {
   try {
     // The phone: a history restored, with its settings, then sync on.
     const a = await device(browser, origin, 'phone');
+    // The page's policy is in force: a connection anywhere but the site and
+    // Google Drive is refused before it is made.
+    const refused = await a.page.evaluate(
+      elsewhere =>
+        new Promise(ok => {
+          document.addEventListener('securitypolicyviolation', e => {
+            if (e.blockedURI.startsWith(elsewhere)) ok(e.effectiveDirective);
+          });
+          fetch(elsewhere).catch(() => {});
+          setTimeout(() => ok(null), 10000);
+        }),
+      ELSEWHERE,
+    );
+    assert.strictEqual(refused, 'connect-src', "the page's policy refuses a connection elsewhere");
     if (!(await a.page.locator('#btn-turn-on-sync').count())) {
+      assert.deepStrictEqual(breached(a), [], "nothing breaches the page's policy");
       console.log('This build offers no sync (it was made without a web client ID): nothing to check.');
       return;
     }
@@ -257,6 +298,7 @@ async function turnOn(page, repeat) {
     for (const d of [a, b]) {
       const off = d.elsewhere.filter(o => !o.includes('fonts.g'));
       assert.deepStrictEqual(off, [], 'nothing but the site and Google');
+      assert.deepStrictEqual(breached(d), [], 'no page breaches its policy, the sign-in page among them');
     }
     console.log(`OK: ${signIns} sign-ins, ${drive.asked.length} Drive requests:`,
       [...new Set(drive.asked)].join(', '));

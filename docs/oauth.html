@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <!--
+    What this page may run and load, ahead of all it governs: its own
+    script and style, by their hashes, and nothing else at all. A change
+    to either changes its hash, which the tests in src/app.rs say.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ktsWQ9b9J01kX1/v3DlsEByCK/OrF/NJ9hgwFAw1m5c='; style-src 'sha256-zqaF82bNDdqdCG5bA0F63SMSbrrC1NH3kskLqNWZqTU='; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <title>Signing in — Dust</title>
