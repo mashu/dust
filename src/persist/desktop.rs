@@ -1368,6 +1368,122 @@ pub(super) mod tests {
         );
     }
 
+    /// A mark's lock file that cannot be opened to be locked, a folder where
+    /// it goes say, or one its copy took away between the look's listing
+    /// and the open, is passed over: the look takes every other mark, and
+    /// leaves that one where it is.
+    #[test]
+    fn a_mark_whose_lock_cannot_be_opened_is_passed_over() {
+        let (dir, cut) = store("open-lock-unopened");
+        cut.mark_open(Some(open_at(7)));
+        drop(cut);
+        let next = DesktopStore::at(dir.0.clone());
+        let odd: Vec<PathBuf> = ["0000000000000001", "ffffffffffffffff"]
+            .iter()
+            .map(|id| next.mark_path(id, "lock"))
+            .collect();
+        for odd in &odd {
+            fs::create_dir(odd).unwrap();
+        }
+        assert_eq!(
+            cuts(&now(next.take_cut_off())),
+            [CutOff::Marked(open_at(7))],
+            "the mark beside them taken"
+        );
+        assert!(odd.iter().all(|odd| odd.is_dir()), "left where they are");
+    }
+
+    /// Where this copy's mark cannot be made, the marks it took of sessions
+    /// cut off stay, though it lets go of them as carried: no mark of its
+    /// own holds what they carry. They go once its mark is made.
+    #[test]
+    fn marks_carried_stay_while_this_copys_mark_cannot_be_made() {
+        let (dir, cut) = store("open-unmade");
+        cut.mark_open(Some(open_at(1)));
+        let cut_id = own_id(&cut);
+        drop(cut);
+        let took = DesktopStore::at(dir.0.clone());
+        let carried: Vec<MarkId> = now(took.take_cut_off())
+            .into_iter()
+            .map(|taken| taken.id)
+            .collect();
+        assert_eq!(carried.len(), 1, "taken");
+        // The name its mark would be made under is a folder's.
+        crate::time::pin_seeds(Some(7));
+        let id = format!("{:016x}", crate::time::seed_rng());
+        crate::time::pin_seeds(Some(7));
+        let making = took.mark_path(&id, "making");
+        fs::create_dir(&making).unwrap();
+        let carrying = OpenSession {
+            unstored: vec![session("2026-10-01")],
+            ..open_at(3)
+        };
+        took.mark_open(Some(carrying.clone()));
+        assert!(took.open_held.borrow().is_none(), "no mark of its own");
+        now(took.release_cut_off(carried, Vec::new()));
+        for extension in ["json", "lock"] {
+            assert!(
+                took.mark_path(&cut_id, extension).exists(),
+                "{extension}: kept, as nothing else holds what it carried"
+            );
+        }
+        fs::remove_dir(&making).unwrap();
+        took.mark_open(Some(carrying));
+        crate::time::pin_seeds(None);
+        assert!(took.open_held.borrow().is_some(), "made");
+        for extension in ["json", "lock"] {
+            assert!(
+                !took.mark_path(&cut_id, extension).exists(),
+                "{extension}: gone"
+            );
+        }
+    }
+
+    /// Where this copy's mark, written, cannot be made safe on the disk, the
+    /// marks it let go of as carried stay: a power cut could leave what
+    /// they carry in no mark at all. They go once a write of its mark is
+    /// made safe.
+    #[test]
+    fn marks_carried_stay_while_this_copys_mark_cannot_be_made_safe() {
+        let (dir, cut) = store("open-unsafe");
+        cut.mark_open(Some(open_at(1)));
+        let cut_id = own_id(&cut);
+        drop(cut);
+        let took = DesktopStore::at(dir.0.clone());
+        let carrying = OpenSession {
+            unstored: vec![session("2026-10-01")],
+            ..open_at(3)
+        };
+        took.mark_open(Some(carrying.clone()));
+        let own = own_id(&took);
+        let carried: Vec<MarkId> = now(took.take_cut_off())
+            .into_iter()
+            .map(|taken| taken.id)
+            .collect();
+        assert_eq!(carried.len(), 1, "taken");
+        // Its text a folder, it cannot be opened to be flushed.
+        let json = took.mark_path(&own, "json");
+        let said = fs::read(&json).unwrap();
+        fs::remove_file(&json).unwrap();
+        fs::create_dir(&json).unwrap();
+        now(took.release_cut_off(carried, Vec::new()));
+        for extension in ["json", "lock"] {
+            assert!(
+                took.mark_path(&cut_id, extension).exists(),
+                "{extension}: kept, as this copy's mark may not be on the disk"
+            );
+        }
+        fs::remove_dir(&json).unwrap();
+        fs::write(&json, said).unwrap();
+        took.mark_open(Some(carrying));
+        for extension in ["json", "lock"] {
+            assert!(
+                !took.mark_path(&cut_id, extension).exists(),
+                "{extension}: gone"
+            );
+        }
+    }
+
     /// A store whose history is still being read on its thread, as the one
     /// the app opens on is, says how far the read has come, asked without
     /// waiting on it, so the app's first frame need not wait either; and
