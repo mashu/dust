@@ -552,8 +552,15 @@ impl AppCtx {
     /// and sent ([`SyncState::stamp_change`]), as it was put back after the
     /// sync began: after the deletion this sync sent, which it may undo,
     /// and so after a deletion of it made elsewhere later by the clock that
-    /// this sync read, which it then beats (`docs/sync.md`). The sign-in is
-    /// no sync's to keep: the store's, or one
+    /// this sync read, which it then beats (`docs/sync.md`). One deleted by
+    /// hand again since is spent, and is no more noted
+    /// ([`Self::deleted_again`]): the deletion is this sync's, or the next
+    /// one's, to send, stamped as it was made. Noted again, after the
+    /// deletion this sync sent and noted, the next sync took it for a
+    /// putting back since, dropped that note, and sent the deletion again,
+    /// stamped after all this one read: after a putting back made elsewhere
+    /// later than the deletion by the clock. The sign-in is no sync's to
+    /// keep: the store's, or one
     /// made here that the store has yet to take, before the sync began or
     /// meanwhile ([`Self::sign_in_made_here`]), not one taken up from another
     /// copy meanwhile. Nothing is kept where sync was turned off or on anew
@@ -563,6 +570,9 @@ impl AppCtx {
     /// it waits with it.
     async fn keep_synced(self, epoch: u64, base: &SyncState, synced: SyncState) {
         let _held = lock_state(&*self.app().store).await;
+        // Asked before what sync keeps is read, so that nothing comes
+        // between that read and the write.
+        let deleted_again = self.deleted_again(base).await;
         put(self.sync.taking_in, false);
         if *self.sync.epoch.peek() != epoch {
             // Taken for off, or on anew, in another copy as it waited: what
@@ -608,10 +618,44 @@ impl AppCtx {
             .map(|(&id, &at)| (id, at))
             .collect();
         for (id, at) in elsewhere.into_iter().chain(take(self.sync.revived)) {
+            if deleted_again.contains(&id) {
+                merged.revived.remove(&id);
+                continue;
+            }
             let at = merged.stamp_change(id, at);
             note(&mut merged.revived, id, at);
         }
         self.write_kept(merged, theirs);
+    }
+
+    /// Of the sessions put back by hand while a sync was under way, here or
+    /// in another copy of the app, as the notes waiting here and those the
+    /// store kept since `base` show them, those deleted by hand again since:
+    /// a putting back takes the session's tombstone away, so one the store
+    /// holds of it now was made after. None where the store cannot say.
+    async fn deleted_again(self, base: &SyncState) -> BTreeSet<RecordId> {
+        let store = self.app().store;
+        let mut put_back: BTreeSet<RecordId> = self.sync.revived.peek().keys().copied().collect();
+        if let Kept::State(kept) = read_kept(&*store)
+            && same_sync(&kept, base)
+        {
+            put_back.extend(
+                kept.revived
+                    .iter()
+                    .filter(|&(id, &at)| base.revived.get(id).is_none_or(|&was| at > was))
+                    .map(|(&id, _)| id),
+            );
+        }
+        if put_back.is_empty() {
+            return BTreeSet::new();
+        }
+        store
+            .deletions(put_back.into_iter().collect())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Take up what another copy of the app on the same store, a tab or a

@@ -89,7 +89,12 @@ stamped again as it ends, after what that sync read and sent, so that it
 beats the deletion that sync sent, which it may undo; and so it beats, too,
 a deletion of that session made on another device after it by the clock,
 where the sync read that deletion: the putting back is the later word
-then, on every device. And a session put back by hand meanwhile, in that
+then, on every device. One whose session was deleted by hand again since,
+in that tab or window or in another, is spent, and is not noted: the
+deletion is the later word, which that sync sends stamped as it was made,
+where it was made before the sync listed the history, so that a putting
+back made elsewhere after it by the clock stands; or the next sync, as
+above. And a session put back by hand meanwhile, in that
 tab or window or in another on the device, is not let go by that sync,
 which planned with no note of it, even where sync is turned off before it
 ends: the next sends it as put back, where sync is on still. A putting back
