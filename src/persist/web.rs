@@ -6,8 +6,9 @@
 //! and a GitHub Pages project site shares its origin with every other one
 //! of the account (docs/platforms.md). So every name kept or locked here
 //! starts with `dust_`, and only names of Dust's own are ever taken away: by
-//! exact name, or by a prefix of its own ([`keep_aside`], the marks' page
-//! script, `src/persist/marks.js`).
+//! exact name, or by a prefix of its own
+//! ([`keep_aside`](super::legacy::keep_aside), the marks' page script,
+//! `src/persist/marks.js`).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::pin::pin;

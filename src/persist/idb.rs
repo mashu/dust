@@ -6,7 +6,7 @@
 //! every key and value a string, so that what a build writes comes back
 //! byte for byte, and makes each change one transaction, whole or not at
 //! all ([`Glue`]). It opens before the app does, and the whole history is
-//! read then, a page at a time ([`BrowserHistory::open`]).
+//! read then, a page at a time ([`BrowserHistory::open_with`]).
 //!
 //! A browser kept the history whole before, in its page storage under
 //! `dust_sessions`. That is moved in once, in one transaction, which two
