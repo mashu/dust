@@ -1148,6 +1148,65 @@ mod ui_tests {
         });
     }
 
+    /// The app that opens once its boot screen gives way hears what an
+    /// input method does on its root, where it hears the paddles: a dead
+    /// dit key keys within the composition it opened, and once that
+    /// composition has ended, a `[` within one no paddle key opened is the
+    /// input method's, and keys nothing. No part of the app, its root among
+    /// them, is there while the history is read.
+    #[test]
+    fn once_open_from_its_boot_screen_the_app_leaves_a_composition_to_its_input_method() {
+        run(|| async {
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.mark_tutorial_done();
+            store.hold_history();
+            let (mut ui, recorder) = Ui::launch(store.clone());
+            ui.advance(1_100).await;
+            assert!(ui.has("Reading your history…"), "{}", ui.html());
+            assert!(!ui.shows("btn-guided-setup"), "no part of the app yet");
+            store.release_history();
+            ui.advance(100).await;
+            assert!(ui.shows("btn-guided-setup"), "Home: {}", ui.html());
+            let tones = || {
+                recorder
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| matches!(call, crate::audio::fake::Call::LiveTone(true)))
+                    .count()
+            };
+
+            let at = "btn-guided-setup";
+            assert!(
+                !ui.press_key(at, Key::Dead, Code::BracketLeft),
+                "a dead dit key keys"
+            );
+            ui.advance(30).await;
+            ui.release_key(at, Key::Dead, Code::BracketLeft);
+            ui.advance(300).await;
+            assert!(
+                !ui.press_key_composing(at, Key::Dead, Code::BracketLeft),
+                "and keys within the composition it opened"
+            );
+            ui.advance(30).await;
+            ui.release_key(at, Key::Dead, Code::BracketLeft);
+            ui.advance(300).await;
+            let keyed = tones();
+            assert!(keyed >= 2, "the sidetone sounded for each: {keyed}");
+
+            ui.end_composition(at);
+            let bracket = Key::Character("[".into());
+            assert!(
+                ui.press_key_composing(at, bracket.clone(), Code::BracketLeft),
+                "a [ within a composition no paddle key opened is left to it"
+            );
+            ui.advance(30).await;
+            ui.release_key(at, bracket, Code::BracketLeft);
+            ui.advance(300).await;
+            assert_eq!(tones(), keyed, "and keys nothing");
+        });
+    }
+
     #[test]
     fn the_bottom_nav_reaches_every_screen() {
         run(|| async {
