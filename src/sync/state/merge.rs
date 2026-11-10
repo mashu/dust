@@ -5,7 +5,9 @@
 //!
 //! Each note is merged by what each copy did to it since this copy last
 //! read or kept the state. What this copy dropped is gone: its sync sent
-//! it, or found it was no more to note, and knew it. What the other copy
+//! it, or found it was no more to note, and knew it; but a deletion's note,
+//! which a sync drops as its session is put back here, before the drive
+//! holds the putting back, goes only once it does. What the other copy
 //! dropped goes only on evidence, in what the copies read of the drive,
 //! that it was sent or spent: a browser's tab can read what sync keeps from
 //! before another tab's last write, and write without what that one noted,
@@ -38,7 +40,13 @@ impl SyncState {
     ///   whose answer never came ([`SyncState::unanswered`]) go note by
     ///   note: one either noted since stays, at the later stamp where both
     ///   did; one this copy dropped since is gone, unless the other noted it
-    ///   again; one the other copy dropped goes only on evidence. A putting
+    ///   again; one the other copy dropped goes only on evidence, and so
+    ///   does a deletion this copy dropped: a sync drops it as its session
+    ///   is put back here, and the drive holds the putting back only once
+    ///   that sync, or the next, has sent it, so a copy that read the store
+    ///   written between would keep the note, on no evidence it was spent,
+    ///   and from then on take it for one it noted itself, laying it back
+    ///   over the putting back at every write. A putting
     ///   back goes once the drive shows it sent, at its stamp or later, or a
     ///   deletion of its session after it is noted; a deletion, once the
     ///   drive has put its session back since, as late or later, and holds
@@ -78,7 +86,11 @@ impl SyncState {
     /// module's model of three copies, a deletion went out again in about
     /// three runs in five where syncs ran at once, and one in thirty-six
     /// where tabs read late; in none where they synced one at a time from
-    /// what the store held. Only that keeps both out.
+    /// what the store held. Only that keeps both out. The model leaves out
+    /// a sync's writes as it sends deletions by hand, and sessions let go
+    /// here put back by hand; the app's tests hold those
+    /// (`a_deletion_noted_as_the_drives_is_not_laid_back_once_put_back_*`
+    /// in `state::sync::tests`).
     pub fn merged(&self, base: Option<&SyncState>, theirs: &SyncState) -> SyncState {
         // What this copy last read or kept of a sync before one turned on
         // here says nothing of this one.
@@ -107,14 +119,14 @@ impl SyncState {
             &base.applied,
             &self.applied,
             &theirs.applied,
-            false,
+            Notes::Deletions,
             |id, at| put_back_since(&id, at) && !drive.deleted(id),
         );
         let revived = merge_notes(
             &base.revived,
             &self.revived,
             &theirs.revived,
-            true,
+            Notes::PuttingsBack,
             |id, at| put_back_since(&id, at) || applied.get(&id).is_some_and(|&gone| gone > at),
         );
         let unanswered = merge_unanswered(
@@ -169,17 +181,30 @@ impl SyncState {
     }
 }
 
+/// Which notes [`merge_notes`] merges.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Notes {
+    /// Sessions put back here by hand ([`SyncState::revived`]): one sent or
+    /// spent goes whoever holds it, and one this copy dropped is gone.
+    PuttingsBack,
+    /// Deletions the drive holds ([`SyncState::applied`]): one either holds
+    /// stays, and one this copy dropped, as one the other dropped, goes only
+    /// once it is spent.
+    Deletions,
+}
+
 /// One kind of stamped note, by record, of two copies' states merged: as
 /// this copy last read or kept it, `base`; as it holds it now, `ours`; and
 /// as the store holds it now, `theirs` ([`SyncState::merged`]). `spent` says
 /// a note, at its stamp, was sent or spent, as the copies' drive shows it:
-/// one the other copy left out goes on that alone, and, where `drop_spent`,
-/// one either holds as well.
+/// one the other copy left out goes on that alone; a putting back either
+/// holds goes on it as well, and a deletion's note this copy left out goes
+/// only on it.
 fn merge_notes(
     base: &BTreeMap<RecordId, u64>,
     ours: &BTreeMap<RecordId, u64>,
     theirs: &BTreeMap<RecordId, u64>,
-    drop_spent: bool,
+    notes: Notes,
     spent: impl Fn(RecordId, u64) -> bool,
 ) -> BTreeMap<RecordId, u64> {
     let ids: BTreeSet<RecordId> = base
@@ -194,9 +219,10 @@ fn merge_notes(
                 base.get(&id).copied(),
                 ours.get(&id).copied(),
                 theirs.get(&id).copied(),
+                notes,
                 |at| spent(id, at),
             )?;
-            (!(drop_spent && spent(id, at))).then_some((id, at))
+            (!(notes == Notes::PuttingsBack && spent(id, at))).then_some((id, at))
         })
         .collect()
 }
@@ -206,6 +232,7 @@ fn merge_note(
     base: Option<u64>,
     ours: Option<u64>,
     theirs: Option<u64>,
+    notes: Notes,
     spent: impl Fn(u64) -> bool,
 ) -> Option<u64> {
     // An older stamp than this copy last saw is one written without having
@@ -222,8 +249,17 @@ fn merge_note(
             _ => theirs,
         }
     } else if theirs == base {
-        // Changed here alone, or dropped: as this copy holds it.
-        ours
+        // Changed here alone, or dropped: as this copy holds it. But a
+        // deletion's note a sync here dropped as its session was put back
+        // here goes only once the drive shows the putting back, which that
+        // sync sends only after, or the next does: written without it
+        // before then, another copy reading the store meanwhile would keep
+        // it, on no evidence that it was spent, and from then on take it for
+        // one it noted itself.
+        match (base, ours) {
+            (Some(seen), None) if notes == Notes::Deletions && !spent(seen) => Some(seen),
+            _ => ours,
+        }
     } else {
         // Changed by both: the later, where either holds it.
         ours.max(theirs)

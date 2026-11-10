@@ -249,20 +249,25 @@ made there. And it ends on them: a setting another tab or window stored
 while it synced stays over what the sync took, as one changed in the tab or
 window syncing does, and goes with the next sync. A note another tab or
 window left out goes only once the drive shows it sent, or no more to send,
-as a browser can hand one tab another's write late. Every such write reads
-what the store keeps for sync first, on the app's thread, which is one read
-of `sync.json`, or of `localStorage`, more than writing it whole was. They
-sync one at a time: a sync asked for while another tab or window syncs
-waits for it, the corner's cloud breathing meanwhile, ten minutes at most,
-then begins from what that one kept. Turning sync off with the copy waits
-for it too, so nothing is written into the folder after the copy is
-deleted. Where nothing locks, as in a browser without Web Locks or a share
-that takes no lock, or once the ten minutes are out, tabs and windows sync
-as they come. The merge keeps the notes each made, but not what a sync
-planned without the other's (`SyncState::merged`): two syncing at once can
-send again the deletion of a session one let go here, undoing everywhere
-a putting back made elsewhere, or take back a session deleted here by hand
-meanwhile (`docs/platforms.md`).
+as a browser can hand one tab another's write late; and the note of a
+deletion the drive holds, which a sync drops as its session is put back
+here, goes from what sync keeps only once the drive holds the putting back,
+so that no tab or window reading the store meanwhile keeps it for one of
+its own and lays it back, to take a later deletion by hand for the drive's.
+Every such write reads what the store keeps for sync first, on the app's
+thread, which is one read of `sync.json`, or of `localStorage`, more than
+writing it whole was. They sync one at a time: a sync asked for while
+another tab or window syncs waits for it, the corner's cloud breathing
+meanwhile, ten minutes at most, then begins from what that one kept.
+Turning sync off with the copy waits for it too, so nothing is written into
+the folder after the copy is deleted. Where nothing locks, as in a browser
+without Web Locks or a share that takes no lock, or once the ten minutes
+are out, tabs and windows sync as they come. The merge keeps the notes
+each made, but not what a sync planned without the other's
+(`SyncState::merged`): two syncing at once can send again the deletion of
+a session one let go here, undoing everywhere a putting back made
+elsewhere, or take back a session deleted here by hand meanwhile
+(`docs/platforms.md`).
 
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that

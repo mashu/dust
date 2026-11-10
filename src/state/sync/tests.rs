@@ -2629,6 +2629,117 @@ fn a_sign_in_made_again_in_another_copy_while_this_one_syncs_is_kept() {
     });
 }
 
+/// The record of the session that finished at `stamp`, as `ctx`, a copy of
+/// the app, holds it.
+fn record_of(harness: &Harness, ctx: AppCtx, stamp: u64) -> RecordId {
+    harness.in_app(|| {
+        let history = ctx.sessions.peek();
+        let at = history
+            .iter()
+            .position(|session| session.timestamp == stamp)
+            .expect("held");
+        history.id_at(at).expect("a record")
+    })
+}
+
+/// A session deleted here and sent, its deletion noted as the drive's, then
+/// put back by Undo; and another copy of the app on the same store, a tab or
+/// a window, that read what sync keeps meanwhile, while the sync sending the
+/// putting back was under way: a later deletion of that session by hand
+/// stands, here and on every device. The sync kept its state as it sent a
+/// deletion by hand, before the putting back was in the drive, with the
+/// deletion's note dropped; the other copy kept the note, on no evidence
+/// that it was spent, took it from then on for one of its own, and wrote it
+/// back after the putting back was sent. The next sync then took the later
+/// deletion by hand for the drive's, put back since, and took the session
+/// back: the deletion was undone everywhere.
+///
+/// With `meanwhile`, the other copy keeps something of its own while that
+/// sync is still under way, laying the note back as it stood then: the
+/// sync's end lets it go, once the putting back it sent is in the drive.
+fn a_deletion_noted_as_the_drives_is_not_laid_back_once_put_back(tabs: bool, meanwhile: bool) {
+    run(|| async move {
+        let mut harness = Harness::new();
+        harness.store.browser.set(tabs);
+        harness.store.hears_news.set(tabs);
+        keep(&harness, &[1, 2, 3, 4]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let other = another_copy(&harness, &remote);
+        harness.in_app(|| other.take_up_store());
+        let [two, three, four] = [2, 3, 4].map(|stamp| record_of(&harness, ctx, stamp));
+        let take_up = |harness: &mut Harness| {
+            if tabs {
+                harness.store.tell_sync_news();
+                harness.pump();
+            } else {
+                harness.in_app(|| other.sync_if_stale());
+            }
+        };
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(1_000).await;
+        assert!(kept_state(&harness).applied.contains_key(&two), "noted");
+        take_up(&mut harness);
+        // Put back, and 3 deleted by hand, so that the next sync keeps what
+        // it has come to as it sends that deletion.
+        harness.in_app(|| ctx.undo_delete());
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        harness.in_app(|| ctx.delete_sessions(&[three]));
+        harness.pump();
+        held.hold_writes(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(100).await;
+        take_up(&mut harness);
+        // The other copy keeps something of its own, then or after.
+        let keep_its_own = |harness: &mut Harness| {
+            harness.in_app(|| other.take_up_store());
+            harness.in_app(|| other.delete_sessions(&[four]));
+            harness.in_app(|| other.undo_delete());
+            harness.pump();
+        };
+        if meanwhile {
+            keep_its_own(&mut harness);
+        }
+        held.hold_writes(false);
+        harness.advance(1_000).await;
+        if !meanwhile {
+            keep_its_own(&mut harness);
+        }
+        assert!(
+            !kept_state(&harness).applied.contains_key(&two),
+            "the deletion's note, spent, laid back"
+        );
+        // 2 deleted by hand again, the last word on it.
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        harness.in_app(|| ctx.take_up_store());
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        for copy in [ctx, other, ctx] {
+            harness.in_app(|| copy.sync_now());
+            harness.advance(1_000).await;
+        }
+        assert_eq!(stored_stamps(&harness), [1, 4], "2 and 3 deleted");
+        assert_eq!(joined_stamps(&remote), [1, 4], "the drive's word");
+    });
+}
+
+#[test]
+fn a_deletion_noted_as_the_drives_is_not_laid_back_once_put_back_by_a_window() {
+    a_deletion_noted_as_the_drives_is_not_laid_back_once_put_back(false, false);
+}
+
+#[test]
+fn a_deletion_noted_as_the_drives_is_not_laid_back_once_put_back_by_a_tab() {
+    a_deletion_noted_as_the_drives_is_not_laid_back_once_put_back(true, false);
+}
+
+#[test]
+fn a_deletion_noted_as_the_drives_kept_while_its_putting_back_is_sent_goes_once_sent() {
+    a_deletion_noted_as_the_drives_is_not_laid_back_once_put_back(false, true);
+}
+
 /// A deletion by hand another copy of the app on the same store sent is
 /// noted as the drive's in what this copy keeps as well, though this copy
 /// read what sync keeps before it was sent: a putting back of that session

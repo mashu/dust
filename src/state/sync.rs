@@ -508,7 +508,18 @@ impl AppCtx {
         if let Some(written) = merged.written()
             && store.save_sync(Some(&written)).is_ok()
         {
-            *base.borrow_mut() = sending.clone();
+            // A deletion's note the sync dropped since, as its session was
+            // put back here, and the write kept, as the drive shows no
+            // putting back of it yet ([`SyncState::merged`]), is one the
+            // sync's end lays what it did over still: dropped then, once the
+            // drive shows it, and not taken for one the store gained.
+            let mut kept = sending.clone();
+            for (&id, &at) in &base.borrow().applied {
+                if !kept.applied.contains_key(&id) && merged.applied.get(&id) == Some(&at) {
+                    kept.applied.insert(id, at);
+                }
+            }
+            *base.borrow_mut() = kept;
         }
     }
 

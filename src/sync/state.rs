@@ -360,7 +360,9 @@ mod tests {
     /// session back since, and holds it so; a pack whose answer never came,
     /// once each deletion in it is noted. A note at an older stamp than
     /// this copy last saw is as one left out. Left out by this copy, which
-    /// knows what it dropped, each is gone.
+    /// knows what it dropped, a putting back and a pack are gone; a
+    /// deletion, only on the same evidence, as a sync here drops it as its
+    /// session is put back here, before the putting back is in the drive.
     #[test]
     fn what_another_copy_left_out_goes_only_on_evidence() {
         let mut base = state();
@@ -402,10 +404,17 @@ mod tests {
         synced.revived.clear();
         synced.applied.clear();
         synced.unanswered.clear();
+        // 6 put back here, and the putting back sent.
+        synced.drive.revives.insert(id(6), 61);
         let merged = synced.merged(Some(&base), &base);
         assert!(
-            merged.revived.is_empty() && merged.applied.is_empty() && merged.unanswered.is_empty(),
+            merged.revived.is_empty() && merged.unanswered.is_empty(),
             "{merged:?}"
+        );
+        assert_eq!(
+            merged.applied,
+            times(&[(5, 50), (7, 70)]),
+            "6 put back in the drive; 5 and 7 not yet"
         );
     }
 
