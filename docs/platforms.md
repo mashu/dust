@@ -975,11 +975,14 @@ every build that keeps them takes a session it puts back out of them. It
 makes here each deletion the older build made since, once, by what it is,
 whatever its clock said (`deletionsTaken`,
 beside `deletedSeen`, which builds before them go by). But where a build
-before those rules took deletions up first, moving `deletedSeen` on, each
-stamped after what this build had seen and no later than that is taken as
-one that build took, as nothing tells it from one whose session was put
-back since: so one made after that build's look with a clock behind,
-stamped there, is never made here. A change there that
+before those rules took deletions up first, moving `deletedSeen` on, every
+deletion stamped after what this build had seen and no later than that
+counts as one that build took, and is not made here. That includes one a
+build before records made after that build looked, with its clock behind:
+its session stays here. This is by choice: such a build notes nothing of
+the deletions it took, so nothing tells that deletion from one it took
+whose session was put back here since, by a restore say, which making it
+again would undo. A change there that
 a build before those rules took up first, by its own, is taken up again by
 them: such a build moves `legacy` on, and leaves `takenLegacy`, this
 build's note of what it took, as it was. Where such a build made the move

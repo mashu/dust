@@ -2211,17 +2211,17 @@ mod tests {
         );
     }
 
-    /// A deletion a build before records made with its clock behind, after
-    /// an older build's look moved `deletedSeen` on past its stamp, though
-    /// after what this build had seen, is taken for one that build took,
-    /// and is not made here. That build took only those it found as it
-    /// looked, and this one was not yet there; but nothing tells it from
-    /// one it took, whose session may have been put back since, by a
-    /// restore say, which a deletion made again here would undo
-    /// (docs/platforms.md). This pins the rule: should a later design tell
-    /// the two apart, the deletion is made here, `[(records[1].id, behind)]`.
+    /// Every deletion stamped after what this build had seen and no later
+    /// than what an older build's look moved `deletedSeen` on to is taken
+    /// as one that build took, and is not made here: one a build before
+    /// records made after that look, with its clock behind, among them, its
+    /// session staying here. That is the rule, by choice
+    /// (docs/platforms.md): such a build notes nothing of the deletions it
+    /// took, so nothing tells this one from one it took whose session was
+    /// put back here since, by a restore say, which making the deletion
+    /// again would undo.
     #[test]
-    fn a_deletion_made_behind_an_older_builds_watermark_after_its_look_is_taken_for_its() {
+    fn a_deletion_stamped_behind_an_older_builds_watermark_is_taken_as_one_that_build_took() {
         let older = [finished(T), finished(T + DAY), finished(T + 2 * DAY)];
         let noted = Deleted::of(&finished(T - DAY), T);
         let (records, layout) = moved(
