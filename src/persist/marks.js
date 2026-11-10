@@ -13,11 +13,14 @@
 // `hold(name)` holds the Web Lock `name`, and keeps the mark of the same name
 // in `localStorage` only while the lock is held. It hands back `write`, which
 // takes the mark's text, or, given none, takes the mark away and lets go of
-// the lock; and `placed`, which settles once the mark's text is in
-// `localStorage`, every write after that going in at once, or once the mark
-// is taken away. It hands back null in a browser without Web Locks, or one
-// that keeps nothing for the site, where nothing is marked, so no running tab
-// is ever taken for one cut off.
+// the lock; and `inPlace`, which gives a promise that settles once the mark
+// holds the text it was last given, in `localStorage`, or is taken away: at
+// once where it does, once its lock is granted and the text goes in, or with
+// the next write that goes in. A write may not: page storage with no room
+// left for the site takes none, and the mark then holds what it held before,
+// until one does. It hands back null in a browser without Web Locks, or one
+// that keeps nothing for the site, where nothing is marked, so no running
+// tab is ever taken for one cut off.
 //
 // A lock asked for is not held at once: the browser grants it a moment later,
 // and only then does a page looking for marks see it, held or waiting. A mark
@@ -34,11 +37,12 @@
 // and left in `localStorage`: a tab that goes before it holds what the mark
 // carried lets go of it there, and the next look takes it again.
 //
-// `release(carried, left, placed)` lets go of marks this tab took. Those
-// `left` are let go of as they are, for the next look to take. Those
-// `carried`, whose sessions this tab's own mark holds now, or the history
-// does, go once `placed`, its own mark's, has settled: from then on its own
-// mark holds them in their place.
+// `release(carried, left, own)` lets go of marks this tab took. Those `left`
+// are let go of as they are, for the next look to take. Those `carried`,
+// whose sessions this tab's own mark, `own` as `hold` handed it back, holds
+// now, as it was last written, or the history does, go once that mark is in
+// place (`inPlace`), holding them in their place; at once where the tab has
+// no mark of its own.
 //
 // `options.locks` and `options.storage`, for a test: the Web Locks and the
 // page storage to use, in place of the page's.
@@ -64,17 +68,31 @@ const hold = (name) => {
   const held = new Promise((done) => {
     release = done;
   });
-  let settled;
-  const inPlace = new Promise((done) => {
-    settled = done;
-  });
   let text = null;
   let placed = false;
   let gone = false;
+  // The last text tried did not go in.
+  let failed = false;
+  // What waits for the mark to be in place.
+  let waiting = [];
+  const settle = () => {
+    if (!gone && (!placed || failed)) return;
+    const ready = waiting;
+    waiting = [];
+    for (const done of ready) done();
+  };
+  const put = () => {
+    try {
+      storage.setItem(name, text);
+      failed = false;
+    } catch (error) {
+      failed = true;
+    }
+  };
   const place = () => {
-    if (!gone && text !== null) storage.setItem(name, text);
+    if (!gone && text !== null) put();
     placed = true;
-    settled();
+    settle();
   };
   locks
     .request(name, () => locks.request(look, place).then(() => held, () => held))
@@ -84,13 +102,21 @@ const hold = (name) => {
       gone = true;
       storage.removeItem(name);
       release();
-      settled();
+      settle();
       return;
     }
     text = raw;
-    if (placed && !gone) storage.setItem(name, raw);
+    if (placed && !gone) {
+      put();
+      settle();
+    }
   };
-  return { write, placed: inPlace };
+  const inPlace = () =>
+    new Promise((done) => {
+      waiting.push(done);
+      settle();
+    });
+  return { write, inPlace };
 };
 
 // The lock `name`, asked for only if no tab holds it nor waits for it, and
@@ -146,10 +172,10 @@ const letGoOf = (key, remove) => {
   letGo();
 };
 
-const release = async (carried, left, placed) => {
+const release = async (carried, left, own) => {
   for (const key of left) letGoOf(key, false);
   if (carried.length === 0) return;
-  await placed;
+  if (own) await own.inPlace();
   for (const key of carried) letGoOf(key, true);
 };
 

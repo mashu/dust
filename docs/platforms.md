@@ -647,7 +647,9 @@ meanwhile. A mark another window still holds is left to it. The copy that
 finds a mark cut off holds its lock in turn, and leaves it where it is
 until its own mark holds what the other carried, written and, on desktop
 and mobile, flushed to the disk then and there, a wait the app makes only
-after it has found a mark cut off; only then does it go. A copy that stops
+after it has found a mark cut off; only then does it go. While its own
+mark will not take a write, the disk or the page storage full say, it
+waits for one that does, or for that mark to go. A copy that stops
 before that lets go of it as it stops, and the next copy to look finds it
 again: what a mark carried is in one mark or another all along, told of
 twice at worst and kept once. Each group

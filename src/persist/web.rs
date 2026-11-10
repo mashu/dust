@@ -456,11 +456,12 @@ impl WebStore {
     /// Hold the Web Lock `name`, and keep the mark of the same name in
     /// `localStorage` only while the lock is held: what is handed back
     /// writes the mark's text, or, given none, takes the mark away and lets
-    /// go of the lock (`write`), and says when the mark is in place
-    /// (`placed`). None in a browser without Web Locks, where nothing is
-    /// marked, so no running tab is ever taken for one cut off. The mark
-    /// goes in only once the lock is granted, under the lock pages look for
-    /// marks under (`src/persist/marks.js`).
+    /// go of the lock (`write`), and says when the mark holds the text it
+    /// was last given, as a write the page storage has no room for leaves
+    /// it holding what it held before (`inPlace`). None in a browser without
+    /// Web Locks, where nothing is marked, so no running tab is ever taken
+    /// for one cut off. The mark goes in only once the lock is granted,
+    /// under the lock pages look for marks under (`src/persist/marks.js`).
     fn hold_mark(&self, name: &str) -> Option<JsValue> {
         call(self.marks()?, "hold", &[JsValue::from_str(name)]).filter(JsValue::is_object)
     }
@@ -736,9 +737,11 @@ impl Store for WebStore {
     }
 
     /// Those `left` are let go of there and then; those `carried` go once
-    /// this page's mark is in place, holding them, or at once where it has
-    /// none (`src/persist/marks.js`): every write of a mark in place goes
-    /// into `localStorage` then and there.
+    /// this page's mark holds the text it was last given, holding them, or
+    /// at once where it has none (`src/persist/marks.js`): every write of a
+    /// mark in place goes into `localStorage` then and there, or, where the
+    /// page storage has no room for it, leaves the marks it carries for
+    /// waiting on one that does.
     fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) {
         let Some(marks) = self.marks() else {
             return;
@@ -746,16 +749,11 @@ impl Store for WebStore {
         let names = |ids: &[MarkId]| -> js_sys::Array {
             ids.iter().map(|id| JsValue::from_str(id.name())).collect()
         };
-        let placed = self
-            .open_held
-            .borrow()
-            .as_ref()
-            .and_then(|mark| js_sys::Reflect::get(mark, &JsValue::from_str("placed")).ok())
-            .unwrap_or(JsValue::UNDEFINED);
+        let own = self.open_held.borrow().clone().unwrap_or(JsValue::NULL);
         let _ = call(
             marks,
             "release",
-            &[names(&carried).into(), names(&left).into(), placed],
+            &[names(&carried).into(), names(&left).into(), own],
         );
     }
 

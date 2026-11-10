@@ -84,7 +84,7 @@ looking.request("dust_open_session_look", () => new Promise((done) => { looked =
 await settle();
 const own = ours.hold("dust_open_session_b");
 own.write('{"startedAt":9,"run":false,"over":true}');
-const released = ours.release(["dust_open_session_a"], ["dust_open_session_c"], own.placed);
+const released = ours.release(["dust_open_session_a"], ["dust_open_session_c"], own);
 await settle();
 dioxus.send([localStorage.getItem("dust_open_session_a"), localStorage.getItem("dust_open_session_b")]);
 looked();
@@ -123,6 +123,100 @@ dioxus.send(query.held.map((lock) => lock.name).sort());"#,
     );
 }
 
+/// A mark carried by a tab whose own mark will not take the write that
+/// carries it, as page storage with no room left takes none, stays where it
+/// is, held by the tab, until a write of the tab's own mark goes in: what it
+/// carried is in no other mark meanwhile. It used to go once the tab's own
+/// mark had been placed, whatever became of the writes after, and the
+/// session it carried was then in no mark at all.
+#[test]
+fn a_mark_carried_stays_while_the_tabs_own_mark_will_not_take_a_write() {
+    let Some(sent) = on_page(
+        r#"const ran = fakeLocks.tab();
+await leftBy(ran, "dust_open_session_a");
+fakeLocks.close(ran);
+const ours = marks(fakeLocks.tab());
+const own = ours.hold("dust_open_session_b");
+own.write('{"startedAt":9,"run":false}');
+await settle();
+dioxus.send((await ours.take()).map(([key]) => key));
+// No room left for the write that carries it.
+localStorage.setItem = () => {
+  throw new DOMException("no room left", "QuotaExceededError");
+};
+// As web.rs calls it, which lets a throw be.
+try {
+  own.write('{"startedAt":9,"run":false,"unstored":["a"]}');
+} catch (error) {}
+const released = ours.release(["dust_open_session_a"], [], own);
+await settle();
+dioxus.send([localStorage.getItem("dust_open_session_a"), localStorage.getItem("dust_open_session_b")]);
+dioxus.send((await marks(fakeLocks.tab()).take()).map(([key]) => key));
+// Room again: the next write goes in, and holds it.
+delete localStorage.setItem;
+own.write('{"startedAt":9,"run":false,"unstored":["a","b"]}');
+await released;
+dioxus.send([localStorage.getItem("dust_open_session_a"), localStorage.getItem("dust_open_session_b")]);"#,
+    ) else {
+        return;
+    };
+    assert_eq!(sent[0], json!(["dust_open_session_a"]), "taken");
+    assert_eq!(
+        sent[1],
+        json!([
+            r#"{"startedAt":7,"run":false}"#,
+            r#"{"startedAt":9,"run":false}"#
+        ]),
+        "kept while the tab's own mark holds what it held before"
+    );
+    assert_eq!(sent[2], json!([]), "held by the tab meanwhile");
+    assert_eq!(
+        sent[3],
+        json!([null, r#"{"startedAt":9,"run":false,"unstored":["a","b"]}"#]),
+        "gone once a write goes in"
+    );
+}
+
+/// A tab's own mark that has no room as its lock is granted goes in with
+/// the next write that has, and a mark it carries goes only then. The
+/// mark used to stay out of the page storage for good, every write after
+/// held back for a placing that never came.
+#[test]
+fn a_tabs_own_mark_with_no_room_as_it_is_placed_goes_in_with_the_next_write() {
+    let Some(sent) = on_page(
+        r#"const ran = fakeLocks.tab();
+await leftBy(ran, "dust_open_session_a");
+fakeLocks.close(ran);
+const ours = marks(fakeLocks.tab());
+dioxus.send((await ours.take()).map(([key]) => key));
+localStorage.setItem = () => {
+  throw new DOMException("no room left", "QuotaExceededError");
+};
+const own = ours.hold("dust_open_session_b");
+own.write('{"startedAt":9,"run":false,"unstored":["a"]}');
+const released = ours.release(["dust_open_session_a"], [], own);
+await settle();
+dioxus.send([localStorage.getItem("dust_open_session_a"), localStorage.getItem("dust_open_session_b")]);
+delete localStorage.setItem;
+own.write('{"startedAt":9,"run":false,"unstored":["a","b"]}');
+await released;
+dioxus.send([localStorage.getItem("dust_open_session_a"), localStorage.getItem("dust_open_session_b")]);"#,
+    ) else {
+        return;
+    };
+    assert_eq!(sent[0], json!(["dust_open_session_a"]), "taken");
+    assert_eq!(
+        sent[1],
+        json!([r#"{"startedAt":7,"run":false}"#, null]),
+        "kept while the tab's own mark is in no place"
+    );
+    assert_eq!(
+        sent[2],
+        json!([null, r#"{"startedAt":9,"run":false,"unstored":["a","b"]}"#]),
+        "in place with the next write, and the one it carried gone"
+    );
+}
+
 /// A tab with no mark of its own lets go of a mark it carried at once, as
 /// what it carried is in the history: as it does where its own mark has
 /// gone, as a mark goes once there is nothing left for it to carry.
@@ -135,12 +229,12 @@ await leftBy(ran, "dust_open_session_c");
 fakeLocks.close(ran);
 const ours = marks(fakeLocks.tab());
 await ours.take();
-await ours.release(["dust_open_session_a"], [], Promise.resolve());
+await ours.release(["dust_open_session_a"], [], null);
 dioxus.send(localStorage.getItem("dust_open_session_a"));
 const own = ours.hold("dust_open_session_b");
 own.write('{"startedAt":9,"run":false}');
 own.write(null);
-await ours.release(["dust_open_session_c"], [], own.placed);
+await ours.release(["dust_open_session_c"], [], own);
 dioxus.send([localStorage.getItem("dust_open_session_b"), localStorage.getItem("dust_open_session_c")]);
 // The tab's own lock, granted after its mark went, is let go of as it is.
 await settle();
