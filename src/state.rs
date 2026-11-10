@@ -5587,6 +5587,67 @@ mod tests {
         });
     }
 
+    /// A session a copy kept as it ended, under the name it gives a session
+    /// just finished, whose mark that copy left behind, as a page closed under
+    /// a browser's database leaves it once the record is in, and which the
+    /// user then deleted by hand in another copy, stays deleted when the next
+    /// copy takes the mark. Only the name it would be stored under now was
+    /// looked at for a deletion, so it was stored again under that name, and
+    /// was back in every copy.
+    #[test]
+    fn a_session_kept_and_deleted_elsewhere_before_its_mark_is_taken_stays_deleted() {
+        crate::testing::run(|| async {
+            let store = holding([1]);
+            Tab::on(&store).finish(day(2));
+            cut_off_keeping(&store, day(2));
+            let other = Tab::on(&store);
+            assert_eq!(other.shown(), [1, 2]);
+            other.delete(2);
+            assert_eq!(days(&store.load_sessions()), [1], "deleted by hand");
+            let mut next = Tab::on(&store);
+            next.act(AppCtx::tell_of_cut_off);
+            next.advance(100).await;
+            assert_eq!(
+                days(&store.load_sessions()),
+                [1],
+                "deleted by hand, not kept again"
+            );
+            assert_eq!(next.shown(), [1]);
+        });
+    }
+
+    /// The same on the files themselves.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_kept_and_deleted_elsewhere_before_its_mark_is_taken_stays_deleted() {
+        crate::testing::run(|| async {
+            let dir = TempDir::new("kept-deleted-before-taken");
+            let a = Tab::on_store(crate::persist::files_at(&dir.0));
+            a.finish(day(1));
+            a.finish(day(2));
+            drop(a);
+            let stopped = Tab::on_store(crate::persist::files_at(&dir.0));
+            let open = stopped.act(|ctx| ctx.mark_running(false));
+            let so_far = SoFar {
+                result: day(2),
+                settings: None,
+            };
+            stopped.act(|ctx| ctx.mark_so_far(&open, so_far));
+            stopped.act(AppCtx::mark_kept);
+            drop(stopped);
+            let other = Tab::on_store(crate::persist::files_at(&dir.0));
+            assert_eq!(other.shown(), [1, 2]);
+            other.delete(2);
+            drop(other);
+            assert_eq!(Tab::on_store(crate::persist::files_at(&dir.0)).shown(), [1]);
+            let mut next = Tab::on_store(crate::persist::files_at(&dir.0));
+            next.act(AppCtx::tell_of_cut_off);
+            next.advance(100).await;
+            let launched = Tab::on_store(crate::persist::files_at(&dir.0));
+            assert_eq!(launched.shown(), [1], "deleted by hand, not kept again");
+        });
+    }
+
     /// A session cut off whose record its copy named just after the newest,
     /// as a session that finished with the clock behind the newest record's
     /// stamp is named (RecordId::next), waits too while that record cannot

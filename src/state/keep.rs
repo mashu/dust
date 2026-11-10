@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use cw_core::{
     Completion, CountersKey, CountersUpdate, SessionResult, TrainingSettings, apply_auto_level,
@@ -46,8 +46,13 @@ pub fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
 ///
 /// Each is kept once, or not at all: one the history holds already, by
 /// when and on what day it finished, as the app stopped under it as it was
-/// stored, is not kept again, nor one deleted by hand under the record it
-/// would be stored as. Two marks that carry one session store it once:
+/// stored, is not kept again, nor one a tombstone names, whatever record it
+/// was deleted by hand under: the one it would be stored as, or the one
+/// its copy stored it as as it ended ([`RecordId::next`]), whose mark was
+/// left behind, as a page closed under a browser's database leaves it, and
+/// which the user deleted by hand in another copy before the mark was
+/// taken. Looked for under the first alone, it was stored again under it,
+/// in every copy. Two marks that carry one session store it once:
 /// each is stored where it finished ([`RecordId::placed`]). One that a
 /// record the store could not read for now may hold, as it finished no
 /// later than such a record is named ([`AppCtx::unread_for_now_finished`]),
@@ -112,9 +117,20 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
         return;
     }
     // One deleted by hand under the record it would be stored as is let
-    // go again, and so is one deleted here meanwhile.
+    // go again, and so is one deleted here meanwhile; and so is one whose
+    // session a tombstone of any other record names.
     let ids = held.iter().map(|record| record.id).collect();
-    let gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
+    let mut gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
+    let named: HashMap<SessionKey, RecordId> = kept
+        .iter()
+        .filter(|(record, _, _)| held.iter().any(|held| held.id == record.id))
+        .map(|(record, result, _)| (SessionKey::of(result), record.id))
+        .collect();
+    let deleted = store
+        .deleted_keys(named.keys().cloned().collect())
+        .await
+        .unwrap_or_default();
+    gone.extend(deleted.iter().filter_map(|key| named.get(key)));
     ctx.let_go_of_held(&gone);
     let held: Vec<Record> = {
         let history = ctx.sessions.peek();

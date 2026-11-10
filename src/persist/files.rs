@@ -776,6 +776,26 @@ impl HistoryFiles {
         Some(found)
     }
 
+    /// Which of the sessions `keys` a tombstone remembers, whatever record
+    /// it named ([`crate::persist::Store::deleted_keys`]): one that does not
+    /// read, or names no session, is left out. None where the tombstones
+    /// cannot be listed.
+    pub(super) fn deleted_keys(&self, keys: &[SessionKey]) -> Option<Vec<SessionKey>> {
+        self.on_its_thread();
+        let tombstones = self.tombstones();
+        let gone: HashSet<SessionKey> = ids_in(&tombstones)
+            .ok()?
+            .into_iter()
+            .filter_map(|id| tombstone_key(&fs::read(tombstones.join(file_name(id))).ok()?))
+            .collect();
+        Some(
+            keys.iter()
+                .filter(|key| gone.contains(key))
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// The gate `layout.json` sets. One that does not read is set aside
     /// and the move made again; one that cannot be set aside holds every
     /// write back.
@@ -1773,6 +1793,10 @@ mod tests {
             wait(self.0.deleted_sessions(ids.to_vec()))
         }
 
+        fn deleted_keys(&self, keys: &[SessionKey]) -> Option<Vec<SessionKey>> {
+            wait(self.0.deleted_keys(keys.to_vec()))
+        }
+
         /// Which of `ids` were deleted by hand: none, where that could not
         /// be looked for, as a store answers sync ([`Store::forgotten`]).
         ///
@@ -2644,6 +2668,12 @@ mod tests {
             Some(vec![(one.id, SessionKey::of(&first))]),
             "which session, where its tombstone says"
         );
+        let keys = [&first, &second, &third].map(SessionKey::of);
+        assert_eq!(
+            files.deleted_keys(&keys),
+            Some(vec![keys[0].clone()]),
+            "which sessions a tombstone names, whatever its record"
+        );
         // In the folder's place, a link that leads back to itself: nothing
         // in it can be looked for, whoever runs this.
         let aside = dir.0.join("tombstones-aside");
@@ -2651,6 +2681,7 @@ mod tests {
         std::os::unix::fs::symlink(&tombstones, &tombstones).unwrap();
         assert_eq!(files.deletions(&all), None, "looked for through a loop");
         assert_eq!(files.deleted_sessions(&all), None);
+        assert_eq!(files.deleted_keys(&keys), None);
         assert!(files.forgotten(&all).is_empty(), "missing is never deleted");
         fs::remove_file(&tombstones).unwrap();
         fs::rename(&aside, &tombstones).unwrap();

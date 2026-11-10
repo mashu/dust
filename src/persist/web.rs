@@ -836,6 +836,16 @@ impl Store for WebStore {
         }
     }
 
+    fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>> {
+        match &self.history {
+            History::Database(database) => {
+                let database = Rc::clone(database);
+                Box::pin(async move { database.deleted_keys(keys).await })
+            }
+            History::Page { whole, .. } => done(whole.deleted_keys(&keys)),
+        }
+    }
+
     fn history_changed(&self) -> bool {
         match &self.history {
             History::Database(database) => database.changed(),

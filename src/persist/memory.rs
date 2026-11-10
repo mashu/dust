@@ -724,6 +724,24 @@ impl Store for MemoryStore {
         ))
     }
 
+    fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>> {
+        if let Some(page) = &self.page {
+            return done(page.deleted_keys(&keys));
+        }
+        if self.deletions_unknown.get() {
+            return done(None);
+        }
+        let gone: HashSet<SessionKey> = self
+            .tombstones
+            .borrow()
+            .values()
+            .map(Deleted::key)
+            .collect();
+        done(Some(
+            keys.into_iter().filter(|key| gone.contains(key)).collect(),
+        ))
+    }
+
     fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
         if let Some(page) = &self.page {
             return done(page.deletions(&ids));
@@ -1427,9 +1445,15 @@ mod tests {
             now(store.deleted_sessions(vec![one.id, two.id])),
             Some(vec![(one.id, SessionKey::of(&first))])
         );
+        let keys = vec![SessionKey::of(&first), SessionKey::of(&second)];
+        assert_eq!(
+            now(store.deleted_keys(keys.clone())),
+            Some(vec![SessionKey::of(&first)])
+        );
         store.deletions_unknown.set(true);
         assert_eq!(now(store.deletions(vec![one.id, two.id])), None);
         assert_eq!(now(store.deleted_sessions(vec![one.id])), None);
+        assert_eq!(now(store.deleted_keys(keys)), None);
         assert!(
             now(store.forgotten(vec![one.id])).is_empty(),
             "missing is never deleted"

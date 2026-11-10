@@ -822,6 +822,15 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         )
     }
 
+    /// Which of the sessions `keys` a tombstone remembers, whatever record
+    /// it named ([`super::Store::deleted_keys`]): one whose tombstone holds
+    /// no text, or names no session, is left out. None where the tombstones
+    /// cannot be looked at.
+    pub(super) async fn deleted_keys(&self, keys: Vec<SessionKey>) -> Option<Vec<SessionKey>> {
+        let gone = tombstoned_keys(&self.glue.tombstones().await.ok()?);
+        Some(keys.into_iter().filter(|key| gone.contains(key)).collect())
+    }
+
     /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
     /// where that could not be looked for.
     #[cfg(test)]

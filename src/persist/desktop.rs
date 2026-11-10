@@ -707,6 +707,10 @@ impl Store for DesktopStore {
         self.history.deleted_sessions(ids)
     }
 
+    fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>> {
+        self.history.deleted_keys(keys)
+    }
+
     fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
         self.history.still_unread(ids)
     }

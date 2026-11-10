@@ -694,16 +694,20 @@ A session cut off is kept from its mark as Exit would have kept it, in the
 history and towards its level's run, and the app says that it was. It is
 kept once the marks that carried it have gone, so its level counts it once;
 only while this copy's mark will not take a write is it kept before then,
-and a copy that stops in between may count it again. One the store holds
-already in a record that cannot be read for now, as its copy stored it
-just before it stopped, waits with this copy's mark until that record
-reads, and is then the record's; it is kept beside it only once the record
-is no more, or is told of as one that could not be read, and not at all
-where the record is no more as another copy that read it had its session
-deleted by hand there, as its tombstone says. A record is named
-when its session finished or after, just after a later one where the clock
-was set back, so every session cut off that finished no later than such a
-record is named waits so. Closing
+and a copy that stops in between may count it again. One whose session a
+tombstone names, deleted by hand under whatever record, is not kept: as
+one its copy stored as it ended, under the name it gave it then, whose
+mark was left behind, as a page closed under a browser's database leaves
+it, and which the user deleted by hand in another copy before the mark was
+taken. One the store holds already in a record that cannot be read for
+now, as its copy stored it just before it stopped, waits with this copy's
+mark until that record reads, and is then the record's; it is kept beside
+it only once the record is no more, or is told of as one that could not be
+read, and not at all where the record is no more as another copy that read
+it had its session deleted by hand there, as its tombstone says. A record
+is named when its session finished or after, just after a later one where
+the clock was set back, so every session cut off that finished no later
+than such a record is named waits so. Closing
 the desktop window, or leaving or reloading the page, ends a session there
 and then as Exit does, so nothing is left to find, and stores the settings
 with it, a level it earned included. On desktop and

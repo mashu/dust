@@ -220,6 +220,14 @@ pub trait Store {
     /// tombstone remembers none is left out. None where the store could not
     /// look, which is no word that none of them was.
     fn deleted_sessions(&self, ids: Vec<RecordId>) -> Pending<Option<Vec<(RecordId, SessionKey)>>>;
+    /// Which of the sessions `keys` a tombstone remembers as deleted by
+    /// hand, whatever record it named: one stored under the name it was
+    /// given as it finished ([`record::RecordId::next`]), and deleted by
+    /// hand since, is found, though a mark would store it under another
+    /// ([`record::RecordId::placed`]). One whose tombstone does not read is
+    /// left out. None where the store could not look, which is no word
+    /// that none of them was.
+    fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>>;
     /// What to tell of `ids`, records listed that could not be read at all
     /// at any of the app's tries since it found them so
     /// ([`HistoryLoad::failed`]): of those not told of before, how many,

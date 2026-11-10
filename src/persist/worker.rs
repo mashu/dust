@@ -237,6 +237,14 @@ impl HistoryJobs {
         Box::pin(async move { found.await.flatten() })
     }
 
+    /// Which of the sessions `keys` a tombstone remembers
+    /// ([`HistoryFiles::deleted_keys`]): no word at all, where the files
+    /// cannot be reached.
+    pub(super) fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>> {
+        let found = self.ask(move |files| files.deleted_keys(&keys));
+        Box::pin(async move { found.await.flatten() })
+    }
+
     /// What to tell of `ids`, records that still could not be read at the
     /// app's last try ([`HistoryFiles::still_unread`]): nothing, where the
     /// files cannot be reached.
