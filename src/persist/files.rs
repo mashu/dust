@@ -2968,6 +2968,32 @@ mod tests {
     }
 
     /// Which records were deleted by hand comes with when each was, as its
+    /// tombstone says, none for one that does not say; and which session
+    /// each was, where its tombstone says. On every platform, as the
+    /// app's cut-off sessions ask it on every platform.
+    #[test]
+    fn deletions_say_when_each_was_made_and_of_which_session() {
+        let (dir, files) = history("deletions-said");
+        files.load();
+        let (first, second, third) = (finished(1_000), finished(2_000), finished(3_000));
+        let (one, two, three) = (record(&first), record(&second), record(&third));
+        files.apply(&put(&[one.clone(), two.clone(), three.clone()]));
+        files.apply(&forget(&[(&one, &first)]));
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::write(tombstones.join(file_name(two.id)), "{ not").unwrap();
+        let all = [one.id, two.id, three.id];
+        assert_eq!(
+            files.deletions(&all),
+            Some(vec![(one.id, Some(7)), (two.id, None)])
+        );
+        assert_eq!(
+            files.deleted_sessions(&all),
+            Some(vec![(one.id, SessionKey::of(&first))]),
+            "which session, where its tombstone says"
+        );
+    }
+
+    /// Which records were deleted by hand comes with when each was, as its
     /// tombstone says, none for one that does not say. Where the tombstones
     /// cannot be looked for, as where their folder will not open, there is
     /// no word at all, rather than the word that none was deleted; and once
@@ -4526,6 +4552,7 @@ mod tests {
         a_deletion_is_a_tombstone_beside_the_history,
         a_record_and_its_tombstone_read_as_deleted,
         an_empty_tombstone_still_deletes,
+        deletions_say_when_each_was_made_and_of_which_session,
         #[cfg(unix)]
         deletions_say_when_each_was_made_or_that_none_could_be_looked_for,
         which_sessions_a_tombstone_names_is_said_whatever_its_record,
