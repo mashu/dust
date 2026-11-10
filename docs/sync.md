@@ -71,7 +71,8 @@ deletion by hand notes those it made that the drive holds, put back since
 or not, at its first sync at which the store can say which they are, and
 looks again at each sync until then.
 A deletion or a putting back is stamped when it is made (a deletion by
-hand when its tombstone says, though it is sent later), or just after the
+hand when its tombstone says, though it is sent later, or as the sync that
+sends it began, where a clock set ahead said later), or just after the
 latest of the record the device knew the drive to hold by then, where that
 is later (`SyncState::stamp_change`): one made after another is the later,
 however far apart the devices' clocks are. But where a sync read the drive

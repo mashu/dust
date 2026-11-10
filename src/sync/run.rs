@@ -360,7 +360,7 @@ pub async fn sync_once_with(
     if !state.deletions_noted {
         state.deletions_noted = note_deletions_by_hand(store, &listed, state).await;
     }
-    let (mut planned, mut stamped) = planned(store, &drive, &listed, state).await;
+    let (mut planned, mut stamped) = planned(store, &drive, &listed, state, now).await;
     // A record to take that only a pack read before holds, as where the
     // store here lost one: every pack read again, once.
     let wanting = |planned: &Plan, bytes: &HashMap<RecordId, String>| {
@@ -379,7 +379,7 @@ pub async fn sync_once_with(
             remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
         )
         .await?;
-        (planned, stamped) = self::planned(store, &drive, &listed, state).await;
+        (planned, stamped) = self::planned(store, &drive, &listed, state, now).await;
     }
 
     // The deletions made here by hand to send, the twins' below left out.
@@ -596,8 +596,13 @@ async fn note_deletions_by_hand(
 /// device knew the drive to hold of its record before this sync read it,
 /// where that is later. So a putting back made elsewhere after it, by the
 /// clock, stands, though the deletion reaches the drive only after; and one
-/// this device knew of as it deleted the session does not. But where a
-/// sync before this one read the drive and did not send a deletion, as the
+/// this device knew of as it deleted the session does not. A tombstone
+/// that says it was made after `now`, this sync's, as one made with the
+/// clock set ahead does, is taken as made `now`, as it was made no later:
+/// stamped as it said, the deletion would beat every putting back made
+/// elsewhere until then. That time also tells whether it was made after
+/// the drive's deletion of the record ([`Here::made`]). But where a sync
+/// before this one read the drive and did not send a deletion, as the
 /// store could not say which were deleted by hand, as that sync listed the
 /// history before the deletion was made, or as it was cut short as it
 /// sent, the deletion is stamped after what that sync read as well: a
@@ -611,6 +616,7 @@ async fn planned(
     drive: &DriveState,
     listed: &BTreeSet<RecordId>,
     state: &SyncState,
+    now: u64,
 ) -> (Plan, BTreeMap<RecordId, u64>) {
     let deleted_since = drive.tombs.keys().copied().filter(|&id| {
         drive.deleted(id)
@@ -632,7 +638,7 @@ async fn planned(
     let made: BTreeMap<RecordId, u64> = found
         .iter()
         .filter(|&&(id, _)| !twin_kept_here(id, listed))
-        .filter_map(|&(id, made)| Some((id, made?)))
+        .filter_map(|&(id, made)| Some((id, made?.min(now))))
         .collect();
     // `state` holds the drive as this device knew it before this sync.
     let stamps = made

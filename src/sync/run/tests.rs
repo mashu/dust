@@ -761,6 +761,42 @@ fn a_deletion_made_here_after_one_the_drive_holds_wins_over_a_putting_back_betwe
     assert_eq!(joined.stamps(), [1], "the drive's word");
 }
 
+/// A session deleted by hand on a device whose clock was set an hour
+/// ahead, and put back on another device after the deletion was sent, the
+/// clock set right by then, comes back on both: a deletion is taken as made
+/// no later than the sync that sends it. Stamped as its tombstone said, an
+/// hour ahead, it beat every putting back made elsewhere until that hour,
+/// and the session was gone from both.
+#[test]
+fn a_session_put_back_after_a_deletion_made_with_the_clock_ahead_was_sent_comes_back() {
+    const HOUR: u64 = 3_600_000;
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = computer.id_of(2);
+    let session = computer.session(two);
+    computer.delete(2, 115);
+    computer.sync(&remote, 116).expect("synced");
+    // Deleted on the phone, its clock an hour ahead, then set right.
+    phone.delete(2, HOUR + 120);
+    phone.sync(&remote, 200).expect("synced");
+
+    // Put back on the computer after that, from its own deletion.
+    computer.undo(two, &session, 300);
+    computer.sync(&remote, 305).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "put back after the deletion");
+    phone.sync(&remote, 310).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 320).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
 /// A setting changed on one device reaches the other, and one changed on
 /// the other comes back, each the newest of its own.
 #[test]

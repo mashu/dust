@@ -121,7 +121,8 @@ pub struct Here<'a> {
     /// hand.
     pub forgotten: &'a BTreeSet<RecordId>,
     /// Of those `forgotten`, when each was deleted here, by this device's
-    /// clock, where its tombstone says.
+    /// clock, where its tombstone says: no later than the sync, where a
+    /// clock set ahead said later.
     pub made: &'a BTreeMap<RecordId, u64>,
     /// The deletions here the drive holds, each with the time of the
     /// drive's deletion: those taken from the drive and made here, and
