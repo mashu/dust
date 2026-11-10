@@ -1378,6 +1378,83 @@ mod tests {
         );
     }
 
+    /// A run whose log a restore fills in from a copy that holds other
+    /// groups than the run here, one answer logged otherwise, takes from the
+    /// run here what it holds of itself and of its letters that this version
+    /// does not read, and nothing of its groups' or their timings': those
+    /// are of groups the copy does not hold. The copy's groups and timings
+    /// stay as they are.
+    #[test]
+    fn restoring_a_runs_log_from_a_copy_of_other_groups_takes_none_of_their_keys() {
+        let run = |log: bool, logged: &str| {
+            let qsos = [
+                ("K5XYZ", "214", "K5XYZ", "214"),
+                ("W1AW", "215", logged, "215"),
+            ];
+            let mut run = crate::testing::stored_run("2026-10-10", &qsos);
+            run.timestamp = 10;
+            if !log {
+                run.contest = None;
+            }
+            run
+        };
+        let mut here = serde_json::to_value(run(false, "W1AW")).expect("writes");
+        here["laterKey"] = serde_json::json!(1);
+        here["groups"][0]["laterGroupKey"] = serde_json::json!([2]);
+        here["groupTimings"][0]["laterTimingKey"] = serde_json::json!(4);
+        here["letterAccuracy"]["K"]["laterInside"] = serde_json::json!(3);
+        let here = read_record(&here.to_string()).expect("a later version's reads");
+        let copy = read_record(&serde_json::to_string(&run(true, "W1AX")).expect("writes"))
+            .expect("reads");
+        assert_ne!(here.groups, copy.groups, "one answer logged otherwise");
+        let merged = merge_sessions(std::slice::from_ref(&here), vec![copy.clone()]);
+        let [fill] = &merged.filled[..] else {
+            panic!("filled in once: {merged:?}");
+        };
+        let mut both = serde_json::to_value(&copy).expect("writes");
+        both["laterKey"] = serde_json::json!(1);
+        both["letterAccuracy"]["K"]["laterInside"] = serde_json::json!(3);
+        let json = serde_json::to_string(&fill.now).expect("writes");
+        let now: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+        assert_eq!(now, both, "the copy, with the run's own keys beside");
+        assert_eq!(fill.now.groups, copy.groups);
+        assert_eq!(fill.now.group_timings, copy.group_timings);
+    }
+
+    /// A key a later version wrote in a group, or in its timing, that both
+    /// the run here and the copy whose log a restore takes hold keeps the
+    /// copy's value there; one the run here alone holds goes in beside it.
+    #[test]
+    fn restoring_a_runs_log_keeps_the_copys_value_of_a_key_both_hold_in_a_group() {
+        let run = |log: bool| {
+            let qsos = [("K5XYZ", "214", "K5XYZ", "214")];
+            let mut run = crate::testing::stored_run("2026-10-10", &qsos);
+            run.timestamp = 10;
+            if !log {
+                run.contest = None;
+            }
+            serde_json::to_value(run).expect("writes")
+        };
+        let mut here = run(false);
+        let mut copy = run(true);
+        for part in ["groups", "groupTimings"] {
+            here[part][0]["laterKey"] = serde_json::json!(1);
+            here[part][0]["onlyHere"] = serde_json::json!(2);
+            copy[part][0]["laterKey"] = serde_json::json!(3);
+        }
+        let here = read_record(&here.to_string()).expect("a later version's reads");
+        let copy = read_record(&copy.to_string()).expect("a later version's reads");
+        let merged = merge_sessions(std::slice::from_ref(&here), vec![copy]);
+        let [fill] = &merged.filled[..] else {
+            panic!("filled in once: {merged:?}");
+        };
+        let now = serde_json::to_value(&fill.now).expect("writes");
+        for part in ["groups", "groupTimings"] {
+            assert_eq!(now[part][0]["laterKey"], 3, "{part}: the copy's");
+            assert_eq!(now[part][0]["onlyHere"], 2, "{part}: the run here's");
+        }
+    }
+
     /// A session whose per-character records an older version dropped takes
     /// them back from a copy that kept them; one that has them keeps its
     /// own.
