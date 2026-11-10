@@ -2314,7 +2314,12 @@ impl AppCtx {
     /// ([`Self::restore_backup`]), and the user is told so: it puts settings
     /// back, the level among them, which a session is not to have changed
     /// beneath it. It is under way meanwhile, so a restore asked for after
-    /// it waits behind it.
+    /// it waits behind it. Asked for just before one began, and made by the
+    /// store only once it has, as a browser's database takes a moment to,
+    /// it takes out what the restore added then, and puts the settings back
+    /// once the session or run is over ([`Self::undo_now`]). An Undo that
+    /// waits for a session waits with this copy of the app: closed first,
+    /// it makes none, and the restore stands, or its settings do.
     pub fn undo_restore(self) {
         let mut before_restore = self.before_restore;
         let Some(restored) = before_restore.write().take() else {
@@ -2409,12 +2414,34 @@ impl AppCtx {
             if let Some(problem) = saved.problem() {
                 toasts.show(problem);
             }
-            if let Some(before) = restored.settings {
-                let mut settings = self.settings;
-                settings.set(before);
+            // Asked for before a session or run that has begun since, as
+            // the store takes a moment to answer: the settings go back once
+            // it is over, as for an Undo asked for under it, and the Undo
+            // is under way until then, so a restore asked for meanwhile is
+            // made after it.
+            let settings = restored.settings;
+            if self.session_running() {
+                spawn_forever(async move {
+                    while self.session_running() {
+                        sleep_ms(RESTORE_WAIT_MS).await;
+                    }
+                    self.undone(settings);
+                });
+            } else {
+                self.undone(settings);
             }
-            self.restore_over();
         });
+    }
+
+    /// The Undo of a restore is over, the history as it was before the
+    /// restore ([`Self::undo_now`]): `settings`, those from before it, put
+    /// back where it took any, and the restore asked for meanwhile made.
+    fn undone(self, settings: Option<TrainingSettings>) {
+        if let Some(before) = settings {
+            let mut settings = self.settings;
+            settings.set(before);
+        }
+        self.restore_over();
     }
 
     /// Put one settings card back to its defaults, called `card` in what
@@ -3595,6 +3622,61 @@ mod tests {
             assert_eq!(level(&a), 3, "undone once it is over");
             assert_eq!(days(&store.load_sessions()), [5]);
             assert_eq!(a.shown(), [5]);
+        });
+    }
+
+    /// The Undo of a restore asked for before a session or run, that the
+    /// store makes only once it has begun, as a browser's database takes a
+    /// moment to, puts the settings back once it is over, the level among
+    /// them, and is under way until then: a restore asked for meanwhile is
+    /// made after it. The settings went back as soon as the store
+    /// answered, under the session.
+    #[test]
+    fn an_undo_the_store_makes_once_a_session_has_begun_puts_the_settings_back_after_it() {
+        crate::testing::run(|| async {
+            let store = holding([5]);
+            let mut a = Tab::on(&store);
+            let level = |a: &Tab| a.act(|ctx| ctx.settings.peek().curriculum.level);
+            let at_level = |level| {
+                let mut settings = TrainingSettings::default();
+                settings.curriculum.level = level;
+                settings
+            };
+            let backup = |day_of: u64, level| Backup {
+                saved_at: 0,
+                settings: Some(at_level(level)),
+                sessions: vec![day(day_of)],
+                left_out: 0,
+            };
+            a.act(|ctx| {
+                let mut settings = ctx.settings;
+                settings.set(at_level(3));
+            });
+            a.act(|ctx| ctx.restore_backup(backup(1, 9)));
+            assert_eq!(level(&a), 9);
+            let on = |a: &Tab, screen| {
+                a.act(|ctx| {
+                    let mut shown = ctx.screen;
+                    shown.set(screen);
+                })
+            };
+            store.deferred.set(true);
+            a.act(AppCtx::undo_restore);
+            on(&a, Screen::Training);
+            store.deferred.set(false);
+            store.settle();
+            a.pump();
+            a.advance(3_000).await;
+            assert_eq!(level(&a), 9, "not under the session");
+            assert_eq!(days(&store.load_sessions()), [5], "the history undone");
+            let waiting = a.act(|ctx| ctx.restore_backup(backup(2, 7)));
+            a.advance(2_000).await;
+            assert_eq!(days(&store.load_sessions()), [5], "nor restored under it");
+            on(&a, Screen::Results);
+            a.advance(3_000).await;
+            assert!(a.act(|ctx| ctx.restore_told(waiting)));
+            assert_eq!(days(&store.load_sessions()), [2, 5], "restored after it");
+            assert_eq!(level(&a), 7, "the settings of the restore after it");
         });
     }
 
