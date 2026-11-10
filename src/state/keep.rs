@@ -54,7 +54,9 @@ pub fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
 /// waits with this copy's mark until the record reads, when the history
 /// holds it, or is no more, or is told of as one that could not be read,
 /// when it is kept beside it ([`AppCtx::wait_for_unread`]): kept at once,
-/// it would be held twice once the record read.
+/// it would be held twice once the record read. But one whose record is no
+/// more as its session was deleted by hand, in another copy that read it,
+/// stays deleted ([`AppCtx::keep_what_waited`]).
 pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
     let store = ctx.app().store;
     // Each as it is to be stored, on today's scale, as every session of the

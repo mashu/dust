@@ -698,7 +698,9 @@ and a copy that stops in between may count it again. One the store holds
 already in a record that cannot be read for now, as its copy stored it
 just before it stopped, waits with this copy's mark until that record
 reads, and is then the record's; it is kept beside it only once the record
-is no more, or is told of as one that could not be read. A record is named
+is no more, or is told of as one that could not be read, and not at all
+where the record is no more as another copy that read it had its session
+deleted by hand there, as its tombstone says. A record is named
 when its session finished or after, just after a later one where the clock
 was set back, so every session cut off that finished no later than such a
 record is named waits so. Closing

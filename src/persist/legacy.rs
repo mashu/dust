@@ -1119,6 +1119,26 @@ impl<S: Aside> BlobHistory<S> {
         )
     }
 
+    /// Which of `ids` were deleted by hand, each beside the session its
+    /// deletion remembers ([`Self::deletions`]). None where the deletions
+    /// cannot be read.
+    pub(super) fn deleted_sessions(&self, ids: &[RecordId]) -> Option<Vec<(RecordId, SessionKey)>> {
+        let raw = self.shelf.get(self.keys.deleted).ok()?;
+        let gone: HashSet<SessionKey> = deleted_of(raw.as_deref().map(str::as_bytes))
+            .iter()
+            .map(Deleted::key)
+            .collect();
+        let keys = self.seen_keys.borrow();
+        Some(
+            ids.iter()
+                .filter_map(|id| {
+                    let key = keys.get(id)?;
+                    gone.contains(key).then(|| (*id, key.clone()))
+                })
+                .collect(),
+        )
+    }
+
     /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
     /// where that could not be looked for.
     #[cfg(test)]
@@ -2174,10 +2194,16 @@ mod tests {
             Some(vec![(one.id, Some(7))]),
             "when, as remembered"
         );
+        assert_eq!(
+            whole.deleted_sessions(&[one.id, two.id]),
+            Some(vec![(one.id, SessionKey::of(&first))]),
+            "which session, as remembered"
+        );
         // The deletions cannot be read: no word of them, rather than the
         // word that there are none.
         shelf.unreadable.set(true);
         assert_eq!(whole.deletions(&[one.id, two.id]), None);
+        assert_eq!(whole.deleted_sessions(&[one.id, two.id]), None);
         shelf.unreadable.set(false);
         // Stored again without undoing it: still deleted.
         whole.apply(&HistoryChange {

@@ -33,6 +33,7 @@ use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
 };
 use super::saved::HistorySaved;
+use super::session::SessionKey;
 
 /// How long a change the files would not take waits, at the head of the
 /// queue, before it is tried again: twice, before the app is told. A file
@@ -222,6 +223,17 @@ impl HistoryJobs {
     /// cannot be reached, which is no word that none was.
     pub(super) fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
         let found = self.ask(move |files| files.deletions(&ids));
+        Box::pin(async move { found.await.flatten() })
+    }
+
+    /// Which of `ids` were deleted by hand, each beside the session its
+    /// tombstone remembers ([`HistoryFiles::deleted_sessions`]): no word at
+    /// all, where the files cannot be reached.
+    pub(super) fn deleted_sessions(
+        &self,
+        ids: Vec<RecordId>,
+    ) -> Pending<Option<Vec<(RecordId, SessionKey)>>> {
+        let found = self.ask(move |files| files.deleted_sessions(&ids));
         Box::pin(async move { found.await.flatten() })
     }
 

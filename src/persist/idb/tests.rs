@@ -830,6 +830,11 @@ fn a_change_is_stored_and_a_deletion_remembered() {
         Some(vec![(a.id, Some(7))]),
         "when, as its tombstone says"
     );
+    assert_eq!(
+        done(tab.deleted_sessions(vec![a.id, b.id])),
+        Some(vec![(a.id, SessionKey::of(&ago(2)))]),
+        "which session, as its tombstone says"
+    );
     // Stored again, as a tab that missed the deletion would: still deleted.
     done(tab.apply(HistoryChange {
         put: vec![a.clone()],
@@ -854,6 +859,7 @@ fn a_change_is_stored_and_a_deletion_remembered() {
     assert_eq!(done(tab.listing()), None);
     assert_eq!(done(tab.forgotten(vec![a.id])), []);
     assert_eq!(done(tab.deletions(vec![a.id])), None);
+    assert_eq!(done(tab.deleted_sessions(vec![a.id])), None);
     assert_eq!(done(tab.read(vec![a.id])), [Err(a.id)]);
 }
 

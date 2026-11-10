@@ -709,6 +709,21 @@ impl Store for MemoryStore {
         }))
     }
 
+    fn deleted_sessions(&self, ids: Vec<RecordId>) -> Pending<Option<Vec<(RecordId, SessionKey)>>> {
+        if let Some(page) = &self.page {
+            return done(page.deleted_sessions(&ids));
+        }
+        if self.deletions_unknown.get() {
+            return done(None);
+        }
+        let tombstones = self.tombstones.borrow();
+        done(Some(
+            ids.into_iter()
+                .filter_map(|id| Some((id, tombstones.get(&id)?.key())))
+                .collect(),
+        ))
+    }
+
     fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
         if let Some(page) = &self.page {
             return done(page.deletions(&ids));
@@ -1408,8 +1423,13 @@ mod tests {
             now(store.deletions(vec![one.id, two.id])),
             Some(vec![(one.id, Some(7))])
         );
+        assert_eq!(
+            now(store.deleted_sessions(vec![one.id, two.id])),
+            Some(vec![(one.id, SessionKey::of(&first))])
+        );
         store.deletions_unknown.set(true);
         assert_eq!(now(store.deletions(vec![one.id, two.id])), None);
+        assert_eq!(now(store.deleted_sessions(vec![one.id])), None);
         assert!(
             now(store.forgotten(vec![one.id])).is_empty(),
             "missing is never deleted"

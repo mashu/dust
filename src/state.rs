@@ -236,10 +236,11 @@ pub struct AppCtx {
     /// ([`Self::tell_of_cut_off`]).
     cut_off_carried: CopyValue<Vec<SessionResult>>,
     /// Of those, the ones held back for a record the store could not read
-    /// for now that may hold one, as it finished then: kept once it reads,
-    /// or is no more, or is told of as one that could not be read
-    /// ([`Self::keep_what_waited`]).
-    cut_off_waiting: CopyValue<Vec<SoFar>>,
+    /// for now that may hold one, as it finished then or before, each with
+    /// those records: kept once each reads, or is no more, or is told of as
+    /// one that could not be read, but let go where one is no more as its
+    /// session was deleted by hand ([`Self::keep_what_waited`]).
+    cut_off_waiting: CopyValue<Vec<(SoFar, BTreeSet<RecordId>)>>,
     /// A try at storing what the store has yet to take is waiting
     /// ([`RETRY_MS`]).
     retrying: CopyValue<bool>,
@@ -646,7 +647,7 @@ impl AppCtx {
             .cut_off_waiting
             .peek()
             .iter()
-            .map(|so_far| SessionKey::of(&so_far.result))
+            .map(|(so_far, _)| SessionKey::of(&so_far.result))
             .collect();
         let keys: HashSet<SessionKey> = cut
             .iter()
@@ -698,17 +699,32 @@ impl AppCtx {
         if waiting.is_empty() {
             return;
         }
+        let unread: Vec<RecordId> = {
+            let told = self.told_unread_for_now.peek();
+            self.unread_for_now
+                .peek()
+                .iter()
+                .filter(|id| !told.contains(id))
+                .copied()
+                .collect()
+        };
         let mut held = self.cut_off_waiting;
         let mut held = held.write();
         let mut keys: HashSet<SessionKey> = held
             .iter()
-            .map(|so_far| SessionKey::of(&so_far.result))
+            .map(|(so_far, _)| SessionKey::of(&so_far.result))
             .collect();
-        held.extend(
-            waiting
-                .into_iter()
-                .filter(|so_far| keys.insert(SessionKey::of(&so_far.result))),
-        );
+        for so_far in waiting {
+            if keys.insert(SessionKey::of(&so_far.result)) {
+                // Those it may be one of, as named when it finished or after.
+                let records = unread
+                    .iter()
+                    .filter(|id| id.order / 1000 >= so_far.result.timestamp)
+                    .copied()
+                    .collect();
+                held.push((so_far, records));
+            }
+        }
     }
 
     /// Keep what waited for a record the store could not read for now
@@ -716,37 +732,77 @@ impl AppCtx {
     /// more, or was told of as one that could not be read after every try:
     /// one the history holds now, as its record read, is let go of; one it
     /// does not is kept as it would have been ([`keep_cut_off`]), its level
-    /// counted where it is to be. The rest wait on. After each look at the
-    /// store, once what it found is taken up.
+    /// counted where it is to be. But one whose record is no more as the
+    /// user deleted its session by hand, in another copy that read it, as
+    /// that record's tombstone says, is let go of too: kept, it would be
+    /// back under a name of its own. The rest wait on. After each look at
+    /// the store, once what it found is taken up.
     fn keep_what_waited(self) {
         if self.cut_off_waiting.peek().is_empty() {
             return;
         }
         let unread = self.unread_for_now_finished();
         let mut waiting = self.cut_off_waiting;
-        let ready: Vec<SoFar> = {
+        let ready: Vec<(SoFar, BTreeSet<RecordId>)> = {
             let mut held = waiting.write();
-            let (still, ready) = std::mem::take(&mut *held).into_iter().partition(|so_far| {
-                unread.is_some_and(|through| so_far.result.timestamp <= through)
-            });
+            let (still, ready) = std::mem::take(&mut *held)
+                .into_iter()
+                .partition(|(so_far, _)| {
+                    unread.is_some_and(|through| so_far.result.timestamp <= through)
+                });
             *held = still;
             ready
         };
         if ready.is_empty() {
             return;
         }
-        let now = now_ms();
-        let cut = ready
-            .into_iter()
-            .map(|so_far| {
-                CutOff::Marked(OpenSession {
-                    so_far: Some(Box::new(so_far)),
-                    over: true,
-                    ..OpenSession::starting(false, now)
+        // The records waited for that are no longer among those that could
+        // not be read for now: read, or no more.
+        let gone: Vec<RecordId> = {
+            let unread_now = self.unread_for_now.peek();
+            ready
+                .iter()
+                .flat_map(|(_, records)| records)
+                .filter(|id| !unread_now.contains(id))
+                .copied()
+                .collect::<BTreeSet<RecordId>>()
+                .into_iter()
+                .collect()
+        };
+        let store = self.app().store;
+        spawn_forever(async move {
+            let deleted: HashSet<SessionKey> = if gone.is_empty() {
+                HashSet::new()
+            } else {
+                store
+                    .deleted_sessions(gone)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(_, key)| key)
+                    .collect()
+            };
+            let now = now_ms();
+            let (deleted, kept): (Vec<CutOff>, Vec<CutOff>) = ready
+                .into_iter()
+                .map(|(so_far, _)| {
+                    CutOff::Marked(OpenSession {
+                        so_far: Some(Box::new(so_far)),
+                        over: true,
+                        ..OpenSession::starting(false, now)
+                    })
                 })
-            })
-            .collect();
-        spawn_forever(keep_cut_off(self, cut));
+                .partition(|cut| {
+                    cut.so_far()
+                        .is_some_and(|so_far| deleted.contains(&SessionKey::of(&so_far.result)))
+                });
+            if !deleted.is_empty() {
+                self.let_go_of_carried(&deleted);
+            }
+            if !kept.is_empty() {
+                keep_cut_off(self, kept).await;
+            }
+        });
     }
 
     /// Tell of whatever reading the store has set aside since it was last
@@ -5499,6 +5555,35 @@ mod tests {
             next.advance(u64::from(tries) + 1_000).await;
             assert_eq!(next.shown(), [1, 2], "kept once it is told of");
             assert_eq!(carried(&store), None);
+        });
+    }
+
+    /// A session cut off that waits for its record, which another copy
+    /// reads meanwhile and whose session the user deletes there by hand,
+    /// stays deleted: its record is no more because it was deleted, and
+    /// the session is not kept again under a name of its own.
+    #[test]
+    fn a_session_cut_off_waiting_for_a_record_deleted_by_hand_elsewhere_stays_deleted() {
+        crate::testing::run(|| async {
+            let (store, busy) = holding_busy([1], 2);
+            cut_off_keeping(&store, day(2));
+            let mut next = Tab::on(&store);
+            next.act(AppCtx::tell_of_cut_off);
+            next.advance(100).await;
+            assert_eq!(next.shown(), [1], "waits for its record");
+            store.held_open.borrow_mut().clear();
+            let other = Tab::on(&store);
+            assert_eq!(other.shown(), [1, 2]);
+            other.delete(2);
+            assert!(store.tombstone(busy).is_some(), "deleted by hand");
+            next.act(AppCtx::take_up_changes);
+            next.advance(100).await;
+            assert_eq!(
+                days(&store.load_sessions()),
+                [1],
+                "deleted by hand, not kept again"
+            );
+            assert_eq!(next.shown(), [1]);
         });
     }
 

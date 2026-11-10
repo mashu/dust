@@ -215,6 +215,11 @@ pub trait Store {
                 .collect()
         })
     }
+    /// Which of `ids` were deleted by hand, each beside the session its
+    /// tombstone remembers, by when and on what day it finished: one whose
+    /// tombstone remembers none is left out. None where the store could not
+    /// look, which is no word that none of them was.
+    fn deleted_sessions(&self, ids: Vec<RecordId>) -> Pending<Option<Vec<(RecordId, SessionKey)>>>;
     /// What to tell of `ids`, records listed that could not be read at all
     /// at any of the app's tries since it found them so
     /// ([`HistoryLoad::failed`]): of those not told of before, how many,

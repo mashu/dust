@@ -20,7 +20,8 @@ use super::record::{
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, LockHeld, Locking, MarkId, OpenSession,
-    SETTINGS_HELD, SetAside, Store, TakenMark, over_stored, read_settings_from, unmarked,
+    SETTINGS_HELD, SessionKey, SetAside, Store, TakenMark, over_stored, read_settings_from,
+    unmarked,
 };
 
 const THEME: &str = "theme.txt";
@@ -700,6 +701,10 @@ impl Store for DesktopStore {
 
     fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
         self.history.deletions(ids)
+    }
+
+    fn deleted_sessions(&self, ids: Vec<RecordId>) -> Pending<Option<Vec<(RecordId, SessionKey)>>> {
+        self.history.deleted_sessions(ids)
     }
 
     fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {

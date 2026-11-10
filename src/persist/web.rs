@@ -31,7 +31,7 @@ use super::record::{
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, Locking, MarkId, OpenSession,
-    SETTINGS_HELD, SetAside, Store, TakenMark, over_stored, read_settings_from,
+    SETTINGS_HELD, SessionKey, SetAside, Store, TakenMark, over_stored, read_settings_from,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -823,6 +823,16 @@ impl Store for WebStore {
                 Box::pin(async move { database.deletions(ids).await })
             }
             History::Page { whole, .. } => done(whole.deletions(&ids)),
+        }
+    }
+
+    fn deleted_sessions(&self, ids: Vec<RecordId>) -> Pending<Option<Vec<(RecordId, SessionKey)>>> {
+        match &self.history {
+            History::Database(database) => {
+                let database = Rc::clone(database);
+                Box::pin(async move { database.deleted_sessions(ids).await })
+            }
+            History::Page { whole, .. } => done(whole.deleted_sessions(&ids)),
         }
     }
 

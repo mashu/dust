@@ -797,6 +797,31 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         )
     }
 
+    /// Which of `ids` were deleted by hand, each beside the session its
+    /// tombstone remembers ([`Self::deletions`]): one whose tombstone does
+    /// not say is left out. None where the tombstones cannot be looked at.
+    pub(super) async fn deleted_sessions(
+        &self,
+        ids: Vec<RecordId>,
+    ) -> Option<Vec<(RecordId, SessionKey)>> {
+        let names = ids.iter().map(|id| id.name()).collect();
+        let held: HashMap<String, Option<String>> = self
+            .glue
+            .tombstones_of(names)
+            .await
+            .ok()?
+            .into_iter()
+            .collect();
+        Some(
+            ids.into_iter()
+                .filter_map(|id| {
+                    let raw = held.get(&id.name())?.as_deref()?;
+                    Some((id, tombstone_key(raw.as_bytes())?))
+                })
+                .collect(),
+        )
+    }
+
     /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
     /// where that could not be looked for.
     #[cfg(test)]
