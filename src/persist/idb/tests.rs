@@ -1253,3 +1253,40 @@ fn a_change_an_older_build_looked_at_first_is_taken_up_in_a_browser() {
         "and as it is listed"
     );
 }
+
+/// The same where a build before this one's take-up rules made the move as
+/// well, as every build from 0.16.3 to 0.16.9 did: its layout holds none of
+/// this build's notes (`takenLegacy` among them), and the change its tab
+/// looked at first is taken up as the page opens here. Gated by `legacy`
+/// where `takenLegacy` is missing, the change looked taken up already.
+#[test]
+fn a_change_an_older_build_looked_at_first_is_taken_up_in_a_browser_where_it_made_the_move() {
+    let before = [ago(30), ago(20)];
+    let page = Page::holding(&before);
+    let fake = Fake::on(&page);
+    opened(&fake).load();
+    // The layout as 0.16.9 writes it as it moves the history and as it
+    // looks: `legacy` moved on to the history kept whole as it took it.
+    let as_an_older_build_wrote_it = |fake: &Fake| {
+        let raw = page.held(KEYS.history).expect("held");
+        let mut shelves = fake.shelves();
+        let mut layout: serde_json::Value =
+            serde_json::from_str(&shelves.meta["layout"]).expect("a layout");
+        let held = layout.as_object_mut().expect("an object");
+        for key in ["takenThrough", "deletionsTaken", "takenLegacy"] {
+            held.remove(key);
+        }
+        layout["legacy"] = serde_json::to_value(fingerprint_of(&raw)).expect("JSON");
+        let written = serde_json::to_string_pretty(&layout).expect("JSON");
+        shelves.meta.insert("layout".into(), written);
+    };
+    as_an_older_build_wrote_it(&fake);
+    let since = ago(10);
+    page.keep(&[before[0].clone(), before[1].clone(), since]);
+    as_an_older_build_wrote_it(&fake);
+    assert_eq!(
+        opened(&fake).load().sessions.len(),
+        3,
+        "taken up as the page opens"
+    );
+}

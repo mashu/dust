@@ -3728,6 +3728,46 @@ mod tests {
         );
     }
 
+    /// The same where a build before this one's take-up rules made the move
+    /// as well, as every build from 0.16.3 to 0.16.9 did: its layout holds
+    /// none of this build's notes (`takenLegacy` among them), and the change
+    /// it looked at first is taken up as the history is next read here.
+    /// Gated by `legacy` where `takenLegacy` is missing, the change looked
+    /// taken up already, though imported() would take it up.
+    #[test]
+    fn a_change_an_older_build_looked_at_first_is_taken_up_where_it_made_the_move() {
+        let dir = TempDir::new("older-moved-looked-first");
+        let now = crate::time::now_ms();
+        let old = [finished(now - 30 * DAY), finished(now - 20 * DAY)];
+        keep_whole(&dir, &old);
+        Files::at(&dir.0).load();
+        // The layout as 0.16.9 writes it as it moves the history and as it
+        // looks: `legacy` moved on to the history kept whole as it took it.
+        let as_an_older_build_wrote_it = || {
+            let path = dir.0.join(HISTORY).join(LAYOUT_FILE);
+            let mut layout: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let held = layout.as_object_mut().expect("an object");
+            for key in ["takenThrough", "deletionsTaken", "takenLegacy"] {
+                held.remove(key);
+            }
+            let whole = fingerprint_of(&dir.0.join(SESSIONS)).unwrap();
+            layout["legacy"] = serde_json::to_value(whole).unwrap();
+            fs::write(&path, serde_json::to_vec_pretty(&layout).unwrap()).unwrap();
+        };
+        as_an_older_build_wrote_it();
+        // A copy of a build before records, left open, stores a session it
+        // finished ten days ago, and the older build looks first.
+        let since = finished(now - 10 * DAY);
+        keep_whole(&dir, &[old[0].clone(), old[1].clone(), since.clone()]);
+        as_an_older_build_wrote_it();
+        assert_eq!(
+            stamps(&Files::at(&dir.0).load()),
+            [old[0].timestamp, old[1].timestamp, since.timestamp],
+            "taken up as the history is read"
+        );
+    }
+
     /// A session a record here holds is not taken up from the history an
     /// older build keeps whole while that record cannot be read for now, as
     /// a file another program holds open cannot be: the record may be that
