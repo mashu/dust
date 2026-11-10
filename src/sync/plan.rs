@@ -12,11 +12,11 @@
 //!
 //! This device's side is the store's: the records it lists, those of them
 //! it deleted by hand and when ([`crate::persist::Store::deletions`]), and
-//! two notes sync keeps of its own ([`super::state::SyncState`]): the deletions here
-//! the drive holds, those it took from the drive and those made here by
-//! hand that it holds, and the sessions put back here by hand since the
-//! last sync. A record the store does not list is never deleted on that
-//! account alone: missing is never deleted.
+//! two notes sync keeps of its own ([`super::state::SyncState`]): the
+//! deletions here the drive holds, those it took from the drive and those
+//! made here by hand that it holds, and the sessions put back here by hand
+//! since the last sync. A record the store does not list is never deleted
+//! on that account alone: missing is never deleted.
 
 use std::collections::{BTreeMap, BTreeSet};
 
