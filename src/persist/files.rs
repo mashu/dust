@@ -761,14 +761,22 @@ impl HistoryFiles {
 
     /// Which of `ids` were deleted by hand, each beside the session its
     /// tombstone remembers ([`Self::deletions`]): one whose tombstone does
-    /// not say is left out. None where a tombstone could not be looked for.
+    /// not say, or is there but does not read, is left out. None where a
+    /// tombstone could not be looked for, as [`Self::deletions`] says. One
+    /// that would not read gave no word at all, of any of `ids`.
     pub(super) fn deleted_sessions(&self, ids: &[RecordId]) -> Option<Vec<(RecordId, SessionKey)>> {
         self.on_its_thread();
         let tombstones = self.tombstones();
         let mut found = Vec::new();
         for &id in ids {
-            match fs::read(tombstones.join(file_name(id))) {
-                Ok(raw) => found.extend(tombstone_key(&raw).map(|key| (id, key))),
+            let tombstone = tombstones.join(file_name(id));
+            match fs::symlink_metadata(&tombstone) {
+                Ok(_) => {
+                    let key = fs::read(&tombstone)
+                        .ok()
+                        .and_then(|raw| tombstone_key(&raw));
+                    found.extend(key.map(|key| (id, key)));
+                }
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(_) => return None,
             }
@@ -2641,6 +2649,36 @@ mod tests {
         assert_eq!(files.listing(), Some(Vec::new()));
         assert_eq!(files.forgotten(&[one.id, two.id]), [one.id, two.id]);
         assert!(files.load().sessions.is_empty());
+    }
+
+    /// Which records were deleted by hand, each beside the session its
+    /// tombstone names, answers for a tombstone that is there but cannot be
+    /// read, as a folder in its place cannot, as deletions() does: deleted,
+    /// with no word of which session, so it is left out. No word at all came
+    /// back, for every record asked of, the one whose tombstone names its
+    /// session among them.
+    #[cfg(unix)]
+    #[test]
+    fn which_sessions_were_deleted_is_said_of_a_tombstone_that_cannot_be_read_as_deletions_say() {
+        let (dir, files) = history("deleted-sessions-unread-tombstone");
+        files.load();
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        files.apply(&forget(&[(&one, &first), (&two, &second)]));
+        let path = dir.0.join(HISTORY).join(TOMBSTONES).join(file_name(two.id));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let all = [one.id, two.id];
+        assert_eq!(
+            files.deletions(&all),
+            Some(vec![(one.id, Some(7)), (two.id, None)])
+        );
+        assert_eq!(
+            files.deleted_sessions(&all),
+            Some(vec![(one.id, SessionKey::of(&first))]),
+            "as deletions() says"
+        );
     }
 
     /// Which records were deleted by hand comes with when each was, as its
