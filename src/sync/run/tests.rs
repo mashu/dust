@@ -1074,6 +1074,66 @@ fn a_twin_let_go_here_and_put_back_elsewhere_is_let_go_again() {
     assert_eq!(joined.stamps(), [1], "the drive's word");
 }
 
+/// What sync keeps, `state`, as a build before deletions by hand were
+/// noted wrote it over this build's: with no word of having looked for
+/// such deletions, so that this build looks again.
+fn as_written_by_a_build_that_drops_the_look(state: &SyncState) -> SyncState {
+    let mut kept: serde_json::Value =
+        serde_json::from_str(&state.written().expect("written")).expect("JSON");
+    let fields = kept.as_object_mut().expect("fields");
+    assert!(fields.remove("deletionsNoted").is_some(), "looked for");
+    SyncState::read(&kept.to_string()).expect("read")
+}
+
+/// A twin let go here, its session kept under the other name, is no
+/// deletion by hand when the deletions an earlier build made are looked
+/// for again, as after a build that drops the word of having looked wrote
+/// what sync keeps: a putting back of the twin's name on another device,
+/// from the same backup, is not taken back here beside the session kept.
+/// It was noted as a deletion by hand the drive held, and taken back, and
+/// the session was here twice.
+#[test]
+fn a_twin_let_go_here_is_no_deletion_by_hand_when_deletions_are_looked_for_again() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1]));
+    let mut computer = Device::keeping(&[]);
+    restore(&computer.store, &sessions(&[1]));
+    let twin = listing(&computer.store)[0];
+    let session = computer.session(twin);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    computer.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    computer.sync(&remote, 110).expect("synced");
+    assert!(
+        !listing(&computer.store).contains(&twin),
+        "let go as a twin"
+    );
+
+    computer.state = as_written_by_a_build_that_drops_the_look(&computer.state);
+    computer.sync(&remote, 120).expect("synced");
+    assert!(computer.state.deletions_noted, "looked for again");
+    assert!(
+        !computer.state.applied.contains_key(&twin),
+        "no deletion by hand"
+    );
+
+    // The backup restored on a third device after: the twin's name is put
+    // back there.
+    let mut third = Device::keeping(&[]);
+    third.turn_on(&remote, "passphrase").expect("on");
+    third.undo(twin, &session, 130);
+    third.sync(&remote, 135).expect("synced");
+    computer.sync(&remote, 140).expect("synced");
+    computer.sync(&remote, 150).expect("synced");
+    assert_eq!(computer.stamps(), [1], "held once");
+    third.sync(&remote, 160).expect("synced");
+    assert_eq!(third.stamps(), [1], "let go there too");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 170).expect("synced");
+    assert_eq!(joined.stamps(), [1], "the drive's word");
+}
+
 /// A pack a later build wrote, which this one cannot read, is told of at
 /// each sync as a later build's, not as damaged, and fetched once: not
 /// passed over for good, it is read again once a build of a later layout

@@ -537,7 +537,13 @@ pub async fn sync_once_with(
 /// out: deleted again, it is a deletion by hand as any other. So is one
 /// made here after the drive's deletion, by this device's clock, which is
 /// the later word ([`Plan::send_deleted`]): should the drive put the
-/// session back, it is sent, stamped as it was made.
+/// session back, it is sent, stamped as it was made. And so is a twin let
+/// go here, its session kept under the other name ([`twin_kept_here`]):
+/// no deletion by hand, though it has a tombstone, it is not noted as one,
+/// as the sync that let it go did not note it ([`send_pack`]), and the
+/// drive putting its name back does not bring it back here beside the one
+/// kept. A deletion by hand of one of two sessions finished in the same
+/// millisecond is left out with it: it is not noted, as before this build.
 ///
 /// Says whether it looked: not where the store could not say which were
 /// deleted by hand, which the next sync asks again.
@@ -556,6 +562,7 @@ async fn note_deletions_by_hand(
                 && !listed.contains(&id)
                 && !state.applied.contains_key(&id)
                 && !state.revived.contains_key(&id)
+                && !twin_kept_here(id, listed)
         })
         .collect();
     if unnoted.is_empty() {

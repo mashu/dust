@@ -89,8 +89,11 @@ session where it finished (`RecordId::placed`), while the device it came
 from named each as it kept it. A record to take that is alike in everything
 to one this device holds under another name is its twin: the smaller name
 is kept on every device, and the other let go everywhere, as a deletion
-sent only once the one kept is in the drive. Two records of a session that
-differ, as one a restore filled in, are both kept.
+sent only once the one kept is in the drive. A twin let go is no deletion
+by hand: should another device put its name back, restoring the same
+backup, it is let go again, never taken back beside the one kept. Two
+records of a session that differ, as one a restore filled in, are both
+kept.
 
 What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads
