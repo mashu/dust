@@ -594,6 +594,62 @@ mod tests {
         }
     }
 
+    /// Nothing on the page asks the browser for anything: no element that
+    /// loads what it shows, no address to load or send to in an attribute
+    /// (any `href` but one to follow, an `<a>`'s or an `<area>`'s, or the
+    /// `<base>`'s, which `base-uri` governs), and no `url(`, `image-set(` or
+    /// `@import` in a style, held or in an attribute. Under `default-src
+    /// 'none'` each would be refused without a word, and no browser check
+    /// opens the privacy page; what a script asks for as it runs, the sync
+    /// check sees refused on the sign-in page.
+    fn loads_nothing(tags: &[Tag]) {
+        for tag in tags {
+            assert!(
+                !matches!(
+                    tag.name.as_str(),
+                    "img"
+                        | "link"
+                        | "iframe"
+                        | "frame"
+                        | "object"
+                        | "embed"
+                        | "audio"
+                        | "video"
+                        | "source"
+                        | "track"
+                        | "picture"
+                ),
+                "<{}> loads",
+                tag.name
+            );
+            let loads_its_href = !matches!(tag.name.as_str(), "a" | "area" | "base");
+            for (key, value) in &tag.attributes {
+                assert!(
+                    !matches!(
+                        key.as_str(),
+                        "src" | "srcset" | "poster" | "data" | "background" | "ping"
+                    ) && !(loads_its_href && matches!(key.as_str(), "href" | "xlink:href")),
+                    "<{} {key}=\"{value}\"> loads",
+                    tag.name
+                );
+            }
+            let styles = tag
+                .attribute("style")
+                .into_iter()
+                .chain(tag.holds.as_deref().filter(|_| tag.name == "style"));
+            for style in styles {
+                let style = style.to_ascii_lowercase();
+                for asks in ["url(", "image-set(", "@import"] {
+                    assert!(
+                        !style.contains(asks),
+                        "a style of <{}> loads: {asks}",
+                        tag.name
+                    );
+                }
+            }
+        }
+    }
+
     /// Where `url` is.
     fn origin_of(url: &str) -> &str {
         let after = url.find("://").expect("a scheme") + 3;
@@ -673,6 +729,7 @@ mod tests {
                 .all(|tag| !matches!(tag.name.as_str(), "script" | "style" | "link")),
             "ahead of all it governs"
         );
+        loads_nothing(&tags);
         let needs = policy(&[
             ("default-src", sources(&["'none'"])),
             ("script-src", inline_hashes(&tags, "script")),
@@ -705,6 +762,7 @@ mod tests {
             tags.iter().all(|tag| tag.attribute("style").is_none()),
             "no style attribute, which a hash does not cover"
         );
+        loads_nothing(&tags);
         let needs = policy(&[
             ("default-src", sources(&["'none'"])),
             ("style-src", inline_hashes(&tags, "style")),
