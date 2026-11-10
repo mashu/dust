@@ -748,7 +748,10 @@ take back a session deleted here by hand meanwhile. Of the settings each
 took or sent, the later word on each, by its stamp, is the one kept here,
 setting by setting; and one changed by hand in a copy while its sync ran
 stays there, the later word, whatever either took, though it is back to
-what it was as that sync began. A restore of a backup holds `restore.lock`
+what it was as that sync began. An edit made in a copy before its sync
+began, which that sync took in and sent, is no change made meanwhile,
+though it is stored only as the sync runs or after it: it gives way to a
+later word the sync took. A restore of a backup holds `restore.lock`
 beside them (in a browser the Web Lock `dust_restore`) from its start
 until neither it nor its Undo is under way
 or offered, so a restore in another copy waits for its Undo rather than

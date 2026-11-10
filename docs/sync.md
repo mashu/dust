@@ -272,7 +272,11 @@ by hand in the tab or window syncing meanwhile is its own, and stays,
 whatever its sync or the other's took, though it is back to what it was as
 the sync began; but the tab or window tells the other's take from a change
 made in a third one only by its value, and one set there to the value the
-other's sync took gives way with it. A note another
+other's sync took gives way with it. An edit made in the tab or window
+before its sync began, which that sync took in and sent, is no change made
+meanwhile, though it is stored only as the sync runs or after it, as an
+edit on the settings screen is once it has been still for a moment: it
+gives way to a later word the sync took. A note another
 tab or window left out goes only once the drive shows it sent, or no more
 to send, as a browser can hand one tab another's write late; and the note of a
 deletion the drive holds, which a sync drops as its session is put back

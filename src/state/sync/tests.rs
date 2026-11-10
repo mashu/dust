@@ -4703,6 +4703,130 @@ fn a_setting_set_by_hand_during_a_sync_back_to_what_it_was_stays() {
     });
 }
 
+/// The settings here, a sync of this copy begun with a change of the
+/// number of groups made here and not yet stored, as an edit on the
+/// settings screen is until it has been still for a moment, and held at
+/// the drive; another device then changes it, later, and syncs, and this
+/// copy's sync goes on and ends. `stored` stores the edit while the sync
+/// waits. As the sync ended, and as the store, this copy and the other
+/// device hold it once each has synced again, as so many groups past
+/// where it began.
+async fn an_edit_from_before_a_sync(stored: bool) -> (i64, Option<i64>, i64, i64) {
+    let mut harness = Harness::new();
+    let remote = Rc::new(MemoryRemote::default());
+    let auth = FakeAuth::giving(&["t"]);
+    let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+    harness.advance(1_000).await;
+    let shown = harness.in_app(|| ctx.settings.peek().clone().clamp());
+    let start = shown.curriculum.num_groups;
+    let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+    let mut theirs = shown.clone();
+    now(sync_once(
+        &*other,
+        &*remote,
+        &mut other_state,
+        &theirs,
+        now_ms(),
+    ))
+    .expect("synced");
+    // Changed here, not stored yet, as this copy's sync begins: it takes
+    // the edit in, and waits on the drive.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    harness.in_app(|| {
+        let mut settings = ctx.settings;
+        settings.write().curriculum.num_groups = start + 1;
+    });
+    held.hold(true);
+    harness.in_app(|| ctx.sync_now());
+    harness.pump();
+    if stored {
+        // The edit has been still a moment, and is stored.
+        harness.in_app(|| {
+            ctx.store_settings();
+        });
+        harness.pump();
+    }
+    // Later, the other device changes it, and syncs.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    theirs.curriculum.num_groups = start + 2;
+    now(sync_once(
+        &*other,
+        &*remote,
+        &mut other_state,
+        &theirs,
+        now_ms(),
+    ))
+    .expect("synced");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    held.hold(false);
+    harness.advance(1_000).await;
+    let at_its_end = harness.in_app(|| ctx.settings.peek().curriculum.num_groups);
+    harness.in_app(|| {
+        ctx.store_settings();
+    });
+    harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+    harness.in_app(|| ctx.sync_now());
+    harness.advance(1_000).await;
+    let synced = now(sync_once(
+        &*other,
+        &*remote,
+        &mut other_state,
+        &theirs,
+        now_ms(),
+    ))
+    .expect("synced");
+    let there = synced
+        .settings
+        .map_or(theirs.curriculum.num_groups, |s| s.curriculum.num_groups);
+    let here = harness.in_app(|| ctx.settings.peek().curriculum.num_groups);
+    let past = |groups: u32| i64::from(groups) - i64::from(start);
+    (
+        past(at_its_end),
+        harness
+            .store
+            .read_settings()
+            .map(|s| past(s.curriculum.num_groups)),
+        past(here),
+        past(there),
+    )
+}
+
+/// A setting changed here before this copy's sync began, and stored while
+/// it waits on the drive, as an edit on the settings screen is once it has
+/// been still for a moment: the sync took it in as it began, and sent it,
+/// stamped as the sync began. Another device changes it after that, later,
+/// and the sync takes that change, the later word, which stays here and
+/// everywhere. Stored while the sync ran, the edit made before it was
+/// noted as set by hand meanwhile, kept over the later word as the sync
+/// ended, and sent again by the next sync, later still, everywhere.
+#[test]
+fn an_edit_made_before_a_sync_and_stored_while_it_runs_gives_way_to_a_later_change() {
+    run(|| async {
+        let (at_its_end, stored, here, there) = an_edit_from_before_a_sync(true).await;
+        assert_eq!(
+            (at_its_end, stored, here, there),
+            (2, Some(2), 2, 2),
+            "as the sync ended, the store, here and the other device: the other device's, the later word"
+        );
+    });
+}
+
+/// The same, the edit not yet stored as the sync ends: the later change
+/// made on the other device stays here and everywhere. Changed here and not
+/// stored, the edit made before the sync was taken for one set by hand
+/// meanwhile, kept over the later word, and sent again, everywhere.
+#[test]
+fn an_edit_made_before_a_sync_and_not_yet_stored_gives_way_to_a_later_change() {
+    run(|| async {
+        let (at_its_end, stored, here, there) = an_edit_from_before_a_sync(false).await;
+        assert_eq!(
+            (at_its_end, stored, here, there),
+            (2, Some(2), 2, 2),
+            "as the sync ended, the store, here and the other device: the other device's, the later word"
+        );
+    });
+}
+
 /// What the store keeps for sync now, which it holds.
 fn kept_state(harness: &Harness) -> SyncState {
     let raw = harness.store.sync.borrow().clone().expect("kept");

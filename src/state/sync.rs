@@ -178,8 +178,16 @@ pub struct SyncCtx {
     /// Every setting changed by hand here and stored while a sync is under
     /// way, by key: none of them gives way to what another copy's sync took
     /// and stored meanwhile, whatever its value, as that sync ends
-    /// ([`given_way`]). Emptied as each begins.
+    /// ([`given_way`]), nor to what that sync took. An edit made before the
+    /// sync began and stored only as it runs is none of them: the sync took
+    /// it in and sent it, and it gives way to a later word the sync took
+    /// ([`AppCtx::changed_by_hand`]). Emptied as each begins.
     set_by_hand: CopyValue<BTreeSet<String>>,
+    /// The settings the sync under way began from, and those stored then:
+    /// what tells a setting set by hand meanwhile from an edit made before
+    /// it and stored only as it ran, which it took in and sent
+    /// ([`AppCtx::changed_by_hand`]).
+    began_from: CopyValue<Option<(cw_core::TrainingSettings, cw_core::TrainingSettings)>>,
 }
 
 impl SyncCtx {
@@ -230,6 +238,7 @@ impl SyncCtx {
             hand_back: CopyValue::new(false),
             put_back: CopyValue::new(BTreeSet::new()),
             set_by_hand: CopyValue::new(BTreeSet::new()),
+            began_from: CopyValue::new(None),
         }
     }
 }
@@ -1169,6 +1178,10 @@ impl AppCtx {
         // so that what this copy has yet to see is no change made here.
         self.take_up_stored_settings();
         let here = self.settings.peek().clone().clamp();
+        put(
+            self.sync.began_from,
+            Some((here.clone(), self.stored_settings.peek().clone())),
+        );
         let store = self.app().store;
         let remote = WhileCurrent {
             remote: &*link.remote,
@@ -1367,7 +1380,7 @@ impl AppCtx {
         stored: &cw_core::TrainingSettings,
     ) {
         if *self.sync.running.peek() {
-            let changed = changed_keys(base, ours);
+            let changed = self.changed_by_hand(base, ours);
             if !changed.is_empty() {
                 let mut noted = self.sync.set_by_hand;
                 noted.write().extend(changed);
@@ -1388,12 +1401,41 @@ impl AppCtx {
     /// key: those stored meanwhile ([`SyncCtx::set_by_hand`]), and those
     /// changed and not stored yet, as an edit on the settings screen is
     /// until it has been still for a moment, or one the store would not
-    /// take. Asked before the settings another copy stored are taken up.
+    /// take. An edit made before the sync began and not stored yet as it
+    /// ends is none of them: the sync took it in and sent it, and it gives
+    /// way to a later word the sync took ([`Self::changed_by_hand`]). Asked
+    /// before the settings another copy stored are taken up.
     fn settings_by_hand(self) -> BTreeSet<String> {
         let mut keys = self.sync.set_by_hand.peek().clone();
         let here = self.settings.peek().clone().clamp();
-        keys.extend(changed_keys(&self.stored_settings.peek(), &here));
+        keys.extend(self.changed_by_hand(&self.stored_settings.peek(), &here));
         keys
+    }
+
+    /// The settings changed here from `base`, what the store held as this
+    /// copy last read or wrote it, to `ours`, that are set by hand while the
+    /// sync under way runs: each that differs from what the sync began from,
+    /// or that was stored as something else than as the sync began, as one
+    /// another copy stored and this copy took up meanwhile. An edit made
+    /// before the sync, and not stored yet as it began, the sync took in and
+    /// sent as this copy's: stored as it runs, or not yet stored as it ends,
+    /// it is no change made meanwhile, and gives way to a later word the
+    /// sync took.
+    fn changed_by_hand(
+        self,
+        base: &cw_core::TrainingSettings,
+        ours: &cw_core::TrainingSettings,
+    ) -> BTreeSet<String> {
+        let changed = changed_keys(base, ours);
+        let Some((began, stored)) = self.sync.began_from.peek().clone() else {
+            return changed;
+        };
+        let (began, stored) = (as_keys(&began), as_keys(&stored));
+        let (base, ours) = (as_keys(base), as_keys(ours));
+        changed
+            .into_iter()
+            .filter(|key| began.get(key) != ours.get(key) || stored.get(key) != base.get(key))
+            .collect()
     }
 
     /// The sessions `ids` were put back by hand, after a deletion, by Undo
