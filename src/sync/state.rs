@@ -380,7 +380,7 @@ mod tests {
         let merged = theirs.merged(Some(&base), &ours);
         assert_eq!(
             (merged.settings, merged.stamps),
-            (ours.settings.clone(), ours.stamps.clone()),
+            (ours.settings, ours.stamps),
             "the other's, where this copy changed none"
         );
     }
