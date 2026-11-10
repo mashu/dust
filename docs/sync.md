@@ -67,22 +67,27 @@ by hand again after it is put back here, it is a deletion by hand as any
 other, whatever was noted of the one before. A putting back as late as a
 deletion stands, here as in the drive. Missing is never deleted: a record
 is let go only for a deletion. A device updated from a build that noted no
-deletion by hand notes those it made that the drive holds at its first
-sync at which the store can say which they are, and looks again at each
-sync until then.
+deletion by hand notes those it made that the drive holds, put back since
+or not, at its first sync at which the store can say which they are, and
+looks again at each sync until then.
 A deletion or a putting back is stamped when it is made (a deletion by
 hand when its tombstone says, though it is sent later), or just after the
 latest of the record the device knew the drive to hold by then, where that
 is later (`SyncState::stamp_change`): one made after another is the later,
-however far apart the devices' clocks are. One made while a sync is under
-way is stamped again as it ends, after what that sync read and sent, and
-a session put back by hand meanwhile, in that tab or window or in another
-on the device, is not let go by that sync, which planned with no note of
-it, even where sync is turned off before it ends: the next sends it as put
-back, where sync is on still. A
-putting back noted while sync knows nothing of the drive, as just after it
-is turned on anew, when what it knew before went with it, is stamped again
-after what the drive holds once its first sync reads it.
+however far apart the devices' clocks are. But where a sync read the drive
+and did not send a deletion by hand, as the store could not say which were
+deleted, as the sync listed the history before the deletion was made, or
+as it was cut short as it sent, the deletion is stamped after what that
+sync read as well: a putting back made elsewhere after it by the clock,
+read there, loses to it. A putting back made while a sync is under way is
+stamped again as it ends, after what that sync read and sent, and a session
+put back by hand meanwhile, in that tab or window or in another on the
+device, is not let go by that sync, which planned with no note of it, even
+where sync is turned off before it ends: the next sends it as put back,
+where sync is on still. A putting back noted while sync knows nothing of
+the drive, as just after it is turned on anew, when what it knew before
+went with it, is stamped again after what the drive holds once its first
+sync reads it.
 
 One session can be two records: a backup restored on one device names each
 session where it finished (`RecordId::placed`), while the device it came

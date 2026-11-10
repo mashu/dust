@@ -527,13 +527,16 @@ pub async fn sync_once_with(
 }
 
 /// Note the deletions by hand made here that a build before this one,
-/// which noted none, left with no note: those of the sessions the drive
-/// held as deleted as this device last synced, each deleted by hand here
-/// and sent from here, or found deleted in the drive already. Each is noted
-/// with the drive's deletion, as this build notes one it finds the drive
-/// holding ([`Plan::deleted_too`]): a putting back the drive holds after it
-/// brings the session back here, rather than this device sending its
-/// deletion again. One put back here by hand since the last sync is left
+/// which noted none, left with no note: those of every record the drive
+/// held a deletion of as this device last synced, put back since or not,
+/// each deleted by hand here and sent from here, or found deleted in the
+/// drive already. A sync at which the store could not say which those are
+/// takes in what the drive holds all the same, a putting back after such a
+/// deletion among it, and the next looks for that deletion still. Each is
+/// noted with the drive's deletion, as this build notes one it finds the
+/// drive holding ([`Plan::deleted_too`]): a putting back the drive holds
+/// after it brings the session back here, rather than this device sending
+/// its deletion again. One put back here by hand since the last sync is left
 /// out: deleted again, it is a deletion by hand as any other. So is one
 /// made here after the drive's deletion, by this device's clock, which is
 /// the later word ([`Plan::send_deleted`]): should the drive put the
@@ -558,8 +561,7 @@ async fn note_deletions_by_hand(
         .keys()
         .copied()
         .filter(|&id| {
-            state.drive.deleted(id)
-                && !listed.contains(&id)
+            !listed.contains(&id)
                 && !state.applied.contains_key(&id)
                 && !state.revived.contains_key(&id)
                 && !twin_kept_here(id, listed)
@@ -594,10 +596,16 @@ async fn note_deletions_by_hand(
 /// device knew the drive to hold of its record before this sync read it,
 /// where that is later. So a putting back made elsewhere after it, by the
 /// clock, stands, though the deletion reaches the drive only after; and one
-/// this device knew of as it deleted the session does not. A twin let go
-/// here ([`twins`]) is no deletion by hand, though it has a tombstone: its
-/// deletion, sent again where the drive has its name put back, is made as
-/// it is sent, as it was as the twin was let go, after any putting back.
+/// this device knew of as it deleted the session does not. But where a
+/// sync before this one read the drive and did not send a deletion, as the
+/// store could not say which were deleted by hand, as that sync listed the
+/// history before the deletion was made, or as it was cut short as it
+/// sent, the deletion is stamped after what that sync read as well: a
+/// putting back made elsewhere after it, by the clock, that the sync read
+/// loses to it. A twin let go here ([`twins`]) is no deletion by hand,
+/// though it has a tombstone: its deletion, sent again where the drive has
+/// its name put back, is made as it is sent, as it was as the twin was let
+/// go, after any putting back.
 async fn planned(
     store: &dyn Store,
     drive: &DriveState,
