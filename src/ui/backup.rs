@@ -199,10 +199,11 @@ impl Restoring {
     /// Read `file` as a backup and restore what it holds, in a task of the
     /// app's own: the card says it is being read at once, and until it has
     /// been restored, and why not, if it could not be; with no card drawn
-    /// by then, a message does. Unless another file is chosen before it is
-    /// restored: then that one is, and nothing of this is said. The app
-    /// makes it in its turn ([`AppCtx::restore_backup`]): once no session
-    /// or run, nor another restore or the Undo of one, is under way.
+    /// by then, a message does, once no session or run has the app. Unless
+    /// another file is chosen before it is restored: then that one is, and
+    /// nothing of this is said. The app makes it in its turn
+    /// ([`AppCtx::restore_backup`]): once no session or run, nor another
+    /// restore or the Undo of one, is under way.
     fn start(self, ctx: AppCtx, file: PickedFile) {
         let Self {
             mut under_way,
@@ -248,6 +249,15 @@ impl Restoring {
                 Ok(backup) => backup,
                 Err(why) => {
                     under_way.set(None);
+                    // No card is drawn over a session or run, and no
+                    // message is said over it either: it is said once that
+                    // is over, where a card is drawn by then, on the card.
+                    while *cards.peek() == 0 && ctx.session_running() {
+                        crate::time::sleep_ms(SESSION_WAIT_MS).await;
+                    }
+                    if !chosen_last() {
+                        return;
+                    }
                     if *cards.peek() > 0 {
                         problem.set(Some(why));
                     } else {

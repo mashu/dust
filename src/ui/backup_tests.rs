@@ -551,6 +551,33 @@ fn a_file_found_no_backup_once_its_tab_is_left_is_said_in_a_message() {
     });
 }
 
+/// A file that is no backup, read once a session is under way, is said in
+/// a message once the session is over: no card is drawn over the session
+/// to say it, and no message is either. It was said over the session, as
+/// soon as it was read.
+#[test]
+fn a_file_found_no_backup_during_a_session_is_said_once_it_is_over() {
+    run(|| async {
+        let mut ui = open(MemoryStore::default(), &history(2));
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "notes.txt", "hello", 5);
+        ui.click("nav-practice");
+        ui.click("btn-start-training");
+        ui.hold_file_reads(false);
+        let said = "notes.txt is not a Dust backup: nothing was restored.";
+        for _ in 0..3 {
+            ui.advance(1_000).await;
+            let toast = ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+            assert_ne!(toast.as_deref(), Some(said), "not over the session");
+        }
+        ui.click("btn-end-session");
+        ui.advance(1_100).await;
+        let toast = ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+        assert_eq!(toast.as_deref(), Some(said), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 2);
+    });
+}
+
 /// One backup is restored at a time: another chosen while one is read takes
 /// its place, the card saying at once that it is the one read, and it alone
 /// is restored, whenever the first is done. Both were read, and the first
