@@ -1374,25 +1374,59 @@ pub(super) mod tests {
 
     /// A mark's lock file that cannot be opened to be locked, a folder where
     /// it goes say, or one its copy took away between the look's listing
-    /// and the open, is passed over: the look takes every other mark, and
-    /// leaves that one where it is.
+    /// and the open, is passed over: the look takes every other mark, one
+    /// listed after it as well as one before, and leaves it where it is.
+    /// The look goes through the folder in the order the disk lists it: by
+    /// name, by when each was made, or by a hash of each name, as ext4 does.
+    /// So marks and such locks are made in turn until the disk lists one of
+    /// the locks before a mark, and a look that stopped at the first lock it
+    /// could not open leaves that mark, whatever the order. With two such
+    /// locks beside one mark, it was caught only where a hash order happened
+    /// to list one of them first.
     #[test]
     fn a_mark_whose_lock_cannot_be_opened_is_passed_over() {
-        let (dir, cut) = store("open-lock-unopened");
-        cut.mark_open(Some(open_at(7)));
-        drop(cut);
-        let next = DesktopStore::at(dir.0.clone());
-        let odd: Vec<PathBuf> = ["0000000000000001", "ffffffffffffffff"]
-            .iter()
-            .map(|id| next.mark_path(id, "lock"))
-            .collect();
-        for odd in &odd {
-            fs::create_dir(odd).unwrap();
+        let dir = TempDir::new("open-lock-unopened");
+        let listed = || -> Vec<PathBuf> {
+            fs::read_dir(dir.0.join(OPEN))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect()
+        };
+        // Whether the disk lists the first of `odd` before the last of
+        // `marks`.
+        let odd_first = |marks: &[PathBuf], odd: &[PathBuf]| {
+            let listed = listed();
+            let at = |path: &PathBuf| listed.iter().position(|listed| listed == path);
+            let first_odd = odd.iter().map(|odd| at(odd).expect("listed")).min();
+            let last_mark = marks.iter().map(|mark| at(mark).expect("listed")).max();
+            first_odd < last_mark
+        };
+        let (mut marks, mut odd) = (Vec::new(), Vec::new());
+        for n in 1..=64 {
+            let cut = DesktopStore::at(dir.0.clone());
+            cut.mark_open(Some(open_at(n)));
+            marks.push(cut.mark_path(&own_id(&cut), "lock"));
+            odd.push(cut.mark_path(&format!("{n:016x}"), "lock"));
+            drop(cut);
+            fs::create_dir(odd.last().unwrap()).unwrap();
+            if odd_first(&marks, &odd) {
+                break;
+            }
         }
-        assert_eq!(
-            cuts(&now(next.take_cut_off())),
-            [CutOff::Marked(open_at(7))],
-            "the mark beside them taken"
+        assert!(
+            odd_first(&marks, &odd),
+            "one listed before a mark: {:?}",
+            listed()
+        );
+        let next = DesktopStore::at(dir.0.clone());
+        let taken = cuts(&now(next.take_cut_off()));
+        let made: Vec<CutOff> = (1..=marks.len() as u64)
+            .map(|n| CutOff::Marked(open_at(n)))
+            .collect();
+        assert!(
+            taken.len() == made.len() && made.iter().all(|made| taken.contains(made)),
+            "every mark beside them taken, {} made: {taken:?}",
+            made.len()
         );
         assert!(odd.iter().all(|odd| odd.is_dir()), "left where they are");
     }
