@@ -2288,7 +2288,7 @@ mod tests {
             noted,
             "left as it was at a launch"
         );
-        assert_eq!(files.read(&[first.id]), [Ok(first.clone())]);
+        assert_eq!(files.read(&[first.id]), [Ok(first)]);
         assert_eq!(fs::read(&told).unwrap(), noted, "and at a look");
     }
 
