@@ -93,7 +93,11 @@ const FAILING: &str = "failing.json";
 /// until each reads, or is gone. No build before this one writes it, so a
 /// record such a build told of in [`TOLD`], which it does of every record
 /// it could not open, a moment's failure among them, holds back none of
-/// this build's notices of a failure of its own.
+/// this build's notices of a failure of its own. Each is noted in [`TOLD`]
+/// as well, where such a build looks, so that it does not tell of it a
+/// second time: that note only gains names, so such a build, used alone,
+/// says nothing of one that reads since and fails again, which this build
+/// tells of.
 const UNREAD_TOLD: &str = "unread-told.json";
 /// The records this build told of as damaged, or as a newer Dust's
 /// ([`HistoryNotice::Damaged`], [`HistoryNotice::Later`]), by name, until
@@ -1177,14 +1181,17 @@ impl HistoryFiles {
         }
         // What it noted, with what it tells of now, whether or not there is
         // anything new to tell: what a build before this one noted there
-        // stays.
+        // stays. A failure told of, now or before, is noted there too,
+        // where such a build looks, so that it does not tell of it again.
         let told_before = names_noted(told.as_deref());
         let names: BTreeSet<String> = told_before
             .iter()
             .cloned()
             .chain(unread_now.iter().map(|(id, _)| id.name()))
+            .chain(failed_now.iter().map(|(id, _)| id.name()))
             .collect();
-        if names.len() != told_before.len() {
+        let told_more = names.len() != told_before.len();
+        if told_more {
             let _ = serde_json::to_vec(&names)
                 .map_err(io::Error::other)
                 .and_then(|raw| write_whole(&self.dir, TOLD, &raw));
@@ -1214,8 +1221,9 @@ impl HistoryFiles {
         // Of the records this build cannot read, every one it cannot read
         // now, told of now or before, and every one it told of that fails
         // now: one that reads, or is gone, is told of no more. Written the
-        // first time where told.json is there, though it names none, so
-        // that told.json stands for it no more.
+        // first time where told.json is there, or this build writes it,
+        // though it names none, so that told.json stands for it no more:
+        // what this build notes there is no build before's.
         let damaged_before = names_noted(damaged_told.as_deref());
         let damaged_now: BTreeSet<String> = unread_now
             .iter()
@@ -1231,7 +1239,7 @@ impl HistoryFiles {
             || damaged_now
                 .iter()
                 .any(|name| !damaged_before.contains(name));
-        let first = damaged_told.is_none() && told.is_some();
+        let first = damaged_told.is_none() && (told.is_some() || told_more);
         if first || changed {
             let _ = serde_json::to_vec(&damaged_now)
                 .map_err(io::Error::other)
@@ -1254,10 +1262,12 @@ impl HistoryFiles {
     /// at any of the app's tries since it found them so: of those this build
     /// has not told of before ([`UNREAD_TOLD`]), how many
     /// ([`HistoryNotice::Unread`]), each noted as told, where this build may
-    /// write, so it is told of once ([`super::Store::still_unread`]). What
-    /// a build before this one noted of one in [`TOLD`] holds back nothing:
-    /// such a build notes there every record it could not open, a moment's
-    /// failure among them, and one that has read since fails now on its own.
+    /// write, so it is told of once ([`super::Store::still_unread`]), and in
+    /// [`TOLD`] too, so that a build before formats does not tell of it
+    /// again. What a build before this one noted of one in [`TOLD`] holds
+    /// back nothing: such a build notes there every record it could not
+    /// open, a moment's failure among them, and one that has read since
+    /// fails now on its own.
     pub(super) fn still_unread(&self, ids: &[RecordId]) -> Vec<HistoryNotice> {
         self.on_its_thread();
         let told = fs::read(self.dir.join(UNREAD_TOLD)).ok();
@@ -1269,6 +1279,24 @@ impl HistoryFiles {
             names.extend(ids.iter().map(|id| id.name()));
             if let Ok(raw) = serde_json::to_vec(&names) {
                 let _ = write_whole(&self.dir, UNREAD_TOLD, &raw);
+            }
+            // Noted where a build before formats looks too ([`TOLD`]), so
+            // such a build does not tell of it a second time.
+            let mut older: BTreeSet<String> =
+                names_noted(fs::read(self.dir.join(TOLD)).ok().as_deref())
+                    .into_iter()
+                    .collect();
+            let held = older.len();
+            older.extend(ids.iter().map(|id| id.name()));
+            if older.len() != held
+                && let Ok(raw) = serde_json::to_vec(&older)
+            {
+                let _ = write_whole(&self.dir, TOLD, &raw);
+                // What this build notes there stands for no note of damage
+                // of its own ([`DAMAGED_TOLD`]): from here on that note does.
+                if !self.dir.join(DAMAGED_TOLD).exists() {
+                    let _ = write_whole(&self.dir, DAMAGED_TOLD, b"[]");
+                }
             }
             // Noted failing as well, as this build's failures: told of no
             // more once they read ([`Self::note_no_more`], [`Self::tell`]).
@@ -2426,6 +2454,80 @@ mod tests {
         assert!(
             noted.contains(&first.id.name()),
             "the older build's note stays: {noted:?}"
+        );
+    }
+
+    /// A record this build told of as one that could not be read, after
+    /// the app's tries or at the launch after, is noted as told in told.json
+    /// too, where a build before formats (0.16.9, 95aa091) looks: such a
+    /// build tells of each record it cannot open that told.json does not
+    /// name. Noted in unread-told.json alone, which no such build reads, it
+    /// was told of a second time by such a build as it next opened while
+    /// the record still could not be read.
+    #[test]
+    fn a_record_this_build_told_of_as_unread_is_not_told_of_again_by_an_older_build() {
+        let fails = |name: &str| {
+            let (dir, files) = history(name);
+            files.load();
+            let busy = record(&finished(2_000));
+            files.apply(&put(std::slice::from_ref(&busy)));
+            let path = dir.0.join(HISTORY).join(RECORDS).join(file_name(busy.id));
+            fs::remove_file(&path).unwrap();
+            fs::create_dir_all(&path).unwrap();
+            (dir, busy)
+        };
+        // What 0.16.9 and 95aa091 go by as they open.
+        let an_older_build_tells_of = |dir: &TempDir, busy: &Record| {
+            !names_noted(fs::read(dir.0.join(HISTORY).join(TOLD)).ok().as_deref())
+                .contains(&busy.id.name())
+        };
+        let told = [HistoryNotice::Unread { count: 1 }];
+        // Told of after the app's tries.
+        let (dir, busy) = fails("told-here-after-tries");
+        let files = Files::at(&dir.0);
+        assert_eq!(files.load().failed, [busy.id]);
+        assert_eq!(files.still_unread(&[busy.id]), told);
+        assert!(
+            !an_older_build_tells_of(&dir, &busy),
+            "not again by an older build, after the tries"
+        );
+        // Told of at the launch after, the app closed before its tries were
+        // over.
+        let (dir, busy) = fails("told-here-at-launch");
+        assert_eq!(Files::at(&dir.0).load().notices, []);
+        assert_eq!(Files::at(&dir.0).load().notices, told);
+        assert!(
+            !an_older_build_tells_of(&dir, &busy),
+            "nor after the launch that told of it"
+        );
+    }
+
+    /// A record this build told of as one that could not be read, its name
+    /// noted in told.json for builds before formats, that is found damaged
+    /// at a later launch is told of as damaged: told.json stands for this
+    /// build's note of damage only for what such a build noted there, not
+    /// for what this build noted itself.
+    #[test]
+    fn a_record_this_build_told_of_as_unread_that_is_damaged_since_is_told_of_as_damaged() {
+        let (dir, files) = history("told-unread-then-damaged");
+        files.load();
+        let busy = record(&finished(2_000));
+        files.apply(&put(std::slice::from_ref(&busy)));
+        let path = dir.0.join(HISTORY).join(RECORDS).join(file_name(busy.id));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir_all(&path).unwrap();
+        let files = Files::at(&dir.0);
+        assert_eq!(files.load().failed, [busy.id]);
+        assert_eq!(
+            files.still_unread(&[busy.id]),
+            [HistoryNotice::Unread { count: 1 }]
+        );
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, "{ cut short").unwrap();
+        assert_eq!(
+            Files::at(&dir.0).load().notices,
+            [HistoryNotice::Damaged { count: 1 }],
+            "told of as damaged"
         );
     }
 

@@ -877,9 +877,11 @@ settings (`src/persist/files.rs`):
 - `layout.json`: how the history is kept, `{"layout": 1, "compatible": 1,
   …}`, and what the move from `sessions.json` took of it, written last.
 - `told.json`: the records this build cannot read and has said so of,
-  each as a newer Dust's or as damaged. A build before records' formats
-  notes there every record it could not open, a moment's failure among
-  them, and every one it could not make out, and those stay.
+  each as a newer Dust's or as damaged, and those it has said could not be
+  read, so a build before records' formats, which goes by this note alone,
+  does not tell of them again. Such a build notes there every record it
+  could not open, a moment's failure among them, and every one it could
+  not make out, and those stay. It only gains names.
 - `damaged-told.json`: the records this build has said are damaged, or a
   newer Dust's, until each reads again or is gone: one that reads, then is
   damaged once more, is told of again, whatever a build before noted of it
