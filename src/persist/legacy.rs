@@ -520,7 +520,7 @@ pub(super) struct Fingerprint {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Gate {
     /// Moved, in a layout this build writes.
-    Open(Layout),
+    Open(Box<Layout>),
     /// Not moved yet: there is no layout. Records are still read and
     /// written; the move is made when it can be.
     Unmoved,
@@ -549,7 +549,7 @@ impl Gate {
         match held.get("compatible").and_then(serde_json::Value::as_u64) {
             Some(compatible) if compatible > COMPATIBLE => Self::Newer,
             Some(_) => serde_json::from_value(serde_json::Value::Object(held))
-                .map_or(Self::Unread, Self::Open),
+                .map_or(Self::Unread, |layout| Self::Open(Box::new(layout))),
             None => Self::Unread,
         }
     }
@@ -1737,7 +1737,7 @@ mod tests {
         let Gate::Open(layout) = Gate::of(Some(raw.to_string().as_bytes())) else {
             panic!("a layout this build writes to: {raw}");
         };
-        layout
+        *layout
     }
 
     /// A move made with the clock ten years ahead leaves what an older build
@@ -2072,7 +2072,7 @@ mod tests {
         let (_, none) = moved(&[], None, &[], T);
         assert_eq!(none.taken_legacy, Some(None));
         let raw = none.written().expect("written");
-        assert_eq!(Gate::of(Some(&raw)), Gate::Open(none));
+        assert_eq!(Gate::of(Some(&raw)), Gate::Open(Box::new(none)));
     }
 
     /// What the take-up took is kept through every write of the layout: by
@@ -2096,7 +2096,7 @@ mod tests {
             held["deletionsTaken"],
             serde_json::json!({"seen": T + 1, "taken": [[gone.timestamp, gone.date, T + 1]]})
         );
-        assert_eq!(Gate::of(Some(&raw)), Gate::Open(layout));
+        assert_eq!(Gate::of(Some(&raw)), Gate::Open(Box::new(layout)));
         let without = earlier(serde_json::json!({"layout": 1, "compatible": 1, "migratedAt": 5}));
         assert_eq!(without.taken_through, None);
         assert_eq!(without.deletions_taken, None);

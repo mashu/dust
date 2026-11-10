@@ -153,7 +153,7 @@ impl Fake {
     fn layout(&self) -> Option<Layout> {
         let raw = self.db.borrow().meta.get("layout").cloned()?;
         match Gate::of(Some(raw.as_bytes())) {
-            Gate::Open(layout) => Some(layout),
+            Gate::Open(layout) => Some(*layout),
             gate => panic!("{gate:?}"),
         }
     }

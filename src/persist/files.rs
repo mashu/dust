@@ -320,7 +320,7 @@ impl HistoryFiles {
         // How the history is kept, once moved, and whether this build may
         // write to it at all.
         let (layout, writable) = match self.gate() {
-            Ok(Gate::Open(layout)) => (Some(layout), true),
+            Ok(Gate::Open(layout)) => (Some(*layout), true),
             Ok(Gate::Unmoved) => match self.migrate(&mut load) {
                 Ok(layout) => (Some(layout), true),
                 Err(why) => {

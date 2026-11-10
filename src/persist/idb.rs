@@ -350,7 +350,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             Gate::of(head.layout.as_deref().map(str::as_bytes))
         };
         let layout = match gate {
-            Gate::Open(layout) => head.layout.clone().map(|raw| (layout, raw)),
+            Gate::Open(layout) => head.layout.clone().map(|raw| (*layout, raw)),
             Gate::Newer => {
                 self.writable.set(false);
                 load.notices.push(HistoryNotice::Newer);
@@ -628,7 +628,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         };
         match Gate::of(head.layout.as_deref().map(str::as_bytes)) {
             Gate::Open(layout) => {
-                self.layout.replace(head.layout.map(|raw| (layout, raw)));
+                self.layout.replace(head.layout.map(|raw| (*layout, raw)));
             }
             Gate::Newer => self.writable.set(false),
             Gate::Unmoved | Gate::Unread => {}
