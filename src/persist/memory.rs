@@ -57,6 +57,9 @@ pub struct MemoryStore {
     pub legacy_aside: RefCell<Vec<String>>,
     /// The records this build could not read and has told of.
     told: RefCell<BTreeSet<RecordId>>,
+    /// How many times the store was asked to tell of records still unread
+    /// after every try ([`Store::still_unread`]).
+    pub still_unread_asks: Cell<usize>,
     /// The records that could not be read at all as the history was last
     /// read: one that still cannot be read at the next read is told of
     /// then, as the files tell of it.
@@ -751,6 +754,7 @@ impl Store for MemoryStore {
 
     /// As the files tell of them: once each.
     fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
+        self.still_unread_asks.set(self.still_unread_asks.get() + 1);
         let mut told = self.told.borrow_mut();
         let new: Vec<RecordId> = ids.into_iter().filter(|id| !told.contains(id)).collect();
         told.extend(new.iter().copied());

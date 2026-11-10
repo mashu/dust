@@ -4744,6 +4744,93 @@ mod tests {
         });
     }
 
+    /// A record that could not be read as the app opened, and reads only
+    /// at the last try ([`READ_AGAIN_MS`]), is shown then, and nothing is
+    /// told of it: the store is not even asked to tell of what is still
+    /// unread, as nothing is.
+    #[test]
+    fn a_record_that_reads_at_the_last_try_is_told_of_by_no_one() {
+        crate::testing::run(|| async {
+            let (store, _) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            let (before, last) = (READ_AGAIN_MS[1], READ_AGAIN_MS[2]);
+            a.advance(u64::from(before) + 500).await;
+            assert_eq!(a.shown(), [1], "not read at the tries before");
+            store.held_open.borrow_mut().clear();
+            a.advance(u64::from(last - before) + 1_000).await;
+            assert_eq!(a.shown(), [1, 2], "read at the last");
+            assert_eq!(a.notices(), []);
+            assert_eq!(store.still_unread_asks.get(), 0, "nothing to tell of");
+        });
+    }
+
+    /// A record told of as one that could not be read, after every try,
+    /// that is deleted in another copy of the app, which could read it, and
+    /// put back there by Undo, is one that could not be read for now once
+    /// more, if this copy's next look finds it so: told of no more, it is
+    /// read again on its own soon after, as any is. It stayed counted as
+    /// told of, and was read again by no try.
+    #[test]
+    fn a_record_told_of_then_gone_and_back_unread_is_read_again_soon() {
+        crate::testing::run(|| async {
+            let (store, busy) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            let last = u64::from(READ_AGAIN_MS[READ_AGAIN_MS.len() - 1]);
+            a.advance(last + 1_000).await;
+            let told = HistoryNotice::Unread { count: 1 }.text();
+            assert_eq!(a.notices(), [Notice::History(told)], "told of");
+            store.held_open.borrow_mut().clear();
+            let b = Tab::on(&store);
+            b.delete(2);
+            a.sync();
+            assert!(
+                a.act(|ctx| ctx.unread_for_now.peek().is_empty()),
+                "gone, as this copy's look finds"
+            );
+            b.act(AppCtx::undo_delete);
+            store.held_open.borrow_mut().insert(busy);
+            a.sync();
+            assert!(a.act(|ctx| ctx.unread_for_now.peek().contains(&busy)));
+            assert_eq!(a.shown(), [1]);
+            store.held_open.borrow_mut().clear();
+            a.advance(u64::from(READ_AGAIN_MS[0]) + 500).await;
+            assert_eq!(a.shown(), [1, 2], "read again on its own");
+        });
+    }
+
+    /// A session cut off handed again to wait for a record that cannot be
+    /// read for now, as the look each session's start makes for sessions
+    /// cut off may hand it, waits once; and is kept once, should the record
+    /// never read, once it is told of.
+    #[test]
+    fn a_session_cut_off_handed_twice_to_wait_for_an_unread_record_waits_once() {
+        crate::testing::run(|| async {
+            let (store, _) = holding_busy([1], 2);
+            let mut a = Tab::on(&store);
+            let so_far = || SoFar {
+                result: day(2),
+                settings: None,
+            };
+            a.act(|ctx| ctx.wait_for_unread(vec![so_far()]));
+            a.act(|ctx| ctx.wait_for_unread(vec![so_far(), so_far()]));
+            let waiting = |a: &Tab| a.act(|ctx| days_waiting(&ctx.cut_off_waiting.peek()));
+            assert_eq!(waiting(&a), [2], "held once");
+            let tries: u32 = READ_AGAIN_MS.iter().sum();
+            a.advance(u64::from(tries) + 1_000).await;
+            assert_eq!(waiting(&a), Vec::<u64>::new());
+            assert_eq!(a.shown(), [1, 2], "kept once, beside its record");
+        });
+    }
+
+    /// The days of the sessions cut off that wait for a record the store
+    /// could not read for now.
+    fn days_waiting(waiting: &[(SoFar, BTreeSet<RecordId>)]) -> Vec<u64> {
+        waiting
+            .iter()
+            .map(|(so_far, _)| so_far.result.timestamp / stamp(1))
+            .collect()
+    }
+
     /// The record of day 2 in the files in a folder, a folder in its place
     /// for now, which cannot be read as one, as a file another program holds
     /// open for a moment cannot be; the records folder's time of change set
@@ -4845,6 +4932,31 @@ mod tests {
             a.advance(u64::from(READ_AGAIN_MS[0]) + 500).await;
             assert_eq!(a.shown(), [1, 2], "read again on its own");
             assert_eq!(a.notices(), []);
+        });
+    }
+
+    /// On the files themselves: a record that still cannot be read after
+    /// every try is told of then, once, and the files note it as told of,
+    /// so that the next launch, which finds it unread still, tells nothing
+    /// of it.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_still_unread_after_every_try_is_told_of_once() {
+        crate::testing::run(|| async {
+            let dir = TempDir::new("busy-told-once");
+            let _busy = BusyFile::of_day_2(&dir);
+            let mut a = Tab::on_store(crate::persist::files_at(&dir.0));
+            assert_eq!(a.notices(), [], "not as the app opens");
+            let last = u64::from(READ_AGAIN_MS[READ_AGAIN_MS.len() - 1]);
+            a.advance(last + 1_000).await;
+            let told = HistoryNotice::Unread { count: 1 }.text();
+            assert_eq!(a.notices(), [Notice::History(told.clone())]);
+            a.advance(2 * last).await;
+            assert_eq!(a.notices(), [Notice::History(told)], "once");
+            drop(a);
+            let b = Tab::on_store(crate::persist::files_at(&dir.0));
+            assert_eq!(b.notices(), [], "nor at the next launch");
+            assert_eq!(b.shown(), [1]);
         });
     }
 
