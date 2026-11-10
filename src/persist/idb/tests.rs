@@ -1203,3 +1203,47 @@ fn a_move_made_again_writes_no_session_twice() {
         moved
     );
 }
+
+/// A session an older build stored in the history kept whole after a move
+/// made long after the sessions it took, which a build before this one's
+/// take-up rules looked at first, is taken up here, as the page opens and
+/// as the history is listed. Such a build (0.16.9) takes up by its own
+/// rules, which leave it out, and writes the layout back with `legacy`
+/// moved on, `takenLegacy`, this build's note, left as it was. Gated by
+/// `legacy`, the change looked taken up already.
+#[test]
+fn a_change_an_older_build_looked_at_first_is_taken_up_in_a_browser() {
+    let before = [ago(30), ago(20)];
+    let page = Page::holding(&before);
+    let fake = Fake::on(&page);
+    opened(&fake).load();
+    let older_looks = |fake: &Fake| {
+        let raw = page.held(KEYS.history).expect("held");
+        let mut shelves = fake.shelves();
+        let mut layout: serde_json::Value =
+            serde_json::from_str(&shelves.meta["layout"]).expect("a layout");
+        layout["legacy"] = serde_json::to_value(fingerprint_of(&raw)).expect("JSON");
+        let written = serde_json::to_string_pretty(&layout).expect("JSON");
+        shelves.meta.insert("layout".into(), written);
+    };
+    let since = ago(10);
+    page.keep(&[before[0].clone(), before[1].clone(), since.clone()]);
+    older_looks(&fake);
+    assert_eq!(
+        opened(&fake).load().sessions.len(),
+        3,
+        "taken up as the page opens"
+    );
+    // Another, as the history is listed.
+    let tab = opened(&fake);
+    tab.load();
+    page.keep(&[before[0].clone(), before[1].clone(), since, ago(9)]);
+    older_looks(&fake);
+    assert!(tab.changed(), "the history kept whole changed");
+    done(tab.listing());
+    assert_eq!(
+        done(tab.listing()).map(|listed| listed.len()),
+        Some(4),
+        "and as it is listed"
+    );
+}

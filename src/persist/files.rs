@@ -3344,6 +3344,52 @@ mod tests {
         );
     }
 
+    /// A session an older build stored in the history kept whole after a
+    /// move made long after the sessions it took, which a build before this
+    /// one's take-up rules looked at first, is taken up as the history is
+    /// next read here, and as it is next listed. Such a build (0.16.9)
+    /// takes up by its own rules, which leave it out, and writes the layout
+    /// back with `legacy` moved on to the history kept whole as it took it,
+    /// `takenLegacy`, this build's note, left as it was. Gated by `legacy`,
+    /// the change looked taken up already, and imported() was never asked.
+    #[test]
+    fn a_change_an_older_build_looked_at_first_is_taken_up_as_the_history_is_read() {
+        let dir = TempDir::new("older-looked-first");
+        let now = crate::time::now_ms();
+        let old = [finished(now - 30 * DAY), finished(now - 20 * DAY)];
+        keep_whole(&dir, &old);
+        Files::at(&dir.0).load();
+        let older_looks = || {
+            let path = dir.0.join(HISTORY).join(LAYOUT_FILE);
+            let mut layout: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let whole = fingerprint_of(&dir.0.join(SESSIONS)).unwrap();
+            layout["legacy"] = serde_json::to_value(whole).unwrap();
+            fs::write(&path, serde_json::to_vec_pretty(&layout).unwrap()).unwrap();
+        };
+        // A copy of a build before records, left open, stores a session it
+        // finished ten days ago, and an older build looks first.
+        let since = finished(now - 10 * DAY);
+        keep_whole(&dir, &[old[0].clone(), old[1].clone(), since.clone()]);
+        older_looks();
+        assert_eq!(
+            stamps(&Files::at(&dir.0).load()),
+            [old[0].timestamp, old[1].timestamp, since.timestamp],
+            "taken up as the history is read"
+        );
+        // Another, as the history is next listed.
+        let files = Files::at(&dir.0);
+        files.load();
+        let later = finished(now - 9 * DAY);
+        keep_whole(&dir, &[old[0].clone(), old[1].clone(), since, later]);
+        older_looks();
+        assert_eq!(
+            files.listing().expect("a listing").len(),
+            4,
+            "and as it is listed"
+        );
+    }
+
     /// A session a record here holds is not taken up from the history an
     /// older build keeps whole while that record cannot be read for now, as
     /// a file another program holds open cannot be: the record may be that
