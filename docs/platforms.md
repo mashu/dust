@@ -794,7 +794,9 @@ neither: it is read again at every look at the history, and on its own two,
 ten and sixty seconds after it was found so; one that still cannot be read
 at the last, or as the app opens again, is told of once, as one that could
 not be read, and a restore asked for meanwhile is refused once, as the
-backup could store its session a second time. Settings that do not read at all, a `settings.json` edited by hand
+backup could store its session a second time. One that reads after it was
+told of, then fails once more, is told of again: a failure of its own.
+Settings that do not read at all, a `settings.json` edited by hand
 and left with a stray comma say, are set aside before the defaults the app
 opens with are written over them: `settings.unreadable-*.json` beside it, or
 `dust_settings_unreadable` in a browser. So are the sessions of a history
@@ -854,7 +856,8 @@ settings (`src/persist/files.rs`):
 - `layout.json`: how the history is kept, `{"layout": 1, "compatible": 1,
   …}`, and what the move from `sessions.json` took of it, written last.
 - `told.json`: the records this build cannot read and has said so of,
-  each as a newer Dust's, as damaged, or as one that could not be read.
+  each as a newer Dust's, as damaged, or as one that could not be read;
+  one of the last that reads again is noted no more.
 - `failing.json`: the records that could not be read at all as the history
   was last read whole, and have not read since, so that one that still
   cannot be read at the next launch is told of then.

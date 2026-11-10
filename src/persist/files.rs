@@ -608,40 +608,47 @@ impl HistoryFiles {
             .zip(ids)
             .map(|(raw, &id)| raw.record(id))
             .collect();
-        self.failing_no_longer(read.iter().filter_map(|read| match read {
-            Ok(record) => Some(record.id),
-            Err(Unopened::Damaged(id)) => Some(*id),
-            Err(Unopened::Failed(_)) => None,
-        }));
+        let read_now: HashSet<String> = read
+            .iter()
+            .filter_map(|read| read.as_ref().ok().map(|record| record.id.name()))
+            .collect();
+        let damaged = read.iter().filter_map(|read| match read {
+            Err(Unopened::Damaged(id)) => Some(id.name()),
+            _ => None,
+        });
+        let failing_no_longer: HashSet<String> = read_now.iter().cloned().chain(damaged).collect();
+        self.note_no_more(FAILING, &failing_no_longer);
+        self.note_no_more(TOLD, &read_now);
         read
     }
 
-    /// Note that `read`, records just read, fail no longer ([`FAILING`]):
-    /// one of them that fails for a moment again as the history is next
-    /// read whole, at a later launch, is not told of then, as one that
-    /// failed at the last read and has not read since is ([`Self::tell`]).
-    /// Noted only where this build may write to the history, as the note is
-    /// made.
-    fn failing_no_longer(&self, read: impl IntoIterator<Item = RecordId>) {
-        let failing = self.dir.join(FAILING);
-        let Ok(raw) = fs::read(&failing) else {
+    /// Take `gone`, records by name, out of `note`, a note of records this
+    /// build could not read: [`FAILING`], as those just read, or found
+    /// damaged, fail no longer, so that one of them that fails for a moment
+    /// again as the history is next read whole, at a later launch, is not
+    /// told of then, as one that failed at the last read and has not read
+    /// since is ([`Self::tell`]); and [`TOLD`], as those just read are told
+    /// of no more, so that one that fails again after, a failure of its
+    /// own, is told of in turn ([`Self::still_unread`]). Taken out only
+    /// where this build may write to the history, as the note is made; a
+    /// note that names none of them is left as it is, and one left naming
+    /// none is removed.
+    fn note_no_more(&self, note: &str, gone: &HashSet<String>) {
+        let path = self.dir.join(note);
+        let Ok(raw) = fs::read(&path) else {
             return;
         };
         let noted = names_noted(Some(&raw));
-        let mut left: BTreeSet<&String> = noted.iter().collect();
-        let mut changed = false;
-        for id in read {
-            changed |= left.remove(&id.name());
-        }
-        if !changed || !matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved)) {
+        let left: BTreeSet<&String> = noted.iter().filter(|name| !gone.contains(*name)).collect();
+        if left.len() == noted.len() || !matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved)) {
             return;
         }
         let _ = if left.is_empty() {
-            remove_if_there(&failing)
+            remove_if_there(&path)
         } else {
             serde_json::to_vec(&left)
                 .map_err(io::Error::other)
-                .and_then(|raw| write_whole(&self.dir, FAILING, &raw))
+                .and_then(|raw| write_whole(&self.dir, note, &raw))
         };
     }
 
@@ -1059,7 +1066,8 @@ impl HistoryFiles {
     /// The note of those told of keeps each that failed and was told of
     /// before, as the app tells of one that still failed at its last try
     /// ([`Self::still_unread`]): dropped from it, one would be told of a
-    /// second time.
+    /// second time. One that reads now, or is gone, is dropped from it:
+    /// should it fail again, that is a failure of its own, told of in turn.
     fn tell(
         &self,
         unread: &[(RecordId, Unreadable)],
@@ -1084,21 +1092,26 @@ impl HistoryFiles {
         if !writable {
             return notices;
         }
-        if !notices.is_empty() {
-            let told_before = names_noted(told.as_deref());
-            let names: BTreeSet<String> = told_now
-                .iter()
-                .map(|(id, _)| id.name())
-                .chain(
-                    failed
-                        .iter()
-                        .map(|id| id.name())
-                        .filter(|name| told_before.contains(name)),
-                )
-                .collect();
-            if let Ok(raw) = serde_json::to_vec(&names) {
-                let _ = write_whole(&self.dir, TOLD, &raw);
-            }
+        let told_before = names_noted(told.as_deref());
+        let names: BTreeSet<String> = told_now
+            .iter()
+            .map(|(id, _)| id.name())
+            .chain(
+                failed
+                    .iter()
+                    .map(|id| id.name())
+                    .filter(|name| told_before.contains(name)),
+            )
+            .collect();
+        if names.len() != told_before.len() || names.iter().any(|name| !told_before.contains(name))
+        {
+            let _ = if names.is_empty() {
+                remove_if_there(&path)
+            } else {
+                serde_json::to_vec(&names)
+                    .map_err(io::Error::other)
+                    .and_then(|raw| write_whole(&self.dir, TOLD, &raw))
+            };
         }
         let failing_now: HashSet<String> = failed.iter().map(|id| id.name()).collect();
         if failing_now != failed_before {
@@ -2172,6 +2185,46 @@ mod tests {
         let read = Files::at(&dir.0).load();
         assert_eq!(read.failed, [busy.id]);
         assert_eq!(read.notices, [], "nor at the next launch");
+    }
+
+    /// A record told of as one that could not be read, which then reads,
+    /// at a later launch or at one of the app's tries, and fails again
+    /// after, is told of again, once: that is a failure of its own. The
+    /// note of those told of kept it for good, as it was rewritten only to
+    /// note one more, and it was never told of again.
+    #[test]
+    fn a_record_told_of_as_unread_that_reads_and_fails_again_is_told_of_again() {
+        let (dir, files) = history("told-read-failed");
+        files.load();
+        let busy = record(&finished(2_000));
+        let path = dir.0.join(HISTORY).join(RECORDS).join(file_name(busy.id));
+        let hold = || {
+            let _ = fs::remove_file(&path);
+            fs::create_dir_all(&path).unwrap();
+        };
+        let free = || {
+            fs::remove_dir(&path).unwrap();
+            fs::write(&path, &busy.json).unwrap();
+        };
+        let told = [HistoryNotice::Unread { count: 1 }];
+        hold();
+        assert_eq!(files.load().notices, []);
+        assert_eq!(files.still_unread(&[busy.id]), told, "after every try");
+        // It reads at the next launch, and fails at the one after.
+        free();
+        assert_eq!(stamps(&Files::at(&dir.0).load()), [2_000]);
+        hold();
+        let files = Files::at(&dir.0);
+        assert_eq!(files.load().failed, [busy.id]);
+        assert_eq!(files.still_unread(&[busy.id]), told, "told of again");
+        assert_eq!(files.still_unread(&[busy.id]), [], "once");
+        // It reads at one of the app's tries, and fails at a later one.
+        free();
+        assert_eq!(files.read(&[busy.id]), [Ok(busy.clone())]);
+        hold();
+        assert_eq!(files.read(&[busy.id]), [Err(Unopened::Failed(busy.id))]);
+        assert_eq!(files.still_unread(&[busy.id]), told, "and again");
+        assert_eq!(files.still_unread(&[busy.id]), [], "once");
     }
 
     /// A record that could not be read as the history was read, and reads
