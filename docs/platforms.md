@@ -628,7 +628,14 @@ copy that stops lets go of its lock, however it stops: closed, crashed,
 killed, reloaded, or rebuilt under `dx serve`. So a mark nobody holds was cut
 off, and the app says so, once, on the screen it opens on, or once the
 session it starts next is over, if the window that was running it stopped
-meanwhile. A mark another window still holds is left to it. Each group
+meanwhile. A mark another window still holds is left to it. The copy that
+finds a mark cut off holds its lock in turn, and leaves it where it is
+until its own mark holds what the other carried, written and, on desktop
+and mobile, flushed to the disk then and there, a wait the app makes only
+after it has found a mark cut off; only then does it go. A copy that stops
+before that lets go of it as it stops, and the next copy to look finds it
+again: what a mark carried is in one mark or another all along, told of
+twice at worst and kept once. Each group
 answered, and each QSO logged, puts in the mark what Exit would keep were
 it pressed then; the history itself is written only once the session ends.
 A session the store has yet to take, for want of room say, rides along in
@@ -648,8 +655,10 @@ be held. In a browser they are `dust_open_session_<id>` in `localStorage`,
 each held by a Web Lock of the same name. The browser grants a lock a moment
 after it is asked for, so the mark goes in only once its lock is held, and
 under the lock a tab looking for marks holds while it looks; it goes again
-before its lock is let go of. A browser without Web Locks marks nothing,
-rather than take a tab still running for one cut off.
+before its lock is let go of. A tab that finds a mark cut off asks for its
+lock under that same look, and holds it until the mark can go. A browser
+without Web Locks marks nothing, rather than take a tab still running for
+one cut off.
 
 Copies of the app on one device sync one at a time, and lay what each did
 over what sync keeps one at a time ([sync.md](sync.md)). On desktop and

@@ -23,7 +23,7 @@ mod files;
 mod idb;
 mod legacy;
 mod lock;
-#[cfg(feature = "web")]
+#[cfg(any(feature = "web", test))]
 mod marks;
 #[cfg(test)]
 pub mod memory;
@@ -148,9 +148,19 @@ pub trait Store {
     /// stopped while it was marked was cut off ([`Store::take_cut_off`]).
     fn mark_open(&self, open: Option<OpenSession>);
     /// The sessions or runs copies of the app left marked open, and stopped
-    /// under: closed, crashed, killed, reloaded. Taken, so each is told of
-    /// once; one a copy is still running is left to it.
+    /// under: closed, crashed, killed, reloaded. One a copy is still running
+    /// is left to it, and so is one another copy took. Each taken is held by
+    /// this copy, and left where it is, until this copy lets go of it
+    /// ([`Store::release_cut_off`]): so each is told of once, and one this
+    /// copy stops under before it holds what the mark carried is taken
+    /// again by the next copy to look.
     fn take_cut_off(&self) -> CutOffTaking;
+    /// Let go of the marks this copy took ([`Store::take_cut_off`]). Those
+    /// `carried`, whose sessions this copy's mark holds now, as it was last
+    /// written, or the history does, go: once this copy's mark is as safe
+    /// as the store makes a mark, and, where it could not be written, once
+    /// it is. Those `left` are let go of as they are, for the next look.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>);
     /// The whole history, by record ([`record`]): moved first, where an
     /// older build kept it whole, and with whatever an older build stored
     /// there since taken up.
@@ -388,10 +398,35 @@ impl CutOff {
     }
 }
 
+/// A mark of a session or run cut off, by its name in the store: what a copy
+/// that took it lets go of it by ([`Store::release_cut_off`]). The mark's
+/// file name on a computer or a phone, its key in a browser.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MarkId(String);
+
+impl MarkId {
+    fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The mark's name in its store.
+    fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A mark of a session or run cut off, as a copy of the app took it, held
+/// by that copy until it lets go of it ([`Store::take_cut_off`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TakenMark {
+    pub id: MarkId,
+    pub cut: CutOff,
+}
+
 /// The sessions cut off, being looked for: already, or still, where only the
 /// platform can tell which copies are running, as in a browser. Every one,
-/// for what each kept so far.
-pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<CutOff>>>>;
+/// for what each kept so far, by the mark it was told of in.
+pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<TakenMark>>>>;
 
 /// A backup file on its way: saved already, as a browser hands one over, or
 /// still being written on the history's own thread, as on a computer or a

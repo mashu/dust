@@ -38,7 +38,8 @@ use crate::persist::record::{
     HistoryChange, HistoryLoad, Record, RecordId, Unopened, Unreadable, read_record, unreadable,
 };
 use crate::persist::{
-    CutOff, Deleted, HistorySaved, OpenSession, SessionKey, SetAside, SoFar, Store, merge_settings,
+    CutOff, Deleted, HistorySaved, MarkId, OpenSession, SessionKey, SetAside, SoFar, Store,
+    TakenMark, merge_settings,
 };
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::time::{POLL_MS, now_ms, sleep_ms};
@@ -218,9 +219,10 @@ pub struct AppCtx {
     /// This copy's mark, as it was written last, while it holds one
     /// ([`Store::mark_open`]).
     mark: CopyValue<Option<OpenSession>>,
-    /// What the marks of sessions cut off carried, taken from the store as
-    /// they were told of, until the history holds it: this copy's mark
-    /// holds it meanwhile, as nothing else does ([`Self::tell_of_cut_off`]).
+    /// What the marks of sessions cut off carried, which went from the
+    /// store once this copy's mark held it, until the history holds it:
+    /// this copy's mark holds it meanwhile, as nothing else does
+    /// ([`Self::tell_of_cut_off`]).
     cut_off_carried: CopyValue<Vec<SessionResult>>,
     /// A try at storing what the store has yet to take is waiting
     /// ([`RETRY_MS`]).
@@ -498,11 +500,14 @@ impl AppCtx {
     /// though a copy open all along may not have taken it up yet. Told of
     /// as kept, it is not stored a second time.
     ///
-    /// The marks are taken from the store as they are told of, so what
-    /// they carry is held with this copy's mark at once, before the store
-    /// is taken up, which on a computer or a phone is a look on a thread of
-    /// its own, and in a browser a moment later still: until the history
-    /// holds it ([`keep_cut_off`]), nothing else does.
+    /// The marks this copy takes are held by it, and left in the store,
+    /// until what they carry is held with this copy's mark, at once, before
+    /// the store is taken up, which on a computer or a phone is a look on a
+    /// thread of its own, and in a browser a moment later still; then they
+    /// go ([`Store::release_cut_off`]). Until the history holds it
+    /// ([`keep_cut_off`]), this copy's mark does, and nothing else: a copy
+    /// that stops before its mark holds it leaves the marks to the next
+    /// copy to look.
     pub fn tell_of_cut_off(self) {
         // This copy's own mark, which it holds still, is no other copy's
         // cut off, whatever a store says of it.
@@ -512,15 +517,29 @@ impl AppCtx {
         // In the root scope: the press that starts a session leaves the
         // screen it was made on.
         dioxus::core::spawn_forever(async move {
-            let mut cut = looking.await;
-            cut.retain(|cut| !matches!(cut, CutOff::Marked(open) if Some(open.started_at) == own));
-            if cut.is_empty() {
+            let (own, others): (Vec<TakenMark>, Vec<TakenMark>) =
+                looking.await.into_iter().partition(|taken| {
+                    matches!(&taken.cut, CutOff::Marked(open) if Some(open.started_at) == own)
+                });
+            let left: Vec<MarkId> = own.into_iter().map(|taken| taken.id).collect();
+            let store = self.app().store;
+            if others.is_empty() {
+                store.release_cut_off(Vec::new(), left);
                 return;
             }
+            let (carried, cut): (Vec<MarkId>, Vec<CutOff>) = others
+                .into_iter()
+                .map(|taken| (taken.id, taken.cut))
+                .unzip();
             self.carry_cut_off(&cut);
+            // Held by this copy's mark now, or by the history: the marks
+            // that carried it go, before its level is counted, so that it
+            // is counted once.
+            store.release_cut_off(carried, left);
             // Kept whether or not the store could be listed: its marks are
-            // taken from it already, so what they carry is kept here or
-            // nowhere. Stored twice at worst, never lost.
+            // let go of already, so what they carry is kept here, as this
+            // copy's mark holds it, or nowhere. Stored twice at worst, never
+            // lost.
             self.sync_with_store(move |_listed| {
                 let told = {
                     let history = self.sessions.peek();
@@ -2517,7 +2536,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "native-runtime")]
     use crate::persist::TempDir;
-    use crate::persist::memory::{MemoryStore, PageShelf};
+    use crate::persist::memory::{MarkEvent, MemoryStore, PageShelf};
     use crate::persist::record::HistoryNotice;
 
     /// A copy of the app — a tab, or a window — on `store`, which other
@@ -4554,6 +4573,43 @@ mod tests {
         );
     }
 
+    /// A session cut off, whose mark a copy of the app took as it opened
+    /// and stopped under before it held anything of it, is kept by the next
+    /// copy to open, and told of there: the mark is left where it is until
+    /// the copy that took it holds what it carried. It used to be deleted
+    /// as it was taken, and the session was lost for good.
+    #[cfg(feature = "native-runtime")]
+    #[test]
+    fn a_session_cut_off_is_kept_though_the_copy_that_took_its_mark_stopped() {
+        let dir = TempDir::new("taken-then-stopped");
+        let tab = Tab::on_store(crate::persist::files_at(&dir.0));
+        let open = tab.act(|ctx| ctx.mark_running(false));
+        let so_far = SoFar {
+            result: day(2),
+            settings: None,
+        };
+        tab.act(|ctx| ctx.mark_so_far(&open, so_far));
+        tab.act(AppCtx::mark_kept);
+        drop(tab);
+
+        // Takes the mark as it opens, and stops before it does anything
+        // with it.
+        let took = Tab::on_store(crate::persist::files_at(&dir.0));
+        took.act(AppCtx::tell_of_cut_off);
+        drop(took);
+
+        let mut next = Tab::on_store(crate::persist::files_at(&dir.0));
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert_eq!(next.shown(), [2], "kept from its mark");
+        assert!(
+            matches!(&next.notices()[..], [Notice::CutOff(CutOff::Marked(open))] if open.over),
+            "told of: {:?}",
+            next.notices()
+        );
+        assert_eq!(Tab::on_store(crate::persist::files_at(&dir.0)).shown(), [2]);
+    }
+
     /// Leave in `store` the mark of a copy of the app that kept `session`
     /// as it stopped, before the store had it.
     fn cut_off_keeping(store: &Rc<MemoryStore>, session: SessionResult) {
@@ -4565,6 +4621,59 @@ mod tests {
         };
         tab.act(|ctx| ctx.mark_so_far(&open, so_far));
         tab.act(AppCtx::mark_kept);
+    }
+
+    /// The mark of a session cut off is held by the copy that took it, and
+    /// let go of as carried only once that copy's mark holds what it
+    /// carried. A look that finds this copy's own mark lets go of it as it
+    /// was, and it is the mark still; one that finds none lets go of none.
+    #[test]
+    fn a_mark_cut_off_is_let_go_only_once_this_copys_mark_holds_what_it_carried() {
+        let store = Rc::new(MemoryStore::default());
+        cut_off_keeping(&store, day(2));
+        store.forgotten_later.set(true);
+        store.mark_log.take();
+        let mut next = Tab::on(&store);
+        next.act(AppCtx::tell_of_cut_off);
+        assert!(store.taken().is_some(), "held by the copy that took it");
+        next.pump();
+        let log = store.mark_log.take();
+        assert_eq!(
+            log[..2],
+            [
+                MarkEvent::Marked(vec![stamp(2)]),
+                MarkEvent::Released {
+                    carried: 1,
+                    left: 0
+                }
+            ],
+            "{log:?}"
+        );
+        assert_eq!(store.taken(), None);
+        store.answer_forgotten();
+        next.pump();
+        assert_eq!(store.open(), None, "stored, so no longer marked");
+        assert_eq!(store.mark_log.take(), [MarkEvent::Unmarked]);
+
+        let open = next.act(|ctx| ctx.mark_running(false));
+        next.pump();
+        next.act(AppCtx::tell_of_cut_off);
+        next.pump();
+        assert_eq!(
+            store.mark_log.take(),
+            [
+                MarkEvent::Marked(Vec::new()),
+                MarkEvent::Released {
+                    carried: 0,
+                    left: 0
+                },
+                MarkEvent::Released {
+                    carried: 0,
+                    left: 1
+                },
+            ]
+        );
+        assert_eq!(store.open(), Some(open), "its own, marked still");
     }
 
     /// A session cut off is held by this copy's mark as soon as it is

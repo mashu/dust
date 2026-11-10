@@ -6,3 +6,6 @@
 /// What a tab does with its own mark, and with those of tabs gone: the body
 /// of a function of `prefix` and `options`, run on the page.
 pub(super) const MARKS_JS: &str = include_str!("marks.js");
+
+#[cfg(test)]
+mod page_tests;

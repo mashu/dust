@@ -84,8 +84,8 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
     }
     // In the history, and held with this copy's mark as sessions the store
     // has yet to take, before the store is asked anything: the marks they
-    // came from were taken from it as they were told of, and this copy's
-    // mark has held what they carried since only for their sake
+    // came from went from it once this copy's mark held what they carried,
+    // which it has held since only for their sake
     // ([`AppCtx::let_go_of_carried`]).
     let put = kept
         .iter()

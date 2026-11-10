@@ -27,8 +27,8 @@ use super::record::{
     failed_for_now,
 };
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, Locking, OpenSession, SETTINGS_HELD,
-    SetAside, Store, over_stored, read_settings_from,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, Locking, MarkId, OpenSession,
+    SETTINGS_HELD, SetAside, Store, TakenMark, over_stored, read_settings_from,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -69,8 +69,9 @@ pub struct WebStore {
     /// The browser has been asked to keep the store, this visit.
     asked_to_keep: Cell<bool>,
     /// This page's mark, while its session is marked open: what writes it,
-    /// and takes it away with its lock ([`WebStore::hold_mark`]).
-    open_held: RefCell<Option<js_sys::Function>>,
+    /// and takes it away with its lock, and what says it is in place
+    /// ([`WebStore::hold_mark`]).
+    open_held: RefCell<Option<JsValue>>,
     /// The marks' page script ([`MARKS_JS`]), once it has run: none where
     /// it would not.
     marks: OnceCell<Option<JsValue>>,
@@ -421,16 +422,15 @@ impl WebStore {
     }
 
     /// Hold the Web Lock `name`, and keep the mark of the same name in
-    /// `localStorage` only while the lock is held: the function handed back
-    /// takes the mark's text, or, given none, takes the mark away and lets
-    /// go of the lock. None in a browser without Web Locks, where nothing is
+    /// `localStorage` only while the lock is held: what is handed back
+    /// writes the mark's text, or, given none, takes the mark away and lets
+    /// go of the lock (`write`), and says when the mark is in place
+    /// (`placed`). None in a browser without Web Locks, where nothing is
     /// marked, so no running tab is ever taken for one cut off. The mark
     /// goes in only once the lock is granted, under the lock pages look for
     /// marks under (`src/persist/marks.js`).
-    fn hold_mark(&self, name: &str) -> Option<js_sys::Function> {
-        call(self.marks()?, "hold", &[JsValue::from_str(name)])?
-            .dyn_into()
-            .ok()
+    fn hold_mark(&self, name: &str) -> Option<JsValue> {
+        call(self.marks()?, "hold", &[JsValue::from_str(name)]).filter(JsValue::is_object)
     }
 
     /// Note `what` to tell of, if it was set aside now, and say whether it
@@ -664,21 +664,21 @@ impl Store for WebStore {
                     return;
                 };
                 if let Ok(raw) = serde_json::to_string(&open) {
-                    let _ = mark.call1(&JsValue::NULL, &JsValue::from_str(&raw));
+                    let _ = call(&mark, "write", &[JsValue::from_str(&raw)]);
                 }
                 *held = Some(mark);
             }
             None => {
                 if let Some(mark) = held.take() {
-                    let _ = mark.call0(&JsValue::NULL);
+                    let _ = call(&mark, "write", &[JsValue::NULL]);
                 }
             }
         }
     }
 
-    /// Every mark whose page has gone, taken, and what each said: one look
-    /// at a time across tabs, so two opening at once tell of it once
-    /// (`src/persist/marks.js`).
+    /// Every mark whose page has gone, and no tab holds, taken and held by
+    /// this one, and what each said: one look at a time across tabs, so two
+    /// opening at once tell of it once (`src/persist/marks.js`).
     fn take_cut_off(&self) -> CutOffTaking {
         let marks = self.marks().cloned();
         Box::pin(async move {
@@ -690,9 +690,41 @@ impl Store for WebStore {
             };
             js_sys::Array::from(&marks)
                 .iter()
-                .map(|mark| CutOff::read(mark.as_string().unwrap_or_default().as_bytes()))
+                .filter_map(|mark| {
+                    let mark = js_sys::Array::from(&mark);
+                    let name = mark.get(0).as_string()?;
+                    let said = mark.get(1).as_string().unwrap_or_default();
+                    Some(TakenMark {
+                        id: MarkId::new(name),
+                        cut: CutOff::read(said.as_bytes()),
+                    })
+                })
                 .collect()
         })
+    }
+
+    /// Those `left` are let go of there and then; those `carried` go once
+    /// this page's mark is in place, holding them, or at once where it has
+    /// none (`src/persist/marks.js`): every write of a mark in place goes
+    /// into `localStorage` then and there.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) {
+        let Some(marks) = self.marks() else {
+            return;
+        };
+        let names = |ids: &[MarkId]| -> js_sys::Array {
+            ids.iter().map(|id| JsValue::from_str(id.name())).collect()
+        };
+        let placed = self
+            .open_held
+            .borrow()
+            .as_ref()
+            .and_then(|mark| js_sys::Reflect::get(mark, &JsValue::from_str("placed")).ok())
+            .unwrap_or(JsValue::UNDEFINED);
+        let _ = call(
+            marks,
+            "release",
+            &[names(&carried).into(), names(&left).into(), placed],
+        );
     }
 
     /// The history read as the page opened ([`preload`]); or, kept in the
