@@ -1444,11 +1444,11 @@ mod tests {
         }
     }
 
-    /// At Fast the hiss comes back 10 dB by the next word where the Listen
-    /// screen's pause counted under 4a0dbb1, fitting under the cap, at fixed
-    /// speeds from 17 to 18.2 WPM and in the two ranges topping out at 18,
-    /// and at 16 WPM, where it still counts: there it held the hang at
-    /// 0.43 s and left the word gap 30 to 60 ms to come back in, 4 to 9 dB
+    /// At Fast the hiss comes back 10 dB by the next word at 16 WPM, where
+    /// the Listen screen's pause still counts, and where it counted under
+    /// 4a0dbb1, fitting under the cap: at fixed speeds from 17 to 18.2 WPM
+    /// and in the two ranges topping out at 18. There 4a0dbb1 held the hang
+    /// at 0.43 s and left the word gap 30 to 60 ms to come back in, 4 to 9 dB
     /// of a 25.6 dB duck. The boundary itself is held below.
     #[test]
     fn the_hiss_comes_back_across_a_word_gap_at_fast_where_the_listen_pause_fits() {
