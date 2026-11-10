@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 
 use crate::persist::backup::{read_backup, write_backup};
 use crate::persist::memory::MemoryStore;
-use crate::persist::{OpenSession, Store};
+use crate::persist::{Lock, OpenSession, Store};
 use crate::testing::{Ui, run, stored_session, test_settings};
 
 /// `count` sessions a day apart, oldest first, the way the store keeps
@@ -433,6 +433,103 @@ fn a_backup_read_during_a_session_is_restored_once_it_is_over() {
     });
 }
 
+/// A backup handed to the app while a session is under way has the card
+/// look at it once a second until the session is over, as the app looks
+/// at the session: not every 16 ms, waking the app's thread sixty times a
+/// second through the session, a new string made each time.
+#[test]
+fn a_backup_waiting_for_a_session_is_looked_at_once_a_second() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.click("nav-practice");
+        ui.click("btn-start-training");
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        ui.take_renders("restore wait");
+        ui.advance(3_000).await;
+        let looks = ui.take_renders("restore wait");
+        assert!(looks <= 4, "looked {looks} times in 3 seconds");
+        ui.click("btn-end-session");
+        ui.advance(3_000).await;
+        assert_eq!(stored_dates(&ui).len(), 5, "restored once it is over");
+        ui.click("nav-stats");
+        ui.click("seg-history");
+        assert!(!ui.has("Reading dust-backup.json"), "{}", ui.html());
+    });
+}
+
+/// The Undo of a restore, clicked while a session is under way, its
+/// message still up, waits for the session to be over, and says so: it
+/// puts back the settings, the level among them, which a session is not to
+/// have changed beneath it. It was made at once, under the session.
+#[test]
+fn an_undo_clicked_during_a_session_waits_for_it_to_be_over() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let level = ui.with_app(|ctx| ctx.settings.peek().curriculum.level);
+        let mut saved = test_settings();
+        saved.curriculum.level = 9;
+        let file = write_backup(&saved, &all, 0);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(20).await;
+        assert_eq!(stored_dates(&ui).len(), 5);
+        ui.click("nav-practice");
+        ui.click("btn-start-training");
+        assert!(ui.shows("toast-undo"), "{}", ui.html());
+        ui.click("toast-undo");
+        assert!(
+            ui.has("The restore will be undone once this session is over."),
+            "{}",
+            ui.html()
+        );
+        ui.advance(3_000).await;
+        assert_eq!(stored_dates(&ui).len(), 5, "not under the session");
+        assert_eq!(ui.with_app(|ctx| ctx.settings.peek().curriculum.level), 9);
+        ui.click("btn-end-session");
+        ui.advance(3_000).await;
+        assert_eq!(stored_dates(&ui).len(), 2, "undone once it is over");
+        assert_eq!(
+            ui.with_app(|ctx| ctx.settings.peek().curriculum.level),
+            level
+        );
+    });
+}
+
+/// A backup chosen while another window's restore, or the Undo of it, has
+/// every window's restores waits for it, and the card says so: it is
+/// restored once that window lets go, and the card says no more of it.
+#[test]
+fn a_backup_chosen_while_another_window_restores_waits_for_it() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        let elsewhere = ui.store.hold_lock(Lock::Restore);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(1_000).await;
+        assert!(
+            ui.has("Waiting for a restore in another window…"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(stored_dates(&ui).len(), 2, "not restored meanwhile");
+        drop(elsewhere);
+        ui.advance(1_000).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Waiting"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 5);
+    });
+}
+
 /// A file that is no backup, read while its tab is left, is said in a
 /// message, as the card is not there to say it; the card, opened again,
 /// says nothing of it.
@@ -450,6 +547,33 @@ fn a_file_found_no_backup_once_its_tab_is_left_is_said_in_a_message() {
         assert_eq!(toast.as_deref(), Some(said), "{}", ui.html());
         ui.click("seg-history");
         assert!(!ui.has("backup-problem"), "{}", ui.html());
+        assert_eq!(stored_dates(&ui).len(), 2);
+    });
+}
+
+/// A file that is no backup, read once a session is under way, is said in
+/// a message once the session is over: no card is drawn over the session
+/// to say it, and no message is either. It was said over the session, as
+/// soon as it was read.
+#[test]
+fn a_file_found_no_backup_during_a_session_is_said_once_it_is_over() {
+    run(|| async {
+        let mut ui = open(MemoryStore::default(), &history(2));
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "notes.txt", "hello", 5);
+        ui.click("nav-practice");
+        ui.click("btn-start-training");
+        ui.hold_file_reads(false);
+        let said = "notes.txt is not a Dust backup: nothing was restored.";
+        for _ in 0..3 {
+            ui.advance(1_000).await;
+            let toast = ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+            assert_ne!(toast.as_deref(), Some(said), "not over the session");
+        }
+        ui.click("btn-end-session");
+        ui.advance(1_100).await;
+        let toast = ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+        assert_eq!(toast.as_deref(), Some(said), "{}", ui.html());
         assert_eq!(stored_dates(&ui).len(), 2);
     });
 }
@@ -542,6 +666,37 @@ fn the_card_says_a_backup_is_under_way_until_it_is_restored() {
     });
 }
 
+/// The card stops saying a backup is being read once its own restore has
+/// been told of, though the restore's Undo is clicked at once, before the
+/// card looks again: an Undo under way is no restore of the card's. The
+/// card went on saying it read the backup until the Undo was over.
+#[test]
+fn the_card_says_its_restore_is_over_though_an_undo_follows_at_once() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.store.deferred.set(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(100).await;
+        assert!(ui.has("Reading dust-backup.json…"), "{}", ui.html());
+        // Told, and its Undo clicked, with no time passing for the card.
+        ui.store.settle();
+        ui.settle();
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        ui.click("toast-undo");
+        ui.advance(100).await;
+        assert!(!ui.has("Reading"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        assert_eq!(stored_dates(&ui), ["2026-09-04", "2026-09-05"], "undone");
+    });
+}
+
 /// A backup chosen while another is being restored is restored once that
 /// is over, merged with the history it restored: its message says what it
 /// brought itself, and its Undo takes back that alone. Merged with a
@@ -616,6 +771,84 @@ fn a_backup_chosen_while_a_restore_is_undone_waits_for_it() {
         assert_eq!(
             stored_dates(&ui),
             ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-05"]
+        );
+    });
+}
+
+/// A backup chosen while the Undo of a restore is under way is handed to
+/// the app as soon as it is read, and waits its turn there, as every
+/// restore asked for does: one way to make restores one at a time, the
+/// app's. The card held it back itself until nothing was under way, so the
+/// app's own wait was reached by no restore the card made.
+#[test]
+fn a_backup_chosen_while_a_restore_is_undone_waits_in_the_apps_queue() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[4..]);
+        let first = write_backup(&test_settings(), &all[..2], 0);
+        let second = write_backup(&test_settings(), &all[..3], 0);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(20).await;
+        ui.store.deferred.set(true);
+        ui.click("toast-undo");
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.advance(100).await;
+        assert!(
+            ui.with_app(|ctx| ctx.restore_waits()),
+            "waiting in the app's queue"
+        );
+        assert!(ui.has("Reading second.json…"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Reading"), "{}", ui.html());
+    });
+}
+
+/// An Undo that fails while a backup chosen meanwhile waits for it puts
+/// back no Undo of the restore it could not undo: the backup waiting is
+/// the last restore asked for, made once the failure is told of, and has
+/// an Undo of its own, which takes back what it brought alone.
+#[test]
+fn an_undo_that_fails_while_a_backup_waits_offers_no_undo_again() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[4..]);
+        let first = write_backup(&test_settings(), &all[..2], 0);
+        let second = write_backup(&test_settings(), &all[..3], 0);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(20).await;
+        assert_eq!(stored_dates(&ui).len(), 3);
+        ui.store.deferred.set(true);
+        ui.click("toast-undo");
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.advance(100).await;
+        // The Undo finds no room to be made in.
+        ui.store.full.set(true);
+        ui.store.settle();
+        ui.store.full.set(false);
+        ui.advance(100).await;
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 1 session and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.shows("toast-undo"), "the second's own Undo");
+        ui.store.deferred.set(false);
+        ui.click("toast-undo");
+        ui.advance(20).await;
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-09-01", "2026-09-02", "2026-09-05"],
+            "what the second brought, taken back alone"
         );
     });
 }

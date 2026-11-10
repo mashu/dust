@@ -510,6 +510,9 @@ mod tests {
                 Here {
                     listed: &listed,
                     forgotten: &forgotten,
+                    // The model's deletions by hand say no time, as a
+                    // tombstone that does not read says none.
+                    made: &BTreeMap::new(),
                     applied: &state.applied,
                     revived: &state.revived,
                 },

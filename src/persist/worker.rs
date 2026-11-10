@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 
 use super::files::{HistoryFiles, THREAD, Watch};
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
+    Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
 };
 use super::saved::HistorySaved;
 
@@ -190,12 +190,12 @@ impl HistoryJobs {
         })
     }
 
-    /// Which of `ids` were deleted by hand ([`HistoryFiles::forgotten`]):
-    /// none, where the files cannot be reached, as missing is never
-    /// deleted.
-    pub(super) fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
-        let found = self.ask(move |files| files.forgotten(&ids));
-        Box::pin(async move { found.await.unwrap_or_default() })
+    /// Which of `ids` were deleted by hand, and when
+    /// ([`HistoryFiles::deletions`]): no word at all, where the files
+    /// cannot be reached, which is no word that none was.
+    pub(super) fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
+        let found = self.ask(move |files| files.deletions(&ids));
+        Box::pin(async move { found.await.flatten() })
     }
 
     /// What to tell of `ids`, records that still could not be read at the
@@ -369,12 +369,12 @@ mod tests {
             ..HistoryChange::default()
         });
         let after = jobs.listing();
-        let forgotten = jobs.forgotten(vec![records[0].id, records[1].id]);
+        let deleted = jobs.deletions(vec![records[0].id, records[1].id]);
         assert_eq!(wait(stored), HistorySaved::Stored { kept: 3 });
         assert_eq!(wait(before).expect("listed").len(), 3);
         assert_eq!(wait(gone), HistorySaved::Stored { kept: 0 });
         assert_eq!(wait(after).expect("listed"), [records[1].id, records[2].id]);
-        assert_eq!(wait(forgotten), [records[0].id]);
+        assert_eq!(wait(deleted), Some(vec![(records[0].id, Some(7))]));
         let read = wait(jobs.read(vec![records[1].id, records[0].id]));
         assert_eq!(
             read,

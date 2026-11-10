@@ -23,8 +23,8 @@ use super::legacy::{
     self, Aside, BlobHistory, BlobKeys, Fingerprint, Layout, parse_sessions, read_history,
 };
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
-    failed_for_now, read_record, records_for_blob, unread_notices, unreadable,
+    Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
+    done, failed_for_now, read_record, records_for_blob, unread_notices, unreadable,
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Lock, LockHeld, Locking,
@@ -95,6 +95,10 @@ pub struct MemoryStore {
     pub forgotten_later: Cell<bool>,
     /// What was asked of which records were deleted, and not yet answered.
     asked_forgotten: RefCell<Vec<Rc<RefCell<Forgotten>>>>,
+    /// Which records were deleted by hand cannot be looked for, the way
+    /// the tombstones of files cannot be where their folder will not open,
+    /// or those of a browser's database where it will not answer.
+    pub deletions_unknown: Cell<bool>,
     /// Records are read only when the test says ([`Self::answer_reads`]),
     /// the way a browser's database reads them a moment after it is asked.
     pub reads_later: Cell<bool>,
@@ -321,7 +325,7 @@ struct Reads {
 /// ([`MemoryStore::forgotten_later`]), and what waits on the answer.
 struct Forgotten {
     ids: Vec<RecordId>,
-    gone: Option<Vec<RecordId>>,
+    gone: Option<Option<Deletions>>,
     waker: Option<Waker>,
 }
 
@@ -603,9 +607,9 @@ impl Store for MemoryStore {
         }))
     }
 
-    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
+    fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
         if let Some(page) = &self.page {
-            return done(page.forgotten(&ids));
+            return done(page.deletions(&ids));
         }
         if !self.forgotten_later.get() {
             return done(self.tombstoned(ids));
@@ -821,12 +825,19 @@ impl MemoryStore {
         self.waiting.borrow().len()
     }
 
-    /// Of `ids`, those deleted by hand.
-    fn tombstoned(&self, ids: Vec<RecordId>) -> Vec<RecordId> {
+    /// Of `ids`, those deleted by hand, each beside when its tombstone says
+    /// it was: no word at all, where they cannot be looked for
+    /// ([`Self::deletions_unknown`]).
+    fn tombstoned(&self, ids: Vec<RecordId>) -> Option<Deletions> {
+        if self.deletions_unknown.get() {
+            return None;
+        }
         let tombstones = self.tombstones.borrow();
-        ids.into_iter()
-            .filter(|id| tombstones.contains_key(id))
-            .collect()
+        Some(
+            ids.into_iter()
+                .filter_map(|id| Some((id, Some(tombstones.get(&id)?.at))))
+                .collect(),
+        )
     }
 
     /// The records `ids`, as they are stored now: one that cannot be read
@@ -1204,6 +1215,52 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("not done"),
         }
+    }
+
+    /// Which records were deleted by hand comes with when each was, as its
+    /// tombstone says, here and in the page storage's history kept whole;
+    /// and with no word at all where the store cannot look, rather than
+    /// the word that none was.
+    #[test]
+    fn deletions_say_when_each_was_made_or_that_none_could_be_looked_for() {
+        let store = MemoryStore::default();
+        let (first, second) = (finished(DAY), finished(2 * DAY));
+        let (one, two) = (record(&first), record(&second));
+        now(store.change_history(put(&[one.clone(), two.clone()])));
+        now(store.change_history(HistoryChange {
+            forget: vec![(one.id, Deleted::of(&first, 7))],
+            ..HistoryChange::default()
+        }));
+        assert_eq!(
+            now(store.deletions(vec![one.id, two.id])),
+            Some(vec![(one.id, Some(7))])
+        );
+        store.deletions_unknown.set(true);
+        assert_eq!(now(store.deletions(vec![one.id, two.id])), None);
+        assert!(
+            now(store.forgotten(vec![one.id])).is_empty(),
+            "missing is never deleted"
+        );
+
+        let shelf = PageShelf::default();
+        shelf.keep(&[first.clone(), second]);
+        let page = MemoryStore::in_page(&shelf);
+        let ids: Vec<RecordId> = page
+            .load_history()
+            .sessions
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        now(page.change_history(HistoryChange {
+            forget: vec![(ids[0], Deleted::of(&first, 9))],
+            ..HistoryChange::default()
+        }));
+        assert_eq!(
+            now(page.deletions(ids.clone())),
+            Some(vec![(ids[0], Some(9))])
+        );
+        shelf.block(true);
+        assert_eq!(now(page.deletions(ids)), None, "the page storage blocked");
     }
 
     /// A lock is held by one copy of the app at a time, whichever copy

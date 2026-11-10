@@ -21,8 +21,8 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::idb::{BrowserHistory, Script, waited_ms};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
-    failed_for_now,
+    Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
+    done, failed_for_now,
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, Locking, OpenSession, SETTINGS_HELD,
@@ -787,13 +787,13 @@ impl Store for WebStore {
         }
     }
 
-    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
+    fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
         match &self.history {
             History::Database(database) => {
                 let database = Rc::clone(database);
-                Box::pin(async move { database.forgotten(ids).await })
+                Box::pin(async move { database.deletions(ids).await })
             }
-            History::Page { whole, .. } => done(whole.forgotten(&ids)),
+            History::Page { whole, .. } => done(whole.deletions(&ids)),
         }
     }
 

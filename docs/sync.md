@@ -45,7 +45,8 @@ Each sync (`src/sync/run.rs`):
    (`DriveState` puts every pack together: of each record, whether some pack
    holds it, and the latest time it was deleted and put back);
 2. asks the store what it lists, and which of the drive's records it does
-   not list it deleted by hand (`Store::forgotten`);
+   not list it deleted by hand, and when (`Store::deletions`): none where
+   the store cannot say, as missing is never deleted;
 3. works out the plan (`src/sync/plan.rs`): records to take, deletions to
    make here, records and deletions to send;
 4. makes the local change in one `HistoryChange`, before anything is sent;
@@ -59,30 +60,53 @@ by a restore, after a deletion the drive holds is sent as *put back*, so
 that the deletion does not take it again; a device that let it go takes it
 back, and so does a device that deleted it by hand, whose deletion the
 drive holds then, sent from it or made on another device as well, rather
-than send it again. Deleted by hand again after it is put back here, it is
-a deletion by hand as any other, whatever was noted of the one before. A
-putting back as late as a deletion stands, here as in the drive.
-Missing is never deleted: a record is let go only for a deletion.
-A deletion or a putting back is stamped when it is made, or just after the
-latest of the record the device knows the drive to hold, where that is
-later (`SyncState::stamp_change`): one made after another is the later,
-however far apart the devices' clocks are. One made while a sync is under
-way is stamped again as it ends, after what that sync read and sent, and
-a session put back by hand meanwhile, in that tab or window or in another
-on the device, is not let go by that sync, which planned with no note of
-it, even where sync is turned off before it ends: the next sends it as put
-back, where sync is on still. A
-putting back noted while sync knows nothing of the drive, as just after it
-is turned on anew, when what it knew before went with it, is stamped again
-after what the drive holds once its first sync reads it.
+than send it again. One a device deleted by hand after the drive's
+deletion, by its own clock, is the later word, and is sent all the same:
+a putting back made between the two loses to it on every device. Deleted
+by hand again after it is put back here, it is a deletion by hand as any
+other, whatever was noted of the one before. A putting back as late as a
+deletion stands, here as in the drive. Missing is never deleted: a record
+is let go only for a deletion. A device updated from a build that noted no
+deletion by hand notes those it made that the drive holds, put back since
+or not, at its first sync at which the store can say which they are, and
+looks again at each sync until then.
+A deletion or a putting back is stamped when it is made (a deletion by
+hand when its tombstone says, though it is sent later, or as the sync that
+sends it began, where a clock set ahead said later), or just after the
+latest of the record the device knew the drive to hold by then, where that
+is later (`SyncState::stamp_change`): one made after another is the later,
+however far apart the devices' clocks are. But where a sync read the drive
+and did not send a deletion by hand, as the store could not say which were
+deleted, as the sync listed the history before the deletion was made, or
+as it was cut short as it sent, the deletion is stamped after what that
+sync read as well: a putting back made elsewhere after it by the clock,
+read there, loses to it. A putting back made while a sync is under way is
+stamped again as it ends, after what that sync read and sent, and a session
+put back by hand meanwhile, in that tab or window or in another on the
+device, is not let go by that sync, which planned with no note of it, even
+where sync is turned off before it ends: the next sends it as put back,
+where sync is on still. A putting back noted while sync knows nothing of
+the drive, as just after it is turned on anew, when what it knew before
+went with it, is stamped again after what the drive holds once its first
+sync reads it.
 
 One session can be two records: a backup restored on one device names each
 session where it finished (`RecordId::placed`), while the device it came
 from named each as it kept it. A record to take that is alike in everything
 to one this device holds under another name is its twin: the smaller name
 is kept on every device, and the other let go everywhere, as a deletion
-sent only once the one kept is in the drive. Two records of a session that
-differ, as one a restore filled in, are both kept.
+sent only once the one kept is in the drive. A twin let go is no deletion
+by hand: should another device put its name back, restoring the same
+backup, it is let go again, never taken back beside the one kept. Two
+records of a session that differ, as one a restore filled in, are both
+kept. The record a restore filled in, its filled record named in the same
+millisecond in its place (`RecordId::beside`), and a filled record the
+Undo of that restore took out, the record it filled in back in its place,
+are deleted as a twin let go is: each deletion is stamped as it is sent,
+never sent as made after the drive's deletion, and not noted by the first
+sync after an update from a build that noted no deletion by hand, so that
+the drive putting the old record back has it let go again on that device,
+the session staying once, under the record kept.
 
 What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads

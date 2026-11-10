@@ -52,7 +52,7 @@ use cw_core::{
 };
 use serde::Deserialize;
 
-use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, Unopened, done};
+use record::{Deletions, HistoryChange, HistoryLoad, Pending, Record, RecordId, Unopened, done};
 use settings::{load_settings_from, unmarked};
 
 pub trait Store {
@@ -166,10 +166,28 @@ pub trait Store {
     /// comes back as why ([`record::Unopened`]): it could not be read just
     /// now, or, where the store can tell, its bytes are no text, damaged.
     fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>>;
-    /// Which of `ids` were deleted by hand: of those missing from the
+    /// Which of `ids` were deleted by hand, each beside when its tombstone
+    /// says it was ([`record::Deletions`]): of those missing from the
     /// listing, the ones to let go. Any other was lost in passing, and is
-    /// to be stored again: missing is never deleted.
-    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>>;
+    /// to be stored again: missing is never deleted. None where the store
+    /// could not look, which is no word that none of them was: sync takes
+    /// none for deleted then, as missing is never deleted, and looks again
+    /// at its next sync for what it may do only once it has looked
+    /// ([`crate::sync::state::SyncState::deletions_noted`]).
+    fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>>;
+    /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
+    /// where the store could not look, as missing is never deleted.
+    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
+        let found = self.deletions(ids);
+        Box::pin(async move {
+            found
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        })
+    }
     /// What to tell of `ids`, records listed that could not be read at all
     /// at any of the app's tries since it found them so
     /// ([`HistoryLoad::failed`]): of those not told of before, how many,

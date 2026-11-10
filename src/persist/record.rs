@@ -297,6 +297,16 @@ pub(super) fn tombstone_key(raw: &[u8]) -> Option<SessionKey> {
         .map(|gone| gone.key())
 }
 
+/// When a tombstone says its record was deleted, by the clock of the device
+/// that deleted it, `raw` being what it holds as it is stored
+/// ([`Deleted::at`]). None for one that is empty or does not read, which
+/// deletes its record all the same.
+pub(super) fn tombstone_at(raw: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<Deleted>(raw)
+        .ok()
+        .map(|gone| gone.at)
+}
+
 /// What to tell of `unread`, the records this build cannot read, each
 /// beside what its text says of it ([`unreadable`]), or none where it could
 /// not be read at all, `told` being the names of those told of before, as
@@ -422,6 +432,11 @@ pub enum Unopened {
     #[cfg_attr(not(feature = "native-runtime"), allow(dead_code))]
     Damaged(RecordId),
 }
+
+/// Records deleted by hand ([`super::Store::deletions`]): each beside when
+/// its tombstone says it was deleted, none where it does not say, as one
+/// that is empty or does not read.
+pub type Deletions = Vec<(RecordId, Option<u64>)>;
 
 /// `read`, as a store that reads each record whole or not at all, and holds
 /// text alone, answers a read ([`super::Store::read_records`]): a record it

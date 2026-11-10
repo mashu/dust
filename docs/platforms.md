@@ -666,7 +666,18 @@ after it is asked for, so a change kept under one would wait, and be lost
 with a tab closed in that moment. A sync that finds another copy's under
 way waits for it, ten minutes at most, then goes on without it, as copies
 do where the store takes no lock at all: a browser without Web Locks, or a
-folder that takes none, on some network shares.
+folder that takes none, on some network shares. A restore of a backup
+holds `restore.lock` beside them (in a browser the Web Lock
+`dust_restore`) from its start until neither it nor its Undo is under way
+or offered, so a restore in another copy waits for its Undo rather than
+take what both bring back for sessions already here, which the Undo would
+then delete; where the store takes no lock, restores are made as they come.
+The Undo is offered until its message is taken down, after eight seconds,
+or another takes its place. A browser that suspends a tab out of sight, as
+Safari on iOS does, or freezes it to save power, runs no timer there, and
+the tab keeps `dust_restore` meanwhile: a restore in another tab waits, its
+card saying so, until that tab is shown again, its message taken down, or
+it is closed. No test suspends a page.
 
 Updating the app does not clear any of it. The `localStorage` keys
 (`dust_settings`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
@@ -923,22 +934,34 @@ card:
   differed. Undo, in the message that follows,
   puts both back as they were: what the restore added taken out, and what it
   filled in as it was, while whatever another window kept or deleted
-  meanwhile stands. A file that is not a backup, or larger than 1 GB, is
-  refused, and the card says why. One past 50 MB takes a while to read, and
-  the card says so as it reads it; in a browser that says it has less
-  room left for the site than the file holds, the card says so first, as a
-  restore that does not fit stores none of it. A session or a setting the
-  file can no longer read is left out, as when the store is read; so is a
-  session past the memory the sessions read are held to, in all: about
-  three times the file's length, or 16 MB for a short one, for what this
-  build reads of them, and beside it 256 MB for what they hold that it
-  does not read, a later build's keys, and 300 MB for contest runs' logs,
-  each counted as the memory it takes. No history Dust stored reaches
-  them, only a file made up to swell far past its length. The message
-  says how many sessions were left out. A backup
-  saved by any build restores on any other: the web app's on a phone, a
-  phone's on a computer. A build from before records takes one of up to
-  50 MB, and keeps the newest 500 sessions of it.
+  meanwhile stands. A restore asked for while a session or run is under
+  way is made once it is over, and so is an Undo clicked then, as the
+  message says: either changes the settings, the level among them. An
+  Undo clicked just before one began, which the store made only once it
+  had, as a browser's database takes a moment to, takes out what the
+  restore added then, and puts the settings back once the session or run
+  is over. Either waits with the app: closed before the session or run is
+  over, the app leaves the restore standing, or, for the second, its
+  settings. One window restores at a time: a restore asked for in another
+  window while this one's, or its Undo, is under way or still offered
+  waits for it, its card saying so, and is made over what the Undo left.
+  A failed Undo is offered again. A file that is not a backup, or larger
+  than 1 GB, is refused, and the card says why; with no card drawn by
+  then, a message does, once no session or run is under way. One past
+  50 MB takes a while to read, and the card says so as it reads it; in a
+  browser that says it has less room left for the site than the file
+  holds, the card says so first, as a restore that does not fit stores
+  none of it. A session or a setting the file can no longer read is left
+  out, as when the store is read; so is a session past the memory the
+  sessions read are held to, in all: about three times the file's length,
+  or 16 MB for a short one, for what this build reads of them, and beside
+  it 256 MB for what they hold that it does not read, a later build's
+  keys, and 300 MB for contest runs' logs, each counted as the memory it
+  takes. No history Dust stored reaches them, only a file made up to swell
+  far past its length. The message says how many sessions were left out.
+  A backup saved by any build restores on any other: the web app's on a
+  phone, a phone's on a computer. A build from before records takes one of
+  up to 50 MB, and keeps the newest 500 sessions of it.
 - After ten sessions without a backup the card says so, and its Save button
   stands out. When the last one was saved is kept under `dust_last_backup`,
   or in `last_backup.txt`. A restored backup counts as the last one only when
