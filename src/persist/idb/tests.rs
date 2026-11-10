@@ -282,12 +282,15 @@ impl Glue for Fake {
         }))
     }
 
-    fn deleted(&self, names: Vec<String>) -> Pending<Result<Vec<String>, Refused>> {
+    fn tombstones_of(&self, names: Vec<String>) -> Pending<Result<Stored, Refused>> {
         let shelves = self.db.borrow();
         answer(self.failing().map(|()| {
             names
                 .into_iter()
-                .filter(|name| shelves.deleted.contains_key(name))
+                .filter_map(|name| {
+                    let tombstone = shelves.deleted.get(&name)?.clone();
+                    Some((name, Some(tombstone)))
+                })
                 .collect()
         }))
     }
@@ -821,6 +824,11 @@ fn a_change_is_stored_and_a_deletion_remembered() {
     done(tab.apply(forget));
     assert_eq!(done(tab.listing()), Some(vec![b.id]));
     assert_eq!(done(tab.forgotten(vec![a.id, b.id])), [a.id]);
+    assert_eq!(
+        done(tab.deletions(vec![a.id, b.id])),
+        Some(vec![(a.id, Some(7))]),
+        "when, as its tombstone says"
+    );
     // Stored again, as a tab that missed the deletion would: still deleted.
     done(tab.apply(HistoryChange {
         put: vec![a.clone()],
@@ -839,10 +847,12 @@ fn a_change_is_stored_and_a_deletion_remembered() {
     fake.shelves().sessions.remove(&b.id.name());
     assert_eq!(done(tab.forgotten(vec![b.id])), []);
     assert_eq!(done(tab.read(vec![a.id, b.id])), [Ok(a.clone()), Err(b.id)]);
-    // A database that cannot be read: nothing read, nothing deleted.
+    // A database that cannot be read: nothing read, nothing deleted, and
+    // no word of what was, rather than the word that nothing was.
     fake.shelves().failing = Some("closed".into());
     assert_eq!(done(tab.listing()), None);
     assert_eq!(done(tab.forgotten(vec![a.id])), []);
+    assert_eq!(done(tab.deletions(vec![a.id])), None);
     assert_eq!(done(tab.read(vec![a.id])), [Err(a.id)]);
 }
 

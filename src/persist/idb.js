@@ -393,14 +393,19 @@ return {
       }),
     ),
 
-  // Which of `keys` were deleted by hand: those with a tombstone.
-  deleted: (keys) =>
+  // Which of `keys` were deleted by hand: those with a tombstone, each beside
+  // what its tombstone holds, which says when.
+  tombstonesOf: (keys) =>
     withDb((base) =>
       transact(base, [DELETED], "readonly", (tx, said) => {
         const deleted = tx.objectStore(DELETED);
-        const counted = keys.map((key) => deleted.count(key));
-        said.answer([]);
-        lastOf(counted, () => said.answer(keys.filter((_, at) => counted[at].result > 0)));
+        const asked = keys.map((key) => deleted.get(key));
+        said.answer(pairs([], []));
+        lastOf(asked, () => {
+          const held = keys.filter((_, at) => asked[at].result !== undefined);
+          const tombstones = asked.map((one) => one.result).filter((one) => one !== undefined);
+          said.answer(pairs(held, tombstones));
+        });
       }),
     ),
 

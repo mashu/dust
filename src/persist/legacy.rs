@@ -21,7 +21,7 @@ use serde_json::value::RawValue;
 
 use super::record::{self, HistoryChange, RecordId};
 #[cfg(any(feature = "web", test))]
-use super::record::{HistoryLoad, Record};
+use super::record::{Deletions, HistoryLoad, Record};
 #[cfg(any(feature = "web", test))]
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -1053,14 +1053,31 @@ impl<S: Aside> BlobHistory<S> {
     }
 
     /// Which of `ids` were deleted by hand: those whose key the deletions
-    /// remember. One never seen here is taken as not deleted.
-    pub(super) fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
-        let gone: HashSet<SessionKey> = self.deleted().iter().map(Deleted::key).collect();
+    /// remember, each beside when it was deleted, the latest where the key
+    /// is remembered more than once. One never seen here is taken as not
+    /// deleted. None where the deletions cannot be read: that is no word
+    /// that a record was not deleted.
+    pub(super) fn deletions(&self, ids: &[RecordId]) -> Option<Deletions> {
+        let raw = self.shelf.get(self.keys.deleted).ok()?;
+        let mut gone: HashMap<SessionKey, u64> = HashMap::new();
+        for deleted in deleted_of(raw.as_deref().map(str::as_bytes)) {
+            let at = gone.entry(deleted.key()).or_insert(deleted.at);
+            *at = (*at).max(deleted.at);
+        }
         let keys = self.seen_keys.borrow();
-        ids.iter()
-            .copied()
-            .filter(|id| keys.get(id).is_some_and(|key| gone.contains(key)))
-            .collect()
+        Some(
+            ids.iter()
+                .filter_map(|id| Some((*id, Some(*gone.get(keys.get(id)?)?))))
+                .collect(),
+        )
+    }
+
+    /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
+    /// where that could not be looked for.
+    #[cfg(test)]
+    pub(super) fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
+        let found = self.deletions(ids).unwrap_or_default();
+        found.into_iter().map(|(id, _)| id).collect()
     }
 
     /// Whether the history or its deletions changed since last looked at.
@@ -2011,6 +2028,16 @@ mod tests {
             serde_json::from_str(&shelf.get("deleted").unwrap().unwrap()).unwrap();
         assert_eq!(remembered, [gone]);
         assert_eq!(whole.forgotten(&[one.id, two.id]), [one.id]);
+        assert_eq!(
+            whole.deletions(&[one.id, two.id]),
+            Some(vec![(one.id, Some(7))]),
+            "when, as remembered"
+        );
+        // The deletions cannot be read: no word of them, rather than the
+        // word that there are none.
+        shelf.unreadable.set(true);
+        assert_eq!(whole.deletions(&[one.id, two.id]), None);
+        shelf.unreadable.set(false);
         // Stored again without undoing it: still deleted.
         whole.apply(&HistoryChange {
             put: vec![one.clone()],

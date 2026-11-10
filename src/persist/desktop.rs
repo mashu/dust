@@ -14,7 +14,7 @@ use super::disk::{
 };
 use super::files::HistoryFiles;
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
+    Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
 };
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
@@ -638,8 +638,8 @@ impl Store for DesktopStore {
         self.history.read(ids)
     }
 
-    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
-        self.history.forgotten(ids)
+    fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
+        self.history.deletions(ids)
     }
 
     fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {

@@ -29,8 +29,9 @@ use cw_core::SessionResult;
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
 use super::record::{
-    self, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unreadable, key_of,
-    keyed, not_told, read_record, taken_up, tombstone_key, unreadable,
+    self, Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId,
+    Unreadable, key_of, keyed, not_told, read_record, taken_up, tombstone_at, tombstone_key,
+    unreadable,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -172,8 +173,9 @@ pub(super) trait Glue {
     /// What the records `names` hold, in order, each none where it is not
     /// there.
     fn read(&self, names: Vec<String>) -> Pending<Result<Vec<Option<String>>, Refused>>;
-    /// Which of `names` were deleted by hand: those with a tombstone.
-    fn deleted(&self, names: Vec<String>) -> Pending<Result<Vec<String>, Refused>>;
+    /// Which of `names` were deleted by hand: those with a tombstone, each
+    /// beside what its tombstone holds, none where it holds no text.
+    fn tombstones_of(&self, names: Vec<String>) -> Pending<Result<Stored, Refused>>;
     /// Make `writes`, whole or not at all. Deletions undone first, then the
     /// records, then the deletions: a record deleted already stays deleted
     /// unless the change undoes that, a record is never written over (one
@@ -741,17 +743,39 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             .collect()
     }
 
-    /// Which of `ids` were deleted by hand. Where the tombstones cannot be
-    /// looked at, none: missing is never deleted.
-    pub(super) async fn forgotten(&self, ids: Vec<RecordId>) -> Vec<RecordId> {
+    /// Which of `ids` were deleted by hand: those with a tombstone, each
+    /// beside when it says the record was deleted, none for one that does
+    /// not say. None where the tombstones cannot be looked at: that is no
+    /// word that a record was not deleted. One with no tombstone was not:
+    /// missing is never deleted.
+    pub(super) async fn deletions(&self, ids: Vec<RecordId>) -> Option<Deletions> {
         let names = ids.iter().map(|id| id.name()).collect();
-        let Ok(gone) = self.glue.deleted(names).await else {
-            return Vec::new();
-        };
-        let gone: HashSet<String> = gone.into_iter().collect();
-        ids.into_iter()
-            .filter(|id| gone.contains(&id.name()))
-            .collect()
+        let held: HashMap<String, Option<String>> = self
+            .glue
+            .tombstones_of(names)
+            .await
+            .ok()?
+            .into_iter()
+            .collect();
+        Some(
+            ids.into_iter()
+                .filter_map(|id| {
+                    let tombstone = held.get(&id.name())?;
+                    let at = tombstone
+                        .as_deref()
+                        .and_then(|raw| tombstone_at(raw.as_bytes()));
+                    Some((id, at))
+                })
+                .collect(),
+        )
+    }
+
+    /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
+    /// where that could not be looked for.
+    #[cfg(test)]
+    pub(super) async fn forgotten(&self, ids: Vec<RecordId>) -> Vec<RecordId> {
+        let found = self.deletions(ids).await.unwrap_or_default();
+        found.into_iter().map(|(id, _)| id).collect()
     }
 
     /// `backup` whole, with every record the database holds, deleted ones
@@ -1157,11 +1181,11 @@ mod script {
             })
         }
 
-        fn deleted(&self, keys: Vec<String>) -> Pending<Result<Vec<String>, Refused>> {
+        fn tombstones_of(&self, keys: Vec<String>) -> Pending<Result<Stored, Refused>> {
             let glue = self.0.clone();
             Box::pin(async move {
-                Ok(strings(
-                    &asked(glue, "deleted", vec![names(&keys).into()]).await?,
+                Ok(pairs(
+                    &asked(glue, "tombstonesOf", vec![names(&keys).into()]).await?,
                 ))
             })
         }

@@ -4,6 +4,7 @@
 //! nor touches the app: it says what it did, and the app takes it up.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::RangeInclusive;
 
 use cw_core::{SessionResult, TrainingSettings};
 use serde_json::Map;
@@ -353,12 +354,13 @@ pub async fn sync_once_with(
         .applied
         .retain(|id, _| !listed.contains(id) && !state.revived.contains_key(id));
     // Once, at the first sync after an update from a build that noted no
-    // deletion by hand: those it made that the drive holds, noted.
+    // deletion by hand: those it made that the drive holds, noted. Not
+    // spent at a sync at which the store could not say which those are:
+    // the sync goes on, and the next looks again.
     if !state.deletions_noted {
-        note_deletions_by_hand(store, &listed, state).await;
-        state.deletions_noted = true;
+        state.deletions_noted = note_deletions_by_hand(store, &listed, state).await;
     }
-    let mut planned = planned(store, &drive, &listed, state).await;
+    let (mut planned, mut stamped) = planned(store, &drive, &listed, state).await;
     // A record to take that only a pack read before holds, as where the
     // store here lost one: every pack read again, once.
     let wanting = |planned: &Plan, bytes: &HashMap<RecordId, String>| {
@@ -377,7 +379,7 @@ pub async fn sync_once_with(
             remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
         )
         .await?;
-        planned = self::planned(store, &drive, &listed, state).await;
+        (planned, stamped) = self::planned(store, &drive, &listed, state).await;
     }
 
     // The deletions made here by hand to send, the twins' below left out.
@@ -481,12 +483,17 @@ pub async fn sync_once_with(
             })
         })
         .collect();
+    // Each deletion by hand stamped as it was made, where the store says
+    // when; a twin's, or one whose tombstone does not say, as made now.
     let forget: Vec<Forget> = planned
         .send_deleted
         .iter()
         .map(|&id| Forget {
             id: id.name(),
-            at: state.stamp_change(id, now),
+            at: stamped
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| state.stamp_change(id, now)),
         })
         .collect();
     let revive: Vec<Revive> = planned
@@ -527,12 +534,18 @@ pub async fn sync_once_with(
 /// holding ([`Plan::deleted_too`]): a putting back the drive holds after it
 /// brings the session back here, rather than this device sending its
 /// deletion again. One put back here by hand since the last sync is left
-/// out: deleted again, it is a deletion by hand as any other.
+/// out: deleted again, it is a deletion by hand as any other. So is one
+/// made here after the drive's deletion, by this device's clock, which is
+/// the later word ([`Plan::send_deleted`]): should the drive put the
+/// session back, it is sent, stamped as it was made.
+///
+/// Says whether it looked: not where the store could not say which were
+/// deleted by hand, which the next sync asks again.
 async fn note_deletions_by_hand(
     store: &dyn Store,
     listed: &BTreeSet<RecordId>,
     state: &mut SyncState,
-) {
+) -> bool {
     let unnoted: Vec<RecordId> = state
         .drive
         .tombs
@@ -546,27 +559,44 @@ async fn note_deletions_by_hand(
         })
         .collect();
     if unnoted.is_empty() {
-        return;
+        return true;
     }
-    for id in store.forgotten(unnoted).await {
-        if let Some(&at) = state.drive.tombs.get(&id) {
+    let Some(found) = store.deletions(unnoted).await else {
+        return false;
+    };
+    for (id, made) in found {
+        if let Some(&at) = state.drive.tombs.get(&id)
+            && made.is_none_or(|made| made <= at)
+        {
             state.applied.insert(id, at);
         }
     }
+    true
 }
 
 /// The plan for this sync, the store asked which of what the drive holds
-/// and it does not list it deleted by hand: of what the drive holds alive,
-/// and of what it holds as deleted that this device has no note of, where
-/// the drive deleted it since the last sync, as a session deleted on two
-/// devices before either synced, or this device put it back by hand since
-/// and deleted it again.
+/// and it does not list it deleted by hand, and when: of what the drive
+/// holds alive, and of what it holds as deleted that this device has no
+/// note of, where the drive deleted it since the last sync, as a session
+/// deleted on two devices before either synced, or this device put it back
+/// by hand since and deleted it again. None of them, where the store could
+/// not say: missing is never deleted.
+///
+/// Beside it, the stamp of each deletion by hand whose tombstone says when
+/// it was made ([`SyncState::stamp_change`]): then, or just after what this
+/// device knew the drive to hold of its record before this sync read it,
+/// where that is later. So a putting back made elsewhere after it, by the
+/// clock, stands, though the deletion reaches the drive only after; and one
+/// this device knew of as it deleted the session does not. A twin let go
+/// here ([`twins`]) is no deletion by hand, though it has a tombstone: its
+/// deletion, sent again where the drive has its name put back, is made as
+/// it is sent, as it was as the twin was let go, after any putting back.
 async fn planned(
     store: &dyn Store,
     drive: &DriveState,
     listed: &BTreeSet<RecordId>,
     state: &SyncState,
-) -> Plan {
+) -> (Plan, BTreeMap<RecordId, u64>) {
     let deleted_since = drive.tombs.keys().copied().filter(|&id| {
         drive.deleted(id)
             && (!state.drive.deleted(id) || state.revived.contains_key(&id))
@@ -578,20 +608,56 @@ async fn planned(
         .chain(deleted_since)
         .filter(|id| !listed.contains(id))
         .collect();
-    let forgotten: BTreeSet<RecordId> = if missing.is_empty() {
-        BTreeSet::new()
+    let found = if missing.is_empty() {
+        Vec::new()
     } else {
-        store.forgotten(missing).await.into_iter().collect()
+        store.deletions(missing).await.unwrap_or_default()
     };
-    plan(
+    let forgotten: BTreeSet<RecordId> = found.iter().map(|&(id, _)| id).collect();
+    let made: BTreeMap<RecordId, u64> = found
+        .iter()
+        .filter(|&&(id, _)| !twin_kept_here(id, listed))
+        .filter_map(|&(id, made)| Some((id, made?)))
+        .collect();
+    // `state` holds the drive as this device knew it before this sync.
+    let stamps = made
+        .iter()
+        .map(|(&id, &made)| (id, state.stamp_change(id, made)))
+        .collect();
+    let plan = plan(
         drive,
         Here {
             listed,
             forgotten: &forgotten,
+            made: &made,
             applied: &state.applied,
             revived: &state.revived,
         },
-    )
+    );
+    (plan, stamps)
+}
+
+/// The names of the sessions that finished in the same millisecond as the
+/// one `id` names, as a session's name falls where it finished
+/// ([`RecordId::next`], [`RecordId::placed`]).
+fn same_millisecond(id: RecordId) -> RangeInclusive<RecordId> {
+    let from = id.order / 1000 * 1000;
+    let start = RecordId {
+        order: from,
+        nonce: 0,
+    };
+    let end = RecordId {
+        order: from.saturating_add(999),
+        nonce: u64::MAX,
+    };
+    start..=end
+}
+
+/// Whether `id`, gone here, may be a twin let go here ([`twins`]): another
+/// record listed here names a session that finished in the same
+/// millisecond, which may be its session, kept under that name.
+fn twin_kept_here(id: RecordId, listed: &BTreeSet<RecordId>) -> bool {
+    listed.range(same_millisecond(id)).any(|&other| other != id)
 }
 
 /// A record the drive holds that is a session this device holds already
@@ -625,17 +691,8 @@ async fn twins(
         .collect();
     let mut near: Vec<(RecordId, Vec<RecordId>)> = Vec::new();
     for &theirs in &planned.take {
-        let from = theirs.order / 1000 * 1000;
-        let start = RecordId {
-            order: from,
-            nonce: 0,
-        };
-        let end = RecordId {
-            order: from.saturating_add(999),
-            nonce: u64::MAX,
-        };
         let here: Vec<RecordId> = listed
-            .range(start..=end)
+            .range(same_millisecond(theirs))
             .copied()
             .filter(|id| !busy.contains(id))
             .collect();

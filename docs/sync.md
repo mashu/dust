@@ -45,7 +45,8 @@ Each sync (`src/sync/run.rs`):
    (`DriveState` puts every pack together: of each record, whether some pack
    holds it, and the latest time it was deleted and put back);
 2. asks the store what it lists, and which of the drive's records it does
-   not list it deleted by hand (`Store::forgotten`);
+   not list it deleted by hand, and when (`Store::deletions`): none where
+   the store cannot say, as missing is never deleted;
 3. works out the plan (`src/sync/plan.rs`): records to take, deletions to
    make here, records and deletions to send;
 4. makes the local change in one `HistoryChange`, before anything is sent;
@@ -59,13 +60,20 @@ by a restore, after a deletion the drive holds is sent as *put back*, so
 that the deletion does not take it again; a device that let it go takes it
 back, and so does a device that deleted it by hand, whose deletion the
 drive holds then, sent from it or made on another device as well, rather
-than send it again. Deleted by hand again after it is put back here, it is
-a deletion by hand as any other, whatever was noted of the one before. A
-putting back as late as a deletion stands, here as in the drive.
-Missing is never deleted: a record is let go only for a deletion.
-A deletion or a putting back is stamped when it is made, or just after the
-latest of the record the device knows the drive to hold, where that is
-later (`SyncState::stamp_change`): one made after another is the later,
+than send it again. One a device deleted by hand after the drive's
+deletion, by its own clock, is the later word, and is sent all the same:
+a putting back made between the two loses to it on every device. Deleted
+by hand again after it is put back here, it is a deletion by hand as any
+other, whatever was noted of the one before. A putting back as late as a
+deletion stands, here as in the drive. Missing is never deleted: a record
+is let go only for a deletion. A device updated from a build that noted no
+deletion by hand notes those it made that the drive holds at its first
+sync at which the store can say which they are, and looks again at each
+sync until then.
+A deletion or a putting back is stamped when it is made (a deletion by
+hand when its tombstone says, though it is sent later), or just after the
+latest of the record the device knew the drive to hold by then, where that
+is later (`SyncState::stamp_change`): one made after another is the later,
 however far apart the devices' clocks are. One made while a sync is under
 way is stamped again as it ends, after what that sync read and sent, and
 a session put back by hand meanwhile, in that tab or window or in another

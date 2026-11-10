@@ -54,8 +54,9 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::disk::{aside_name, flush, move_aside, place_whole, shown, sync_dir, write_whole};
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{
-    HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unopened, Unreadable, held_key,
-    key_of, keyed, names_noted, not_told, read_record, taken_up, tombstone_key, unreadable,
+    Deletions, HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unopened, Unreadable,
+    held_key, key_of, keyed, names_noted, not_told, read_record, taken_up, tombstone_at,
+    tombstone_key, unreadable,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -702,14 +703,28 @@ impl HistoryFiles {
         read
     }
 
-    /// Which of `ids` were deleted by hand. One whose tombstone cannot be
-    /// looked for is taken as not deleted: missing is never deleted.
-    pub(super) fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
+    /// Which of `ids` were deleted by hand: those with a tombstone, each
+    /// beside when it says the record was deleted, none for one that does
+    /// not say, as an empty one, which deletes its record all the same.
+    /// None where a tombstone could not be looked for, as where their
+    /// folder will not open: that is no word that a record was not deleted.
+    /// One with no tombstone was not: missing is never deleted.
+    pub(super) fn deletions(&self, ids: &[RecordId]) -> Option<Deletions> {
         self.on_its_thread();
-        ids.iter()
-            .copied()
-            .filter(|id| fs::symlink_metadata(self.tombstones().join(file_name(*id))).is_ok())
-            .collect()
+        let tombstones = self.tombstones();
+        let mut found = Vec::new();
+        for &id in ids {
+            let tombstone = tombstones.join(file_name(id));
+            match fs::symlink_metadata(&tombstone) {
+                Ok(_) => {
+                    let at = fs::read(&tombstone).ok().and_then(|raw| tombstone_at(&raw));
+                    found.push((id, at));
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return None,
+            }
+        }
+        Some(found)
     }
 
     /// The gate `layout.json` sets. One that does not read is set aside
@@ -1644,8 +1659,17 @@ mod tests {
             wait(self.0.read(ids.to_vec()))
         }
 
+        fn deletions(&self, ids: &[RecordId]) -> Option<Deletions> {
+            wait(self.0.deletions(ids.to_vec()))
+        }
+
+        /// Which of `ids` were deleted by hand: none, where that could not
+        /// be looked for, as a store answers sync ([`Store::forgotten`]).
+        ///
+        /// [`Store::forgotten`]: crate::persist::Store::forgotten
         fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
-            wait(self.0.forgotten(ids.to_vec()))
+            let found = self.deletions(ids).unwrap_or_default();
+            found.into_iter().map(|(id, _)| id).collect()
         }
 
         fn still_unread(&self, ids: &[RecordId]) -> Vec<HistoryNotice> {
@@ -2261,6 +2285,49 @@ mod tests {
         assert_eq!(files.listing(), Some(Vec::new()));
         assert_eq!(files.forgotten(&[one.id, two.id]), [one.id, two.id]);
         assert!(files.load().sessions.is_empty());
+    }
+
+    /// Which records were deleted by hand comes with when each was, as its
+    /// tombstone says, none for one that does not say. Where the tombstones
+    /// cannot be looked for, as where their folder will not open, there is
+    /// no word at all, rather than the word that none was deleted; and once
+    /// they can be again, the word comes back.
+    #[cfg(unix)]
+    #[test]
+    fn deletions_say_when_each_was_made_or_that_none_could_be_looked_for() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, files) = history("deletions");
+        files.load();
+        let (first, second, third) = (finished(1_000), finished(2_000), finished(3_000));
+        let (one, two, three) = (record(&first), record(&second), record(&third));
+        files.apply(&put(&[one.clone(), two.clone(), three.clone()]));
+        files.apply(&forget(&[(&one, &first)]));
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::write(tombstones.join(file_name(two.id)), "{ not").unwrap();
+        let all = [one.id, two.id, three.id];
+        let found = Some(vec![(one.id, Some(7)), (two.id, None)]);
+        assert_eq!(files.deletions(&all), found);
+        // In the folder's place, a link that leads back to itself: nothing
+        // in it can be looked for, whoever runs this.
+        let aside = dir.0.join("tombstones-aside");
+        fs::rename(&tombstones, &aside).unwrap();
+        std::os::unix::fs::symlink(&tombstones, &tombstones).unwrap();
+        assert_eq!(files.deletions(&all), None, "looked for through a loop");
+        assert!(files.forgotten(&all).is_empty(), "missing is never deleted");
+        fs::remove_file(&tombstones).unwrap();
+        fs::rename(&aside, &tombstones).unwrap();
+        assert_eq!(files.deletions(&all), found, "looked for again");
+        // A folder that cannot be searched, where its permissions hold.
+        if TempDir::permissions_hold() {
+            let mode = |mode| fs::set_permissions(&tombstones, fs::Permissions::from_mode(mode));
+            mode(0o600).unwrap();
+            let unsearchable = files.deletions(&all);
+            mode(0o755).unwrap();
+            assert_eq!(
+                unsearchable, None,
+                "looked for in a folder not to be searched"
+            );
+        }
     }
 
     /// A deletion is made once its tombstones are: a record that will not
@@ -3680,6 +3747,8 @@ mod tests {
         a_deletion_is_a_tombstone_beside_the_history,
         a_record_and_its_tombstone_read_as_deleted,
         an_empty_tombstone_still_deletes,
+        #[cfg(unix)]
+        deletions_say_when_each_was_made_or_that_none_could_be_looked_for,
         a_deletion_is_made_once_its_tombstones_are,
         #[cfg(unix)]
         a_deletion_that_cannot_be_made_durable_deletes_nothing,
