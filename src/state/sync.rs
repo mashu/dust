@@ -598,13 +598,21 @@ impl AppCtx {
     /// and so after a deletion of it made elsewhere later by the clock that
     /// this sync read, which it then beats (`docs/sync.md`). One deleted by
     /// hand again since is spent, and is no more noted
-    /// ([`Self::deleted_again`]): the deletion is this sync's, or the next
-    /// one's, to send, stamped as it was made. Noted again, after the
-    /// deletion this sync sent and noted, the next sync took it for a
-    /// putting back since, dropped that note, and sent the deletion again,
-    /// stamped after all this one read: after a putting back made elsewhere
-    /// later than the deletion by the clock. The sign-in is no sync's to
-    /// keep: the store's, or one
+    /// ([`Self::deleted_again`]), nor is the drive's deletion it undid, one
+    /// stamped before both it and the deletion the store holds now: the
+    /// deletion is this sync's, or the next one's, to send, stamped as it
+    /// was made. Noted again, after the deletion this sync sent and noted,
+    /// the next sync took it for a putting back since, dropped that note,
+    /// and sent the deletion again, stamped after all this one read: after a
+    /// putting back made elsewhere later than the deletion by the clock.
+    /// With the note of the deletion it undid kept, the next sync took the
+    /// deletion here for that one, and took the session back on every device
+    /// where the drive had it put back since. A note as late as either is of
+    /// the deletion now, as another copy's sync sent it, found the drive
+    /// holding it, or let the session go by it, and stays; the drive's stamp
+    /// is by the clock of the device that made it, so a deletion made there
+    /// before the putting back, with that clock ahead, can read as one, and
+    /// stays as well. The sign-in is no sync's to keep: the store's, or one
     /// made here that the store has yet to take, before the sync began or
     /// meanwhile ([`Self::sign_in_made_here`]), not one taken up from another
     /// copy meanwhile. Nothing is kept where sync was turned off or on anew
@@ -669,8 +677,17 @@ impl AppCtx {
             .map(|(&id, &at)| (id, at))
             .collect();
         for (id, at) in elsewhere.into_iter().chain(take(self.sync.revived)) {
-            if deleted_again.contains(&id) {
+            if let Some(&made) = deleted_again.get(&id) {
                 merged.revived.remove(&id);
+                // The note of the deletion that putting back undid is spent
+                // with it: one stamped before both the putting back and the
+                // deletion the store holds now. One as late as either is of
+                // that deletion, as another copy's sync sent it, found the
+                // drive holding it, or let the session go by it.
+                let undone = made.map_or(at, |made| made.min(at));
+                if merged.applied.get(&id).is_some_and(|&gone| gone < undone) {
+                    merged.applied.remove(&id);
+                }
                 continue;
             }
             let at = merged.stamp_change(id, at);
@@ -682,10 +699,11 @@ impl AppCtx {
 
     /// Of the sessions put back by hand while a sync was under way, here or
     /// in another copy of the app, as the notes waiting here and those the
-    /// store kept since `base` show them, those deleted by hand again since:
-    /// a putting back takes the session's tombstone away, so one the store
-    /// holds of it now was made after. None where the store cannot say.
-    async fn deleted_again(self, base: &SyncState) -> BTreeSet<RecordId> {
+    /// store kept since `base` show them, those deleted by hand again since,
+    /// each beside when its tombstone says it was: a putting back takes the
+    /// session's tombstone away, so one the store holds of it now was made
+    /// after. None where the store cannot say.
+    async fn deleted_again(self, base: &SyncState) -> BTreeMap<RecordId, Option<u64>> {
         let store = self.app().store;
         let mut put_back: BTreeSet<RecordId> = self.sync.revived.peek().keys().copied().collect();
         if let Kept::State(kept) = read_kept(&*store)
@@ -699,14 +717,13 @@ impl AppCtx {
             );
         }
         if put_back.is_empty() {
-            return BTreeSet::new();
+            return BTreeMap::new();
         }
         store
             .deletions(put_back.into_iter().collect())
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(|(id, _)| id)
             .collect()
     }
 

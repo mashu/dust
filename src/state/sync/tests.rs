@@ -3866,6 +3866,103 @@ fn a_putting_back_elsewhere_after_a_deletion_by_hand_made_during_a_sync_stands()
     });
 }
 
+/// A session deleted here and sent; put back here by Undo while this
+/// copy's next sync is under way, past its reading; put back on another
+/// device after that; and deleted here by hand again, last of all, before
+/// that sync ends: the last deletion is the last word, and stands
+/// everywhere. As the sync ended, the putting back made meanwhile, deleted
+/// again since, was left unnoted as spent, but the note of the deletion it
+/// undid stayed in what sync keeps: the next sync took the new deletion for
+/// that one, put back since in the drive, and took the session back on
+/// every device.
+#[test]
+fn a_deletion_after_a_putting_back_elsewhere_stands_where_one_during_a_sync_was_spent() {
+    run(|| async {
+        let mut harness = Harness::new();
+        keep(&harness, &[1, 2]);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        harness.advance(1_000).await;
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let theirs = harness.in_app(|| ctx.settings.peek().clone().clamp());
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        let two = harness
+            .in_app(|| ctx.sessions.peek().id_at(1))
+            .expect("two");
+        // 2 deleted here and sent; the other device lets it go.
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.pump();
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(1_000).await;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        assert!(
+            kept_state(&harness).applied.contains_key(&two),
+            "noted as the drive's"
+        );
+        assert_eq!(held_by(&other), [1], "let go there");
+        // A setting changed here, so that the next sync writes to the drive,
+        // and that sync waits on its write, past its reading.
+        harness.in_app(|| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = 7;
+            ctx.store_settings();
+        });
+        harness.pump();
+        held.hold_writes(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(200).await;
+        // Meanwhile 2 is put back here by Undo; put back on the other device
+        // after that, which syncs; and deleted here by hand, last of all.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        harness.in_app(|| ctx.undo_delete());
+        harness.pump();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        put_back_in(&other, &mut other_state, two, &at(2), now_ms());
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        harness.in_app(|| ctx.delete_sessions(&[two]));
+        harness.pump();
+        held.hold_writes(false);
+        harness.advance(1_000).await;
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(1_000).await;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        assert_eq!(stored_stamps(&harness), [1], "deleted here, the last word");
+        assert_eq!(joined_stamps(&remote), [1], "the drive's word");
+        assert_eq!(held_by(&other), [1], "the other device");
+    });
+}
+
 /// Two copies of the app on a store that takes no lock (as Safari before
 /// 15.4, a share without locks, or once a sync's ten minutes are out), whose
 /// syncs run at once: one reads the drive as another device has set 3

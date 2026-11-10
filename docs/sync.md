@@ -90,17 +90,23 @@ beats the deletion that sync sent, which it may undo; and so it beats, too,
 a deletion of that session made on another device after it by the clock,
 where the sync read that deletion: the putting back is the later word
 then, on every device. One whose session was deleted by hand again since,
-in that tab or window or in another, is spent, and is not noted: the
-deletion is the later word, which that sync sends stamped as it was made,
-where it was made before the sync listed the history, so that a putting
-back made elsewhere after it by the clock stands; or the next sync, as
-above. And a session put back by hand meanwhile, in that
-tab or window or in another on the device, is not let go by that sync,
-which planned with no note of it, even where sync is turned off before it
-ends: the next sends it as put back, where sync is on still. A putting back
-noted while sync knows nothing of the drive, as just after it is turned on
-anew, when what it knew before went with it, is stamped again after what
-the drive holds once its first sync reads it.
+in that tab or window or in another, is spent, and is not noted, nor is
+the drive's deletion it undid: the deletion is the later word, which that
+sync sends stamped as it was made, where it was made before the sync
+listed the history, so that a putting back made elsewhere after it by the
+clock stands; or the next sync, as above, though the drive has the session
+put back since. A note of the drive's deletion as late as that putting
+back, or as the deletion, is of the deletion, sent or found in the drive
+by another tab's or window's sync, and stays: the drive's stamp is by the
+clock of the device that made it, so one made before the putting back on a
+device whose clock was ahead can read so too, and then the session comes
+back where the drive has it put back since. And a session put back by hand
+meanwhile, in that tab or window or in another on the device, is not let
+go by that sync, which planned with no note of it, even where sync is
+turned off before it ends: the next sends it as put back, where sync is on
+still. A putting back noted while sync knows nothing of the drive, as just
+after it is turned on anew, when what it knew before went with it, is
+stamped again after what the drive holds once its first sync reads it.
 
 One session can be two records: a backup restored on one device names each
 session where it finished (`RecordId::placed`), while the device it came
