@@ -16,7 +16,7 @@ pub use preview::{Dialogue, DialogueLine, HeardGroup, Preview};
 pub use sync::SyncStatus;
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +57,11 @@ pub const RETRY_MS: u32 = 60_000;
 /// the first; a record that still cannot be read at the last is told of
 /// ([`crate::persist::record::HistoryNotice::Unread`]).
 pub const READ_AGAIN_MS: [u32; 3] = [2_000, 10_000, 60_000];
+
+/// How long a restore asked for while a session or a run has the app waits
+/// before it looks again, to be made once that is over
+/// ([`AppCtx::restore_backup`]).
+const RESTORE_WAIT_MS: u32 = 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -256,9 +261,13 @@ pub struct AppCtx {
     /// The restore under way, by its number, until what became of it has
     /// been told: none while an Undo is, or nothing is.
     current_restore: CopyValue<Option<u64>>,
-    /// The restores asked for while another, or an Undo, was under way,
-    /// each by its number, made in turn once the one before it is over.
-    restores_waiting: CopyValue<VecDeque<(u64, Backup)>>,
+    /// The restore asked for last while another, or an Undo, was under way,
+    /// or a session or run had the app, by its number: made once that is
+    /// over. One asked for after takes its place, and it is never made.
+    restores_waiting: CopyValue<Option<(u64, Backup)>>,
+    /// A task waits for the session or run under way to be over, to make
+    /// the restore waiting then ([`Self::restore_after_session`]).
+    restore_after_session: CopyValue<bool>,
     /// Sync with the user's own Google Drive, where it is on
     /// ([`self::sync`]).
     pub sync: SyncCtx,
@@ -332,7 +341,8 @@ impl AppCtx {
                 restore_under_way: CopyValue::new(false),
                 restores_asked: CopyValue::new(0),
                 current_restore: CopyValue::new(None),
-                restores_waiting: CopyValue::new(VecDeque::new()),
+                restores_waiting: CopyValue::new(None),
+                restore_after_session: CopyValue::new(false),
                 sync,
                 app: CopyValue::new(app),
             };
@@ -1599,14 +1609,18 @@ impl AppCtx {
     /// once; one it fills in is a record in its place
     /// ([`RecordId::beside`]), the one it fills in deleted.
     ///
-    /// One at a time: a restore asked for while another is under way, as a
-    /// store that takes a moment to list or change the history leaves one,
-    /// or while the Undo of one is, is made once that is over, merged with
-    /// the history it left. Merged with a history short of what the other
-    /// brings back, it would take that for its own, and its Undo take it
-    /// back as well; merged with one that still holds what the Undo takes
-    /// back, it would take that for sessions already here, and the Undo
-    /// delete them.
+    /// One at a time, and between sessions: a restore asked for while
+    /// another is under way, as a store that takes a moment to list or
+    /// change the history leaves one, or while the Undo of one is, is made
+    /// once that is over, merged with the history it left. Merged with a
+    /// history short of what the other brings back, it would take that for
+    /// its own, and its Undo take it back as well; merged with one that
+    /// still holds what the Undo takes back, it would take that for
+    /// sessions already here, and the Undo delete them. One asked for while
+    /// a session or a run has the app is made once that is over, as a sync
+    /// is, never under it: a restore takes its settings, the level among
+    /// them. Of those asked for meanwhile, the last is made, and none
+    /// before it.
     ///
     /// Gives back the number it is known by until what became of it has
     /// been told ([`Self::restore_told`]).
@@ -1621,19 +1635,36 @@ impl AppCtx {
     /// Whether what became of the restore asked for under `ticket` has been
     /// told ([`Self::restore_backup`]): it is neither waiting its turn nor
     /// under way, whatever else is, as the Undo of it, which may follow at
-    /// once.
+    /// once. One that another asked for after it took the place of is told
+    /// of as soon as it is, though it is never made.
     pub fn restore_told(self, ticket: u64) -> bool {
         ticket <= *self.restores_asked.peek()
             && *self.current_restore.peek() != Some(ticket)
-            && !self
-                .restores_waiting
-                .peek()
-                .iter()
-                .any(|(waiting, _)| *waiting == ticket)
+            && !self.waits(ticket)
+    }
+
+    /// Whether the restore asked for under `ticket` waits its turn.
+    fn waits(self, ticket: u64) -> bool {
+        self.restores_waiting
+            .peek()
+            .as_ref()
+            .is_some_and(|(waiting, _)| *waiting == ticket)
+    }
+
+    /// The restore asked for under `ticket`, where it still waits its turn,
+    /// is made no more: another backup was chosen in its place, to be asked
+    /// for once it is read.
+    pub fn withdraw_restore(self, ticket: u64) {
+        if self.waits(ticket) {
+            let mut waiting = self.restores_waiting;
+            waiting.set(None);
+        }
     }
 
     /// Restore `backup`, asked for under `ticket` ([`Self::restore_backup`]),
-    /// once no other restore, nor Undo, is under way.
+    /// now, or once no other restore, nor Undo, is under way and no session
+    /// or run has the app: the last asked for until then, in place of any
+    /// asked for before.
     fn restore_in_turn(self, ticket: u64, backup: Backup) {
         // The last restore asked for: the one before it is undone no more,
         // and its message, while it is up, offers no Undo that would do
@@ -1644,13 +1675,28 @@ impl AppCtx {
             self.toasts.withdraw(ToastAction::UndoRestore);
         }
         let mut under_way = self.restore_under_way;
-        if *under_way.peek() {
+        let mut current = self.current_restore;
+        if *under_way.peek() || self.session_running() {
+            // Waiting, unless one asked for after it waits already, as one
+            // taken from the queue as a session began may find: that one is
+            // made in its place.
             let mut waiting = self.restores_waiting;
-            waiting.write().push_back((ticket, backup));
+            let later = waiting
+                .peek()
+                .as_ref()
+                .is_some_and(|(waiting, _)| *waiting > ticket);
+            if !later {
+                waiting.set(Some((ticket, backup)));
+            }
+            if *current.peek() == Some(ticket) {
+                current.set(None);
+            }
+            if !*under_way.peek() {
+                self.restore_after_session();
+            }
             return;
         }
         under_way.set(true);
-        let mut current = self.current_restore;
         current.set(Some(ticket));
         self.sync_with_store(move |listed| {
             if listed {
@@ -1782,15 +1828,24 @@ impl AppCtx {
 
     /// Whether a restore, or the Undo of one, is under way
     /// ([`Self::restore_backup`]).
+    #[cfg(test)]
     pub fn restore_under_way(self) -> bool {
         *self.restore_under_way.peek()
     }
 
+    /// Whether a restore asked for waits its turn in the app
+    /// ([`Self::restore_backup`]).
+    #[cfg(test)]
+    pub fn restore_waits(self) -> bool {
+        self.restores_waiting.peek().is_some()
+    }
+
     /// The restore under way, or the Undo of one, is over, what became of
-    /// it told: the next restore asked for meanwhile is made next, in a
-    /// task of its own, and is under way until then, so that one asked for
-    /// in between waits behind it. What became of a change is told of as
-    /// soon as the store answers, before it is taken up here
+    /// it told: the restore asked for meanwhile is made next, in a task of
+    /// its own, and is under way until then, so that one asked for in
+    /// between waits behind it; or, where a session or a run has the app,
+    /// once that is over. What became of a change is told of as soon as the
+    /// store answers, before it is taken up here
     /// ([`Self::change_history`]): what rode along with it marked stored,
     /// and what the store let go for room gone. Made then and there, the
     /// next would be merged with a history that still holds what the store
@@ -1802,16 +1857,52 @@ impl AppCtx {
     fn restore_over(self) {
         let mut under_way = self.restore_under_way;
         let mut waiting = self.restores_waiting;
-        let next = waiting.write().pop_front();
+        let next = if self.session_running() {
+            None
+        } else {
+            waiting.write().take()
+        };
         let mut current = self.current_restore;
         current.set(next.as_ref().map(|(ticket, _)| *ticket));
         let Some((ticket, next)) = next else {
             under_way.set(false);
+            if waiting.peek().is_some() {
+                self.restore_after_session();
+            }
             return;
         };
         spawn_forever(async move {
             under_way.set(false);
             self.restore_in_turn(ticket, next);
+        });
+    }
+
+    /// Make the restore waiting once the session or run that has the app is
+    /// over, as one that ends under it would change its settings, the level
+    /// among them: in a task of its own, looking again every
+    /// [`RESTORE_WAIT_MS`], and one task however many restores are asked
+    /// for meanwhile. No task waits where no session runs: a restore is made
+    /// then and there.
+    fn restore_after_session(self) {
+        let mut waits = self.restore_after_session;
+        if *waits.peek() {
+            return;
+        }
+        waits.set(true);
+        spawn_forever(async move {
+            while self.session_running() {
+                sleep_ms(RESTORE_WAIT_MS).await;
+            }
+            waits.set(false);
+            // Unless a restore or an Undo got under way meanwhile, which
+            // makes it as it ends.
+            if !*self.restore_under_way.peek() {
+                let mut waiting = self.restores_waiting;
+                let next = waiting.write().take();
+                if let Some((ticket, next)) = next {
+                    self.restore_in_turn(ticket, next);
+                }
+            }
         });
     }
 
@@ -2035,7 +2126,7 @@ impl AppCtx {
         }
         // A restore asked for while this one was under way, and waiting
         // for it, is the last one asked for: this one is undone no more.
-        if self.restores_waiting.peek().is_empty() {
+        if self.restores_waiting.peek().is_none() {
             let mut before_restore = self.before_restore;
             before_restore.set(Some(Restored {
                 added,
@@ -2103,7 +2194,7 @@ impl AppCtx {
             if let Some(why) = why_not_stored(&saved) {
                 // Still to undo, unless another restore was asked for
                 // meanwhile.
-                if self.restores_waiting.peek().is_empty() {
+                if self.restores_waiting.peek().is_none() {
                     before_restore.set(Some(restored));
                 }
                 toasts.show(format!("The restore could not be undone: {why}."));

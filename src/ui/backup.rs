@@ -46,10 +46,6 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
 /// backup of the app takes, which then backs up none of it.
 const OUTGROWN: &str = "Your history here is past 20 MB, and Android's own backup of an app stops at 25 MB: save a backup file now and then, so a lost or new phone still has every session.";
 
-/// How long a backup read while a session or a run is under way waits
-/// before it looks again, to be restored once that is over.
-const SESSION_WAIT_MS: u32 = 1_000;
-
 /// What a restore does: no more, and no less.
 const RESTORING: &str = "adds the sessions missing here and takes its settings, level included, though not this device's volume and paddle keys. Undo, in the message that follows, puts both back";
 
@@ -190,12 +186,12 @@ impl Restoring {
     }
 
     /// Read `file` as a backup and restore what it holds, in a task of the
-    /// app's own, once no session or run, nor another restore or the Undo
-    /// of one, is under way: the card says it is being read at once, and
-    /// until it has been restored, and why not, if it could not be; with
-    /// no card drawn by then, a message does. Unless another file is
-    /// chosen before it is restored: then that one is, and nothing of this
-    /// is said.
+    /// app's own: the card says it is being read at once, and until it has
+    /// been restored, and why not, if it could not be; with no card drawn
+    /// by then, a message does. Unless another file is chosen before it is
+    /// restored: then that one is, and nothing of this is said. The app
+    /// makes it in its turn ([`AppCtx::restore_backup`]): once no session
+    /// or run, nor another restore or the Undo of one, is under way.
     fn start(self, ctx: AppCtx, file: PickedFile) {
         let Self {
             mut under_way,
@@ -233,18 +229,6 @@ impl Restoring {
                 Ok((name, text)) => backup_in(&name, text).await,
                 Err(why) => Err(why),
             };
-            // Restored between sessions, as a sync is, never under one: a
-            // restore takes its settings, the level among them. And after
-            // any restore, or Undo of one, still under way, to be merged
-            // with the history that one left.
-            while ctx.session_running() || ctx.restore_under_way() {
-                let wait = if ctx.session_running() {
-                    SESSION_WAIT_MS
-                } else {
-                    crate::time::POLL_MS
-                };
-                crate::time::sleep_ms(wait).await;
-            }
             // Another file chosen meanwhile is restored in its place.
             if !chosen_last() {
                 return;
@@ -263,9 +247,15 @@ impl Restoring {
             };
             // Said on the card until the store has said what became of this
             // restore, as a browser's database takes a moment to: of this
-            // one, not of an Undo clicked as soon as it is told of.
+            // one, not of an Undo clicked as soon as it is told of. Another
+            // file chosen while it still waits its turn is restored in its
+            // place, once read: this one is made no more.
             let ticket = ctx.restore_backup(backup);
             while !ctx.restore_told(ticket) {
+                if !chosen_last() {
+                    ctx.withdraw_restore(ticket);
+                    return;
+                }
                 crate::time::sleep_ms(crate::time::POLL_MS).await;
             }
             if chosen_last() {

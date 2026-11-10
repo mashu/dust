@@ -651,6 +651,84 @@ fn a_backup_chosen_while_a_restore_is_undone_waits_for_it() {
     });
 }
 
+/// A backup chosen while the Undo of a restore is under way is handed to
+/// the app as soon as it is read, and waits its turn there, as every
+/// restore asked for does: one way to make restores one at a time, the
+/// app's. The card held it back itself until nothing was under way, so the
+/// app's own wait was reached by no restore the card made.
+#[test]
+fn a_backup_chosen_while_a_restore_is_undone_waits_in_the_apps_queue() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[4..]);
+        let first = write_backup(&test_settings(), &all[..2], 0);
+        let second = write_backup(&test_settings(), &all[..3], 0);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(20).await;
+        ui.store.deferred.set(true);
+        ui.click("toast-undo");
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.advance(100).await;
+        assert!(
+            ui.with_app(|ctx| ctx.restore_waits()),
+            "waiting in the app's queue"
+        );
+        assert!(ui.has("Reading second.json…"), "{}", ui.html());
+        ui.store.settle();
+        ui.advance(100).await;
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Reading"), "{}", ui.html());
+    });
+}
+
+/// An Undo that fails while a backup chosen meanwhile waits for it puts
+/// back no Undo of the restore it could not undo: the backup waiting is
+/// the last restore asked for, made once the failure is told of, and has
+/// an Undo of its own, which takes back what it brought alone.
+#[test]
+fn an_undo_that_fails_while_a_backup_waits_offers_no_undo_again() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[4..]);
+        let first = write_backup(&test_settings(), &all[..2], 0);
+        let second = write_backup(&test_settings(), &all[..3], 0);
+        ui.choose_file("file-backup", "first.json", &first, first.len() as u64);
+        ui.advance(20).await;
+        assert_eq!(stored_dates(&ui).len(), 3);
+        ui.store.deferred.set(true);
+        ui.click("toast-undo");
+        ui.choose_file("file-backup", "second.json", &second, second.len() as u64);
+        ui.advance(100).await;
+        // The Undo finds no room to be made in.
+        ui.store.full.set(true);
+        ui.store.settle();
+        ui.store.full.set(false);
+        ui.advance(100).await;
+        ui.store.settle();
+        ui.advance(100).await;
+        assert!(
+            ui.has("Restored 1 session and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.shows("toast-undo"), "the second's own Undo");
+        ui.store.deferred.set(false);
+        ui.click("toast-undo");
+        ui.advance(20).await;
+        assert_eq!(
+            stored_dates(&ui),
+            ["2026-09-01", "2026-09-02", "2026-09-05"],
+            "what the second brought, taken back alone"
+        );
+    });
+}
+
 /// A file whose read never ends, as a browser's of a file moved after it
 /// was chosen never does, leaves the next one chosen to be restored: the
 /// card says at once that the newer is being read, and what it holds is
