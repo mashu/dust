@@ -672,6 +672,12 @@ holds `restore.lock` beside them (in a browser the Web Lock
 or offered, so a restore in another copy waits for its Undo rather than
 take what both bring back for sessions already here, which the Undo would
 then delete; where the store takes no lock, restores are made as they come.
+The Undo is offered until its message is taken down, after eight seconds,
+or another takes its place. A browser that suspends a tab out of sight, as
+Safari on iOS does, or freezes it to save power, runs no timer there, and
+the tab keeps `dust_restore` meanwhile: a restore in another tab waits, its
+card saying so, until that tab is shown again, its message taken down, or
+it is closed. No test suspends a page.
 
 Updating the app does not clear any of it. The `localStorage` keys
 (`dust_settings`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
