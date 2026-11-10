@@ -2902,6 +2902,23 @@ mod tests {
         assert_eq!(files.listing(), Some(Vec::new()));
     }
 
+    /// Which sessions a tombstone names, whatever record it was deleted
+    /// under, is said on every platform, as the app's cut-off sessions ask it
+    /// on every platform: one whose tombstone does not read is left out.
+    #[test]
+    fn which_sessions_a_tombstone_names_is_said_whatever_its_record() {
+        let (dir, files) = history("deleted-keys");
+        files.load();
+        let (first, second, third) = (finished(1_000), finished(2_000), finished(3_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        files.apply(&forget(&[(&one, &first)]));
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::write(tombstones.join(file_name(two.id)), "{ not").unwrap();
+        let keys = [&first, &second, &third].map(SessionKey::of);
+        assert_eq!(files.deleted_keys(&keys), Some(vec![keys[0].clone()]));
+    }
+
     /// A tombstone that holds nothing, or nothing that reads, deletes its
     /// record all the same.
     #[test]
@@ -4511,6 +4528,7 @@ mod tests {
         an_empty_tombstone_still_deletes,
         #[cfg(unix)]
         deletions_say_when_each_was_made_or_that_none_could_be_looked_for,
+        which_sessions_a_tombstone_names_is_said_whatever_its_record,
         a_deletion_is_made_once_its_tombstones_are,
         #[cfg(unix)]
         a_deletion_that_cannot_be_made_durable_deletes_nothing,
