@@ -352,6 +352,34 @@ mod tests {
         }
     }
 
+    /// Of two copies' syncs that ran at once, as where nothing locks, the one
+    /// that began later can have read the drive before the other sent a change
+    /// of a setting there: the settings each came to go together by the later
+    /// word on each, by its stamp, as the drive keeps the newest of each, not
+    /// whole as of the sync that began later. Taken whole from that one, the
+    /// change the other sent was not in what sync keeps, and a setting changed
+    /// by hand since, back to what that one held, read as no change at the next
+    /// sync, which took the drive's older word over it.
+    #[test]
+    fn settings_of_two_syncs_run_at_once_go_by_the_later_stamp_of_each() {
+        let mut base = state();
+        base.last = Some(100);
+        base.settings = Some(groups(36));
+        base.stamps = BTreeMap::from([("numGroups".to_string(), 30)]);
+        // This copy's sync began at 180, and sent 39, changed here.
+        let mut ours = base.clone();
+        ours.last = Some(180);
+        ours.settings = Some(groups(39));
+        ours.stamps = BTreeMap::from([("numGroups".to_string(), 180)]);
+        // The other copy's began at 200, read the drive before that, and ended
+        // first, taking nothing.
+        let mut theirs = base.clone();
+        theirs.last = Some(200);
+        let merged = ours.merged(Some(&base), &theirs);
+        assert_eq!(merged.settings, Some(groups(39)), "the later word on it");
+        assert_eq!(merged.stamps.get("numGroups"), Some(&180));
+    }
+
     /// What another copy's write leaves out stays, as a tab can read what
     /// sync keeps from before another tab's last write, and write without
     /// what that one noted; it goes only on evidence. A putting back goes

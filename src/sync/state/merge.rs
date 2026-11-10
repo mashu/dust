@@ -22,6 +22,8 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde_json::{Map, Value};
+
 use super::SyncState;
 use crate::persist::record::RecordId;
 
@@ -61,10 +63,17 @@ impl SyncState {
     ///   back, and without the note the next would take the session for one
     ///   deleted by hand and send its deletion.
     /// - The settings as of the last sync, with when each was changed, go
-    ///   together, as of the later sync; of one sync, this copy's where it
-    ///   changed them. The sign-in is this copy's where it signed in again
-    ///   since, and otherwise the store's. The deletions an earlier build
-    ///   made are noted where either copy noted them.
+    ///   together setting by setting, at the later stamp of each, as the
+    ///   drive keeps the newest of each ([`settings_by_stamp`]): two syncs
+    ///   that ran at once, where nothing locks, can each have sent or taken
+    ///   a change the other never read. At one stamp, the later sync's; of
+    ///   one sync, this copy's where it changed them. Taken whole from the
+    ///   later sync, a change the other sent was missing from what sync
+    ///   keeps, and a setting changed by hand since, back to what the later
+    ///   held, read as no change at the next sync, which took the drive's
+    ///   older word over it. The sign-in is this copy's where it signed in
+    ///   again since, and otherwise the store's. The deletions an earlier
+    ///   build made are noted where either copy noted them.
     /// - What a later build keeps here, which this one does not know, is the
     ///   store's: this copy never changes it, so a key the store no longer
     ///   holds was let go, and stays gone.
@@ -139,14 +148,15 @@ impl SyncState {
                 })
             },
         );
-        let synced_later = match self.last.cmp(&theirs.last) {
-            Ordering::Greater => self,
-            Ordering::Less => theirs,
+        let (synced_later, other) = match self.last.cmp(&theirs.last) {
+            Ordering::Greater => (self, theirs),
+            Ordering::Less => (theirs, self),
             Ordering::Equal if (&self.settings, &self.stamps) != (&base.settings, &base.stamps) => {
-                self
+                (self, theirs)
             }
-            Ordering::Equal => theirs,
+            Ordering::Equal => (theirs, self),
         };
+        let (settings, stamps) = settings_by_stamp(synced_later, other);
         let sign_in = if self.sign_in != base.sign_in {
             &self.sign_in
         } else {
@@ -167,8 +177,8 @@ impl SyncState {
             unanswered,
             revived,
             deletions_noted: self.deletions_noted || theirs.deletions_noted,
-            settings: synced_later.settings.clone(),
-            stamps: synced_later.stamps.clone(),
+            settings,
+            stamps,
             unread,
         }
     }
@@ -179,6 +189,33 @@ impl SyncState {
     fn of_one_sync(&self, other: &SyncState) -> bool {
         self.device == other.device && self.keyring == other.keyring
     }
+}
+
+/// The settings as of the last sync, with when each was changed, of two
+/// copies' states of one sync, `later` the one whose sync was the later:
+/// its own, with each setting `other` holds at a later stamp, as the drive
+/// keeps the newest of each. Where `later` holds none, `other`'s.
+fn settings_by_stamp(
+    later: &SyncState,
+    other: &SyncState,
+) -> (Option<Map<String, Value>>, BTreeMap<String, u64>) {
+    let (mut settings, mut stamps) = (later.settings.clone(), later.stamps.clone());
+    match (settings.as_mut(), &other.settings) {
+        (Some(kept), Some(also)) => {
+            for (key, value) in also {
+                let Some(&at) = other.stamps.get(key) else {
+                    continue;
+                };
+                if stamps.get(key).is_none_or(|&was| at > was) {
+                    kept.insert(key.clone(), value.clone());
+                    stamps.insert(key.clone(), at);
+                }
+            }
+        }
+        (None, Some(_)) => return (other.settings.clone(), other.stamps.clone()),
+        _ => {}
+    }
+    (settings, stamps)
 }
 
 /// Which notes [`merge_notes`] merges.

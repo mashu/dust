@@ -256,9 +256,9 @@ same place (`SyncState`), and each lays what it did over what the store
 holds as it writes, note by note, rather than writing its own whole over
 the other's (`SyncState::merged`): a session one of them puts back by Undo,
 a deletion the other's sync sent, a sign-in made in either, and the
-settings as the later sync left them all stay. Each sync begins from what
-the store holds, and lays what it did over what the store holds as it
-ends, so a putting back made in another tab or window meanwhile goes with
+settings, the later word on each by its stamp, all stay. Each sync begins
+from what the store holds, and lays what it did over what the store holds
+as it ends, so a putting back made in another tab or window meanwhile goes with
 the next sync. It begins from the settings the store holds as well: a tab or
 window that has not looked since another changed a setting and synced it
 takes that change up, rather than send its own older value back as a change
@@ -269,9 +269,10 @@ sync took and stored meanwhile, as two sync at once where nothing locks
 (below), is that sync's word on it: the later word of the two, by its
 stamp, is the one kept, as the drive keeps the newest of each. One changed
 by hand in the tab or window syncing meanwhile is its own, and stays,
-whatever the other's sync took; but the tab or window tells that sync's
-take from a change made in a third one only by its value, and one set
-there to the value the other's sync took gives way with it. A note another
+whatever its sync or the other's took, though it is back to what it was as
+the sync began; but the tab or window tells the other's take from a change
+made in a third one only by its value, and one set there to the value the
+other's sync took gives way with it. A note another
 tab or window left out goes only once the drive shows it sent, or no more
 to send, as a browser can hand one tab another's write late; and the note of a
 deletion the drive holds, which a sync drops as its session is put back

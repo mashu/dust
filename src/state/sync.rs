@@ -1247,7 +1247,10 @@ impl AppCtx {
                 // what the sync took would undo it. But one that another
                 // copy's sync took and stored meanwhile gives way to this
                 // sync's word on it, where that is as late or later, unless
-                // it was changed by hand here meanwhile as well.
+                // it was changed by hand here meanwhile as well. One changed
+                // by hand here meanwhile stays though it is back to what it
+                // was as the sync began: told by its value alone, it read
+                // as no change, and the sync's older take was laid over it.
                 let by_hand = self.settings_by_hand();
                 self.take_up_stored_settings();
                 let now = self.settings.peek().clone().clamp();
@@ -1256,7 +1259,14 @@ impl AppCtx {
                     None => now,
                 };
                 let (kept, synced_as) = match synced.settings {
-                    Some(taken) => (merge_settings(&here, &now, &taken), taken),
+                    Some(taken) => {
+                        let kept = merge_settings(&here, &now, &taken);
+                        if by_hand.is_empty() {
+                            (kept, taken)
+                        } else {
+                            (settings_with(&kept, &now, &by_hand), taken)
+                        }
+                    }
                     None => (now.clone(), here),
                 };
                 if kept != now {

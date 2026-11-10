@@ -4274,6 +4274,92 @@ fn a_setting_set_by_hand_during_a_sync_to_what_an_older_sync_took_stays() {
     });
 }
 
+/// A setting changed by hand here while this copy's sync waits on its
+/// write, past its reading, and set back by hand to what it was as that
+/// sync began: the last word, later than the change made on another device
+/// that the sync took, and it stays, here and everywhere, as a setting
+/// changed here while it syncs does. Back to what it was, it read as no
+/// change made meanwhile, and the sync's older take was laid over it, and
+/// stored, and kept everywhere.
+#[test]
+fn a_setting_set_by_hand_during_a_sync_back_to_what_it_was_stays() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        harness.advance(1_000).await;
+        let shown = harness.in_app(|| ctx.settings.peek().clone().clamp());
+        let start = shown.curriculum.num_groups;
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let mut theirs = shown.clone();
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        // The other device changes the setting, and syncs.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        theirs.curriculum.num_groups = start + 2;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        // This copy's sync reads the drive, takes that, and waits on its
+        // write.
+        held.hold_writes(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(200).await;
+        // Later, the user changes it by hand here, and back.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        for groups in [start + 1, start] {
+            harness.in_app(|| {
+                let mut settings = ctx.settings;
+                settings.write().curriculum.num_groups = groups;
+                ctx.store_settings();
+            });
+            harness.pump();
+        }
+        held.hold_writes(false);
+        harness.advance(500).await;
+        let at_its_end = harness.in_app(|| ctx.settings.peek().curriculum.num_groups);
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(1_000).await;
+        let synced = now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        let there = synced
+            .settings
+            .map_or(theirs.curriculum.num_groups, |s| s.curriculum.num_groups);
+        assert_eq!(
+            at_its_end, start,
+            "as the sync ended: set by hand, the last word"
+        );
+        assert_eq!(
+            harness
+                .store
+                .read_settings()
+                .map(|s| s.curriculum.num_groups),
+            Some(start),
+            "the store"
+        );
+        assert_eq!(there, start, "the other device");
+    });
+}
+
 /// What the store keeps for sync now, which it holds.
 fn kept_state(harness: &Harness) -> SyncState {
     let raw = harness.store.sync.borrow().clone().expect("kept");
