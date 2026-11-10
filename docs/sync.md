@@ -106,7 +106,9 @@ are deleted as a twin let go is: each deletion is stamped as it is sent,
 never sent as made after the drive's deletion, and not noted by the first
 sync after an update from a build that noted no deletion by hand, so that
 the drive putting the old record back has it let go again on that device,
-the session staying once, under the record kept.
+the session staying once, under the record kept. The record that Undo puts
+back is put back by hand, as by the Undo of a deletion, and sent as put
+back where the drive holds its deletion.
 
 What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads

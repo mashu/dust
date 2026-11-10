@@ -5,6 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use super::*;
+use crate::persist::backup::Backup;
 use crate::persist::memory::MemoryStore;
 use crate::persist::record::{HistoryChange, Pending, Record, RecordId};
 use crate::persist::tests::at;
@@ -1978,6 +1979,79 @@ fn undo_while_a_sync_from_before_sync_was_turned_on_anew_ends_outlasts_a_deletio
             .map(|(_, s)| s.timestamp)
             .collect();
         assert_eq!(theirs, [1, 2, 5], "the drive's word");
+    });
+}
+
+/// A run as it was kept, with its log or, as an older build kept it,
+/// without: a restore of the one with its log fills in the other.
+fn a_run(stamp: u64, log: bool) -> cw_core::SessionResult {
+    let mut run = crate::testing::stored_run("2026-10-02", &[("K5XYZ", "214", "K5XYZ", "214")]);
+    run.timestamp = stamp;
+    if !log {
+        run.contest = None;
+    }
+    run
+}
+
+/// A session a restore filled in, and the sync a moment after it synced,
+/// stays where the restore's Undo puts it back as it was, here and on every
+/// device: the record put back is noted as put back by hand, after the
+/// deletion of it that sync sent. It used to be put back with no such note,
+/// so the next sync let it go as the drive's deletion, and sent the
+/// deletion of the filled record the Undo took out: the session was gone
+/// everywhere.
+#[test]
+fn the_undo_of_a_session_filled_in_and_synced_keeps_it_everywhere() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let stamp = 1_790_000_000_000;
+        harness.in_app(|| {
+            harness
+                .ctx
+                .keep_finished(a_run(stamp, false), |saved| assert!(saved.kept().is_some()))
+        });
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        assert_eq!(joined_stamps(&remote), [stamp], "synced");
+        harness.in_app(|| {
+            ctx.restore_backup(Backup {
+                saved_at: 0,
+                settings: None,
+                sessions: vec![a_run(stamp, true)],
+                left_out: 0,
+            })
+        });
+        harness.pump();
+        assert_eq!(
+            harness.in_app(|| harness.toast()).as_deref(),
+            Some("Filled in 1 session.")
+        );
+        // The sync a moment after the restore sends the filled record, and
+        // the deletion of the one it took the place of.
+        harness.advance(u64::from(SYNC_SOON_MS) + 1_000).await;
+        let (joined, _) = another_device(&remote, "a long passphrase", &[]);
+        let theirs = joined.load_sessions();
+        assert_eq!(theirs.len(), 1);
+        assert!(
+            theirs[0].contest.is_some(),
+            "the drive's word is the filled one"
+        );
+        // Undone while its message is up.
+        harness.in_app(|| ctx.undo_restore());
+        harness.pump();
+        let here = harness.store.load_sessions();
+        assert_eq!(here.len(), 1);
+        assert!(here[0].contest.is_none(), "put back as it was");
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        harness.in_app(|| ctx.sync_now());
+        harness.advance(1_000).await;
+        assert_eq!(stored_stamps(&harness), [stamp], "kept here");
+        assert_eq!(stamps(&harness), [stamp]);
+        let (joined, _) = another_device(&remote, "a long passphrase", &[]);
+        let theirs = joined.load_sessions();
+        assert_eq!(theirs.len(), 1, "the drive's word");
+        assert!(theirs[0].contest.is_none(), "as it was before the restore");
     });
 }
 

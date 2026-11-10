@@ -2427,6 +2427,10 @@ impl AppCtx {
                 self.restore_over();
                 return;
             }
+            // Back by hand, as an Undo of a deletion puts a session back: a
+            // deletion of the record a sync sent since the restore no longer
+            // stands.
+            let put_back: Vec<RecordId> = back.iter().map(|(id, _)| *id).collect();
             {
                 let mut history = sessions.write();
                 for id in gone {
@@ -2436,6 +2440,7 @@ impl AppCtx {
                     history.insert(id, session);
                 }
             }
+            self.sync_revived(put_back);
             if let Some(problem) = saved.problem() {
                 toasts.show(problem);
             }
