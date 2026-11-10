@@ -515,7 +515,7 @@ pub fn BandConditionsCard(
                             }
                         }
                         p { id: "agc-decay-line", class: "muted hint small",
-                            "How fast the band comes back after a signal: Fast by the next word, Slow over a second or so."
+                            "How fast the band comes back after a signal: Fast between words, by less the faster they come; Slow over a second or so."
                         }
                     }
                 }

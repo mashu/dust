@@ -114,10 +114,11 @@ pub const AGC_WORD_MARGIN_SEC: f64 = 0.025;
 /// pause has to leave after the hang it asks for, for it to count at Fast:
 /// time enough, the detector's few milliseconds taken off, for the band to
 /// come back 10 dB of the strongest station's 25 dB duck before the next
-/// word, as the shortest hang lets it at every speed (the release's 0.15 s
-/// times ln(25.6 / 15.6), 74 ms, and ten more). Held to the bare
-/// [`AGC_WORD_MARGIN_SEC`], the pause counted up to 18.3 WPM, and held every
-/// screen's word gaps from 17 WPM up to a few decibels.
+/// word, as the shortest hang lets it up to about 28 WPM at a fixed speed
+/// (the release's 0.15 s times ln(25.6 / 15.6), 74 ms, and ten more); the
+/// word gaps leave less after it faster, and none from about 38 WPM. Held
+/// to the bare [`AGC_WORD_MARGIN_SEC`], the pause counted up to 18.3 WPM,
+/// and held every screen's word gaps from 17 WPM up to a few decibels.
 pub const AGC_LISTEN_WORD_MARGIN_SEC: f64 = 0.085;
 
 /// The hang and the release the AGC runs with at `decay` for `settings`, in
@@ -127,9 +128,11 @@ pub const AGC_LISTEN_WORD_MARGIN_SEC: f64 = 0.085;
 /// for you among them, and the Listen screen's pause between the letters it
 /// sends one at a time ([`LISTEN_LETTER_GAP_MS`]), which the band plays on
 /// through. At Fast it stops [`AGC_WORD_MARGIN_SEC`] short of the shortest
-/// word gap they send, so the band still comes back between words, and
-/// where their speeds are too far apart for both the word gap wins; Slow
-/// holds across word gaps by design. The Listen screen's pause counts at
+/// word gap they send, so the band still comes back between words, by less
+/// the faster they come, and where their speeds are too far apart for both
+/// the word gap wins; from about 38 WPM even the decay's own hang outlasts
+/// the word gap, and the band does not come back between words. Slow holds
+/// across word gaps by design. The Listen screen's pause counts at
 /// Fast only where their shortest word gap leaves the band room to come back
 /// after it ([`AGC_LISTEN_WORD_MARGIN_SEC`]), 16 WPM and under at a fixed
 /// speed: held across it nearer the word gap than that, every word gap
@@ -1509,6 +1512,38 @@ mod tests {
             "{fastest} WPM, the heaviest fist: back {:.1} dB",
             words[0].1
         );
+    }
+
+    /// How far Fast brings the hiss back by the next word, from the
+    /// heaviest fist the settings draw, as the help and the margins' docs
+    /// should say it: 10 dB of a 25.6 dB duck and more up to about 28 WPM
+    /// at a fixed speed, less from there, and nothing from 38 WPM, where the
+    /// shortest hang outlasts the word gap; and at the top of the speed range
+    /// out of the box, 30 of 15 to 30 WPM, under 4 dB, the hang held just
+    /// short of that word gap for the 15 WPM letter gaps.
+    #[test]
+    fn how_far_fast_brings_the_hiss_back_by_the_next_word() {
+        let fist = TrainingSettings::default().playback.fist_variation;
+        let back = |settings: &TrainingSettings, wpm: f64| {
+            let heaviest = StationVoice {
+                weight: 1.0 + fist * 0.18,
+                dash_ratio: 3.0 - fist * 0.45,
+                ..keyer(wpm, wpm)
+            };
+            let (keyed, hiss) = hiss_under(settings, &heaviest, &["PARIS PARIS"], 0.0);
+            let words = gap_swells(&keyed, &hiss, |gap| gap > 6.0 * 1.2 / wpm);
+            assert_eq!(words.len(), 1, "{wpm} WPM");
+            words[0].1
+        };
+        let fixed = |wpm: f64| back(&sending_at(wpm, wpm, AgcDecay::Fast), wpm);
+        assert!(fixed(27.0) >= 10.0, "27 WPM: back {:.1} dB", fixed(27.0));
+        assert!(fixed(30.0) < 8.5, "30 WPM: back {:.1} dB", fixed(30.0));
+        assert!(fixed(34.0) < 4.0, "34 WPM: back {:.1} dB", fixed(34.0));
+        assert!(fixed(38.0) < 0.5, "38 WPM: back {:.1} dB", fixed(38.0));
+        let out_of_the_box = floor_only();
+        assert_eq!(out_of_the_box.band.agc_decay, AgcDecay::Fast);
+        let top = back(&out_of_the_box, 30.0);
+        assert!(top < 4.0, "30 of 15-30 WPM: back {top:.1} dB");
     }
 
     /// A station fading as the band fades it holds its own hang from its

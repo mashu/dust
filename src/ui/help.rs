@@ -655,7 +655,7 @@ pub fn band() -> Element {
             dt { "AGC" }
             dd { "Evens out strong and weak stations, as a rig's AGC does: a station clear of the noise comes out within a few dB of the others, while one down in the noise keeps its own level. It does not make a weak station more readable: the hiss under it comes up with it, and the hiss ducks under a strong station and comes back between overs. Off, every station keeps its own level, and full volume is lower in a pile-up, so callers keyed together do not distort." }
             dt { "AGC decay" }
-            dd { "How fast the gain comes back once a signal has gone. Fast is back by the next word; Slow holds through an over and comes back over a second or so, so a weak station straight after a strong one starts quiet." }
+            dd { "How fast the gain comes back once a signal has gone. Fast lets the band back between words, by less the faster they come and the wider the speed range, and not at all from about 38 WPM; Slow holds through an over and comes back over a second or so, so a weak station straight after a strong one starts quiet." }
             dt { "Live preview" }
             dd { "Loops a CQ through the band as it is set, loud, medium and weak in turn, a second apart so the AGC can let the band back between them. Move a slider and the band follows as soon as you pause." }
         }
