@@ -100,7 +100,12 @@ const attribute = (tag, key) => {
   return found ? found.value : null;
 };
 
-const hashOf = text => `'sha256-${crypto.createHash('sha256').update(text, 'utf8').digest('base64')}'`;
+/// How a policy lets an inline script or style run: by the hash of what it
+/// holds, as the browser reads it. The HTML parser reads each CRLF and each
+/// lone CR as LF before anything else, so a page whose line ends a checkout
+/// made CRLF holds what the one served holds.
+const hashOf = text =>
+  `'sha256-${crypto.createHash('sha256').update(text.replace(/\r\n?/g, '\n'), 'utf8').digest('base64')}'`;
 
 /// A policy's directives, in order, each with its sources.
 function parse(policy) {

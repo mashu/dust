@@ -563,9 +563,12 @@ mod tests {
     }
 
     /// How a policy lets an inline script or style run: by the hash of what
-    /// it holds.
+    /// it holds, as the browser reads it. The HTML parser reads each CRLF
+    /// and each lone CR as LF before anything else, so a page whose line
+    /// ends a checkout made CRLF holds what the one served holds.
     fn hash_of(held: &str) -> String {
-        format!("'sha256-{}'", base64(&Sha256::digest(held.as_bytes())))
+        let read = held.replace("\r\n", "\n").replace('\r', "\n");
+        format!("'sha256-{}'", base64(&Sha256::digest(read.as_bytes())))
     }
 
     /// The hashes of what the page's inline elements called `name` hold.
@@ -774,6 +777,91 @@ mod tests {
             "privacy.html's policy, left, is not what it needs"
         );
         runs_nothing_written_into_its_markup(&tags);
+    }
+
+    /// The site's pages, each with its line ends written as `line_end`
+    /// says, as a checkout may have them: Git for Windows turns them into
+    /// CRLF by default.
+    fn site_pages(line_end: &str) -> [(&'static str, String); 3] {
+        [
+            ("index.html", include_str!("../index.html")),
+            ("oauth.html", include_str!("../docs/oauth.html")),
+            ("privacy/index.html", include_str!("../docs/privacy.html")),
+        ]
+        .map(|(served, page)| {
+            let lines = page.replace("\r\n", "\n").replace('\r', "\n");
+            (served, lines.replace('\n', line_end))
+        })
+    }
+
+    /// A browser hashes what an inline script or a style holds as the HTML
+    /// parser hands it over, each CRLF and lone CR read as LF, and so do
+    /// the tests: on pages whose line ends are CRLF, or CR, each policy and
+    /// each inline hash reads as on the pages written with LF, which the
+    /// site is built from, so the tests above hold there too.
+    #[test]
+    fn an_inline_hash_is_of_what_the_browser_reads() {
+        let read = "(function () {\n  var said = 1;\n})();\n";
+        for written in [read.replace('\n', "\r\n"), read.replace('\n', "\r")] {
+            assert_eq!(hash_of(&written), hash_of(read), "{written:?}");
+        }
+        let built = site_pages("\n");
+        for line_end in ["\r\n", "\r"] {
+            for ((served, page), (_, built)) in site_pages(line_end).iter().zip(&built) {
+                let (checked_out, built) = (tags_of(page), tags_of(built));
+                assert_eq!(policy_of(&checked_out).1, policy_of(&built).1, "{served}");
+                for name in ["script", "style"] {
+                    assert_eq!(
+                        inline_hashes(&checked_out, name),
+                        inline_hashes(&built, name),
+                        "{served}'s {name} with {line_end:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The Pages step's check of the site (scripts/check-site-policy.cjs)
+    /// reads the pages as a browser does too: whatever their line ends, it
+    /// finds every inline script and style of the app's page, the sign-in
+    /// page and the privacy page listed, adds no hash, and passes. Node
+    /// runs it, as it runs the page scripts.
+    #[test]
+    fn the_site_check_reads_the_pages_as_a_browser_does() {
+        let check = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/check-site-policy.cjs");
+        for (line_end, named) in [("\n", "lf"), ("\r\n", "crlf"), ("\r", "cr")] {
+            let site = std::env::temp_dir()
+                .join(format!("dust-site-policy-{}-{named}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&site);
+            for (served, page) in site_pages(line_end) {
+                let at = site.join(served);
+                std::fs::create_dir_all(at.parent().expect("a folder")).expect("the site");
+                std::fs::write(at, page).expect("a page");
+            }
+            let checked = std::process::Command::new("node")
+                .arg(check)
+                .arg(&site)
+                .arg("index.html")
+                .output();
+            let checked = match checked {
+                Ok(checked) => checked,
+                Err(error) if std::env::var_os("CI").is_some() => {
+                    panic!("CI has Node, yet it would not start: {error}")
+                }
+                Err(error) => {
+                    eprintln!("no Node on this machine ({error}); skipping");
+                    return;
+                }
+            };
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&checked.stdout),
+                String::from_utf8_lossy(&checked.stderr)
+            );
+            let _ = std::fs::remove_dir_all(&site);
+            assert!(checked.status.success(), "{named}: {said}");
+            assert!(!said.contains("added the hashes"), "{named}: {said}");
+        }
     }
 
     /// Each face the font sheet asks for gives a value for every axis its
