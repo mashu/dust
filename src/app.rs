@@ -758,9 +758,12 @@ mod tests {
     /// as it runs (Dioxus's eval, the history's and the tabs' scripts) and
     /// its WebAssembly; styles of the site, inline (Dioxus writes style
     /// attributes) and Google's sheet of type faces; the faces from Google,
-    /// and those inline in the stylesheet; the icons inline; connections to
-    /// the site and to Google Drive alone. No plugin, frame, worker, form or
-    /// other base address, and no handler written into the markup.
+    /// and those inline in the stylesheet; the icons inline, and no image
+    /// from the site, which the app never shows; connections to the site
+    /// and to Google Drive alone. No plugin, frame, worker, form or other
+    /// base address, nothing else from anywhere (`default-src 'none'`, as
+    /// media and a web app manifest would fall back to it), and no handler
+    /// written into the markup.
     #[test]
     fn the_web_page_allows_only_what_the_app_needs() {
         let page = include_str!("../index.html");
@@ -787,14 +790,14 @@ mod tests {
         let mut scripts = sources(&["'self'", "'unsafe-eval'", "'wasm-unsafe-eval'"]);
         scripts.extend(inline_hashes(&tags, "script"));
         let needs = policy(&[
-            ("default-src", sources(&["'self'"])),
+            ("default-src", sources(&["'none'"])),
             ("script-src", scripts),
             (
                 "style-src",
                 sources(&["'self'", "'unsafe-inline'", origin_of(FONT_CSS_URL)]),
             ),
             ("font-src", sources(&["data:", "https://fonts.gstatic.com"])),
-            ("img-src", sources(&["'self'", "data:"])),
+            ("img-src", sources(&["data:"])),
             ("connect-src", sources(&["'self'", drive])),
             ("object-src", sources(&["'none'"])),
             ("base-uri", sources(&["'self'"])),

@@ -9,12 +9,13 @@
          tabs' scripts), with its WebAssembly; styles from the site, inline,
          as Dioxus writes style attributes, and Google's sheet of type
          faces; faces from Google, or inline in the stylesheet; the icons
-         inline; connections to the site and Google Drive alone. Sign-in is
-         a window of Google's own. src/app.rs's tests hold this to what the
+         inline, and no image from the site; connections to the site and
+         Google Drive alone; nothing else from anywhere. Sign-in is a window
+         of Google's own. src/app.rs's tests hold this to what the
          app needs; CI adds the hash of any inline script dx bundle puts in,
          and fails on anything inline it leaves uncovered
          (scripts/check-site-policy.cjs). -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' 'sha256-UZOQyJWpGk74Y4LfOiiOwGIpysKjfFS3eQAvtIc+dzk='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://www.googleapis.com; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; worker-src 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' 'sha256-UZOQyJWpGk74Y4LfOiiOwGIpysKjfFS3eQAvtIc+dzk='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com; img-src data:; connect-src 'self' https://www.googleapis.com; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; worker-src 'none'" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#1b2436" />
     <title>{app_title}</title>

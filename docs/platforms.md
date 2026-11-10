@@ -654,18 +654,19 @@ it runs (Dioxus's eval, the history's, the marks' and the tabs' page
 scripts) and its WebAssembly, by `'unsafe-eval'` and
 `'wasm-unsafe-eval'`. Styles come from the site, inline (Dioxus writes
 style attributes) and from Google's sheet of type faces; the faces from
-Google, or inline in the stylesheet; images from the site, or inline. The
+Google, or inline in the stylesheet; images only inline, the icons. The
 page connects to the site and to Google Drive alone, and has no frames,
-workers, plugins or form posts. Sign-in is a window of Google's own, which
-the page's policy does not govern; `oauth.html`, where it comes back, runs
-its own script alone, by its hash, and the privacy page runs none. Tests in
-`src/app.rs` hold each page's policy to that. The Pages step adds the hash
-of any inline script `dx bundle` puts in the page, and fails on anything
-inline a page's policy leaves uncovered (`scripts/check-site-policy.cjs`),
-and both browser checks fail on any breach. A meta cannot set
-`frame-ancestors`, so another site can still frame the app. The policy
-limits what the page loads and where it connects; it keeps no other page
-of the same origin from Dust's store.
+workers, plugins or form posts, and loads nothing else from anywhere, the
+site included (`default-src 'none'`). Sign-in is a window of Google's own,
+which the page's policy does not govern; `oauth.html`, where it comes back,
+runs its own script alone, by its hash, and the privacy page runs none.
+Tests in `src/app.rs` hold each page's policy to that. The Pages step adds
+the hash of any inline script `dx bundle` puts in the page, and fails on
+anything inline a page's policy leaves uncovered
+(`scripts/check-site-policy.cjs`), and both browser checks fail on any
+breach. A meta cannot set `frame-ancestors`, so another site can still
+frame the app. The policy limits what the page loads and where it
+connects; it keeps no other page of the same origin from Dust's store.
 
 A session or contest run is marked open while it runs, and the mark goes
 once it ends and the store has taken it, or once it is discarded. Each copy of the app marks its own, a
