@@ -1441,11 +1441,12 @@ mod tests {
         }
     }
 
-    /// At Fast the hiss comes back by the next word at every fixed speed the
-    /// Listen screen's pause counts at too, and with a speed range whose top
-    /// is there: from 17 to 18.2 WPM the pause fitted under the cap, held the
-    /// hang at 0.43 s, and left the word gap 30 to 60 ms to come back in,
-    /// 4 to 9 dB of a 25.6 dB duck.
+    /// At Fast the hiss comes back 10 dB by the next word where the Listen
+    /// screen's pause counted under 4a0dbb1, fitting under the cap, at fixed
+    /// speeds from 17 to 18.2 WPM and in the two ranges topping out at 18,
+    /// and at 16 WPM, where it still counts: there it held the hang at
+    /// 0.43 s and left the word gap 30 to 60 ms to come back in, 4 to 9 dB
+    /// of a 25.6 dB duck. The boundary itself is held below.
     #[test]
     fn the_hiss_comes_back_across_a_word_gap_at_fast_where_the_listen_pause_fits() {
         for wpm in [16.0, 17.0, 18.0, 18.2] {
@@ -1472,6 +1473,42 @@ mod tests {
                 words[0].1
             );
         }
+    }
+
+    /// At the fastest fixed speed the Listen screen's pause still counts
+    /// at, where the shortest word gap leaves the band the least room after
+    /// the hang, the hiss is 10 dB back by the next word from the heaviest
+    /// fist the settings draw: what [`AGC_LISTEN_WORD_MARGIN_SEC`] is sized
+    /// for. Held to 60 ms, the pause counted up to 16.98 WPM, the band came
+    /// back 8.2 dB there, and 16, 17, 18 and 18.2 WPM passed all the same.
+    #[test]
+    fn the_hiss_comes_back_10_db_at_the_fastest_speed_the_listen_pause_counts_at() {
+        let listen = f64::from(LISTEN_LETTER_GAP_MS) / 1_000.0 + AGC_LETTER_MARGIN_SEC;
+        let counts = |wpm: f64| {
+            let (hang, _) = agc_timing(&sending_at(wpm, wpm, AgcDecay::Fast), AgcDecay::Fast);
+            hang >= listen - 1e-12
+        };
+        assert!(counts(12.0) && !counts(20.0));
+        let fastest = (1_200..2_000)
+            .map(|centi| f64::from(centi) / 100.0)
+            .take_while(|&wpm| counts(wpm))
+            .last()
+            .expect("the pause counts at 12 WPM");
+        let fist = TrainingSettings::default().playback.fist_variation;
+        let heaviest = StationVoice {
+            weight: 1.0 + fist * 0.18,
+            dash_ratio: 3.0 - fist * 0.45,
+            ..keyer(fastest, fastest)
+        };
+        let settings = sending_at(fastest, fastest, AgcDecay::Fast);
+        let (keyed, hiss) = hiss_under(&settings, &heaviest, &["PARIS PARIS"], 0.0);
+        let words = gap_swells(&keyed, &hiss, |gap| gap > 6.0 * 1.2 / fastest);
+        assert_eq!(words.len(), 1);
+        assert!(
+            words[0].1 >= 10.0,
+            "{fastest} WPM, the heaviest fist: back {:.1} dB",
+            words[0].1
+        );
     }
 
     /// A station fading as the band fades it holds its own hang from its
