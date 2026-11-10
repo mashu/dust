@@ -869,6 +869,34 @@ pub(crate) mod tests {
         assert_eq!(out.curriculum.num_groups, 9);
     }
 
+    /// Settings set back, setting by setting, to what another copy holds
+    /// lose a key that copy's settings do not write: Contest, written as
+    /// Callsign with `contestActive` beside it, set back to the Callsign it
+    /// was is Callsign again, with no `contestActive` left over to read as
+    /// Contest, and the rest stays as it is. As a sync's end gives way to
+    /// its own later word on a setting another copy's sync took meanwhile
+    /// (`given_way` in `state::sync`).
+    #[test]
+    fn settings_set_back_to_another_copys_lose_a_key_it_does_not_write() {
+        let on = |mode| {
+            let mut settings = TrainingSettings::default();
+            settings.curriculum.char_set_mode = mode;
+            settings
+        };
+        let mut now = on(CharSetMode::Contest);
+        now.curriculum.num_groups = 9;
+        let here = on(CharSetMode::Callsign);
+        let keys = std::collections::BTreeSet::from(["contestActive".to_string()]);
+        let back = settings_with(&now, &here, &keys);
+        assert_eq!(back.curriculum.char_set_mode, CharSetMode::Callsign);
+        assert_eq!(back.curriculum.num_groups, 9, "the rest as it was");
+        let written = serde_json::to_value(&back).expect("settings write");
+        assert!(written.get("contestActive").is_none(), "{written}");
+        // And the other way: a key the other copy writes comes back.
+        let there = settings_with(&back, &now, &keys);
+        assert_eq!(there.curriculum.char_set_mode, CharSetMode::Contest);
+    }
+
     /// A merge keeps what the store holds that this build cannot read, a
     /// later build's choices, as it is stored, beside a change made here.
     /// It used to read the merge again as this build reads it, and put
