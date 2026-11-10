@@ -235,6 +235,11 @@ pub struct AppCtx {
     /// this copy's mark holds it meanwhile, as nothing else does
     /// ([`Self::tell_of_cut_off`]).
     cut_off_carried: CopyValue<Vec<SessionResult>>,
+    /// Of those, the ones held back for a record the store could not read
+    /// for now that may hold one, as it finished then: kept once it reads,
+    /// or is no more, or is told of as one that could not be read
+    /// ([`Self::keep_what_waited`]).
+    cut_off_waiting: CopyValue<Vec<SoFar>>,
     /// A try at storing what the store has yet to take is waiting
     /// ([`RETRY_MS`]).
     retrying: CopyValue<bool>,
@@ -352,6 +357,7 @@ impl AppCtx {
                 stored_settings,
                 mark: CopyValue::new(None),
                 cut_off_carried: CopyValue::new(Vec::new()),
+                cut_off_waiting: CopyValue::new(Vec::new()),
                 retrying: CopyValue::new(false),
                 settings_unsaved: CopyValue::new(false),
                 unread_for_now: CopyValue::new(unread_for_now),
@@ -632,14 +638,23 @@ impl AppCtx {
 
     /// What `cut`, the marks of sessions cut off, carried is held by the
     /// history now, or let go: this copy's mark holds it no longer for
-    /// their sake ([`Self::carry_cut_off`]).
+    /// their sake ([`Self::carry_cut_off`]). What waits for a record the
+    /// store could not read for now is held still
+    /// ([`Self::cut_off_waiting`]).
     pub fn let_go_of_carried(self, cut: &[CutOff]) {
+        let waiting: HashSet<SessionKey> = self
+            .cut_off_waiting
+            .peek()
+            .iter()
+            .map(|so_far| SessionKey::of(&so_far.result))
+            .collect();
         let keys: HashSet<SessionKey> = cut
             .iter()
             .filter_map(CutOff::so_far)
             .map(|so_far| &so_far.result)
             .chain(cut.iter().flat_map(CutOff::unstored))
             .map(SessionKey::of)
+            .filter(|key| !waiting.contains(key))
             .collect();
         let mut carried = self.cut_off_carried;
         let held = carried
@@ -652,6 +667,80 @@ impl AppCtx {
                 .retain(|session| !keys.contains(&SessionKey::of(session)));
             self.settle_mark();
         }
+    }
+
+    /// When the sessions the records the store could not read for now
+    /// would hold finished, by their names, as a restore finds them
+    /// ([`Self::restore_beside`]): of those not told of yet as records that
+    /// could not be read, which are read again soon.
+    pub fn unread_for_now_finished(self) -> HashSet<u64> {
+        let told = self.told_unread_for_now.peek();
+        self.unread_for_now
+            .peek()
+            .iter()
+            .filter(|id| !told.contains(id))
+            .map(|id| id.order / 1000)
+            .collect()
+    }
+
+    /// Hold `waiting`, sessions cut off held back for a record the store
+    /// could not read for now that may hold one, until it reads, is no
+    /// more, or is told of ([`Self::keep_what_waited`]): this copy's mark
+    /// holds each meanwhile, as it holds what it carried
+    /// ([`Self::cut_off_carried`]).
+    pub fn wait_for_unread(self, waiting: Vec<SoFar>) {
+        if waiting.is_empty() {
+            return;
+        }
+        let mut held = self.cut_off_waiting;
+        let mut held = held.write();
+        let mut keys: HashSet<SessionKey> = held
+            .iter()
+            .map(|so_far| SessionKey::of(&so_far.result))
+            .collect();
+        held.extend(
+            waiting
+                .into_iter()
+                .filter(|so_far| keys.insert(SessionKey::of(&so_far.result))),
+        );
+    }
+
+    /// Keep what waited for a record the store could not read for now
+    /// ([`Self::cut_off_waiting`]), where that record reads now, is no
+    /// more, or was told of as one that could not be read after every try:
+    /// one the history holds now, as its record read, is let go of; one it
+    /// does not is kept as it would have been ([`keep_cut_off`]), its level
+    /// counted where it is to be. The rest wait on. After each look at the
+    /// store, once what it found is taken up.
+    fn keep_what_waited(self) {
+        if self.cut_off_waiting.peek().is_empty() {
+            return;
+        }
+        let unread = self.unread_for_now_finished();
+        let mut waiting = self.cut_off_waiting;
+        let ready: Vec<SoFar> = {
+            let mut held = waiting.write();
+            let (still, ready) = std::mem::take(&mut *held)
+                .into_iter()
+                .partition(|so_far| unread.contains(&so_far.result.timestamp));
+            *held = still;
+            ready
+        };
+        if ready.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        let cut = ready
+            .into_iter()
+            .map(|so_far| {
+                CutOff::Marked(OpenSession {
+                    so_far: Some(Box::new(so_far)),
+                    over: true,
+                    ..OpenSession::starting(false, now)
+                })
+            })
+            .collect();
+        spawn_forever(keep_cut_off(self, cut));
     }
 
     /// Tell of whatever reading the store has set aside since it was last
@@ -904,6 +993,7 @@ impl AppCtx {
             let listed = looked.is_some();
             if let Some(looked) = looked {
                 self.take_up(looked);
+                self.keep_what_waited();
             }
             then(listed);
         });
@@ -1185,6 +1275,9 @@ impl AppCtx {
         }
         let mut told = self.told_unread_for_now;
         told.write().extend(still.iter().copied());
+        // What a session cut off held back for one of them is held back no
+        // more: it may never read.
+        self.keep_what_waited();
         let telling = self.app().store.still_unread(still);
         let mut notices = self.notices;
         settle_or_spawn(telling, move |said| {
@@ -4690,6 +4783,40 @@ mod tests {
         });
     }
 
+    /// On the files themselves: a session cut off that its copy stored as
+    /// it ended, and whose record cannot be read for now as the next copy
+    /// opens, is kept once, from its record once that reads, with nothing
+    /// stored beside it.
+    #[cfg(all(unix, feature = "native-runtime"))]
+    #[test]
+    fn a_file_held_for_now_as_its_session_is_told_of_as_cut_off_is_kept_once() {
+        crate::testing::run(|| async {
+            let dir = TempDir::new("busy-cut-off");
+            let busy = BusyFile::of_day_2(&dir);
+            let stopped = Tab::on_store(crate::persist::files_at(&dir.0));
+            let open = stopped.act(|ctx| ctx.mark_running(false));
+            let so_far = SoFar {
+                result: day(2),
+                settings: None,
+            };
+            stopped.act(|ctx| ctx.mark_so_far(&open, so_far));
+            stopped.act(AppCtx::mark_kept);
+            drop(stopped);
+            let mut next = Tab::on_store(crate::persist::files_at(&dir.0));
+            next.act(AppCtx::tell_of_cut_off);
+            next.advance(100).await;
+            assert_eq!(next.shown(), [1], "not kept beside its record");
+            busy.let_go();
+            next.act(AppCtx::take_up_changes);
+            next.advance(100).await;
+            assert_eq!(next.shown(), [1, 2], "once, from its record");
+            let records = dir.0.join("history").join("sessions");
+            assert_eq!(std::fs::read_dir(&records).unwrap().count(), 2);
+            let launched = Tab::on_store(crate::persist::files_at(&dir.0));
+            assert_eq!(launched.shown(), [1, 2]);
+        });
+    }
+
     /// A record that could not be read as the app opened, and reads now, is
     /// taken up by a restore whose backup holds a session from its moment,
     /// and the backup's session is merged with it: stored once, under the
@@ -5247,6 +5374,56 @@ mod tests {
         };
         tab.act(|ctx| ctx.mark_so_far(&open, so_far));
         tab.act(AppCtx::mark_kept);
+    }
+
+    /// A session cut off that a copy of the app stored as it ended, and
+    /// stopped before its mark went, is kept once, though its record cannot
+    /// be read for now as the next copy opens, as a file another program
+    /// holds open for a moment cannot be: held with this copy's mark until
+    /// that record reads, the history holding it from there, and not stored
+    /// a second time beside it. One whose record still cannot be read after
+    /// every try is kept beside it then, as the backup's copy is restored
+    /// beside one. It used to be stored at once under a name of its own,
+    /// and once the record read the history held it twice, for good.
+    #[test]
+    fn a_session_cut_off_whose_record_cannot_be_read_for_now_is_kept_once() {
+        crate::testing::run(|| async {
+            let (store, busy) = holding_busy([1], 2);
+            cut_off_keeping(&store, day(2));
+            let mut next = Tab::on(&store);
+            assert!(next.act(|ctx| ctx.unread_for_now.peek().contains(&busy)));
+            next.act(AppCtx::tell_of_cut_off);
+            next.advance(100).await;
+            assert_eq!(next.shown(), [1], "not kept beside its record");
+            let carried = |store: &MemoryStore| store.open().map(|open| days(&open.unstored));
+            assert_eq!(carried(&store), Some(vec![2]), "held by this copy's mark");
+            assert!(
+                next.notices().iter().any(
+                    |notice| matches!(notice, Notice::CutOff(CutOff::Marked(open)) if open.over)
+                ),
+                "told of: {:?}",
+                next.notices()
+            );
+            store.held_open.borrow_mut().clear();
+            next.act(AppCtx::take_up_changes);
+            next.advance(100).await;
+            assert_eq!(next.shown(), [1, 2], "once, from its record");
+            assert_eq!(days(&store.load_sessions()), [1, 2]);
+            assert_eq!(carried(&store), None, "its mark has nothing left to hold");
+            assert_eq!(Tab::on(&store).shown(), [1, 2]);
+
+            // Its record never reads: kept beside it after the last try.
+            let (store, _) = holding_busy([1], 2);
+            cut_off_keeping(&store, day(2));
+            let mut next = Tab::on(&store);
+            next.act(AppCtx::tell_of_cut_off);
+            next.advance(100).await;
+            assert_eq!(next.shown(), [1]);
+            let tries: u32 = READ_AGAIN_MS.iter().sum();
+            next.advance(u64::from(tries) + 1_000).await;
+            assert_eq!(next.shown(), [1, 2], "kept once it is told of");
+            assert_eq!(carried(&store), None);
+        });
     }
 
     /// A session of groups cut off counts towards its level's run only once

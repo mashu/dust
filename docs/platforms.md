@@ -694,7 +694,11 @@ A session cut off is kept from its mark as Exit would have kept it, in the
 history and towards its level's run, and the app says that it was. It is
 kept once the marks that carried it have gone, so its level counts it once;
 only while this copy's mark will not take a write is it kept before then,
-and a copy that stops in between may count it again. Closing
+and a copy that stops in between may count it again. One the store holds
+already in a record that cannot be read for now, as its copy stored it
+just before it stopped, waits with this copy's mark until that record
+reads, and is then the record's; it is kept beside it only once the record
+is no more, or is told of as one that could not be read. Closing
 the desktop window, or leaving or reloading the page, ends a session there
 and then as Exit does, so nothing is left to find, and stores the settings
 with it, a level it earned included. On desktop and
