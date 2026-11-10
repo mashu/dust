@@ -267,9 +267,13 @@ while it synced stays over what the sync took, as one changed in the tab or
 window syncing does, and goes with the next sync. One that the other's own
 sync took and stored meanwhile, as two sync at once where nothing locks
 (below), is that sync's word on it: the later word of the two, by its
-stamp, is the one kept, as the drive keeps the newest of each. A note another tab or
-window left out goes only once the drive shows it sent, or no more to send,
-as a browser can hand one tab another's write late; and the note of a
+stamp, is the one kept, as the drive keeps the newest of each. One changed
+by hand in the tab or window syncing meanwhile is its own, and stays,
+whatever the other's sync took; but the tab or window tells that sync's
+take from a change made in a third one only by its value, and one set
+there to the value the other's sync took gives way with it. A note another
+tab or window left out goes only once the drive shows it sent, or no more
+to send, as a browser can hand one tab another's write late; and the note of a
 deletion the drive holds, which a sync drops as its session is put back
 here, goes from what sync keeps only once the drive holds the putting back,
 so that no tab or window reading the store meanwhile keeps it for one of

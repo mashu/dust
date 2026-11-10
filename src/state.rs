@@ -852,13 +852,13 @@ impl AppCtx {
         // over it. Only that is the base of the next merge, or an edit the
         // store refused would read next time as another copy's change, and
         // be undone by it.
-        let mut held = elsewhere.unwrap_or(base);
+        let mut held = elsewhere.unwrap_or_else(|| base.clone());
         let mut refused = None;
         if held != merged {
             match store.write_settings(&merged) {
                 Ok(()) => {
                     held = merged.clone();
-                    self.sync_settings_stored(&merged);
+                    self.sync_settings_stored(&base, &ours, &merged);
                 }
                 Err(why) => refused = Some(why),
             }

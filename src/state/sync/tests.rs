@@ -4163,6 +4163,117 @@ fn overlapping_syncs_keep_the_later_setting_where_the_one_that_read_the_newer_en
     overlapping_syncs_keep_the_later_setting(false);
 }
 
+/// Two copies of the app on a store that takes no lock, whose syncs run at
+/// once: B's reads the drive as another device has set 3 groups, A's after
+/// that device set 4, later. While A's sync is under way, past its reading,
+/// the user sets 3 by hand in A, later than both. B's sync ends first, then
+/// A's. The change by hand, the last word, stays here and goes everywhere,
+/// as a setting changed in a copy while it syncs does.
+#[test]
+fn a_setting_set_by_hand_during_a_sync_to_what_an_older_sync_took_stays() {
+    run(|| async {
+        let mut harness = Harness::new();
+        harness.store.browser.set(true);
+        harness.store.hears_news.set(true);
+        harness.store.unlockable.set(true);
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (a, held_a) = turned_on_held(&mut harness, &remote, &auth).await;
+        harness.advance(1_000).await;
+        // The settings stored, so that the other copy opens on them.
+        let shown = harness.in_app(|| a.settings.peek().clone().clamp());
+        harness.store.write_settings(&shown).expect("stored");
+        harness.in_app(|| a.take_up_store());
+        let held_b = Held::of(&remote);
+        let b = another_copy_through(
+            &harness,
+            Rc::clone(&held_b) as Rc<dyn Remote>,
+            FakeAuth::giving(&["t"]) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| b.take_up_store());
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let mut theirs = shown.clone();
+        theirs.curriculum.num_groups = 3;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // B's sync reads the drive, 3, and waits on its first write.
+        held_b.hold_writes(true);
+        harness.in_app(|| b.sync_now());
+        harness.advance(200).await;
+        // The other device sets 4, later, and syncs.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        theirs.curriculum.num_groups = 4;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        // A's sync reads the drive, 4, and waits on its first write.
+        held_a.hold_writes(true);
+        harness.in_app(|| a.sync_now());
+        harness.advance(200).await;
+        // Later than both, the user sets 3 by hand in A.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        harness.in_app(|| {
+            let mut settings = a.settings;
+            settings.write().curriculum.num_groups = 3;
+            a.store_settings();
+        });
+        harness.pump();
+        // B's sync ends first, then A's.
+        held_b.hold_writes(false);
+        harness.advance(500).await;
+        held_a.hold_writes(false);
+        harness.advance(500).await;
+        let at_its_end = harness.in_app(|| a.settings.peek().curriculum.num_groups);
+        // A quiet end: each copy syncs in turn, then the other device.
+        harness.advance(u64::from(SYNC_SOON_MS) * 3).await;
+        for _ in 0..2 {
+            for copy in [a, b] {
+                harness.in_app(|| copy.take_up_store());
+                harness.in_app(|| copy.sync_now());
+                harness.advance(2_000).await;
+            }
+        }
+        let synced = now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        let there = synced
+            .settings
+            .map_or(theirs.curriculum.num_groups, |s| s.curriculum.num_groups);
+        for copy in [a, b] {
+            harness.in_app(|| copy.take_up_store());
+        }
+        let here = [a, b].map(|copy| harness.in_app(|| copy.settings.peek().curriculum.num_groups));
+        assert_eq!(at_its_end, 3, "A as its sync ended: set by hand there");
+        assert_eq!(
+            harness
+                .store
+                .read_settings()
+                .map(|s| s.curriculum.num_groups),
+            Some(3),
+            "the store: set by hand, the last word"
+        );
+        assert_eq!(here, [3, 3], "the copies");
+        assert_eq!(there, 3, "the other device");
+    });
+}
+
 /// What the store keeps for sync now, which it holds.
 fn kept_state(harness: &Harness) -> SyncState {
     let raw = harness.store.sync.borrow().clone().expect("kept");

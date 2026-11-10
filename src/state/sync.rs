@@ -175,6 +175,11 @@ pub struct SyncCtx {
     /// lets go of none another copy put back meanwhile, which the store's
     /// notes show ([`AppCtx::put_back_since`]). Emptied as each begins.
     put_back: CopyValue<BTreeSet<RecordId>>,
+    /// Every setting changed by hand here and stored while a sync is under
+    /// way, by key: none of them gives way to what another copy's sync took
+    /// and stored meanwhile, whatever its value, as that sync ends
+    /// ([`given_way`]). Emptied as each begins.
+    set_by_hand: CopyValue<BTreeSet<String>>,
 }
 
 impl SyncCtx {
@@ -224,6 +229,7 @@ impl SyncCtx {
             taken_in: CopyValue::new(BTreeMap::new()),
             hand_back: CopyValue::new(false),
             put_back: CopyValue::new(BTreeSet::new()),
+            set_by_hand: CopyValue::new(BTreeSet::new()),
         }
     }
 }
@@ -302,13 +308,19 @@ fn same_sync(kept: &SyncState, ours: &SyncState) -> bool {
 /// this sync's end read it, before laying this one's over it, `began` what
 /// this sync began from, and `stamps` when each setting was last changed,
 /// as of this sync. Two such syncs run at once only where nothing locks
-/// ([`RUN_LOCK_WAIT_MS`]).
+/// ([`RUN_LOCK_WAIT_MS`]). A setting changed by hand here while this sync
+/// ran, `by_hand`, is no such take, whatever its value: it stays, the later
+/// word, and goes with the next sync. Told apart by its value alone, one
+/// set by hand to what the other's sync took was set back, and this sync's
+/// older take sent everywhere. One set in a third copy to that value reads
+/// as the other's take all the same.
 fn given_way(
     here: &cw_core::TrainingSettings,
     now: &cw_core::TrainingSettings,
     began: &SyncState,
     theirs: &SyncState,
     stamps: &BTreeMap<String, u64>,
+    by_hand: &BTreeSet<String>,
 ) -> cw_core::TrainingSettings {
     let Some(took) = &theirs.settings else {
         return now.clone();
@@ -325,6 +337,7 @@ fn given_way(
                 && now_keys.get(key) == Some(value)
                 && here_keys.get(key) != Some(value)
                 && stamps.get(key) >= theirs.stamps.get(key)
+                && !by_hand.contains(key)
         })
         .map(|(key, _)| key)
         .collect();
@@ -332,6 +345,20 @@ fn given_way(
         return now.clone();
     }
     settings_with(now, here, &given)
+}
+
+/// The settings that differ between `one` and `other`, by key: each either
+/// has, as [`crate::persist::merge_settings`] takes a change.
+fn changed_keys(
+    one: &cw_core::TrainingSettings,
+    other: &cw_core::TrainingSettings,
+) -> BTreeSet<String> {
+    let (one, other) = (as_keys(one), as_keys(other));
+    one.keys()
+        .chain(other.keys())
+        .filter(|key| one.get(*key) != other.get(*key))
+        .cloned()
+        .collect()
 }
 
 /// Note `id` as put back by hand at `at` in `notes`: at the later, where it
@@ -1121,6 +1148,7 @@ impl AppCtx {
         }
         put(self.sync.taken_in, state.revived.clone());
         put(self.sync.put_back, BTreeSet::new());
+        put(self.sync.set_by_hand, BTreeSet::new());
         // What it began from, or last kept as it went: what it does is laid
         // over the store as against it. The sign-in, which no sync changes,
         // as against the store's: one made here that the store has yet to
@@ -1218,11 +1246,13 @@ impl AppCtx {
                 // what this copy held, which knew nothing of it, and stored,
                 // what the sync took would undo it. But one that another
                 // copy's sync took and stored meanwhile gives way to this
-                // sync's word on it, where that is as late or later.
+                // sync's word on it, where that is as late or later, unless
+                // it was changed by hand here meanwhile as well.
+                let by_hand = self.settings_by_hand();
                 self.take_up_stored_settings();
                 let now = self.settings.peek().clone().clamp();
                 let now = match &stored {
-                    Some(theirs) => given_way(&here, &now, &base, theirs, &stamps),
+                    Some(theirs) => given_way(&here, &now, &base, theirs, &stamps, &by_hand),
                     None => now,
                 };
                 let (kept, synced_as) = match synced.settings {
@@ -1315,9 +1345,24 @@ impl AppCtx {
         }
     }
 
-    /// The settings were just stored as `stored`: synced soon, unless they
-    /// are what the last sync left them as.
-    pub fn sync_settings_stored(self, stored: &cw_core::TrainingSettings) {
+    /// The settings were just stored as `stored`, what was changed here,
+    /// from `base` to `ours`, laid over what the store held: synced soon,
+    /// unless they are what the last sync left them as. While a sync is
+    /// under way, each setting changed here is noted as set by hand
+    /// meanwhile ([`SyncCtx::set_by_hand`]).
+    pub fn sync_settings_stored(
+        self,
+        base: &cw_core::TrainingSettings,
+        ours: &cw_core::TrainingSettings,
+        stored: &cw_core::TrainingSettings,
+    ) {
+        if *self.sync.running.peek() {
+            let changed = changed_keys(base, ours);
+            if !changed.is_empty() {
+                let mut noted = self.sync.set_by_hand;
+                noted.write().extend(changed);
+            }
+        }
         let synced = self.sync.state.peek().as_ref().is_some_and(|state| {
             state
                 .settings
@@ -1327,6 +1372,18 @@ impl AppCtx {
         if !synced {
             self.sync_soon();
         }
+    }
+
+    /// The settings changed by hand here while the sync under way ran, by
+    /// key: those stored meanwhile ([`SyncCtx::set_by_hand`]), and those
+    /// changed and not stored yet, as an edit on the settings screen is
+    /// until it has been still for a moment, or one the store would not
+    /// take. Asked before the settings another copy stored are taken up.
+    fn settings_by_hand(self) -> BTreeSet<String> {
+        let mut keys = self.sync.set_by_hand.peek().clone();
+        let here = self.settings.peek().clone().clamp();
+        keys.extend(changed_keys(&self.stored_settings.peek(), &here));
+        keys
     }
 
     /// The sessions `ids` were put back by hand, after a deletion, by Undo
