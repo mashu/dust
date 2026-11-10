@@ -253,9 +253,13 @@ sync one at a time: a sync asked for while another tab or window syncs
 waits for it, the corner's cloud breathing meanwhile, ten minutes at most,
 then begins from what that one kept. Turning sync off with the copy waits
 for it too, so nothing is written into the folder after the copy is
-deleted. Where nothing locks, as in a browser without Web Locks, tabs sync
-as they come, and the merge alone keeps each one's notes
-(`docs/platforms.md`).
+deleted. Where nothing locks, as in a browser without Web Locks or a share
+that takes no lock, or once the ten minutes are out, tabs and windows sync
+as they come. The merge keeps the notes each made, but not what a sync
+planned without the other's (`SyncState::merged`): two syncing at once can
+send again the deletion of a session one let go here, undoing everywhere
+a putting back made elsewhere, or take back a session deleted here by hand
+meanwhile (`docs/platforms.md`).
 
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that
