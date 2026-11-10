@@ -157,17 +157,22 @@ fn open(app: AppState) {
 /// paper alone for the first second, as most reads are over by then, and
 /// then the app's mark, and how far the read has come (`note`). The page in
 /// a browser shows its own, `index.html`'s, before the app starts.
+///
+/// The words go into a live region there, empty, from the first frame, as
+/// `index.html`'s is: a screen reader tells of what comes into a region it
+/// knows, and may say nothing of one that comes with its words.
 #[component]
 fn BootScreen(theme: &'static str, note: Option<String>) -> Element {
+    let said = note.clone().unwrap_or_default();
     rsx! {
         div { class: "app-root", "data-theme": theme,
             div { class: "boot-screen",
-                if let Some(note) = note {
+                if note.is_some() {
                     div { class: "boot-mark", aria_hidden: "true", "·−" }
                     div { class: "boot-name", "Dust" }
                     div { class: "boot-pulse", aria_hidden: "true", span {} }
-                    p { class: "boot-note", role: "status", aria_live: "polite", "{note}" }
                 }
+                p { class: "boot-note", role: "status", aria_live: "polite", "{said}" }
             }
         }
     }
@@ -640,7 +645,9 @@ mod ui_tests {
     /// read meanwhile, its settings stored, a mark made or one cut off
     /// taken. Home opens, with every session, once the read is in. The app
     /// used to wait for the history as it drew its first frame: a window
-    /// left blank, or none at all, for as long as the read took.
+    /// left blank, or none at all, for as long as the read took. The words
+    /// come into a live region there, empty, from the screen's first frame,
+    /// as a screen reader may say nothing of one that comes with its words.
     #[test]
     fn the_app_says_its_history_is_being_read_past_a_second_and_opens_once_it_is() {
         run(|| async {
@@ -655,14 +662,21 @@ mod ui_tests {
             // A copy that stopped under its session left its mark.
             store.mark_open(Some(OpenSession::starting(false, 5)));
             store.hold_history();
+            let region = r#"<p class="boot-note" role="status" aria-live="polite">"#;
             let (mut ui, _recorder) = Ui::launch(store.clone());
+            assert!(
+                ui.has(&format!("{region}</p>")),
+                "its live region there, empty, from the first frame: {}",
+                ui.html()
+            );
             ui.advance(500).await;
             assert!(!ui.has("your history"), "nothing yet: {}", ui.html());
+            assert!(ui.has(&format!("{region}</p>")), "{}", ui.html());
             assert!(!ui.shows("nav-practice"));
             ui.advance(600).await;
             assert!(
-                ui.has("Reading your history…"),
-                "past a second: {}",
+                ui.has(&format!("{region}Reading your history…</p>")),
+                "past a second, in that region: {}",
                 ui.html()
             );
             // The records listed, and one read.
