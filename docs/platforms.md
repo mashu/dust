@@ -982,7 +982,10 @@ whole at all, none, so nothing is cut off) and is neither here already nor
 deleted here, nor named among the deletions it remembers: one deleted by
 hand there by a build that keeps them, before the move or after, that a
 copy left open of a build that keeps none stores back, stays deleted, as
-every build that keeps them takes a session it puts back out of them. It
+every build that keeps them takes a session it puts back out of them. One
+deleted there by a build that keeps none, which finished after that
+cut-off, a later one than every session the move took among them, comes
+back with such a copy, as it does in that build. It
 makes here each deletion the older build made since, once, by what it is,
 whatever its clock said (`deletionsTaken`,
 beside `deletedSeen`, which builds before them go by). But where a build

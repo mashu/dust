@@ -461,8 +461,9 @@ impl Layout {
     /// took; it takes no session twice, as it leaves out those it took
     /// before and those here, nor one from before the move, but for one a
     /// build that keeps no deletions deleted there and a copy of it brought
-    /// back, which finished in the day before the newest the move took. A
-    /// change since is taken up by it, though a build before this one's
+    /// back, which finished after the newest the move took, less a day, a
+    /// later one than every one it took among them. A change since is taken
+    /// up by it, though a build before this one's
     /// rules took it up first.
     pub(super) fn taken_up(&self) -> Option<Option<Fingerprint>> {
         self.taken_legacy
@@ -722,8 +723,9 @@ fn as_moved(json: &str) -> String {
 /// deletions, and stored back by a copy left open of one that keeps none:
 /// every build that keeps them takes a session it puts back, by Undo or a
 /// restore, out of them. Only one deleted there by a build that keeps none,
-/// which finished in that last day, comes back with such a copy, as it does
-/// in that build. Each goes where it finished ([`RecordId::placed`]).
+/// which finished after that cut-off, a later one than every session the
+/// move took among them, comes back with such a copy, as it does in that
+/// build. Each goes where it finished ([`RecordId::placed`]).
 /// A layout an earlier build wrote says nothing of what the move took: the
 /// newest session taken, at the clock as the move was made or before it,
 /// stands for it, and is noted.
@@ -2208,6 +2210,41 @@ mod tests {
             put_stamps(&change),
             [since.timestamp],
             "the one deleted stays deleted"
+        );
+    }
+
+    /// A session deleted by hand before the move by a build that remembers
+    /// no deletions (0.16.0), newer than every session the move took, and
+    /// stored back since by a copy of that build left open, is taken up as
+    /// it comes back in that build: nothing kept beside the history names
+    /// it. Not only one that finished in the day before the newest the move
+    /// took comes back so, but every one after that day.
+    #[test]
+    fn a_session_newer_than_the_move_deleted_by_a_build_that_keeps_no_deletions_comes_back() {
+        let moved = [finished(T), finished(T + DAY)];
+        let gone = finished(T + 2 * DAY);
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 3 * DAY,
+            "legacy": written(1),
+            "importedKeys": [[T, moved[0].date], [T + DAY, moved[1].date]],
+            "deletedSeen": 0,
+        }));
+        let records = record::records_for_blob(&moved);
+        let (change, _) = imported(
+            &layout,
+            written(2),
+            &[moved[0].clone(), moved[1].clone(), gone.clone()],
+            &[],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(
+            put_stamps(&change),
+            [gone.timestamp],
+            "back, as in that build"
         );
     }
 
