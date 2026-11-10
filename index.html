@@ -90,6 +90,19 @@
         0% { transform: translateX(-120%); }
         100% { transform: translateX(350%); }
       }
+      /* How far the history read as the page opens has come, written in by
+         the app's own code once the read has taken a while
+         (src/persist/web.rs): its line kept from the start, so nothing
+         moves as it comes. */
+      .boot-note {
+        margin: 0;
+        min-height: 1.4em;
+        font-size: 0.94rem;
+        line-height: 1.4;
+        opacity: 0.72;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+      }
       @media (prefers-color-scheme: dark) {
         html:not([data-theme="light"]) body,
         html:not([data-theme="light"]) #main,
@@ -120,6 +133,7 @@
       <div class="boot-mark" aria-hidden="true">·−</div>
       <div class="boot-name">Dust</div>
       <div class="boot-pulse" aria-hidden="true"><span></span></div>
+      <p class="boot-note" id="boot-note" role="status" aria-live="polite"></p>
     </div>
   </body>
 </html>

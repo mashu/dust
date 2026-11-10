@@ -556,6 +556,21 @@ static-head `asset!` (`src/app.rs`), and shows its boot screen until the app
 mounts. The phones used to put the sheet in from the app once it had
 mounted, and Android drew the first frames raw before it arrived.
 
+The app waits for the whole history before anything of it runs, so nothing
+acts on a history half read; it never waits on it to draw a frame. A
+history still being read, or moved to this version's records, as the first
+frame is drawn holds the app on a boot screen of its own (`src/app.rs`):
+the paper alone for the first second, as most reads are over by then, then
+the app's mark and "Reading your history… n of N", or "Moving your
+history… n of N" during a move, until the history is in, with no time
+after which it gives up. The app used to read it as it drew its first
+frame: a Linux window stood blank meanwhile, a Mac's or a Windows PC's
+showed nothing at all, and Android's event loop waited on it. In a browser
+the page's own boot screen (`index.html`'s `#boot`) shows from the first
+frame, as the history is read before the app starts, and gains the same
+words after about a second, written in by the app's code, so the page runs
+no script of its own for it.
+
 The rest of what a frame needs is in the head too: a phone's viewport, edge
 to edge from the start, and every build's link to the type faces, which are
 asked for as the page loads. The faces never hold up the first paint: the
@@ -806,13 +821,15 @@ to the disk, renamed into place, and the folder flushed too. The files are
 read and written on a thread of their own, `dust-history`, one job at a time
 in the order asked (`src/persist/worker.rs`), so a long history never holds
 the window up. It starts reading the history as the app starts, before the
-window or webview is up, and the app waits for it as it closes, three
-seconds at most, so a session kept as the window closes is stored before it
-goes. A change that fails is tried twice more there, within half a second,
-before the app is told. One that still fails, or that the disk has no room
-for, leaves the session in the app and in its mark, and it is tried again
-with the next change, as the app comes back into sight, and every minute
-until it is stored.
+window or webview is up, counting what it reads, and what it moves, for the
+boot screen to say ([The first frame](#the-first-frame)); the app asks
+without waiting, and opens once the read is in. The app waits for it as it
+closes, three seconds at most, so a session kept as the window closes is
+stored before it goes. A change that fails is tried twice more there,
+within half a second, before the app is told. One that still fails, or that
+the disk has no room for, leaves the session in the app and in its mark,
+and it is tried again with the next change, as the app comes back into
+sight, and every minute until it is stored.
 
 In a browser the history is the IndexedDB database `dust_history`
 (`src/persist/idb.rs`, `src/persist/idb.js`), whose keys and values are all
@@ -821,7 +838,10 @@ and `deleted`, by record name, as the folders above, and `meta`, which holds
 `layout` and `told`. Each change is one transaction, whole or not at all; a
 browser that has no room for one keeps none of it, and the app says the
 browser is full. The database is opened, and the history read 2,000 records
-at a time, while the page's boot screen shows, before the app starts. A
+at a time, while the page's boot screen shows, before the app starts; it
+counts them as it goes, against how many the database says it holds, for
+the boot screen to say. A move from the page storage is one change, made
+whole, and the boot screen says only that it is being made. A
 newer Dust that opens it in another tab closes it under this one, which then
 asks to be reloaded before it stores anything; a database a newer Dust keeps
 is only read.

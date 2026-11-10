@@ -11,11 +11,12 @@ use crate::keep_awake::use_keep_awake;
 use crate::page::scroll_to_top;
 use crate::page_closed::use_end_on_close;
 use crate::page_hidden::{APP_HIDDEN, APP_SHOWN, use_page_hidden, use_page_shown};
+use crate::persist::progress::BOOT_NOTE_AFTER_MS;
 use crate::routes::Route;
 use crate::session_runtime::finish_run;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
-use crate::time::{mono_ms, sleep_ms};
+use crate::time::{POLL_MS, mono_ms, sleep_ms};
 use crate::ui::contest::RunAnnouncer;
 use crate::ui::notice::NoticeBanner;
 use crate::ui::paddle::use_paddle_keys;
@@ -35,6 +36,12 @@ pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
 /// under a notch or a rounded corner, which the app's own padding keeps
 /// clear of. A phone has it in the page's head from the start (src/main.rs).
 pub(crate) const VIEWPORT: &str = "width=device-width, initial-scale=1, viewport-fit=cover";
+
+/// How often the boot screen's words are drawn afresh while the history is
+/// read ([`App`]): it is looked at more often, so the app opens as soon as
+/// the read is in, but a count drawn every look would only cost the
+/// webview a redraw it cannot show.
+const BOOT_NOTE_EVERY_MS: u64 = 250;
 
 /// How long the settings have to sit still on their screen before they are
 /// stored: a slider being dragged changes them every frame.
@@ -81,15 +88,96 @@ fn AppHead() -> Element {
     }
 }
 
+/// The app: its boot screen while the history read as it opens is on its
+/// way ([`crate::persist::Store::history_progress`]), and once it is in,
+/// the app itself ([`Shell`]). Nothing of the app is made before then, so
+/// nothing acts on a history half read: no setting is stored, no mark made
+/// or taken, no sync started, no key heard.
 #[component]
 pub fn App() -> Element {
     // The audio backend is injectable through context so a test can drive the
     // whole app with a player that records instead of one that needs a device.
-    let ctx = use_context_provider(|| {
-        let app = try_consume_context::<AppState>().unwrap_or_else(AppState::new);
-        let (settings, history) = (app.store.load_settings(), app.store.load_history());
-        AppCtx::new(app, settings, history)
+    let app = use_hook(|| try_consume_context::<AppState>().unwrap_or_else(AppState::new));
+    // In at once, as a short history is by the time the first frame is
+    // drawn, and every history in a browser, which reads it before the app
+    // starts: the app opens on it then and there.
+    let in_at_once = use_hook(|| {
+        let in_now = app.store.history_progress().is_none();
+        if in_now {
+            open(app.clone());
+        }
+        in_now
     });
+    let mut ready = use_signal(|| in_at_once);
+    let mut note = use_signal(|| None::<String>);
+    let theme = use_hook(|| Theme::from_key(&app.store.load_theme()).key());
+    use_hook(move || {
+        if in_at_once {
+            return;
+        }
+        let started = mono_ms();
+        spawn(async move {
+            let mut noted_at = None;
+            while let Some(progress) = app.store.history_progress() {
+                let now = mono_ms();
+                let due = noted_at.is_none_or(|at| now.saturating_sub(at) >= BOOT_NOTE_EVERY_MS);
+                if due && now.saturating_sub(started) >= BOOT_NOTE_AFTER_MS {
+                    noted_at = Some(now);
+                    let said = progress.said();
+                    if note.peek().as_deref() != Some(said.as_str()) {
+                        note.set(Some(said));
+                    }
+                }
+                sleep_ms(POLL_MS).await;
+            }
+            open(app);
+            ready.set(true);
+        });
+    });
+
+    rsx! {
+        AppHead {}
+        if ready() {
+            Shell {}
+        } else {
+            BootScreen { theme, note: note() }
+        }
+    }
+}
+
+/// Make the app around `app` once its history is in, in the scope of
+/// [`App`], where every part of it looks for it: from the settings and the
+/// history as they are stored.
+fn open(app: AppState) {
+    let (settings, history) = (app.store.load_settings(), app.store.load_history());
+    provide_context(AppCtx::new(app, settings, history));
+}
+
+/// What shows while the history is read, or moved, as the app opens: the
+/// paper alone for the first second, as most reads are over by then, and
+/// then the app's mark, and how far the read has come (`note`). The page in
+/// a browser shows its own, `index.html`'s, before the app starts.
+#[component]
+fn BootScreen(theme: &'static str, note: Option<String>) -> Element {
+    rsx! {
+        div { class: "app-root", "data-theme": theme,
+            div { class: "boot-screen",
+                if let Some(note) = note {
+                    div { class: "boot-mark", aria_hidden: "true", "·−" }
+                    div { class: "boot-name", "Dust" }
+                    div { class: "boot-pulse", aria_hidden: "true", span {} }
+                    p { class: "boot-note", role: "status", aria_live: "polite", "{note}" }
+                }
+            }
+        }
+    }
+}
+
+/// The app itself, once its history is in ([`App`]): the header, the
+/// screens and the navigation, and everything that runs beside them.
+#[component]
+fn Shell() -> Element {
+    let ctx = use_context::<AppCtx>();
     let AppCtx {
         screen,
         settings,
@@ -165,7 +253,6 @@ pub fn App() -> Element {
     let theme_attr = theme().key();
 
     rsx! {
-        AppHead {}
         div {
             class: "app-root",
             "data-theme": theme_attr,
@@ -462,6 +549,26 @@ mod tests {
         text
     }
 
+    /// The web page's boot screen has a place for how far the history has
+    /// come, which the app's own code fills in once the read has taken a
+    /// while (`persist::preload`), there for whoever reads the page aloud
+    /// too. No script of the page's own writes it, so the page's
+    /// Content-Security-Policy need allow none for it.
+    #[test]
+    fn the_web_boot_screen_has_a_place_for_its_note() {
+        let page = include_str!("../index.html");
+        let boot = &page[page.find(r#"<div id="boot">"#).expect("a boot screen")..];
+        let boot = &boot[..boot.find("</body>").expect("its end")];
+        let id = crate::persist::progress::BOOT_NOTE_ID;
+        let note =
+            format!(r#"<p class="boot-note" id="{id}" role="status" aria-live="polite"></p>"#);
+        assert!(boot.contains(&note), "{boot}");
+        for script in page.split("<script").skip(1) {
+            let script = &script[..script.find("</script>").expect("its end")];
+            assert!(!script.contains(id), "{script}");
+        }
+    }
+
     /// The web page carries its tab icon inline, the app's own at 32 and
     /// 64 px. A project site lives under /<repo>/ on GitHub Pages, and a
     /// browser with no icon linked asks for /favicon.ico at the root of the
@@ -524,6 +631,63 @@ mod ui_tests {
             assert_eq!(ui.screen(), "home");
             assert!(ui.has("Start training"));
             assert!(ui.has("bottom-nav"));
+        });
+    }
+
+    /// A history still being read as the app opens holds it on its boot
+    /// screen: the paper alone for the first second, then how far the read
+    /// has come, as it goes; and nothing of the app acts on a history half
+    /// read meanwhile, its settings stored, a mark made or one cut off
+    /// taken. Home opens, with every session, once the read is in. The app
+    /// used to wait for the history as it drew its first frame: a window
+    /// left blank, or none at all, for as long as the read took.
+    #[test]
+    fn the_app_says_its_history_is_being_read_past_a_second_and_opens_once_it_is() {
+        run(|| async {
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.save_settings(&short_session());
+            let sessions: Vec<_> = (1..=3)
+                .map(|day| stored_session(&format!("2026-10-0{day}"), &[("KM", "KM")]))
+                .collect();
+            store.save_sessions(&sessions);
+            store.mark_tutorial_done();
+            store.settings_saves.set(0);
+            // A copy that stopped under its session left its mark.
+            store.mark_open(Some(OpenSession::starting(false, 5)));
+            store.hold_history();
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(500).await;
+            assert!(!ui.has("your history"), "nothing yet: {}", ui.html());
+            assert!(!ui.shows("nav-practice"));
+            ui.advance(600).await;
+            assert!(
+                ui.has("Reading your history…"),
+                "past a second: {}",
+                ui.html()
+            );
+            // The records listed, and one read.
+            store.progress.reading(Some(3));
+            store.progress.step();
+            ui.advance(400).await;
+            assert!(ui.has("Reading your history… 1 of 3"), "{}", ui.html());
+            assert!(!ui.shows("nav-practice"), "not open on a history half read");
+            assert_eq!(store.settings_saves.get(), 0, "no settings stored");
+            assert_eq!(store.record_writes.get(), 0, "nothing stored");
+            assert_eq!(store.taken(), None, "no mark taken");
+            assert_eq!(store.open(), Some(OpenSession::starting(false, 5)));
+
+            store.release_history();
+            ui.advance(100).await;
+            assert!(
+                ui.shows("nav-practice"),
+                "Home, once it is in: {}",
+                ui.html()
+            );
+            assert!(!ui.has("your history"));
+            assert_eq!(ui.screen(), "home");
+            let shown = ui.with_app(|ctx| ctx.sessions.peek().len());
+            assert_eq!(shown, 3, "every session");
+            assert!(ui.has("Dust closed while it ran"), "{}", ui.html());
         });
     }
 

@@ -13,6 +13,7 @@ use super::disk::{
     aside_name, flush, move_aside, save_streamed, shown, sync_dir, temporary, write_whole,
 };
 use super::files::HistoryFiles;
+use super::progress::HistoryProgress;
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
 };
@@ -101,7 +102,8 @@ static PRELOADED: Mutex<Option<Preloaded>> = Mutex::new(None);
 
 /// Start reading the history, on its own thread, as the app starts: before
 /// its window is up, so the webview starts up meanwhile, and the app opens
-/// on what is left of it to read, if anything.
+/// on its boot screen only for what is left of it to read, if anything
+/// ([`Store::history_progress`]).
 pub(super) fn preload() {
     let root = data_dir();
     let history = HistoryJobs::on_worker(HistoryFiles::at(&root));
@@ -656,6 +658,20 @@ impl Store for DesktopStore {
             self.releasing.borrow_mut().extend(going);
         }
         self.release_carried();
+    }
+
+    /// While the history read as the app started is still on its way from
+    /// the history's thread ([`preload`]), how far it has come: asked of
+    /// nothing on the disk, and without waiting for the read. None once it
+    /// is in, held for the first load to take at once, and none where no
+    /// read was started, as the first load then reads it then and there.
+    fn history_progress(&self) -> Option<HistoryProgress> {
+        let arrived = self
+            .loading
+            .borrow_mut()
+            .as_mut()
+            .is_none_or(Loading::arrived);
+        (!arrived).then(|| self.history.progress())
     }
 
     /// The history read as the app started, once it is; or read now.
@@ -1313,6 +1329,60 @@ pub(super) mod tests {
             1,
             "what it carried is in its own mark"
         );
+    }
+
+    /// A store whose history is still being read on its thread, as the one
+    /// the app opens on is, says how far the read has come, asked without
+    /// waiting on it, so the app's first frame need not wait either; and
+    /// once the read is in, says so, and hands the history over at once.
+    #[test]
+    fn a_store_still_reading_its_history_says_so_without_waiting_on_it() {
+        use crate::persist::progress::HistoryProgress;
+        use std::time::{Duration, Instant};
+        let (dir, files) = store("still-reading");
+        let sessions: Vec<SessionResult> = (1..=600)
+            .map(|n| SessionResult {
+                timestamp: n * 60_000,
+                ..session(&format!("day {n}"))
+            })
+            .collect();
+        store_sessions(&files, &sessions);
+        drop(files);
+        let store = DesktopStore::on_worker_at(dir.0.clone());
+        // The history's thread is busy a while before it reads, as with a
+        // long history.
+        let (go, busy) = std::sync::mpsc::channel::<()>();
+        let _busy = store.history.ask(move |_| {
+            let _ = busy.recv();
+        });
+        *store.loading.borrow_mut() = Some(store.history.start_load());
+        let asked = Instant::now();
+        assert_eq!(
+            store.history_progress(),
+            Some(HistoryProgress {
+                moving: false,
+                count: None,
+            }),
+            "still being read"
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "asked, not waited on"
+        );
+        go.send(()).unwrap();
+        let given_up = Instant::now() + Duration::from_secs(60);
+        while store.history_progress().is_some() {
+            assert!(Instant::now() < given_up, "the read never came in");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            store.history.progress(),
+            HistoryProgress {
+                moving: false,
+                count: Some((600, 600)),
+            }
+        );
+        assert_eq!(store.load_history().sessions.len(), 600);
     }
 
     #[test]

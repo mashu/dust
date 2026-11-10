@@ -179,6 +179,7 @@ dioxus.send((await one.head()).ok.layout);"#,
         sent[3]["ok"]["layout"],
         r#"{"layout":1,"compatible":1,"migratedAt":5}"#
     );
+    assert_eq!(sent[3]["ok"]["count"], 2, "as many records as it holds");
     let answers = sent[4].as_array().expect("both answered");
     assert!(answers.iter().any(|answer| answer["why"] == "raced"));
     assert_eq!(sent[5], r#"{"layout":1,"compatible":1,"migratedAt":6}"#);

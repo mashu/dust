@@ -12,6 +12,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::pin::pin;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::Poll;
 
 use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
@@ -22,6 +23,7 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::idb::{BrowserHistory, Script, waited_ms};
 use super::legacy::{Aside, BlobHistory, BlobKeys, HISTORY_BUDGET, Kept, set_aside_from};
 use super::marks::MARKS_JS;
+use super::progress::{BOOT_NOTE_AFTER_MS, BOOT_NOTE_ID, LoadProgress};
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
     failed_for_now,
@@ -104,22 +106,27 @@ thread_local! {
 
 /// Open the history in the browser's database before the app starts, and
 /// read it whole, so that the app opens on it at once, the boot screen
-/// showing meanwhile. The history kept whole in the page storage is moved
-/// in first, where it was not ([`BrowserHistory::open`]). Where the
-/// database will not open, will not take the history, or stops answering
-/// as it is read ([`unless_stalled`]), the page storage keeps it this visit
+/// showing meanwhile, and saying how far the read has come once it has
+/// taken a while ([`unless_stalled`]). The history kept whole in the page
+/// storage is moved in first, where it was not ([`BrowserHistory::open_with`]).
+/// Where the database will not open, will not take the history, or stops
+/// answering as it is read, the page storage keeps it this visit
 /// ([`WebStore::default`]).
 pub async fn preload() {
-    let opening = async {
+    let progress = Arc::new(LoadProgress::default());
+    let counted = Arc::clone(&progress);
+    let opening = async move {
         match Script::open().await {
-            Ok((script, read_only)) => BrowserHistory::open(script, read_only, Local, BLOB_KEYS)
-                .await
-                .map(Rc::new)
-                .map_err(|not| (not.why, not.set_aside)),
+            Ok((script, read_only)) => {
+                BrowserHistory::open_with(script, read_only, Local, BLOB_KEYS, counted)
+                    .await
+                    .map(Rc::new)
+                    .map_err(|not| (not.why, not.set_aside))
+            }
             Err(why) => Err((why, Vec::new())),
         }
     };
-    let opened = unless_stalled(opening)
+    let opened = unless_stalled(opening, &progress)
         .await
         .unwrap_or_else(|| Err(("it did not answer".into(), Vec::new())));
     PRELOADED.with(|preloaded| *preloaded.borrow_mut() = Some(opened));
@@ -134,23 +141,47 @@ pub async fn preload() {
 /// script's own wait, `OPEN_WAIT_MS`.
 const STALLED_MS: f64 = 20_000.0;
 
+/// How often the page looks at what it waits on as it opens: whether the
+/// database has stalled, and how far the read has come.
+const LOOK_MS: u32 = 250;
+
 /// What `opening` comes to; or none, once the database has kept it waiting
-/// for [`STALLED_MS`], looked at every second while it waits.
-async fn unless_stalled<T>(opening: impl Future<Output = T>) -> Option<T> {
+/// for [`STALLED_MS`], looked at every [`LOOK_MS`] while it waits. Once the
+/// page has shown its boot screen for [`BOOT_NOTE_AFTER_MS`], each look
+/// says on it how far the read has come, as `progress` counts it.
+async fn unless_stalled<T>(opening: impl Future<Output = T>, progress: &LoadProgress) -> Option<T> {
     let mut opening = pin!(opening);
     loop {
-        let mut second = pin!(gloo_timers::future::TimeoutFuture::new(1_000));
+        let mut look = pin!(gloo_timers::future::TimeoutFuture::new(LOOK_MS));
         let opened = std::future::poll_fn(|asked| match opening.as_mut().poll(asked) {
             Poll::Ready(opened) => Poll::Ready(Some(opened)),
-            Poll::Pending => second.as_mut().poll(asked).map(|()| None),
+            Poll::Pending => look.as_mut().poll(asked).map(|()| None),
         })
         .await;
         if opened.is_some() {
             return opened;
         }
+        // The page's own clock, which starts as the page loads: the boot
+        // screen shows from its first frame.
+        if crate::time::mono_ms() >= BOOT_NOTE_AFTER_MS {
+            boot_note(&progress.now().said());
+        }
         if waited_ms() > STALLED_MS {
             return None;
         }
+    }
+}
+
+/// Say `said` on the page's boot screen, under its mark (`index.html`):
+/// written from here, so the page runs no script of its own for it.
+fn boot_note(said: &str) {
+    let note = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(BOOT_NOTE_ID));
+    if let Some(note) = note
+        && note.text_content().as_deref() != Some(said)
+    {
+        note.set_text_content(Some(said));
     }
 }
 

@@ -27,6 +27,7 @@ mod lock;
 mod marks;
 #[cfg(test)]
 pub mod memory;
+pub mod progress;
 pub mod record;
 mod saved;
 mod session;
@@ -54,6 +55,7 @@ use cw_core::{
 };
 use serde::Deserialize;
 
+use progress::HistoryProgress;
 use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, Unopened, done};
 use settings::{load_settings_from, unmarked};
 
@@ -161,6 +163,15 @@ pub trait Store {
     /// as the store makes a mark, and, where it could not be written, once
     /// it is. Those `left` are let go of as they are, for the next look.
     fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>);
+    /// How far the history read as the app opens has come, while it is
+    /// still being read, or moved from where an older build kept it whole:
+    /// none once it is in, and [`Store::load_history`] hands it over at
+    /// once, and none where the store reads it then and there. Asked
+    /// without waiting on the read: the app shows its boot screen until the
+    /// history is in, and nothing of it acts on a history half read.
+    fn history_progress(&self) -> Option<HistoryProgress> {
+        None
+    }
     /// The whole history, by record ([`record`]): moved first, where an
     /// older build kept it whole, and with whatever an older build stored
     /// there since taken up.
@@ -476,9 +487,10 @@ pub fn default_store() -> Rc<dyn Store> {
 }
 
 /// Start reading the history as the app starts, on a thread of its own, so
-/// that the app's window comes up meanwhile and opens on it: the store the
-/// app opens takes what was read ([`default_store`]). A browser has its
-/// own, which the page waits on before the app starts ([`web::preload`]).
+/// that the app's window comes up meanwhile, on its boot screen, and opens
+/// on it once it is in ([`Store::history_progress`]): the store the app
+/// opens takes what was read ([`default_store`]). A browser has its own,
+/// which the page waits on before the app starts ([`web::preload`]).
 #[cfg(feature = "native-runtime")]
 pub fn preload() {
     desktop::preload();

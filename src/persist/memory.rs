@@ -22,6 +22,7 @@ use super::backup::{BackupFile, NotSaved};
 use super::legacy::{
     self, Aside, BlobHistory, BlobKeys, Fingerprint, Layout, parse_sessions, read_history,
 };
+use super::progress::{HistoryProgress, LoadProgress};
 use super::record::{
     HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
     failed_for_now, read_record, records_for_blob, unread_notices, unreadable,
@@ -167,6 +168,13 @@ pub struct MemoryStore {
     /// the site's ([`Lock::web_name`]), as a browser's tabs share them: none
     /// on what sync keeps.
     pub browser: Cell<bool>,
+    /// The history is being read as the app opens, and is in only once the
+    /// test says ([`Self::release_history`]): until then the store says how
+    /// far the read has come ([`Self::progress`]), and nothing may wait on
+    /// it.
+    history_held: Cell<bool>,
+    /// How far a read held has come, for the test to move on.
+    pub progress: LoadProgress,
 }
 
 /// What became of the marks of a [`MemoryStore`], for a test to follow.
@@ -522,8 +530,16 @@ impl Store for MemoryStore {
         }
     }
 
+    fn history_progress(&self) -> Option<HistoryProgress> {
+        self.history_held.get().then(|| self.progress.now())
+    }
+
     /// The history by record, the move made first, as the files make it.
     fn load_history(&self) -> HistoryLoad {
+        assert!(
+            !self.history_held.get(),
+            "the history was waited on while it was still being read"
+        );
         if let Some(page) = &self.page {
             return page.load();
         }
@@ -823,6 +839,17 @@ impl MemoryStore {
     /// The mark a copy took as cut off, while it holds it.
     pub fn taken(&self) -> Option<OpenSession> {
         self.taken.borrow().clone()
+    }
+
+    /// Have the history read as the app opens take its time, as a long one
+    /// does: in only once [`Self::release_history`] says so.
+    pub fn hold_history(&self) {
+        self.history_held.set(true);
+    }
+
+    /// The history held is in ([`Self::hold_history`]).
+    pub fn release_history(&self) {
+        self.history_held.set(false);
     }
 
     /// Every session stored that reads, in the order of the history,
