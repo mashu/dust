@@ -547,6 +547,12 @@ pub async fn sync_once_with(
 /// drive putting its name back does not bring it back here beside the one
 /// kept. A deletion by hand of one of two sessions finished in the same
 /// millisecond is left out with it: it is not noted, as before this build.
+/// So are the record a restore filled in, its filled record named in the
+/// same millisecond in its place ([`RecordId::beside`]), and a filled
+/// record the Undo of that restore took out, the record it filled in back
+/// in its place: neither is noted, and the drive putting either back has
+/// its deletion sent again, stamped as it is sent ([`planned`]), the
+/// session staying here once, under the record kept.
 ///
 /// Says whether it looked: not where the store could not say which were
 /// deleted by hand, which the next sync asks again.
@@ -610,7 +616,12 @@ async fn note_deletions_by_hand(
 /// loses to it. A twin let go here ([`twins`]) is no deletion by hand,
 /// though it has a tombstone: its deletion, sent again where the drive has
 /// its name put back, is made as it is sent, as it was as the twin was let
-/// go, after any putting back.
+/// go, after any putting back. The same rule ([`twin_kept_here`]) takes in
+/// the record a restore filled in, its filled record named in the same
+/// millisecond in its place ([`RecordId::beside`]), and a filled record the
+/// Undo of that restore took out: each deletion is stamped as it is sent,
+/// and never sent as made after the drive's deletion of the record, as
+/// every deletion by hand was before this build.
 async fn planned(
     store: &dyn Store,
     drive: &DriveState,
@@ -676,7 +687,10 @@ fn same_millisecond(id: RecordId) -> RangeInclusive<RecordId> {
 
 /// Whether `id`, gone here, may be a twin let go here ([`twins`]): another
 /// record listed here names a session that finished in the same
-/// millisecond, which may be its session, kept under that name.
+/// millisecond, which may be its session, kept under that name. So it is
+/// for a record a restore filled in, or a filled record the Undo of that
+/// restore took out: the record in its place is named in the same
+/// millisecond ([`RecordId::beside`]).
 fn twin_kept_here(id: RecordId, listed: &BTreeSet<RecordId>) -> bool {
     listed.range(same_millisecond(id)).any(|&other| other != id)
 }

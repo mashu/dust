@@ -99,7 +99,14 @@ sent only once the one kept is in the drive. A twin let go is no deletion
 by hand: should another device put its name back, restoring the same
 backup, it is let go again, never taken back beside the one kept. Two
 records of a session that differ, as one a restore filled in, are both
-kept.
+kept. The record a restore filled in, its filled record named in the same
+millisecond in its place (`RecordId::beside`), and a filled record the
+Undo of that restore took out, the record it filled in back in its place,
+are deleted as a twin let go is: each deletion is stamped as it is sent,
+never sent as made after the drive's deletion, and not noted by the first
+sync after an update from a build that noted no deletion by hand, so that
+the drive putting the old record back has it let go again on that device,
+the session staying once, under the record kept.
 
 What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads
