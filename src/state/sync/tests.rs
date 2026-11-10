@@ -2583,6 +2583,52 @@ fn a_sign_in_made_in_another_copy_is_kept_by_this_copys_sync() {
     });
 }
 
+/// A sign-in another copy of the app on the same store made while a sync
+/// here was under way, taken up here, then made again there, is the later
+/// one kept as that sync ends, and the one both copies sign in with: the
+/// one taken up here is no sign-in made here. The sync's end used to take
+/// any sign-in here that differed from the store's as the sync began for
+/// one made here, and kept the one taken up over the later.
+#[test]
+fn a_sign_in_made_again_in_another_copy_while_this_one_syncs_is_kept() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let ctx = turned_on(&mut harness, &remote, &auth).await;
+        let held = Held::of(&remote);
+        let window_auth = FakeAuth::giving(&["t"]);
+        let window = another_copy_through(
+            &harness,
+            Rc::clone(&held) as Rc<dyn Remote>,
+            Rc::clone(&window_auth) as Rc<dyn Auth>,
+        );
+        harness.in_app(|| window.take_up_store());
+        held.hold(true);
+        harness.in_app(|| window.sync_now());
+        harness.pump();
+        // Signed in again here, then taken up there as it comes into
+        // sight, then signed in again here.
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        let first = auth.kept();
+        harness.in_app(|| window.sync_if_stale());
+        assert_eq!(window_auth.kept(), first, "taken up there");
+        harness.in_app(|| ctx.sync_sign_in());
+        harness.pump();
+        let later = auth.kept();
+        assert_ne!(later, first);
+        assert_eq!(kept_state(&harness).sign_in, later, "kept");
+        held.hold(false);
+        harness.advance(100).await;
+        assert_eq!(kept_state(&harness).sign_in, later, "the later, as it ends");
+        harness.in_app(|| window.sync_if_stale());
+        assert_eq!(window_auth.kept(), later, "signed in with there");
+        harness.in_app(|| ctx.sync_if_stale());
+        assert_eq!(auth.kept(), later, "and here");
+    });
+}
+
 /// A deletion by hand another copy of the app on the same store sent is
 /// noted as the drive's in what this copy keeps as well, though this copy
 /// read what sync keeps before it was sent: a putting back of that session

@@ -476,7 +476,9 @@ impl AppCtx {
     /// which becomes `sending` once kept: the sync's end lays what it does
     /// after over the store in turn ([`Self::keep_synced`]). The sign-in
     /// kept is the store's, or one made here that the store has yet to take,
-    /// before the sync began or since. Nothing is kept where sync was turned
+    /// before the sync began or since ([`Self::sign_in_made_here`]): one
+    /// taken up from another copy meanwhile is that copy's, which the store
+    /// holds as that copy last made it. Nothing is kept where sync was turned
     /// off or on anew since, here or in another copy of the app, which the
     /// sync's end takes up; nor is a failing told of, which the sync's end
     /// tells. Under the lock on what sync keeps, as every keep is
@@ -500,14 +502,33 @@ impl AppCtx {
             Kept::State(theirs) => sending.merged(taken.then_some(&*base.borrow()), theirs),
             Kept::Cleared | Kept::Unread | Kept::Unknown => sending.clone(),
         };
-        if here.sign_in != base.borrow().sign_in {
-            merged.sign_in = here.sign_in;
+        if let Some(sign_in) = self.sign_in_made_here(&here, &base.borrow()) {
+            merged.sign_in = sign_in;
         }
         if let Some(written) = merged.written()
             && store.save_sync(Some(&written)).is_ok()
         {
             *base.borrow_mut() = sending.clone();
         }
+    }
+
+    /// The sign-in `here` holds, this copy's state, where it is one made
+    /// here that the store has yet to take, as against `base`, what a sync
+    /// under way began from or last kept as it went: one that differs from
+    /// `base`'s, and from the sign-in this copy last read or kept in the
+    /// store. One taken up from another copy since the sync began is none,
+    /// though it differs from `base`'s: that copy may have signed in again
+    /// since, and the later is the one kept. One the store would not take
+    /// is, as this copy last read the store's ([`Self::write_kept`]).
+    fn sign_in_made_here(self, here: &SyncState, base: &SyncState) -> Option<Option<String>> {
+        let seen = self
+            .sync
+            .base
+            .peek()
+            .as_ref()
+            .map(|seen| seen.sign_in.clone());
+        (here.sign_in != base.sign_in && seen.as_ref() != Some(&here.sign_in))
+            .then(|| here.sign_in.clone())
     }
 
     /// Keep `synced`, what the sync of the turning on of sync `epoch` came
@@ -520,7 +541,8 @@ impl AppCtx {
     /// and sent ([`SyncState::stamp_change`]), as it was put back after the
     /// sync began. The sign-in is no sync's to keep: the store's, or one
     /// made here that the store has yet to take, before the sync began or
-    /// meanwhile. Nothing is kept where sync was turned off or on anew
+    /// meanwhile ([`Self::sign_in_made_here`]), not one taken up from another
+    /// copy meanwhile. Nothing is kept where sync was turned off or on anew
     /// meanwhile, here or in another copy: off here as well, then.
     /// Under the lock on what sync keeps, as every keep is
     /// ([`Self::keep_sync_state`]): a putting back noted while it waits for
@@ -554,13 +576,13 @@ impl AppCtx {
             Kept::State(theirs) => (synced.merged(taken.then_some(base), &theirs), Some(*theirs)),
             Kept::Cleared | Kept::Unread | Kept::Unknown => (synced, None),
         };
-        let sign_in = self
+        let made_here = self
             .sync
             .state
             .peek()
             .as_ref()
-            .and_then(|here| here.sign_in.clone());
-        if sign_in != base.sign_in {
+            .and_then(|here| self.sign_in_made_here(here, base));
+        if let Some(sign_in) = made_here {
             merged.sign_in = sign_in;
         }
         // Noted in another copy since: where it still stands.
