@@ -1130,6 +1130,12 @@ impl MemoryStore {
             if tombstones.contains_key(&record.id) && !undone.contains(&record.id) {
                 continue;
             }
+            // One put back whose record is there still is back as it is
+            // stored, as the files and a browser's database keep it: not
+            // stored a second time beside itself.
+            if undone.contains(&record.id) && records.contains_key(&record.id) {
+                continue;
+            }
             let mut id = record.id;
             while records
                 .get(&id)
@@ -1348,6 +1354,40 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("not done"),
         }
+    }
+
+    /// A session put back whose record is there still, as one a sync took
+    /// back from the drive in the meantime, is back as it is stored, under
+    /// its own name, as the files and a browser's database keep it: one
+    /// record, not two of one session. The test store used to store the
+    /// one put back beside it, under the next name, where its bytes
+    /// differed.
+    #[test]
+    fn a_session_put_back_whose_record_is_there_is_one_record() {
+        let store = MemoryStore::default();
+        let first = finished(DAY);
+        let one = record(&first);
+        now(store.change_history(put(std::slice::from_ref(&one))));
+        let undo = HistoryChange {
+            put: vec![Record {
+                id: one.id,
+                json: serde_json::to_string_pretty(&first).expect("JSON"),
+            }],
+            unforget: vec![one.id],
+            ..HistoryChange::default()
+        };
+        assert_eq!(
+            now(store.change_history(undo)),
+            HistorySaved::Stored { kept: 1 }
+        );
+        let ids: Vec<RecordId> = store
+            .load_history()
+            .sessions
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(ids, [one.id], "one record");
+        assert_eq!(store.record(one.id), Some(one.json), "as it was stored");
     }
 
     /// Which records were deleted by hand comes with when each was, as its
