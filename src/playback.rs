@@ -360,7 +360,12 @@ fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, SplitMix6
 /// browser's stream skipped some of, the page held up past the half second
 /// it renders ahead, is stopped there and goes on at once from the first
 /// letter it did not play whole, as a send per letter went on after the
-/// page came back.
+/// page came back. What waits on a send to be over waits on the whole run:
+/// natively, an output the system has moved to meanwhile, headphones
+/// plugged in, is taken up once the run has been heard out; in a browser,
+/// an audio clock that stops with the page in view is taken for stalled
+/// once the run's length and two seconds have gone by, each try as long
+/// again.
 async fn play_chars(
     lease: Lease,
     settings: TrainingSettings,

@@ -126,7 +126,7 @@ pub const AGC_LISTEN_WORD_MARGIN_SEC: f64 = 0.085;
 /// letters the settings send, [`AGC_LETTER_MARGIN_SEC`] over it: at their
 /// slowest spacing, Farnsworth's included, a contest's caller slowed down
 /// for you among them, and the Listen screen's pause between the letters it
-/// sends one at a time ([`LISTEN_LETTER_GAP_MS`]), which the band plays on
+/// plays one at a time ([`LISTEN_LETTER_GAP_MS`]), which the band plays on
 /// through. At Fast it stops [`AGC_WORD_MARGIN_SEC`] short of the shortest
 /// word gap they send, so the band still comes back between words, by less
 /// the faster they come, and where their speeds are too far apart for both
@@ -1261,7 +1261,7 @@ mod tests {
     /// you under easy habits, as far as one ever slows, and by less where
     /// its Farnsworth spacing reaches the Speed card's floor first, which
     /// is where its letters are farthest apart; and between the letters the
-    /// Listen screen sends one at a time: each a letter gap the settings
+    /// Listen screen plays one at a time: each a letter gap the settings
     /// send, which the hang is sized from where their word gaps let it.
     #[test]
     fn the_hiss_holds_between_a_slowed_callers_letters_and_the_listen_screens() {
