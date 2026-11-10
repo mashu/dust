@@ -81,14 +81,17 @@ deleted, as the sync listed the history before the deletion was made, or
 as it was cut short as it sent, the deletion is stamped after what that
 sync read as well: a putting back made elsewhere after it by the clock,
 read there, loses to it. A putting back made while a sync is under way is
-stamped again as it ends, after what that sync read and sent, and a session
-put back by hand meanwhile, in that tab or window or in another on the
-device, is not let go by that sync, which planned with no note of it, even
-where sync is turned off before it ends: the next sends it as put back,
-where sync is on still. A putting back noted while sync knows nothing of
-the drive, as just after it is turned on anew, when what it knew before
-went with it, is stamped again after what the drive holds once its first
-sync reads it.
+stamped again as it ends, after what that sync read and sent, so that it
+beats the deletion that sync sent, which it may undo; and so it beats, too,
+a deletion of that session made on another device after it by the clock,
+where the sync read that deletion: the putting back is the later word
+then, on every device. And a session put back by hand meanwhile, in that
+tab or window or in another on the device, is not let go by that sync,
+which planned with no note of it, even where sync is turned off before it
+ends: the next sends it as put back, where sync is on still. A putting back
+noted while sync knows nothing of the drive, as just after it is turned on
+anew, when what it knew before went with it, is stamped again after what
+the drive holds once its first sync reads it.
 
 One session can be two records: a backup restored on one device names each
 session where it finished (`RecordId::placed`), while the device it came

@@ -539,7 +539,10 @@ impl AppCtx {
     /// it ([`SyncState::merged`]). A session put back by hand meanwhile,
     /// here or in another copy, is stamped again after what this sync read
     /// and sent ([`SyncState::stamp_change`]), as it was put back after the
-    /// sync began. The sign-in is no sync's to keep: the store's, or one
+    /// sync began: after the deletion this sync sent, which it may undo,
+    /// and so after a deletion of it made elsewhere later by the clock that
+    /// this sync read, which it then beats (`docs/sync.md`). The sign-in is
+    /// no sync's to keep: the store's, or one
     /// made here that the store has yet to take, before the sync began or
     /// meanwhile ([`Self::sign_in_made_here`]), not one taken up from another
     /// copy meanwhile. Nothing is kept where sync was turned off or on anew
