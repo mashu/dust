@@ -179,8 +179,9 @@ pub struct SyncCtx {
     /// way, by key: none of them gives way to what another copy's sync took
     /// and stored meanwhile, whatever its value, as that sync ends
     /// ([`given_way`]), nor to what that sync took. An edit made before the
-    /// sync began and stored only as it runs is none of them: the sync took
-    /// it in and sent it, and it gives way to a later word the sync took
+    /// sync began and stored only as it runs is none of them, unless this
+    /// copy took up another's store of that setting first: the sync took it
+    /// in and sent it, and it gives way to a later word the sync took
     /// ([`AppCtx::changed_by_hand`]). Emptied as each begins.
     set_by_hand: CopyValue<BTreeSet<String>>,
     /// The settings the sync under way began from, and those stored then:
@@ -1402,9 +1403,12 @@ impl AppCtx {
     /// changed and not stored yet, as an edit on the settings screen is
     /// until it has been still for a moment, or one the store would not
     /// take. An edit made before the sync began and not stored yet as it
-    /// ends is none of them: the sync took it in and sent it, and it gives
-    /// way to a later word the sync took ([`Self::changed_by_hand`]). Asked
-    /// before the settings another copy stored are taken up.
+    /// ends is none of them, unless this copy took up another's store of
+    /// that setting while the sync ran: the sync took it in and sent it, and
+    /// it gives way to a later word the sync took ([`Self::changed_by_hand`]).
+    /// Asked before the settings another copy stored are taken up as the
+    /// sync ends, though a sync that changed the history has taken them up
+    /// already ([`Self::take_up_synced`]).
     fn settings_by_hand(self) -> BTreeSet<String> {
         let mut keys = self.sync.set_by_hand.peek().clone();
         let here = self.settings.peek().clone().clamp();

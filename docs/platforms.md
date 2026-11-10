@@ -751,7 +751,10 @@ stays there, the later word, whatever either took, though it is back to
 what it was as that sync began. An edit made in a copy before its sync
 began, which that sync took in and sent, is no change made meanwhile,
 though it is stored only as the sync runs or after it: it gives way to a
-later word the sync took. A restore of a backup holds `restore.lock`
+later word the sync took, unless another copy stored that setting while
+the sync ran and this one took that up first, as a sync that changed the
+history does as it ends: then it is taken for one set by hand meanwhile,
+and stays. A restore of a backup holds `restore.lock`
 beside them (in a browser the Web Lock `dust_restore`) from its start
 until neither it nor its Undo is under way
 or offered, so a restore in another copy waits for its Undo rather than
