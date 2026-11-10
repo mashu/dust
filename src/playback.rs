@@ -356,7 +356,11 @@ fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, SplitMix6
 /// asked for only once the last had been heard out, a letter a device too
 /// far behind its output could no longer have heard on time was heard late.
 /// A Stop ends the one send, wherever it is, and a send the audio fails is
-/// tried again whole, from its first letter, as every send is.
+/// tried again whole, from its first letter, as every send is. A run the
+/// browser's stream skipped some of, the page held up past the half second
+/// it renders ahead, is stopped there and goes on at once from the first
+/// letter it did not play whole, as a send per letter went on after the
+/// page came back.
 async fn play_chars(
     lease: Lease,
     settings: TrainingSettings,
@@ -366,16 +370,49 @@ async fn play_chars(
     // One operator for the whole run: a different pitch per letter would make
     // the screen harder to learn from, not more realistic.
     let (voice, _) = new_station(&settings);
-    let plan = letters_apart(&chars, &settings, voice, f64::from(gap_ms) / 1_000.0);
-    if plan.wanted.chars.is_empty() {
-        return Ok(());
+    let gap_sec = f64::from(gap_ms) / 1_000.0;
+    // Where in `chars` the letters still to be played begin.
+    let mut from = 0;
+    loop {
+        let rest = &chars[from..];
+        let plan = letters_apart(rest, &settings, voice, gap_sec);
+        if plan.wanted.chars.is_empty() {
+            return Ok(());
+        }
+        let transcript = Transmission::alone(rest, voice);
+        // Where the browser's stream first skipped some of the run, if it
+        // did: the run is stopped there, rather than left to lose what of
+        // it the skip took, the rest of it whole where the skip was longer
+        // than the stream runs on over unheard.
+        let mut skipped = None;
+        let asked = lease.ask_to_send();
+        let sent = lease
+            .send_planned(asked, &plan, &transcript, &settings, None, |news| {
+                if let SendNews::Missed { from_sec, .. } = news
+                    && skipped.is_none()
+                {
+                    skipped = Some(from_sec);
+                    lease.stop_sending();
+                }
+            })
+            .await;
+        let Some(skipped_sec) = skipped else {
+            return sent.map(|_| ());
+        };
+        if !lease.is_current() {
+            return Err(AudioError::Cancelled);
+        }
+        // On from the first letter it did not play whole.
+        let first_unheard = plan
+            .wanted
+            .chars
+            .iter()
+            .find(|span| span.end_sec > skipped_sec);
+        match first_unheard {
+            Some(span) => from += span.at,
+            None => return Ok(()),
+        }
     }
-    let transcript = Transmission::alone(chars, voice);
-    let asked = lease.ask_to_send();
-    lease
-        .send_planned(asked, &plan, &transcript, &settings, None, |_| {})
-        .await
-        .map(|_| ())
 }
 
 /// `chars` sent by `voice` one at a time, as one send: each letter planned
@@ -841,6 +878,41 @@ mod tests {
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), 1, "nothing is played after leaving");
         });
+    }
+
+    /// A run the browser's stream skipped some of, the page held up past
+    /// what the stream renders ahead, goes on at once from the first letter
+    /// it did not play whole: one skipped inside a letter, and one dropped
+    /// from there to its end, the page held up longer than the stream runs
+    /// on over unheard. Left to play on, it lost those letters, all of the
+    /// rest for the longer hold-up, while the screen said it played; a send
+    /// per letter lost none, each sent as the page came back.
+    #[test]
+    fn listening_goes_on_from_the_first_letter_the_stream_skipped() {
+        // K ends a little over a quarter of a second in, M sounds from
+        // 0.69 s to 0.89 s.
+        for skip in [(0.75, 0.8), (0.5, 1_000.0)] {
+            run(move || async move {
+                let mut h = Harness::new();
+                let lease = claim(&h);
+                h.recorder.skip_next.set(Some(skip));
+                let gap = LISTEN_LETTER_GAP_MS;
+                let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), gap));
+                h.pump();
+                assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
+                assert_eq!(*outcome.borrow(), Some(Ok(())));
+                assert_eq!(h.texts(), ["KMU", "MU"], "{skip:?}");
+                let starts = h.recorder.starts();
+                let again = &starts[1].plan.wanted.chars;
+                assert_eq!(again.iter().map(|span| span.at).collect::<Vec<_>>(), [0, 1]);
+                let after_ms = starts[1].at.0 - starts[0].at.0;
+                assert!(
+                    (after_ms as f64) < skip.0 * 1_000.0 + 200.0,
+                    "{skip:?}: sent again {after_ms} ms in, of a run of {:.0} ms",
+                    starts[0].plan.sound_end_sec() * 1_000.0
+                );
+            });
+        }
     }
 
     /// The audio failing gives up on the Listen screen's letters whole,
