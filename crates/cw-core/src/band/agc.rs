@@ -110,6 +110,15 @@ pub const AGC_LETTER_MARGIN_SEC: f64 = 0.010;
 /// taken off, for the band to come back a few decibels under the
 /// strongest station before its next word, audibly, rather than a decibel.
 pub const AGC_WORD_MARGIN_SEC: f64 = 0.025;
+/// How much of the shortest word gap the settings send the Listen screen's
+/// pause has to leave after the hang it asks for, for it to count at Fast:
+/// time enough, the detector's few milliseconds taken off, for the band to
+/// come back 10 dB of the strongest station's 25 dB duck before the next
+/// word, as the shortest hang lets it at every speed (the release's 0.15 s
+/// times ln(25.6 / 15.6), 74 ms, and ten more). Held to the bare
+/// [`AGC_WORD_MARGIN_SEC`], the pause counted up to 18.3 WPM, and held every
+/// screen's word gaps from 17 WPM up to a few decibels.
+pub const AGC_LISTEN_WORD_MARGIN_SEC: f64 = 0.085;
 
 /// The hang and the release the AGC runs with at `decay` for `settings`, in
 /// seconds. The hang carries the gain across the longest gap between two
@@ -121,9 +130,11 @@ pub const AGC_WORD_MARGIN_SEC: f64 = 0.025;
 /// word gap they send, so the band still comes back between words, and
 /// where their speeds are too far apart for both the word gap wins; Slow
 /// holds across word gaps by design. The Listen screen's pause counts at
-/// Fast only where it fits under that: one their word gaps leave no room
-/// for lets the band up across it however near the hang comes, and would
-/// cost every word gap they send for nothing. Never shorter than the
+/// Fast only where their shortest word gap leaves the band room to come back
+/// after it ([`AGC_LISTEN_WORD_MARGIN_SEC`]), 16 WPM and under at a fixed
+/// speed: held across it nearer the word gap than that, every word gap
+/// they send would come back a few decibels, on every screen, for the
+/// Listen screen's sake. Never shorter than the
 /// decay's own ([`agc_decay_sec`]). It follows the settings, not each send:
 /// a station the settings do not send, one of the band's own, may still be
 /// let go of between its letters.
@@ -133,13 +144,13 @@ pub fn agc_timing(settings: &TrainingSettings, decay: AgcDecay) -> (f64, f64) {
     let listen = f64::from(LISTEN_LETTER_GAP_MS) / 1_000.0 + AGC_LETTER_MARGIN_SEC;
     let hang = match decay {
         AgcDecay::Fast => {
-            let most = shortest_word_gap_sec(settings) - AGC_WORD_MARGIN_SEC;
-            let letters = if listen <= most {
+            let word = shortest_word_gap_sec(settings);
+            let letters = if listen <= word - AGC_LISTEN_WORD_MARGIN_SEC {
                 letters.max(listen)
             } else {
                 letters
             };
-            letters.min(most)
+            letters.min(word - AGC_WORD_MARGIN_SEC)
         }
         AgcDecay::Slow => letters.max(listen),
     };
@@ -1427,6 +1438,39 @@ mod tests {
             let words = gap_swells(&keyed, &hiss, |gap| gap > 6.0 * 1.2 / wpm);
             assert_eq!(words.len(), 1);
             assert!(words[0].1 >= 10.0, "{wpm} WPM: back {:.1} dB", words[0].1);
+        }
+    }
+
+    /// At Fast the hiss comes back by the next word at every fixed speed the
+    /// Listen screen's pause counts at too, and with a speed range whose top
+    /// is there: from 17 to 18.2 WPM the pause fitted under the cap, held the
+    /// hang at 0.43 s, and left the word gap 30 to 60 ms to come back in,
+    /// 4 to 9 dB of a 25.6 dB duck.
+    #[test]
+    fn the_hiss_comes_back_across_a_word_gap_at_fast_where_the_listen_pause_fits() {
+        for wpm in [16.0, 17.0, 18.0, 18.2] {
+            let settings = sending_at(wpm, wpm, AgcDecay::Fast);
+            let (keyed, hiss) = hiss_under(&settings, &keyer(wpm, wpm), &["PARIS PARIS"], 0.0);
+            let words = gap_swells(&keyed, &hiss, |gap| gap > 6.0 * 1.2 / wpm);
+            assert_eq!(words.len(), 1);
+            assert!(words[0].1 >= 10.0, "{wpm} WPM: back {:.1} dB", words[0].1);
+        }
+        for (lo, hi) in [(12.0, 18.0), (14.0, 18.0)] {
+            let mut settings = floor_only();
+            let p = &mut settings.playback;
+            (p.char_wpm_min, p.char_wpm_max) = (lo, hi);
+            (p.effective_wpm_min, p.effective_wpm_max) = (lo, hi);
+            p.link_char_to_effective = true;
+            settings.band.agc_decay = AgcDecay::Fast;
+            let settings = settings.clamp();
+            let (keyed, hiss) = hiss_under(&settings, &keyer(hi, hi), &["PARIS PARIS"], 0.0);
+            let words = gap_swells(&keyed, &hiss, |gap| gap > 6.0 * 1.2 / hi);
+            assert_eq!(words.len(), 1);
+            assert!(
+                words[0].1 >= 10.0,
+                "{lo} to {hi} WPM, sent at {hi}: back {:.1} dB",
+                words[0].1
+            );
         }
     }
 
