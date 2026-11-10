@@ -93,6 +93,7 @@ fn Keyed(
             id: crate::ui::widgets::control_id("keyed", "root"),
             onkeydown: move |e| keys.keydown(e),
             onkeyup: move |e| keys.keyup(e),
+            oncompositionend: move |_| keys.composition_ended(),
             {children}
             // What the window losing the focus, or the page going, does.
             button {
@@ -5101,6 +5102,77 @@ mod interactions {
             assert!(!ui.press_key_held("keyed-root", bracket.clone(), Code::Digit8, altgr));
             ui.advance(30).await;
             ui.release_key("keyed-root", bracket, Code::Digit8);
+            ui.advance(1_000).await;
+            assert!(ui.has(">E<"), "{}", ui.html());
+        });
+    }
+
+    /// Within a composition no paddle key opened, Pinyin's begun with a
+    /// letter, a `[` is the input method's, which may turn a page of
+    /// candidates with it: the root keys no paddle and leaves it to the
+    /// box. A dead dit key, as on a French keyboard, keys all the same:
+    /// its first press, which opens a composition of its own, and its next,
+    /// within that one.
+    #[test]
+    fn a_bracket_in_a_composition_no_paddle_key_opened_keys_no_paddle() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let letter = Key::Character("n".into());
+            assert!(ui.press_key("keyed-root", letter.clone(), Code::KeyN));
+            ui.release_key("keyed-root", letter, Code::KeyN);
+            let bracket = Key::Character("[".into());
+            assert!(
+                ui.press_key_composing("keyed-root", bracket.clone(), Code::BracketLeft),
+                "the [ was kept from the input method"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", bracket, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">· −<"), "a paddle keyed: {}", ui.html());
+            ui.end_composition("keyed-root");
+            assert!(
+                !ui.press_key("keyed-root", Key::Dead, Code::BracketLeft),
+                "the dead key was left to the box"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">E<"), "{}", ui.html());
+            assert!(
+                !ui.press_key_composing("keyed-root", Key::Dead, Code::BracketLeft),
+                "the dead key was left to the composition it opened"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">EE<"), "{}", ui.html());
+        });
+    }
+
+    /// On Linux the window keys every bracket it hears, with no word of an
+    /// input method's composition, so the root keeps a `[` typed within
+    /// one from the box as before, and keys nothing itself; a dead dit
+    /// key, which the window drops, it keys, composing or not.
+    #[test]
+    fn on_linux_a_bracket_while_composing_is_kept_from_the_page_as_before() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(LinuxPadHarness, ());
+            let bracket = Key::Character("[".into());
+            assert!(
+                !ui.press_key_composing("keyed-root", bracket.clone(), Code::BracketLeft),
+                "the [ was left to the input method"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", bracket, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(
+                ui.has(">· −<"),
+                "the root keyed the window's: {}",
+                ui.html()
+            );
+            assert!(!ui.press_key_composing("keyed-root", Key::Dead, Code::BracketLeft));
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
             ui.advance(1_000).await;
             assert!(ui.has(">E<"), "{}", ui.html());
         });

@@ -458,7 +458,17 @@ What no test runs: the web build's audio (`src/audio/web`), which needs a
 browser's Web Audio, and the platform audio code, which needs the phone —
 the iOS audio session, Android's volume keys and output latency. The
 mixer, the receiver stream and the timing of a send that they hand their
-work to are tested natively.
+work to are tested natively. Nor does any test run a real input method:
+the keys of a composition, a dead key's among them, are made up in Node
+as Safari, Chrome and the macOS build are known to hand them over, so a
+paddle key that is dead, and a `[` typed in Pinyin or Kana, are checked
+by hand on a Mac, an iPhone and in Safari. In WebKit — Safari, every
+browser on an iPhone and the macOS build — a `[` or a `]` that ends a
+composition, as Pinyin's pick of the first or last character of a word
+does, still keys its paddle: it arrives after `compositionend` and, like
+a dead key's press, not as composing but with the input method's key
+code, 229. On the Linux desktop every bracket keys its paddle, composing
+or not, as the window that keys them tells of no composition.
 
 ## Desktop bundles
 
@@ -574,9 +584,10 @@ no script of its own for it.
 The rest of what a frame needs is in the head too: a phone's viewport, edge
 to edge from the start, and every build's link to the type faces, which are
 asked for as the page loads. The faces never hold up the first paint: the
-sheet loads as print media and switches itself on, and its faces are
-`display=optional`, so a face that is late, or a phone offline, leaves the
-system's for that page rather than swapping it in under the reader. Before
+sheet loads as print media and is switched on once it has arrived, and its
+faces are `display=optional`, so a face that is late, or a phone offline,
+leaves the system's for that page rather than swapping it in under the
+reader. Before
 the page has loaded, the desktop window and Android's webview are the light
 theme's paper, not white; iOS keeps its webview's own colour, which wry
 would make translucent to change.
@@ -635,6 +646,26 @@ project site along with it), or a user or organisation site
 (`<name>.github.io`) that holds only Dust. A new origin starts with an empty
 store, so users move with a backup, and the policy and
 `PRIVACY_POLICY_URL` change with it.
+
+The web app's page sets a content security policy, in a `<meta>` of
+`index.html`, as Pages sets no headers. Scripts come only from the site:
+the page's one inline script by its hash, and the code the app builds as
+it runs (Dioxus's eval, the history's, the marks' and the tabs' page
+scripts) and its WebAssembly, by `'unsafe-eval'` and
+`'wasm-unsafe-eval'`. Styles come from the site, inline (Dioxus writes
+style attributes) and from Google's sheet of type faces; the faces from
+Google, or inline in the stylesheet; images from the site, or inline. The
+page connects to the site and to Google Drive alone, and has no frames,
+workers, plugins or form posts. Sign-in is a window of Google's own, which
+the page's policy does not govern; `oauth.html`, where it comes back, runs
+its own script alone, by its hash, and the privacy page runs none. Tests in
+`src/app.rs` hold each page's policy to that. The Pages step adds the hash
+of any inline script `dx bundle` puts in the page, and fails on anything
+inline a page's policy leaves uncovered (`scripts/check-site-policy.cjs`),
+and both browser checks fail on any breach. A meta cannot set
+`frame-ancestors`, so another site can still frame the app. The policy
+limits what the page loads and where it connects; it keeps no other page
+of the same origin from Dust's store.
 
 A session or contest run is marked open while it runs, and the mark goes
 once it ends and the store has taken it, or once it is discarded. Each copy of the app marks its own, a

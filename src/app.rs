@@ -270,6 +270,9 @@ fn Shell() -> Element {
                 paddle.keydown(e);
             },
             onkeyup: move |e| paddle.keyup(e),
+            // A composition ended in any field: a paddle's key pressed in
+            // the next is the input method's, unless a paddle key opens it.
+            oncompositionend: move |_| paddle.composition_ended(),
             div { class: shell_class,
                 header { class: "header-bar",
                     div { class: "brand",
@@ -496,21 +499,461 @@ fn toggle_fullscreen() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use sha2::{Digest, Sha256};
+
     use super::{FONT_CSS_URL, VIEWPORT};
+    use crate::sync::drive::{FILES, UPLOAD};
 
     /// The web page links the same font sheet as every other build, from
     /// its head, before the app mounts, and never holds up its first paint
-    /// for it; and it lays out in the app's viewport from the start.
+    /// for it: the sheet comes as print media, and the page's own script
+    /// switches it on once it has arrived, as the page's policy runs no
+    /// handler written into the markup. And it lays out in the app's
+    /// viewport from the start.
     #[test]
     fn the_web_page_links_the_fonts_from_its_head() {
         let page = include_str!("../index.html");
         let head = &page[..page.find("</head>").expect("a head")];
         let href = FONT_CSS_URL.replace('&', "&amp;");
-        let link = format!(
-            r#"<link rel="stylesheet" href="{href}" media="print" onload="this.media='all'" />"#
-        );
+        let link = format!(r#"<link id="fonts" rel="stylesheet" href="{href}" media="print" />"#);
         assert!(head.contains(&link), "{head}");
+        let script = &head[head.find(&link).expect("the link")..];
+        let script = &script[script.find("<script>").expect("a script after it")..];
+        for switch in [
+            r#"var fonts = document.getElementById("fonts");"#,
+            "if (fonts.sheet) {",
+            r#"fonts.media = "all";"#,
+            r#"fonts.addEventListener("load", all);"#,
+        ] {
+            assert!(script.contains(switch), "{switch}\n{script}");
+        }
         assert!(head.contains(&format!(r#"<meta name="viewport" content="{VIEWPORT}" />"#)));
+    }
+
+    /// A tag of a page, as written: its name, its attributes, and what a
+    /// script or a style holds.
+    struct Tag {
+        name: String,
+        attributes: Vec<(String, String)>,
+        holds: Option<String>,
+    }
+
+    impl Tag {
+        fn attribute(&self, name: &str) -> Option<&str> {
+            self.attributes
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    /// The tags of `page`, in order, its comments passed over.
+    fn tags_of(page: &str) -> Vec<Tag> {
+        let mut tags = Vec::new();
+        let mut rest = page;
+        while let Some(open) = rest.find('<') {
+            rest = &rest[open + 1..];
+            if let Some(comment) = rest.strip_prefix("!--") {
+                rest = &comment[comment.find("-->").expect("a comment ends") + 3..];
+                continue;
+            }
+            let name: String = rest
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if name.is_empty() {
+                continue;
+            }
+            rest = &rest[name.len()..];
+            let mut attributes = Vec::new();
+            loop {
+                rest = rest.trim_start();
+                if let Some(after) = rest.strip_prefix("/>").or_else(|| rest.strip_prefix('>')) {
+                    rest = after;
+                    break;
+                }
+                let key = rest
+                    .find(|c: char| c.is_whitespace() || "=>/".contains(c))
+                    .expect("a tag ends")
+                    .max(1);
+                let (key, after) = rest.split_at(key);
+                rest = after.trim_start();
+                let mut value = String::new();
+                if let Some(after) = rest.strip_prefix('=') {
+                    let after = after.trim_start();
+                    let quote = after.chars().next().expect("a value");
+                    let (written, after) = if quote == '"' || quote == '\'' {
+                        let end = after[1..].find(quote).expect("a value ends") + 1;
+                        (&after[1..end], &after[end + 1..])
+                    } else {
+                        after.split_at(
+                            after
+                                .find(|c: char| c.is_whitespace() || c == '>')
+                                .expect("a tag ends"),
+                        )
+                    };
+                    value = written.to_string();
+                    rest = after;
+                }
+                attributes.push((key.to_ascii_lowercase(), value));
+            }
+            let holds = matches!(name.as_str(), "script" | "style").then(|| {
+                let end = rest.find(&format!("</{name}")).expect("it ends");
+                let held = rest[..end].to_string();
+                rest = &rest[end..];
+                held
+            });
+            tags.push(Tag {
+                name,
+                attributes,
+                holds,
+            });
+        }
+        tags
+    }
+
+    /// The policy a page sets itself, by the one meta that holds it: where
+    /// that meta is among the page's tags, and each directive with its
+    /// sources.
+    fn policy_of(tags: &[Tag]) -> (usize, BTreeMap<String, Vec<String>>) {
+        let metas: Vec<usize> = (0..tags.len())
+            .filter(|at| {
+                tags[*at]
+                    .attribute("http-equiv")
+                    .is_some_and(|said| said.eq_ignore_ascii_case("Content-Security-Policy"))
+            })
+            .collect();
+        let [meta] = metas[..] else {
+            panic!("the page sets {} policies of its own, not one", metas.len());
+        };
+        let policy = tags[meta]
+            .attribute("content")
+            .expect("the policy")
+            .split(';')
+            .filter_map(|directive| {
+                let mut words = directive.split_whitespace();
+                let name = words.next()?.to_ascii_lowercase();
+                Some((name, words.map(str::to_string).collect()))
+            })
+            .collect();
+        (meta, policy)
+    }
+
+    /// A policy written as a list, to compare with one read.
+    fn policy(directives: &[(&str, Vec<String>)]) -> BTreeMap<String, Vec<String>> {
+        directives
+            .iter()
+            .map(|(name, sources)| (name.to_string(), sources.clone()))
+            .collect()
+    }
+
+    fn sources(sources: &[&str]) -> Vec<String> {
+        sources.iter().map(|source| source.to_string()).collect()
+    }
+
+    /// How a policy lets an inline script or style run: by the hash of what
+    /// it holds, as the browser reads it. The HTML parser reads each CRLF
+    /// and each lone CR as LF before anything else, so a page whose line
+    /// ends a checkout made CRLF holds what the one served holds.
+    fn hash_of(held: &str) -> String {
+        let read = held.replace("\r\n", "\n").replace('\r', "\n");
+        format!("'sha256-{}'", base64(&Sha256::digest(read.as_bytes())))
+    }
+
+    /// The hashes of what the page's inline elements called `name` hold.
+    fn inline_hashes(tags: &[Tag], name: &str) -> Vec<String> {
+        tags.iter()
+            .filter(|tag| tag.name == name && tag.attribute("src").is_none())
+            .filter_map(|tag| tag.holds.as_deref().map(hash_of))
+            .collect()
+    }
+
+    /// No tag of the page carries a handler written into the markup, which
+    /// its policy would not run, nor a `javascript:` address.
+    fn runs_nothing_written_into_its_markup(tags: &[Tag]) {
+        for tag in tags {
+            for (key, value) in &tag.attributes {
+                assert!(!key.starts_with("on"), "<{} {key}=\"{value}\">", tag.name);
+                assert!(
+                    !value
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("javascript:"),
+                    "<{} {key}=\"{value}\">",
+                    tag.name
+                );
+            }
+        }
+    }
+
+    /// Nothing on the page asks the browser for anything: no element that
+    /// loads what it shows, no address to load or send to in an attribute
+    /// (any `href` but one to follow, an `<a>`'s or an `<area>`'s, or the
+    /// `<base>`'s, which `base-uri` governs), and no `url(`, `image-set(` or
+    /// `@import` in a style, held or in an attribute. Under `default-src
+    /// 'none'` each would be refused without a word, and no browser check
+    /// opens the privacy page; what a script asks for as it runs, the sync
+    /// check sees refused on the sign-in page.
+    fn loads_nothing(tags: &[Tag]) {
+        for tag in tags {
+            assert!(
+                !matches!(
+                    tag.name.as_str(),
+                    "img"
+                        | "link"
+                        | "iframe"
+                        | "frame"
+                        | "object"
+                        | "embed"
+                        | "audio"
+                        | "video"
+                        | "source"
+                        | "track"
+                        | "picture"
+                ),
+                "<{}> loads",
+                tag.name
+            );
+            let loads_its_href = !matches!(tag.name.as_str(), "a" | "area" | "base");
+            for (key, value) in &tag.attributes {
+                assert!(
+                    !matches!(
+                        key.as_str(),
+                        "src" | "srcset" | "poster" | "data" | "background" | "ping"
+                    ) && !(loads_its_href && matches!(key.as_str(), "href" | "xlink:href")),
+                    "<{} {key}=\"{value}\"> loads",
+                    tag.name
+                );
+            }
+            let styles = tag
+                .attribute("style")
+                .into_iter()
+                .chain(tag.holds.as_deref().filter(|_| tag.name == "style"));
+            for style in styles {
+                let style = style.to_ascii_lowercase();
+                for asks in ["url(", "image-set(", "@import"] {
+                    assert!(
+                        !style.contains(asks),
+                        "a style of <{}> loads: {asks}",
+                        tag.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Where `url` is.
+    fn origin_of(url: &str) -> &str {
+        let after = url.find("://").expect("a scheme") + 3;
+        let end = url[after..].find('/').map_or(url.len(), |at| after + at);
+        &url[..end]
+    }
+
+    /// The web page sets its policy first, ahead of all it governs (a meta:
+    /// GitHub Pages sets no headers), and allows only what the app needs:
+    /// scripts of the site, its inline one by its hash, what the app builds
+    /// as it runs (Dioxus's eval, the history's and the tabs' scripts) and
+    /// its WebAssembly; styles of the site, inline (Dioxus writes style
+    /// attributes) and Google's sheet of type faces; the faces from Google,
+    /// and those inline in the stylesheet; the icons inline; connections to
+    /// the site and to Google Drive alone. No plugin, frame, worker, form or
+    /// other base address, and no handler written into the markup.
+    #[test]
+    fn the_web_page_allows_only_what_the_app_needs() {
+        let page = include_str!("../index.html");
+        let tags = tags_of(page);
+        let (meta, read) = policy_of(&tags);
+        let ahead: Vec<&str> = tags[..meta].iter().map(|tag| tag.name.as_str()).collect();
+        assert_eq!(ahead, ["html", "head", "meta"], "first in the head");
+        assert!(
+            tags[meta - 1].attribute("charset").is_some(),
+            "after the charset"
+        );
+        let drive = origin_of(FILES);
+        assert_eq!(origin_of(UPLOAD), drive);
+        // Google's sheet asks for its faces from fonts.gstatic.com, which the
+        // page connects to early; the stylesheet's own faces are inline.
+        assert!(
+            page.contains(
+                r#"<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />"#
+            )
+        );
+        assert!(
+            include_str!("../assets/styles.css").contains(r#"src: url("data:font/woff2;base64,"#)
+        );
+        let mut scripts = sources(&["'self'", "'unsafe-eval'", "'wasm-unsafe-eval'"]);
+        scripts.extend(inline_hashes(&tags, "script"));
+        let needs = policy(&[
+            ("default-src", sources(&["'self'"])),
+            ("script-src", scripts),
+            (
+                "style-src",
+                sources(&["'self'", "'unsafe-inline'", origin_of(FONT_CSS_URL)]),
+            ),
+            ("font-src", sources(&["data:", "https://fonts.gstatic.com"])),
+            ("img-src", sources(&["'self'", "data:"])),
+            ("connect-src", sources(&["'self'", drive])),
+            ("object-src", sources(&["'none'"])),
+            ("base-uri", sources(&["'self'"])),
+            ("form-action", sources(&["'none'"])),
+            ("frame-src", sources(&["'none'"])),
+            ("worker-src", sources(&["'none'"])),
+        ]);
+        assert_eq!(
+            read, needs,
+            "index.html's policy, left, is not what it needs"
+        );
+        runs_nothing_written_into_its_markup(&tags);
+    }
+
+    /// The page Google's sign-in sends the browser back to runs its own
+    /// script and style alone, by their hashes, and loads nothing at all
+    /// (docs/oauth.html, src/sync/auth/web.rs): the address it is sent to
+    /// holds the sign-in's token.
+    #[test]
+    fn the_sign_in_page_runs_only_its_own_script() {
+        let page = include_str!("../docs/oauth.html");
+        let tags = tags_of(page);
+        let (meta, read) = policy_of(&tags);
+        assert!(
+            tags[..meta]
+                .iter()
+                .all(|tag| !matches!(tag.name.as_str(), "script" | "style" | "link")),
+            "ahead of all it governs"
+        );
+        loads_nothing(&tags);
+        let needs = policy(&[
+            ("default-src", sources(&["'none'"])),
+            ("script-src", inline_hashes(&tags, "script")),
+            ("style-src", inline_hashes(&tags, "style")),
+            ("base-uri", sources(&["'none'"])),
+            ("form-action", sources(&["'none'"])),
+        ]);
+        assert_eq!(
+            read, needs,
+            "oauth.html's policy, left, is not what it needs"
+        );
+        runs_nothing_written_into_its_markup(&tags);
+    }
+
+    /// The privacy page runs no script and loads nothing: its own style
+    /// alone, by its hash.
+    #[test]
+    fn the_privacy_page_runs_nothing() {
+        let page = include_str!("../docs/privacy.html");
+        let tags = tags_of(page);
+        let (meta, read) = policy_of(&tags);
+        assert!(
+            tags[..meta]
+                .iter()
+                .all(|tag| !matches!(tag.name.as_str(), "script" | "style" | "link")),
+            "ahead of all it governs"
+        );
+        assert!(tags.iter().all(|tag| tag.name != "script"), "no script");
+        assert!(
+            tags.iter().all(|tag| tag.attribute("style").is_none()),
+            "no style attribute, which a hash does not cover"
+        );
+        loads_nothing(&tags);
+        let needs = policy(&[
+            ("default-src", sources(&["'none'"])),
+            ("style-src", inline_hashes(&tags, "style")),
+            ("base-uri", sources(&["'none'"])),
+            ("form-action", sources(&["'none'"])),
+        ]);
+        assert_eq!(
+            read, needs,
+            "privacy.html's policy, left, is not what it needs"
+        );
+        runs_nothing_written_into_its_markup(&tags);
+    }
+
+    /// The site's pages, each with its line ends written as `line_end`
+    /// says, as a checkout may have them: Git for Windows turns them into
+    /// CRLF by default.
+    fn site_pages(line_end: &str) -> [(&'static str, String); 3] {
+        [
+            ("index.html", include_str!("../index.html")),
+            ("oauth.html", include_str!("../docs/oauth.html")),
+            ("privacy/index.html", include_str!("../docs/privacy.html")),
+        ]
+        .map(|(served, page)| {
+            let lines = page.replace("\r\n", "\n").replace('\r', "\n");
+            (served, lines.replace('\n', line_end))
+        })
+    }
+
+    /// A browser hashes what an inline script or a style holds as the HTML
+    /// parser hands it over, each CRLF and lone CR read as LF, and so do
+    /// the tests: on pages whose line ends are CRLF, or CR, each policy and
+    /// each inline hash reads as on the pages written with LF, which the
+    /// site is built from, so the tests above hold there too.
+    #[test]
+    fn an_inline_hash_is_of_what_the_browser_reads() {
+        let read = "(function () {\n  var said = 1;\n})();\n";
+        for written in [read.replace('\n', "\r\n"), read.replace('\n', "\r")] {
+            assert_eq!(hash_of(&written), hash_of(read), "{written:?}");
+        }
+        let built = site_pages("\n");
+        for line_end in ["\r\n", "\r"] {
+            for ((served, page), (_, built)) in site_pages(line_end).iter().zip(&built) {
+                let (checked_out, built) = (tags_of(page), tags_of(built));
+                assert_eq!(policy_of(&checked_out).1, policy_of(&built).1, "{served}");
+                for name in ["script", "style"] {
+                    assert_eq!(
+                        inline_hashes(&checked_out, name),
+                        inline_hashes(&built, name),
+                        "{served}'s {name} with {line_end:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The Pages step's check of the site (scripts/check-site-policy.cjs)
+    /// reads the pages as a browser does too: whatever their line ends, it
+    /// finds every inline script and style of the app's page, the sign-in
+    /// page and the privacy page listed, adds no hash, and passes. Node
+    /// runs it, as it runs the page scripts.
+    #[test]
+    fn the_site_check_reads_the_pages_as_a_browser_does() {
+        let check = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/check-site-policy.cjs");
+        for (line_end, named) in [("\n", "lf"), ("\r\n", "crlf"), ("\r", "cr")] {
+            let site = std::env::temp_dir()
+                .join(format!("dust-site-policy-{}-{named}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&site);
+            for (served, page) in site_pages(line_end) {
+                let at = site.join(served);
+                std::fs::create_dir_all(at.parent().expect("a folder")).expect("the site");
+                std::fs::write(at, page).expect("a page");
+            }
+            let checked = std::process::Command::new("node")
+                .arg(check)
+                .arg(&site)
+                .arg("index.html")
+                .output();
+            let checked = match checked {
+                Ok(checked) => checked,
+                Err(error) if std::env::var_os("CI").is_some() => {
+                    panic!("CI has Node, yet it would not start: {error}")
+                }
+                Err(error) => {
+                    eprintln!("no Node on this machine ({error}); skipping");
+                    return;
+                }
+            };
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&checked.stdout),
+                String::from_utf8_lossy(&checked.stderr)
+            );
+            let _ = std::fs::remove_dir_all(&site);
+            assert!(checked.status.success(), "{named}: {said}");
+            assert!(!said.contains("added the hashes"), "{named}: {said}");
+        }
     }
 
     /// Each face the font sheet asks for gives a value for every axis its

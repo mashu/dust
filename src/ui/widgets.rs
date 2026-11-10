@@ -45,6 +45,33 @@ pub const DISCLOSURE: &str = "disclosure";
 /// where the keypad always shows. Elsewhere it shows only on a touch screen.
 pub(crate) const TOUCH_BUILD: bool = cfg!(any(feature = "mobile", feature = "mobile-silent"));
 
+/// The key code a browser gives a key the input method took. WebKit, in
+/// Safari and in every browser on an iPhone, hands over the Enter or the
+/// Space that ends a composition once it is over, not as composing, but
+/// with this code; Chrome on Android hands over the Enter that both ends a
+/// word and confirms it with Enter's own. Safari, Chrome on a Mac and the
+/// macOS build give it to a dead key too, which opens a composition of its
+/// own. A script on the page reads it in every build, the run's keys and
+/// the paddles among them ([`crate::ui::contest_keys`],
+/// [`crate::ui::paddle`]).
+pub(crate) const INPUT_METHOD_KEY_CODE: u32 = 229;
+
+/// The key code the browser gave `pressed`: the web build's alone has it,
+/// the webview builds handing a key over without it.
+pub(crate) fn key_code(pressed: &KeyboardData) -> Option<u32> {
+    #[cfg(feature = "web")]
+    {
+        pressed
+            .downcast::<web_sys::KeyboardEvent>()
+            .map(web_sys::KeyboardEvent::key_code)
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        let _ = pressed;
+        None
+    }
+}
+
 /// A button that leaves the cursor where it is: a click would otherwise take
 /// it from the box being typed in, so that the letters typed next went
 /// nowhere and Enter pressed the button again.
