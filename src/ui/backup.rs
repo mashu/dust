@@ -9,7 +9,7 @@ use crate::format::{counted, day_of, short_date};
 use crate::persist::backup::{
     BACKUP_DUE_AFTER, BACKUP_LARGE_BYTES, BACKUP_MAX_BYTES, Backup, read_backup_apart,
 };
-use crate::state::{AppCtx, in_root};
+use crate::state::{AppCtx, RESTORE_LOCK_POLL_MS, in_root};
 use crate::ui::file_pick::{ChosenFile, FileButton, PickedFile};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 
@@ -271,9 +271,11 @@ impl Restoring {
             // one, not of an Undo clicked as soon as it is told of. Another
             // file chosen while it still waits its turn is restored in its
             // place, once read: this one is made no more. While it waits for
-            // another window's restore, or the Undo of it, the card says so.
-            // While it waits for a session or run to be over, it is looked
-            // at once a second, as the app looks at the session.
+            // another window's restore, or the Undo of it, the card says so,
+            // and looks at it as often as the app looks at that window's
+            // hold on the restores. While it waits for a session or run to
+            // be over, it is looked at once a second, as the app looks at
+            // the session.
             let reading = under_way.peek().clone();
             let ticket = ctx.restore_backup(backup);
             while !ctx.restore_told(ticket) {
@@ -293,6 +295,8 @@ impl Restoring {
                 }
                 let wait = if ctx.session_running() {
                     SESSION_WAIT_MS
+                } else if said == Some(WAITING_ELSEWHERE) {
+                    RESTORE_LOCK_POLL_MS
                 } else {
                     crate::time::POLL_MS
                 };

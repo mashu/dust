@@ -530,6 +530,40 @@ fn a_backup_chosen_while_another_window_restores_waits_for_it() {
     });
 }
 
+/// A backup waiting for another window's restore, or the Undo of it, has
+/// the card look at it as often as the app looks at that window's hold on
+/// the restores: not every 16 ms, waking the app's thread sixty times a
+/// second for as long as the other window holds them, which for an Undo
+/// waiting for its session is the whole of that session.
+#[test]
+fn a_backup_waiting_for_another_windows_restore_is_looked_at_as_the_app_looks() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        let elsewhere = ui.store.hold_lock(Lock::Restore);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(1_000).await;
+        assert!(
+            ui.has("Waiting for a restore in another window…"),
+            "{}",
+            ui.html()
+        );
+        ui.take_renders("restore wait");
+        ui.advance(3_000).await;
+        let looks = ui.take_renders("restore wait");
+        assert!(looks <= 13, "looked {looks} times in 3 seconds");
+        drop(elsewhere);
+        ui.advance(1_000).await;
+        assert!(
+            ui.has("Restored 3 sessions and your settings."),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("Waiting"), "{}", ui.html());
+    });
+}
+
 /// A file that is no backup, read while its tab is left, is said in a
 /// message, as the card is not there to say it; the card, opened again,
 /// says nothing of it.

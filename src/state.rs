@@ -66,8 +66,9 @@ const RESTORE_WAIT_MS: u32 = 1_000;
 
 /// How long a restore asked for while another copy of the app has every
 /// copy's restores waits before it tries again ([`Lock::Restore`]): as a
-/// sync waits for another copy's.
-const RESTORE_LOCK_POLL_MS: u32 = 250;
+/// sync waits for another copy's. The backup card looks at a restore that
+/// waits so as often.
+pub const RESTORE_LOCK_POLL_MS: u32 = 250;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
