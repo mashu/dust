@@ -870,9 +870,13 @@ settings (`src/persist/files.rs`):
 - `layout.json`: how the history is kept, `{"layout": 1, "compatible": 1,
   …}`, and what the move from `sessions.json` took of it, written last.
 - `told.json`: the records this build cannot read and has said so of,
-  each as a newer Dust's, as damaged, or as one that could not be read;
-  one of the last that reads again is noted no more. A build before
-  records' formats notes there the records it cannot read, and those stay.
+  each as a newer Dust's or as damaged. A build before records' formats
+  notes there every record it could not open, a moment's failure among
+  them, and those stay.
+- `unread-told.json`: the records this build has said could not be read,
+  a failure that outlasted its tries, until each reads again or is gone:
+  one that reads, then fails once more, is told of again, whatever a build
+  before noted of it in `told.json`. No such build writes it.
 - `failing.json`: the records that could not be read at all as the history
   was last read whole, or at the app's last try, and have not read since,
   so that one that still cannot be read at the next launch is told of
