@@ -728,7 +728,11 @@ fn as_moved(json: &str) -> String {
 /// notes none has taken deletions up since ([`DeletionsTaken::seen`]),
 /// each it took, made after what this build had seen and no later than the
 /// latest taken now. One stamped no later than what this build had seen,
-/// and not noted, it did not take, and is made here.
+/// and not noted, it did not take, and is made here. But one stamped in
+/// between that was made after that build looked, with a clock behind, is
+/// taken for one it took, and never made here: such a build notes nothing
+/// of what it took, and a session of one it took may have been put back
+/// here since, by a restore say, which making it again would undo.
 ///
 /// A change a build before these rules took up first, by its own, is
 /// taken up again by them: such a build moves [`Layout::legacy`] on, and
@@ -2132,6 +2136,50 @@ mod tests {
         )
         .expect("taken up here");
         assert_eq!(put_stamps(&change), [since.timestamp]);
+    }
+
+    /// A deletion a build before records made with its clock behind, after
+    /// an older build's look moved `deletedSeen` on past its stamp, though
+    /// after what this build had seen, is taken for one that build took,
+    /// and is not made here. That build took only those it found as it
+    /// looked, and this one was not yet there; but nothing tells it from
+    /// one it took, whose session may have been put back since, by a
+    /// restore say, which a deletion made again here would undo
+    /// (docs/platforms.md). This pins the rule: should a later design tell
+    /// the two apart, the deletion is made here, `[(records[1].id, behind)]`.
+    #[test]
+    fn a_deletion_made_behind_an_older_builds_watermark_after_its_look_is_taken_for_its() {
+        let older = [finished(T), finished(T + DAY), finished(T + 2 * DAY)];
+        let noted = Deleted::of(&finished(T - DAY), T);
+        let (records, layout) = moved(
+            &older,
+            written(1),
+            std::slice::from_ref(&noted),
+            T + 3 * DAY,
+        );
+        // An older build takes up a deletion made with the clock right, and
+        // moves deletedSeen on to it.
+        let first = Deleted::of(&older[0], T + 10);
+        let looked =
+            taken_up_by_an_older_build(&layout, written(2), &[noted.clone(), first.clone()]);
+        let mut live = live_of(&records);
+        live.remove(&first.key());
+        // Then one is made with a clock behind: after what this build had
+        // seen, before what the older build moved on to.
+        let behind = Deleted::of(&older[1], T + 5);
+        let deleted = [noted, first, behind.clone()];
+        let (change, next) = imported(
+            &looked,
+            written(3),
+            &older[2..],
+            &deleted,
+            &live,
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(change.forget, [], "taken for one that build took");
+        let taken = next.deletions_taken.expect("noted").taken;
+        assert!(taken.contains(&DeletionSeen::of(&behind)), "noted as taken");
     }
 
     /// What the take-up took is kept through every write of the layout: by
