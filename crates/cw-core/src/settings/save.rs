@@ -1440,6 +1440,38 @@ mod tests {
         assert_eq!(written["filterShape"], "sharp");
     }
 
+    /// A key of a save that this build does not read, a later build's
+    /// setting or one an earlier build retired, has no value kept for it as
+    /// one this build cannot read ([`TrainingSettings::unread_values`]): a
+    /// later build's is carried along with the rest of what this build does
+    /// not read, and written back once, as it was; a retired one is let go
+    /// of. A value this build cannot read, under a key it reads, is the one
+    /// kept.
+    #[test]
+    fn a_key_this_build_does_not_read_is_carried_with_no_value_kept_for_it() {
+        let settings = read_keeping(serde_json::json!({
+            "laterKnob": 5, "laterChoice": "wide", "qrmLevel": 3, "filterShape": "notch",
+        }));
+        assert_eq!(
+            settings.unread_values.keys().collect::<Vec<_>>(),
+            ["filterShape"]
+        );
+        let json = serde_json::to_string(&settings).expect("settings write");
+        let written: Value = serde_json::from_str(&json).expect("JSON");
+        assert_eq!(
+            (
+                &written["laterKnob"],
+                &written["laterChoice"],
+                &written["filterShape"]
+            ),
+            (&5.into(), &"wide".into(), &"notch".into())
+        );
+        assert!(written.get("qrmLevel").is_none(), "let go of: {json}");
+        for key in ["\"laterKnob\"", "\"laterChoice\"", "\"filterShape\""] {
+            assert_eq!(json.matches(key).count(), 1, "{key} once: {json}");
+        }
+    }
+
     /// A save from before the stations a pile-up opened were kept in mind,
     /// on Pile-up with the range a pile-up opens, is taken for one it
     /// opened: kept open in Contest, so a single caller closes it again,
