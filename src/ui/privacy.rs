@@ -349,6 +349,15 @@ mod tests {
         }
         assert!(flat.contains("served by GitHub Pages"));
         assert!(flat.contains("GitHub General Privacy Statement"));
+        // What the pages' policy lets them load is all they reach: Google
+        // Fonts too, for the typefaces, as the policy says further down.
+        let allowed = flat
+            .split(". ")
+            .find(|said| said.contains("(a content security policy)"))
+            .expect("the policy says what the pages' own policy allows");
+        for named in ["the site", "Google Drive", "Google Fonts"] {
+            assert!(allowed.contains(named), "{named:?} is not in {allowed:?}");
+        }
         for gone in [
             "The only data that leaves the device",
             "Nothing is synced between devices or between installs",
@@ -358,6 +367,7 @@ mod tests {
             "It does not ask you to sign in.",
             "Nothing is synced between browsers or devices.",
             "On Android, iPhone and desktop it is the only request the app makes.",
+            "to connect only to it and to Google Drive",
         ] {
             assert!(!flat.contains(gone), "the policy still says {gone:?}");
         }

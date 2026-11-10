@@ -200,10 +200,10 @@
           page under mashu.github.io. Only the developer’s GitHub repositories
           can publish there, and whatever a page there loads shares its access.
           Dust’s pages tell the browser to run scripts only from the site
-          itself and to connect only to it and to Google Drive (a content
-          security policy), so no script from anywhere else runs in them; no
-          such policy can keep another page under mashu.github.io from the
-          site’s storage.
+          itself, and to load nothing but the site, Google Drive and the
+          app’s typefaces from Google Fonts (a content security policy), so
+          no script from anywhere else runs in them; no such policy can keep
+          another page under mashu.github.io from the site’s storage.
           Dust keeps the practice history in the browser’s database for the
           site (IndexedDB), in one named <code>dust_history</code>, and the
           rest in the site’s page storage (localStorage). It keeps everything
