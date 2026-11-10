@@ -884,7 +884,9 @@ settings (`src/persist/files.rs`):
   read, so a build before records' formats, which goes by this note alone,
   does not tell of them again. Such a build notes there every record it
   could not open, a moment's failure among them, and every one it could
-  not make out, and those stay. It only gains names.
+  not make out. This build only adds names to it, so those stay; such a
+  build writes it over, as it tells of a record the note does not name,
+  with every record it cannot read just then.
 - `damaged-told.json`: the records this build has said are damaged, or a
   newer Dust's, until each reads again or is gone: one that reads, then is
   damaged once more, is told of again, whatever a build before noted of it

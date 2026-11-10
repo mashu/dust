@@ -96,9 +96,11 @@ const FAILING: &str = "failing.json";
 /// it could not open, a moment's failure among them, holds back none of
 /// this build's notices of a failure of its own. Each is noted in [`TOLD`]
 /// as well, where such a build looks, so that it does not tell of it a
-/// second time: that note only gains names, so such a build, used alone,
-/// says nothing of one that reads since and fails again, which this build
-/// tells of.
+/// second time. This build only adds names to that note, so such a build,
+/// used alone, says nothing of one that reads since and fails again, which
+/// this build tells of, unless it has written the note over meanwhile: it
+/// does so as it tells of a record the note does not name, with every
+/// record it cannot read just then.
 const UNREAD_TOLD: &str = "unread-told.json";
 /// The records this build told of as damaged, or as a newer Dust's
 /// ([`HistoryNotice::Damaged`], [`HistoryNotice::Later`]), by name, until
@@ -1179,15 +1181,16 @@ impl HistoryFiles {
     /// rest, as read or gone; until it is first written, [`TOLD`] stands
     /// for it, and from then on a record a build before formats told of
     /// first is told of again here. One of a failure, by [`UNREAD_TOLD`],
-    /// which keeps each told
-    /// of before, by this launch or by the app's tries
-    /// ([`Self::still_unread`]), that still fails, and drops one that reads
-    /// now or is gone: should it fail again, that is a failure of its own,
-    /// told of in turn. [`TOLD`], where a build before formats looks, only
-    /// gains names: every one told of, of either kind, beside what such a
-    /// build noted there, the records it could not open or make out, some
-    /// of which this one reads; dropped, such a build would tell of one
-    /// again as it next opened. A look drops from this build's notes the
+    /// which keeps each told of before, by this launch or by the app's
+    /// tries ([`Self::still_unread`]), that still fails, and drops one that
+    /// reads now or is gone: should it fail again, that is a failure of its
+    /// own, told of in turn. This build only adds names to [`TOLD`], where
+    /// a build before formats looks: every one told of, of either kind,
+    /// beside what such a build noted there, the records it could not open
+    /// or make out, some of which this one reads; dropped, such a build
+    /// would tell of one again as it next opened. Such a build writes it
+    /// over, as it tells of a record it does not name, with every record it
+    /// cannot read just then. A look drops from this build's notes the
     /// records it reads, and those it no longer lists ([`Self::read`],
     /// [`Self::listing`]).
     fn tell(
