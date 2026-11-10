@@ -1584,29 +1584,30 @@ mod device_tests {
     /// once rather than open a third.
     #[test]
     fn a_send_on_a_stream_in_a_loop_of_errors_plays_on_one_opened_in_its_place() {
-        let Some(mut player) = player() else {
-            return;
-        };
         let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
         let send = |player: &mut MorsePlayer| {
             crate::audio::start_send(player, &Transmission::alone("K", voice), &settings())
         };
-        let looping = player.stream.as_ref().expect("open");
-        fall_into_a_loop(looping);
-        let looping = Arc::clone(&looping.heartbeat);
-        let began = Instant::now();
-        send(&mut player).expect("the send starts");
-        let open = player.stream.as_ref().expect("open");
-        assert!(
-            !Arc::ptr_eq(&open.heartbeat, &looping),
-            "the send plays on a stream opened in its place"
+        within_the_while(
+            || {
+                let mut player = player()?;
+                let looping = player.stream.as_ref().expect("open");
+                fall_into_a_loop(looping);
+                let looping = Arc::clone(&looping.heartbeat);
+                let began = Instant::now();
+                send(&mut player).expect("the send starts");
+                let open = player.stream.as_ref().expect("open");
+                assert!(
+                    !Arc::ptr_eq(&open.heartbeat, &looping),
+                    "the send plays on a stream opened in its place"
+                );
+                fall_into_a_loop(open);
+                let said = send(&mut player).map(|_| ());
+                player.shutdown();
+                Some((began, said))
+            },
+            |said| assert!(said.is_err(), "{said:?}"),
         );
-        fall_into_a_loop(open);
-        let said = send(&mut player).map(|_| ());
-        if began.elapsed() < REOPEN_AFTER {
-            assert!(said.is_err(), "{said:?}");
-        }
-        player.shutdown();
     }
 
     /// A stream in a loop of errors is opened again at most once a
@@ -1619,28 +1620,30 @@ mod device_tests {
     /// more and left one more looping worker behind.
     #[test]
     fn a_stream_in_a_loop_of_errors_is_opened_again_at_most_once_a_while_whichever_player_asks() {
-        PROBES.set(0);
-        let Some(mut failed) = opened(MorsePlayer::probing(counted_probe, false)) else {
-            return;
-        };
-        fall_into_a_loop(failed.stream.as_ref().expect("open"));
-        let began = Instant::now();
-        failed
-            .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
-            .expect("opened again in its place");
-        failed.shutdown();
-        drop(failed);
-        let Some(mut rebuilt) = opened(MorsePlayer::probing(counted_probe, false)) else {
-            return;
-        };
-        fall_into_a_loop(rebuilt.stream.as_ref().expect("open"));
-        let probes = PROBES.get();
-        let said = rebuilt.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
-        if began.elapsed() < REOPEN_AFTER {
-            assert_eq!(PROBES.get(), probes, "opened again: {said:?}");
-            assert_eq!(said, Err(LOOPING.to_string()));
-        }
-        rebuilt.shutdown();
+        within_the_while(
+            || {
+                PROBES.set(0);
+                let mut failed = opened(MorsePlayer::probing(counted_probe, false))?;
+                fall_into_a_loop(failed.stream.as_ref().expect("open"));
+                let began = Instant::now();
+                failed
+                    .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
+                    .expect("opened again in its place");
+                failed.shutdown();
+                drop(failed);
+                let mut rebuilt = opened(MorsePlayer::probing(counted_probe, false))?;
+                fall_into_a_loop(rebuilt.stream.as_ref().expect("open"));
+                let probes = PROBES.get();
+                let said = rebuilt.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+                let probed = PROBES.get() > probes;
+                rebuilt.shutdown();
+                Some((began, (probed, said)))
+            },
+            |(probed, said)| {
+                assert!(!probed, "opened again: {said:?}");
+                assert_eq!(said, Err(LOOPING.to_string()));
+            },
+        );
     }
 
     /// Once the stream opened in place of one in a loop of errors has
@@ -1655,48 +1658,93 @@ mod device_tests {
     /// more worker looping for good, some four a send.
     #[test]
     fn a_player_built_afresh_opens_no_stream_while_every_stream_opened_falls_into_a_loop() {
-        let Some(mut failed) = opened(MorsePlayer::probing(counted_probe, false)) else {
-            return;
-        };
-        fall_into_a_loop(failed.stream.as_ref().expect("open"));
-        let began = Instant::now();
-        failed
-            .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
-            .expect("opened again in its place");
-        fall_into_a_loop(failed.stream.as_ref().expect("opened again"));
-        let refused = failed.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
-        failed.shutdown();
-        drop(failed);
-        let Some(mut rebuilt) = opened(MorsePlayer::probing(counted_probe, false)) else {
-            return;
-        };
-        let opened_afresh = rebuilt.stream.is_some();
-        let probes = PROBES.get();
-        let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
-        let sent =
-            crate::audio::start_send(&mut rebuilt, &Transmission::alone("K", voice), &settings())
+        within_the_while(
+            || {
+                let mut failed = opened(MorsePlayer::probing(counted_probe, false))?;
+                fall_into_a_loop(failed.stream.as_ref().expect("open"));
+                let began = Instant::now();
+                failed
+                    .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
+                    .expect("opened again in its place");
+                fall_into_a_loop(failed.stream.as_ref().expect("opened again"));
+                let refused = failed.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+                failed.shutdown();
+                drop(failed);
+                let mut rebuilt = opened(MorsePlayer::probing(counted_probe, false))?;
+                let opened_afresh = rebuilt.stream.is_some();
+                let probes = PROBES.get();
+                let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
+                let sent = crate::audio::start_send(
+                    &mut rebuilt,
+                    &Transmission::alone("K", voice),
+                    &settings(),
+                )
                 .map(|_| ());
-        let toned = rebuilt.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
-        if began.elapsed() < REOPEN_AFTER {
-            assert_eq!(refused, Err(LOOPING.to_string()));
-            assert!(!opened_afresh, "a player built afresh opened a stream");
-            assert!(
-                matches!(&sent, Err(why) if why.contains(LOOPING)),
-                "{sent:?}"
-            );
-            assert_eq!(toned, Err(LOOPING.to_string()));
-            assert!(
-                rebuilt.stream.is_none(),
-                "the send or the sidetone opened one"
-            );
-            assert_eq!(PROBES.get(), probes, "probed for the send or the sidetone");
+                let toned = rebuilt.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+                let probed = PROBES.get() > probes;
+                Some((
+                    began,
+                    (refused, opened_afresh, sent, toned, probed, rebuilt),
+                ))
+            },
+            |(refused, opened_afresh, sent, toned, probed, mut rebuilt)| {
+                assert_eq!(refused, Err(LOOPING.to_string()));
+                assert!(!opened_afresh, "a player built afresh opened a stream");
+                assert!(
+                    matches!(&sent, Err(why) if why.contains(LOOPING)),
+                    "{sent:?}"
+                );
+                assert_eq!(toned, Err(LOOPING.to_string()));
+                assert!(
+                    rebuilt.stream.is_none(),
+                    "the send or the sidetone opened one"
+                );
+                assert!(!probed, "probed for the send or the sidetone");
+                std::thread::sleep(REOPEN_AFTER);
+                rebuilt
+                    .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
+                    .expect("a while on, it opens one");
+                assert!(rebuilt.stream.is_some(), "a while on, it opens one");
+                rebuilt.shutdown();
+            },
+        );
+    }
+
+    /// How many times a test of what holds within a [`REOPEN_AFTER`] tries
+    /// before it fails, each try having run past the while, as on a loaded
+    /// machine ([`within_the_while`]).
+    const TRIES: u32 = 3;
+
+    /// Try `once`, a test of what holds within a [`REOPEN_AFTER`] of when
+    /// it says it began, until a try is over within the while, then `check`
+    /// what that try saw: a try that ran past it saw what holds once the
+    /// while is out, and is made again, what this thread knew of streams in
+    /// a loop of errors forgotten. One that never fits fails as too slow to
+    /// test, rather than pass having checked nothing. None from `once`, a
+    /// machine with no output, skips the test, as [`opened`] does.
+    fn within_the_while<T>(mut once: impl FnMut() -> Option<(Instant, T)>, check: impl FnOnce(T)) {
+        for _ in 0..TRIES {
+            let Some((began, saw)) = once() else {
+                return;
+            };
+            if began.elapsed() < REOPEN_AFTER {
+                check(saw);
+                return;
+            }
+            LOOP_FAILED_AT.set(None);
+            LOOPED_AGAIN.set(false);
         }
-        std::thread::sleep(REOPEN_AFTER);
-        rebuilt
-            .set_live_tone(ToneRequest::new(false, 600.0, 0.2))
-            .expect("a while on, it opens one");
-        assert!(rebuilt.stream.is_some(), "a while on, it opens one");
-        rebuilt.shutdown();
+        panic!("too slow to test: {TRIES} tries each ran past the {REOPEN_AFTER:?} they test");
+    }
+
+    /// Whether a player built afresh opens a stream as it is made, which it
+    /// then lets go of.
+    fn opened_afresh() -> bool {
+        opened(MorsePlayer::probing(counted_probe, false)).is_some_and(|mut afresh| {
+            let open = afresh.stream.is_some();
+            afresh.shutdown();
+            open
+        })
     }
 
     /// `player`'s stream falls into a loop of errors and is opened again in
@@ -1734,37 +1782,32 @@ mod device_tests {
     /// played, and a player built afresh opened none.
     #[test]
     fn a_stream_refused_for_a_loop_of_errors_is_the_output_again_once_called_again() {
-        PROBES.set(0);
-        let Some(mut player) = opened(MorsePlayer::probing(counted_probe, false)) else {
-            return;
-        };
-        let began = Instant::now();
-        let refused = looped_again(&mut player);
-        let open = player.stream.as_ref().expect("kept while refused");
-        come_out_of_the_loop(open);
-        let came_back = Arc::clone(&open.heartbeat);
-        let probes = PROBES.get();
-        let toned = player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
-        let kept =
-            (player.stream.as_ref()).is_some_and(|open| Arc::ptr_eq(&open.heartbeat, &came_back));
-        let probed = PROBES.get() > probes;
-        player.shutdown();
-        drop(player);
-        let afresh = opened(MorsePlayer::probing(counted_probe, false));
-        if began.elapsed() < REOPEN_AFTER {
-            assert_eq!(refused, Err(LOOPING.to_string()), "refused while it loops");
-            assert_eq!(toned, Ok(()), "called again, it is the output");
-            assert!(kept && !probed, "on the stream that came out of its loop");
-            assert!(
-                afresh
-                    .as_ref()
-                    .is_some_and(|afresh| afresh.stream.is_some()),
-                "a player built afresh opened none"
-            );
-        }
-        if let Some(mut afresh) = afresh {
-            afresh.shutdown();
-        }
+        within_the_while(
+            || {
+                PROBES.set(0);
+                let mut player = opened(MorsePlayer::probing(counted_probe, false))?;
+                let began = Instant::now();
+                let refused = looped_again(&mut player);
+                let open = player.stream.as_ref().expect("kept while refused");
+                come_out_of_the_loop(open);
+                let came_back = Arc::clone(&open.heartbeat);
+                let probes = PROBES.get();
+                let toned = player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+                let kept = (player.stream.as_ref())
+                    .is_some_and(|open| Arc::ptr_eq(&open.heartbeat, &came_back));
+                let probed = PROBES.get() > probes;
+                player.shutdown();
+                drop(player);
+                let afresh = opened_afresh();
+                Some((began, (refused, toned, kept, probed, afresh)))
+            },
+            |(refused, toned, kept, probed, afresh)| {
+                assert_eq!(refused, Err(LOOPING.to_string()), "refused while it loops");
+                assert_eq!(toned, Ok(()), "called again, it is the output");
+                assert!(kept && !probed, "on the stream that came out of its loop");
+                assert!(afresh, "a player built afresh opened none");
+            },
+        );
     }
 
     /// A send finds a stream that came out of its loop of errors as the
@@ -1775,37 +1818,35 @@ mod device_tests {
     /// was out, the send on the stream that played notwithstanding.
     #[test]
     fn a_send_on_a_stream_out_of_its_loop_of_errors_lets_a_player_built_afresh_open_one() {
-        let Some(mut player) = opened(MorsePlayer::probing(counted_probe, false)) else {
-            return;
-        };
-        let began = Instant::now();
-        let refused = looped_again(&mut player);
-        let open = player.stream.as_ref().expect("kept while refused");
-        come_out_of_the_loop(open);
-        let came_back = Arc::clone(&open.heartbeat);
-        let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
-        let sent =
-            crate::audio::start_send(&mut player, &Transmission::alone("K", voice), &settings())
+        within_the_while(
+            || {
+                let mut player = opened(MorsePlayer::probing(counted_probe, false))?;
+                let began = Instant::now();
+                let refused = looped_again(&mut player);
+                let open = player.stream.as_ref().expect("kept while refused");
+                come_out_of_the_loop(open);
+                let came_back = Arc::clone(&open.heartbeat);
+                let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
+                let sent = crate::audio::start_send(
+                    &mut player,
+                    &Transmission::alone("K", voice),
+                    &settings(),
+                )
                 .map(|_| ());
-        let kept =
-            (player.stream.as_ref()).is_some_and(|open| Arc::ptr_eq(&open.heartbeat, &came_back));
-        player.shutdown();
-        drop(player);
-        let afresh = opened(MorsePlayer::probing(counted_probe, false));
-        if began.elapsed() < REOPEN_AFTER {
-            assert_eq!(refused, Err(LOOPING.to_string()), "refused while it loops");
-            assert_eq!(sent, Ok(()), "the send plays");
-            assert!(kept, "on the stream that came out of its loop");
-            assert!(
-                afresh
-                    .as_ref()
-                    .is_some_and(|afresh| afresh.stream.is_some()),
-                "a player built afresh opened none"
-            );
-        }
-        if let Some(mut afresh) = afresh {
-            afresh.shutdown();
-        }
+                let kept = (player.stream.as_ref())
+                    .is_some_and(|open| Arc::ptr_eq(&open.heartbeat, &came_back));
+                player.shutdown();
+                drop(player);
+                let afresh = opened_afresh();
+                Some((began, (refused, sent, kept, afresh)))
+            },
+            |(refused, sent, kept, afresh)| {
+                assert_eq!(refused, Err(LOOPING.to_string()), "refused while it loops");
+                assert_eq!(sent, Ok(()), "the send plays");
+                assert!(kept, "on the stream that came out of its loop");
+                assert!(afresh, "a player built afresh opened none");
+            },
+        );
     }
 
     #[test]
