@@ -504,8 +504,9 @@ impl AppCtx {
     /// until what they carry is held with this copy's mark, at once, before
     /// the store is taken up, which on a computer or a phone is a look on a
     /// thread of its own, and in a browser a moment later still; then they
-    /// go ([`Store::release_cut_off`]), and only once they have is anything
-    /// kept, a level counted included. Until the history holds it
+    /// go ([`Store::release_cut_off`]), and nothing is kept, nor a level
+    /// counted, until they have gone, or wait for a write of this copy's
+    /// mark that goes in. Until the history holds it
     /// ([`keep_cut_off`]), this copy's mark does, and nothing else: a copy
     /// that stops before its mark holds it leaves the marks to the next
     /// copy to look.
