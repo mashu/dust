@@ -1094,9 +1094,11 @@ impl HistoryFiles {
     /// ([`Self::still_unread`]): dropped from it, one would be told of a
     /// second time. One this build noted failing that reads now, or is
     /// gone, is dropped from it: should it fail again, that is a failure of
-    /// its own, told of in turn. What else it holds is left as it is, while
-    /// there is nothing new to tell: a build before this one notes there
-    /// the records it cannot read, which this one may.
+    /// its own, told of in turn. What else it holds is left as it is, with
+    /// what is told of now beside it, whether there is anything new to
+    /// tell or not: a build before this one notes there the records it
+    /// cannot read, which this one may, and tells of one again where it is
+    /// dropped.
     fn tell(
         &self,
         unread: &[(RecordId, Unreadable)],
@@ -1122,29 +1124,20 @@ impl HistoryFiles {
             return notices;
         }
         let told_before = names_noted(told.as_deref());
-        let names: BTreeSet<String> = if notices.is_empty() {
-            let still: HashSet<String> = unread
-                .iter()
-                .map(|(id, _)| id.name())
-                .chain(failed.iter().map(|id| id.name()))
-                .collect();
-            told_before
-                .iter()
-                .filter(|name| !failed_before.contains(*name) || still.contains(*name))
-                .cloned()
-                .collect()
-        } else {
-            told_now
-                .iter()
-                .map(|(id, _)| id.name())
-                .chain(
-                    failed
-                        .iter()
-                        .map(|id| id.name())
-                        .filter(|name| told_before.contains(name)),
-                )
-                .collect()
-        };
+        // What it noted, but those this build noted failing that no longer
+        // fail, with what it tells of now: whether or not there is anything
+        // new to tell, what a build before this one noted there stays.
+        let still: HashSet<String> = unread
+            .iter()
+            .map(|(id, _)| id.name())
+            .chain(failed.iter().map(|id| id.name()))
+            .collect();
+        let names: BTreeSet<String> = told_before
+            .iter()
+            .filter(|name| !failed_before.contains(*name) || still.contains(*name))
+            .cloned()
+            .chain(told_now.iter().map(|(id, _)| id.name()))
+            .collect();
         if names.len() != told_before.len() || names.iter().any(|name| !told_before.contains(name))
         {
             let _ = if names.is_empty() {
@@ -2311,6 +2304,35 @@ mod tests {
         );
         assert_eq!(files.read(&[first.id]), [Ok(first)]);
         assert_eq!(fs::read(&told).unwrap(), noted, "and at a look");
+    }
+
+    /// What a build before this one noted there as told of, a record it
+    /// cannot read that this build reads, stays as it noted it when this
+    /// build has something new of its own to tell: dropped, that build
+    /// tells of it again as it next opens (0.16.9 with a session stored
+    /// with a null score, which it cannot read).
+    #[test]
+    fn what_an_older_build_noted_as_told_of_stays_when_this_build_tells_of_another() {
+        let (dir, files) = history("told-elsewhere-and-here");
+        files.load();
+        let first = record(&finished(1_000));
+        files.apply(&put(std::slice::from_ref(&first)));
+        let told = dir.0.join(HISTORY).join(TOLD);
+        fs::write(&told, serde_json::to_vec(&[first.id.name()]).unwrap()).unwrap();
+        let damaged = RecordId {
+            order: 2_000_000,
+            nonce: 1,
+        };
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::write(records.join(file_name(damaged)), "[").unwrap();
+        let load = Files::at(&dir.0).load();
+        assert_eq!(load.notices, [HistoryNotice::Damaged { count: 1 }]);
+        let noted = names_noted(fs::read(&told).ok().as_deref());
+        assert!(noted.contains(&damaged.name()), "this build's noted");
+        assert!(
+            noted.contains(&first.id.name()),
+            "the older build's note stays: {noted:?}"
+        );
     }
 
     /// A record that could not be read as the history was read, and reads
