@@ -1245,6 +1245,36 @@ pub(super) mod tests {
         assert_eq!(cuts(&next.cut_off()), [CutOff::Unread]);
     }
 
+    /// A mark whose text cannot be read just now, though it is there, is
+    /// left where it is, and the next look takes it once it reads. It used
+    /// to be deleted unread as it was taken, and what it carried with it.
+    #[test]
+    fn a_mark_whose_text_cannot_be_read_now_is_left_for_the_next_look() {
+        let (dir, cut) = store("open-unreadable-now");
+        cut.mark_open(Some(open_at(7)));
+        let id = own_id(&cut);
+        drop(cut);
+        let next = DesktopStore::at(dir.0.clone());
+        let (json, lock) = (next.mark_path(&id, "json"), next.mark_path(&id, "lock"));
+        let said = fs::read(&json).unwrap();
+        // A folder where its text is: the read fails, though the mark is
+        // there.
+        fs::remove_file(&json).unwrap();
+        fs::create_dir(&json).unwrap();
+        assert_eq!(now(next.take_cut_off()), [], "not to be read now");
+        assert!(lock.exists(), "left where it is");
+        drop(next);
+
+        fs::remove_dir(&json).unwrap();
+        fs::write(&json, said).unwrap();
+        let next = DesktopStore::at(dir.0.clone());
+        assert_eq!(
+            cuts(&now(next.take_cut_off())),
+            [CutOff::Marked(open_at(7))],
+            "taken at the next look, once it reads"
+        );
+    }
+
     /// A mark a copy took, which that copy stopped under before its own
     /// mark held what the other carried, is found again by the next copy
     /// to look. It used to be deleted as it was taken, and what it carried
