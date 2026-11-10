@@ -4623,6 +4623,30 @@ mod tests {
         tab.act(AppCtx::mark_kept);
     }
 
+    /// A mark one copy took stays held by it, whatever another copy lets go
+    /// of: one that took nothing, as the look a session's start makes may
+    /// take nothing, lets go of nothing. The store used to let go of the
+    /// mark taken at any copy's letting go, and the copy that took it was
+    /// taken for holding none.
+    #[test]
+    fn a_mark_one_copy_took_stays_held_whatever_another_lets_go_of() {
+        let store = Rc::new(MemoryStore::default());
+        cut_off_keeping(&store, day(2));
+        let mut took = Tab::on(&store);
+        let mut other = Tab::on(&store);
+        took.act(AppCtx::tell_of_cut_off);
+        assert!(store.taken().is_some(), "taken");
+        other.act(|ctx| ctx.mark_running(false));
+        other.pump();
+        assert!(
+            store.taken().is_some(),
+            "held still by the copy that took it"
+        );
+        took.pump();
+        assert_eq!(store.taken(), None, "let go of once it is carried");
+        assert_eq!(took.shown(), [2]);
+    }
+
     /// The mark of a session cut off is held by the copy that took it, and
     /// let go of as carried only once that copy's mark holds what it
     /// carried. A look that finds this copy's own mark lets go of it as it

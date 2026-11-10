@@ -515,17 +515,23 @@ impl Store for MemoryStore {
     }
 
     /// One let go of as it was is the mark again, unless a copy has marked
-    /// a session since; one carried goes.
+    /// a session since; one carried goes. A letting go that names no mark,
+    /// a copy's that took none, lets go of none: the mark a copy took is
+    /// held by it still.
     fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) {
         self.mark_log.borrow_mut().push(MarkEvent::Released {
             carried: carried.len(),
             left: left.len(),
         });
+        let named = |ids: &[MarkId]| ids.iter().any(|id| id.name() == MARK);
+        if !named(&carried) && !named(&left) {
+            return;
+        }
         let Some(taken) = self.taken.take() else {
             return;
         };
         let mut marked = self.marked.borrow_mut();
-        if left.iter().any(|id| id.name() == MARK) && marked.is_none() {
+        if named(&left) && marked.is_none() {
             *marked = Some(taken);
         }
     }
