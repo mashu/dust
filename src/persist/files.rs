@@ -82,11 +82,12 @@ const LAYOUT_FILE: &str = "layout.json";
 const TOLD: &str = "told.json";
 /// The records that could not be read at all as the history was last read
 /// whole, by name ([`HistoryLoad::failed`]), or at the app's last try at
-/// one ([`HistoryFiles::still_unread`]), and have not read since
+/// one ([`HistoryFiles::still_unread`]), and have not read since, nor gone
 /// ([`HistoryFiles::note_no_more`]): one that still cannot be read as it is
 /// read again, at a later launch, is told of then ([`HistoryFiles::tell`]).
-/// It holds this build's failures alone, where [`TOLD`] holds a build
-/// before it's as well.
+/// It holds this build's failures alone, whether told of or not; [`TOLD`]
+/// names those this build told of, beside every record a build before
+/// formats could not open or make out.
 const FAILING: &str = "failing.json";
 /// The records this build told of as ones that could not be read at all,
 /// a moment's failure that lasted ([`HistoryNotice::Unread`]), by name,
@@ -610,7 +611,32 @@ impl HistoryFiles {
         }
         let listing = self.listing_now().ok()?;
         self.watch.looked(before);
-        Some(listing.records.difference(&listing.gone).copied().collect())
+        let listed: Vec<RecordId> = listing.records.difference(&listing.gone).copied().collect();
+        // Of what this build noted of records, those gone since: a listing
+        // that skipped a pack it could not open does not say which are.
+        if !listing.skipped {
+            self.note_listed(&listed.iter().map(|id| id.name()).collect());
+        }
+        Some(listed)
+    }
+
+    /// Take out of this build's notes of records it could not read
+    /// ([`FAILING`], [`UNREAD_TOLD`], [`DAMAGED_TOLD`]) each that `listed`,
+    /// every record a look found, holds no more: it is gone, and should it
+    /// come back and fail, that is a failure of its own, told of in turn.
+    fn note_listed(&self, listed: &HashSet<String>) {
+        for note in [FAILING, UNREAD_TOLD, DAMAGED_TOLD] {
+            let Ok(raw) = fs::read(self.dir.join(note)) else {
+                continue;
+            };
+            let gone: HashSet<String> = names_noted(Some(&raw))
+                .into_iter()
+                .filter(|name| !listed.contains(name))
+                .collect();
+            if !gone.is_empty() {
+                self.note_no_more(note, &gone);
+            }
+        }
     }
 
     /// The records `ids`, as they are stored, each that can be read: one
@@ -652,16 +678,18 @@ impl HistoryFiles {
     /// damaged, fail no longer, so that one of them that fails for a moment
     /// again as the history is next read whole, at a later launch, is not
     /// told of then, as one that failed at the last read and has not read
-    /// since is ([`Self::tell`]); and [`UNREAD_TOLD`], as those it told of
-    /// that read now are told of no more, so that one that fails again
-    /// after, a failure of its own, is told of in turn
-    /// ([`Self::still_unread`]). What a build before this one noted in
+    /// since is ([`Self::tell`]); [`UNREAD_TOLD`], as those it told of that
+    /// read now are told of no more, so that one that fails again after, a
+    /// failure of its own, is told of in turn ([`Self::still_unread`]); and
+    /// [`DAMAGED_TOLD`], as those just read are damaged no more. Those a
+    /// look no longer lists are gone, and go from each the same way
+    /// ([`Self::note_listed`]). What a build before this one noted in
     /// [`TOLD`], the records it cannot read, is no failure this build noted,
     /// and stays as it is: dropped, that build would tell of it again as it
-    /// next opens. Taken out only
-    /// where this build may write to the history, as the note is made; a
-    /// note that names none of them is left as it is, and one left naming
-    /// none is removed.
+    /// next opens. Taken out only where this build may write to the
+    /// history, as the note is made; a note that names none of them is left
+    /// as it is, and one left naming none is removed, but for
+    /// [`DAMAGED_TOLD`].
     fn note_no_more(&self, note: &str, gone: &HashSet<String>) {
         let path = self.dir.join(note);
         let Ok(raw) = fs::read(&path) else {
@@ -1139,16 +1167,21 @@ impl HistoryFiles {
     /// `writable` is whether what was told may be noted, so it is told of
     /// once, and what failed, for the next read to tell of.
     ///
-    /// The note of those told of keeps each that failed and was told of
-    /// before, as the app tells of one that still failed at its last try
-    /// ([`Self::still_unread`]): dropped from it, one would be told of a
-    /// second time. One this build noted failing that reads now, or is
-    /// gone, is dropped from it: should it fail again, that is a failure of
-    /// its own, told of in turn. What else it holds is left as it is, with
-    /// what is told of now beside it, whether there is anything new to
-    /// tell or not: a build before this one notes there the records it
-    /// cannot read, which this one may, and tells of one again where it is
-    /// dropped.
+    /// Each kind of notice goes by a note of its own. One of a record this
+    /// build cannot read, by [`DAMAGED_TOLD`], which keeps each of those it
+    /// cannot read now and each it told of that fails now, and drops the
+    /// rest, as read or gone; until it is first written, [`TOLD`] stands
+    /// for it. One of a failure, by [`UNREAD_TOLD`], which keeps each told
+    /// of before, by this launch or by the app's tries
+    /// ([`Self::still_unread`]), that still fails, and drops one that reads
+    /// now or is gone: should it fail again, that is a failure of its own,
+    /// told of in turn. [`TOLD`], where a build before formats looks, only
+    /// gains names: every one told of, of either kind, beside what such a
+    /// build noted there, the records it could not open or make out, some
+    /// of which this one reads; dropped, such a build would tell of one
+    /// again as it next opened. A look drops from this build's notes the
+    /// records it reads, and those it no longer lists ([`Self::read`],
+    /// [`Self::listing`]).
     fn tell(
         &self,
         unread: &[(RecordId, Unreadable)],
@@ -2528,6 +2561,35 @@ mod tests {
             Files::at(&dir.0).load().notices,
             [HistoryNotice::Damaged { count: 1 }],
             "told of as damaged"
+        );
+    }
+
+    /// A record this build told of as one that could not be read, which is no
+    /// longer listed at a look, is noted as told of no more: it is gone, and
+    /// should it come back and fail, that is a failure of its own.
+    #[test]
+    fn a_record_told_of_that_is_gone_at_a_look_is_told_of_no_more() {
+        let (dir, files) = history("told-gone-at-a-look");
+        files.load();
+        let busy = record(&finished(2_000));
+        files.apply(&put(std::slice::from_ref(&busy)));
+        let path = dir.0.join(HISTORY).join(RECORDS).join(file_name(busy.id));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir_all(&path).unwrap();
+        let files = Files::at(&dir.0);
+        assert_eq!(files.load().failed, [busy.id]);
+        assert_eq!(
+            files.still_unread(&[busy.id]),
+            [HistoryNotice::Unread { count: 1 }]
+        );
+        fs::remove_dir(&path).unwrap();
+        assert_eq!(files.listing(), Some(Vec::new()), "gone, at a look");
+        fs::create_dir_all(&path).unwrap();
+        assert_eq!(files.read(&[busy.id]), [Err(Unopened::Failed(busy.id))]);
+        assert_eq!(
+            files.still_unread(&[busy.id]),
+            [HistoryNotice::Unread { count: 1 }],
+            "back, and failing on its own"
         );
     }
 

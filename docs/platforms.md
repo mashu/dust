@@ -894,8 +894,8 @@ settings (`src/persist/files.rs`):
   before noted of it in `told.json`. No such build writes it.
 - `failing.json`: the records that could not be read at all as the history
   was last read whole, or at the app's last try, and have not read since,
-  so that one that still cannot be read at the next launch is told of
-  then.
+  nor gone, so that one that still cannot be read at the next launch is
+  told of then.
 - `restoring-<n>.json`: held locked while a restore of many sessions stores
   them, so one Dust stopped under is told of as cut short.
 - `packs/*.jsonl.gz`: older records packed together, gzip, a record a line.
