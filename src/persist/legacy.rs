@@ -459,9 +459,11 @@ impl Layout {
     /// that build moved [`Self::legacy`] on as it took it up by its own. So
     /// [`imported`] takes it up once by this build's, and notes what it
     /// took; it takes no session twice, as it leaves out those it took
-    /// before and those here, nor any from before the move. A change since
-    /// is taken up by it, though a build before this one's rules took it up
-    /// first.
+    /// before and those here, nor one from before the move, but for one a
+    /// build that keeps no deletions deleted there and a copy of it brought
+    /// back, which finished in the day before the newest the move took. A
+    /// change since is taken up by it, though a build before this one's
+    /// rules took it up first.
     pub(super) fn taken_up(&self) -> Option<Option<Fingerprint>> {
         self.taken_legacy
     }
@@ -712,10 +714,16 @@ fn as_moved(json: &str) -> String {
 ///
 /// A session is taken up once, where it finished after the newest the move
 /// took ([`Layout::taken_through`]), less a day, and is neither here
-/// already nor deleted here: only one an older build finished since, or a
-/// copy of it left open stored since. One from before, which an older copy
-/// brings back as it stores the history it held, is never taken up again,
-/// nor one deleted here. Each goes where it finished ([`RecordId::placed`]).
+/// already nor deleted here, nor named among `deleted`: only one an older
+/// build finished since, or a copy of it left open stored since. One from
+/// before, which an older copy brings back as it stores the history it
+/// held, is never taken up again, nor one deleted here, nor one deleted
+/// there by hand before or after the move, by a build that keeps its
+/// deletions, and stored back by a copy left open of one that keeps none:
+/// every build that keeps them takes a session it puts back, by Undo or a
+/// restore, out of them. Only one deleted there by a build that keeps none,
+/// which finished in that last day, comes back with such a copy, as it does
+/// in that build. Each goes where it finished ([`RecordId::placed`]).
 /// A layout an earlier build wrote says nothing of what the move took: the
 /// newest session taken, at the clock as the move was made or before it,
 /// stands for it, and is noted.
@@ -763,6 +771,10 @@ pub(super) fn imported(
             .unwrap_or(layout.migrated_at)
     });
     let since = through.saturating_sub(MOVE_SLACK_MS);
+    // Deleted by hand there, and stored again by a copy that keeps no
+    // deletions: every build that keeps them takes a session it puts back,
+    // by Undo or a restore, out of them.
+    let deleted_there: HashSet<SessionKey> = deleted.iter().map(Deleted::key).collect();
     let mut change = HistoryChange::default();
     let mut put = HashSet::new();
     let mut keys = Vec::new();
@@ -771,7 +783,8 @@ pub(super) fn imported(
         let new = session.timestamp > since
             && !taken.contains(&key)
             && !gone.contains(&key)
-            && !live.contains_key(&key);
+            && !live.contains_key(&key)
+            && !deleted_there.contains(&key);
         let Some(record) = new
             .then(|| record::Record::of(session, |json| RecordId::placed(session.timestamp, json)))
             .flatten()
@@ -2153,6 +2166,49 @@ mod tests {
         )
         .expect("taken up here");
         assert_eq!(put_stamps(&change), [since.timestamp]);
+    }
+
+    /// A session deleted by hand before the move by a build before records
+    /// that remembers its deletions (0.16.2), and stored in the history kept
+    /// whole again since by a copy left open of a build that remembers none
+    /// (0.16.0), stays deleted as this build takes up a layout an earlier
+    /// build wrote: it finished after the newest session the move took, less
+    /// a day, but the deletions kept beside that history name it, and every
+    /// build that keeps them takes a session it puts back, by Undo or a
+    /// restore, out of them. Taken up by the cut-off alone, it came back.
+    #[test]
+    fn a_session_deleted_before_the_move_and_stored_again_by_a_copy_left_open_stays_deleted() {
+        let moved = [finished(T), finished(T + DAY)];
+        let gone = finished(T + DAY + DAY / 4);
+        let deletion = Deleted::of(&gone, T + 2 * DAY);
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 3 * DAY,
+            "legacy": written(1),
+            "importedKeys": [[T, moved[0].date], [T + DAY, moved[1].date]],
+            "deletedSeen": deletion.at,
+        }));
+        let records = record::records_for_blob(&moved);
+        // Stored since by the copy left open: one it finished before the
+        // move, and the one deleted, which it still held.
+        let since = finished(T + DAY + DAY / 2);
+        let looked =
+            taken_up_by_an_older_build(&layout, written(2), std::slice::from_ref(&deletion));
+        let (change, _) = imported(
+            &looked,
+            written(2),
+            &[moved[0].clone(), moved[1].clone(), gone, since.clone()],
+            std::slice::from_ref(&deletion),
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(
+            put_stamps(&change),
+            [since.timestamp],
+            "the one deleted stays deleted"
+        );
     }
 
     /// A deletion a build before records made with its clock behind, after
