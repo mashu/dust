@@ -3583,6 +3583,47 @@ mod tests {
         assert_eq!(read.unread, [damaged, damaged_since], "left as they are");
     }
 
+    /// A record whose bytes are no text, which no build reads, holds back no
+    /// take-up of what an older build stored in the history it keeps whole
+    /// as a look lists the history: it holds no session, as a damaged one
+    /// holds none, and the older build's session is taken up beside it,
+    /// which is left as it is. Only one that cannot be read for now holds
+    /// the take-up back, as it may hold that session.
+    #[test]
+    fn a_record_whose_bytes_are_no_text_holds_back_no_take_up_from_an_older_build() {
+        let dir = TempDir::new("older-no-text");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = Files::at(&dir.0);
+        files.load();
+        // Damaged once this copy read the history: no text at all.
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let damaged = RecordId {
+            order: (now + 60_000) * 1000,
+            nonce: 1,
+        };
+        let bytes = b"{\"date\":\"\xff\xfe\",\"timestamp\":1}";
+        fs::write(records.join(file_name(damaged)), bytes).unwrap();
+        let theirs = finished(now + 120_000);
+        keep_whole(&dir, &[old.clone(), theirs.clone()]);
+        assert_eq!(
+            files.listing().map(|listed| listed.len()),
+            Some(3),
+            "taken up as it is listed"
+        );
+        assert_eq!(names(&records).len(), 3);
+        let read = Files::at(&dir.0).load();
+        assert_eq!(stamps(&read), [old.timestamp, theirs.timestamp]);
+        assert_eq!(read.unread, [damaged]);
+        assert_eq!(read.notices, [HistoryNotice::Damaged { count: 1 }]);
+        assert_eq!(
+            fs::read(records.join(file_name(damaged))).unwrap(),
+            bytes,
+            "left as it is"
+        );
+    }
+
     /// A session from before the move that an older copy writes back, as
     /// one left open stores the history it held, is never brought back:
     /// neither one it let go long ago, nor one deleted here since.
