@@ -462,7 +462,13 @@ work to are tested natively. Nor does any test run a real input method:
 the keys of a composition, a dead key's among them, are made up in Node
 as Safari, Chrome and the macOS build are known to hand them over, so a
 paddle key that is dead, and a `[` typed in Pinyin or Kana, are checked
-by hand on a Mac, an iPhone and in Safari.
+by hand on a Mac, an iPhone and in Safari. In WebKit — Safari, every
+browser on an iPhone and the macOS build — a `[` or a `]` that ends a
+composition, as Pinyin's pick of the first or last character of a word
+does, still keys its paddle: it arrives after `compositionend` and, like
+a dead key's press, not as composing but with the input method's key
+code, 229. On the Linux desktop every bracket keys its paddle, composing
+or not, as the window that keys them tells of no composition.
 
 ## Desktop bundles
 

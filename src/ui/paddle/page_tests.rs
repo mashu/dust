@@ -391,3 +391,55 @@ fn the_page_leaves_a_composition_no_paddle_key_opened_to_the_input_method() {
         .collect();
     keys_as_the_web_build_does(&typed);
 }
+
+/// WebKit, in Safari, on an iPhone and in the macOS build, hands over the
+/// key that ends a composition once it has ended: not as composing, but
+/// with the input method's key code, as it hands over a dead key's press.
+/// So a `[` or a `]` that ends a Pinyin composition, picking the first or
+/// the last character of the word composed, keys its paddle, by place or
+/// not, and is kept from the page, as docs/platforms.md says: a dead
+/// paddle key's second press, which ends the composition its first
+/// opened, may be handed over the same way, and how WebKit hands it over
+/// is checked by hand on a Mac. Chrome hands the bracket over as
+/// composing, before the composition ends, and it is the input method's.
+#[test]
+fn a_bracket_that_ends_a_composition_in_webkit_keys_its_paddle() {
+    let steps = [
+        does(down("n", "KeyN").taken_by_input_method(), NOTHING, false),
+        does(down("i", "KeyI").composing(), NOTHING, false),
+        does(Step::CompositionEnd, NOTHING, false),
+        does(
+            down("[", "BracketLeft").ending_composition(),
+            &[["down", "[", "BracketLeft"]],
+            true,
+        ),
+        does(up("[", "BracketLeft"), &[["up", "[", "BracketLeft"]], true),
+        does(down("n", "KeyN").taken_by_input_method(), NOTHING, false),
+        does(down("i", "KeyI").composing(), NOTHING, false),
+        does(Step::CompositionEnd, NOTHING, false),
+        does(
+            down("]", "BracketRight").ending_composition(),
+            &[["down", "]", "BracketRight"]],
+            true,
+        ),
+        does(
+            up("]", "BracketRight"),
+            &[["up", "]", "BracketRight"]],
+            true,
+        ),
+        // Chrome's order.
+        does(down("n", "KeyN").taken_by_input_method(), NOTHING, false),
+        does(down("i", "KeyI").composing(), NOTHING, false),
+        does(down("[", "BracketLeft").composing(), NOTHING, false),
+        does(Step::CompositionEnd, NOTHING, false),
+        does(up("[", "BracketLeft"), &[["up", "[", "BracketLeft"]], true),
+    ];
+    for by_place in [true, false] {
+        hands_over(by_place, &steps);
+        let steps: Vec<Step> = [Step::ByPlace(by_place)]
+            .into_iter()
+            .chain(steps.iter().map(|(step, ..)| step.clone()))
+            .collect();
+        keys_as_the_web_build_does(&steps);
+    }
+}

@@ -204,7 +204,11 @@ impl Contacts {
 /// the composition ends, another key is pressed, or the window loses the
 /// focus. So is a press of a paddle's key the input method takes with no
 /// composition under way, which looks like a dead key: a `[` that begins a
-/// composition keys the dit, as it always did.
+/// composition keys the dit, as it always did. And so, in WebKit, is a `[`
+/// or a `]` that ends a composition, handed over once it has ended, not as
+/// composing, with the input method's key code: it keys its paddle, for a
+/// dead paddle key's second press, which ends the composition its first
+/// opened, may be handed over the same way (docs/platforms.md).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct InputMethods {
     /// A paddle key's press opened the composition under way, as far as
