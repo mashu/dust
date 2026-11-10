@@ -1459,6 +1459,102 @@ fn a_pack_whose_upload_failed_is_sent_again() {
     assert_eq!(computer.stamps(), [1], "let go");
 }
 
+/// A folder that is `remote` but for the file `gone`, which it lists, and
+/// then answers is gone as it is read: as one deleted as a sync reads it.
+struct GoneAsRead<'a> {
+    remote: &'a MemoryRemote,
+    gone: String,
+}
+
+impl Remote for GoneAsRead<'_> {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        self.remote.list()
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        if id == self.gone {
+            return done(Err(RemoteError::Gone));
+        }
+        self.remote.get(id)
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        self.remote.create(name, bytes)
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        self.remote.update(id, bytes)
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        self.remote.delete(id)
+    }
+}
+
+/// A pack whose answer was lost, which the drive lists but a sync could not
+/// read, gone as it was read, keeps its deletions by hand noted against it
+/// until a sync reads it, as one not listed yet does not: that sync takes
+/// them for the drive's, as had the answer come, and so takes back the
+/// putting back another device made since, sending nothing. Here the
+/// deletion that the sync between sent again went nowhere, the drive full.
+/// With the note dropped as the pack went unread, the sync that read it
+/// took the session for one deleted by hand that the drive had yet to hear
+/// of, kept it deleted here, and sent its deletion once more.
+#[test]
+fn a_pack_whose_answer_was_lost_waits_while_the_drive_lists_it_unread() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    let session = computer.session(two);
+    phone.delete(2, 120);
+    remote.answer_lost.set(true);
+    assert!(phone.sync(&remote, 130).is_err(), "no answer");
+    remote.answer_lost.set(false);
+    let noted = phone.state.unanswered.clone();
+    let [sent] = &noted.keys().cloned().collect::<Vec<_>>()[..] else {
+        panic!("one pack noted: {noted:?}");
+    };
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "the pack was made");
+    computer.undo(two, &session, 150);
+    computer.sync(&remote, 155).expect("synced");
+
+    let listed = now(remote.list()).expect("listed");
+    let file = listed.iter().find(|file| file.name == *sent).expect("made");
+    let unread = GoneAsRead {
+        remote: &remote,
+        gone: file.id.clone(),
+    };
+    remote.full.set(true);
+    let between = now(sync_once(
+        &*phone.store,
+        &unread,
+        &mut phone.state,
+        &phone.settings,
+        158,
+    ));
+    assert_eq!(between, Err(SyncFailed::Remote(RemoteError::Full)));
+    remote.full.set(false);
+    assert_eq!(
+        phone.state.unanswered.get(sent),
+        noted.get(sent),
+        "waits, its deletions with it"
+    );
+    assert!(!phone.state.applied.contains_key(&two));
+
+    let synced = phone.sync(&remote, 160).expect("synced");
+    assert!(phone.state.unanswered.is_empty(), "found");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    assert_eq!(synced.sent, 0, "nothing of the deletion sent again");
+    computer.sync(&remote, 170).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+}
+
 /// A session put back by hand under a sync turned on anew, before that
 /// sync has read the drive, is put back after the drive's deletion of it,
 /// stamped ahead on another device though that deletion is: the putting

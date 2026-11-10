@@ -2805,6 +2805,38 @@ mod tests {
         }
     }
 
+    /// A letters' tally, `"letterAccuracy"`, that is no map, a list or a
+    /// number say, makes no session, and the reason says a map was wanted
+    /// there: as before the tally was read entry by entry to keep what a
+    /// later build puts inside each, when such a session was no session
+    /// either. The app then tells of its record as damaged, rather than
+    /// showing it with no letter tallied.
+    #[test]
+    fn a_letters_tally_that_is_no_map_makes_no_session() {
+        let mut written = SessionResult::empty_for_test();
+        written.groups = vec![GroupResult {
+            sent: "K".into(),
+            received: "K".into(),
+            correct: true,
+        }];
+        written.group_timings = vec![SessionTiming::default()];
+        written.tally = CopyTally::of("K", "K");
+        for tally in [
+            serde_json::json!([]),
+            serde_json::json!(5),
+            serde_json::json!("K"),
+            Value::Null,
+        ] {
+            let mut damaged = serde_json::to_value(&written).unwrap();
+            damaged["letterAccuracy"] = tally.clone();
+            let read = serde_json::from_str::<SessionResult>(&damaged.to_string());
+            let Err(why) = read else {
+                panic!("a tally of {tally} read as a session");
+            };
+            assert!(why.to_string().contains("expected a map"), "{tally}: {why}");
+        }
+    }
+
     /// The keys of `raw` that `T` does not read: none where it is no object.
     fn beside<T: serde::de::DeserializeOwned>(raw: &Value) -> Map<String, Value> {
         let mut beside = raw.as_object().cloned().unwrap_or_default();

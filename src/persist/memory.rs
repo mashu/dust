@@ -57,6 +57,9 @@ pub struct MemoryStore {
     pub legacy_aside: RefCell<Vec<String>>,
     /// The records this build could not read and has told of.
     told: RefCell<BTreeSet<RecordId>>,
+    /// How many times the store was asked to tell of records still unread
+    /// after every try ([`Store::still_unread`]).
+    pub still_unread_asks: Cell<usize>,
     /// The records that could not be read at all as the history was last
     /// read: one that still cannot be read at the next read is told of
     /// then, as the files tell of it.
@@ -174,6 +177,9 @@ pub struct MemoryStore {
     locks: Rc<RefCell<BTreeSet<Lock>>>,
     /// The store takes no lock, as a browser without Web Locks takes none.
     pub unlockable: Cell<bool>,
+    /// How many times a lock was asked for ([`Store::try_lock`]), held or
+    /// not, for a test that cares how often a copy asks.
+    pub lock_tries: Cell<usize>,
     /// The store takes only the locks a browser takes, each a Web Lock of
     /// the site's ([`Lock::web_name`]), as a browser's tabs share them: none
     /// on what sync keeps.
@@ -769,6 +775,7 @@ impl Store for MemoryStore {
 
     /// As the files tell of them: once each.
     fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
+        self.still_unread_asks.set(self.still_unread_asks.get() + 1);
         let mut told = self.told.borrow_mut();
         let new: Vec<RecordId> = ids.into_iter().filter(|id| !told.contains(id)).collect();
         told.extend(new.iter().copied());
@@ -806,6 +813,7 @@ impl Store for MemoryStore {
 
     /// Answered at once, as by a computer's or a phone's store.
     fn try_lock(&self, lock: Lock) -> Pending<Locking> {
+        self.lock_tries.set(self.lock_tries.get() + 1);
         if self.unlockable.get() || self.browser.get() && lock.web_name().is_none() {
             return done(Locking::Unlockable);
         }

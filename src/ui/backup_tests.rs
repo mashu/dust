@@ -612,6 +612,40 @@ fn a_file_found_no_backup_during_a_session_is_said_once_it_is_over() {
     });
 }
 
+/// A file that is no backup, read once a session is under way, is said
+/// nothing of where another file is chosen once the session is over,
+/// before the word of the first is due: the card, drawn again, says nothing
+/// of the first, and the other is restored.
+#[test]
+fn a_file_found_no_backup_during_a_session_is_said_nothing_of_once_another_is_chosen() {
+    run(|| async {
+        let all = history(4);
+        let mut ui = open(MemoryStore::default(), &all[2..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "notes.txt", "hello", 5);
+        ui.click("nav-practice");
+        ui.click("btn-start-training");
+        ui.hold_file_reads(false);
+        ui.advance(1_500).await;
+        ui.click("btn-end-session");
+        ui.click("nav-stats");
+        ui.click("seg-history");
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(2_000).await;
+        let said = "notes.txt is not a Dust backup";
+        assert!(!ui.has(said), "{}", ui.html());
+        let toast = ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+        assert!(
+            !toast
+                .as_deref()
+                .is_some_and(|toast| toast.starts_with(said)),
+            "{toast:?}"
+        );
+        assert_eq!(stored_dates(&ui).len(), 4, "the other restored");
+    });
+}
+
 /// One backup is restored at a time: another chosen while one is read takes
 /// its place, the card saying at once that it is the one read, and it alone
 /// is restored, whenever the first is done. Both were read, and the first
