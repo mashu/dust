@@ -10,7 +10,7 @@ use cw_core::{
     AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, HeardTurn, LISTEN_LETTER_GAP_MS,
     MonoMs, Sampler, Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX,
     VOLUME_MIN, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
-    generate_training_group, hear_qsos, plan_turn, resolve_station,
+    generate_training_group, hear_qsos, plan_transmission, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -347,7 +347,12 @@ fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, SplitMix6
     (resolve_station(settings, &mut rng), rng)
 }
 
-/// Play `chars` one at a time, `gap_ms` apart.
+/// Play `chars` one at a time, each heard `gap_ms` after the last one's
+/// last element ends, as the player says it is heard: on the clock the band
+/// plays to, so the gap the AGC's hang is sized for is the gap the band
+/// hears ([`LISTEN_LETTER_GAP_MS`]). Waited out once a send was over, the
+/// pause would run on past it by the send's tail, the device's delay and a
+/// poll, on the band.
 async fn play_chars(
     lease: Lease,
     settings: TrainingSettings,
@@ -357,17 +362,21 @@ async fn play_chars(
     // One operator for the whole run: a different pitch per letter would make
     // the screen harder to learn from, not more realistic.
     let (voice, _) = new_station(&settings);
-    for (i, ch) in chars.chars().enumerate() {
-        if i > 0 {
-            lease.sleep(gap_ms).await?;
-        }
+    let mut heard_at = None;
+    for ch in chars.chars() {
+        let transmission = Transmission::alone(ch.to_string(), voice);
+        let plan = plan_transmission(&transmission, &settings);
+        let asked = lease.ask_to_send();
+        let mut ends = None;
         lease
-            .send(
-                &Transmission::alone(ch.to_string(), voice),
-                &settings,
-                |_| {},
-            )
+            .send_planned(asked, &plan, &transmission, &settings, heard_at, |news| {
+                if let SendNews::Started(start) = news {
+                    let last = start.char_ends_ms.iter().copied().max().unwrap_or(0);
+                    ends = Some(start.heard_at().plus(u64::from(last)));
+                }
+            })
             .await?;
+        heard_at = ends.map(|ends| ends.plus(u64::from(gap_ms)));
     }
     Ok(())
 }
@@ -659,6 +668,42 @@ mod tests {
             assert!(h.run_until(10_000, |_| outcome.borrow().is_some()).await);
             assert_eq!(*outcome.borrow(), Some(Ok(())));
             assert_eq!(h.texts(), vec!["K".to_string(), "M".to_string()]);
+        });
+    }
+
+    /// The Listen screen's letters are each heard their pause after the
+    /// last one's last element ends ([`LISTEN_LETTER_GAP_MS`]), on the clock
+    /// the band plays to, as the AGC's hang is sized for: however long the
+    /// device takes to play a send out and say it is over. The pause was
+    /// waited out only once a send was heard to its end, its tail, the
+    /// device's delay and a poll among it, and so ran some 80 ms longer on
+    /// the band than the hang it was sized for, which let the band up
+    /// between the letters.
+    #[test]
+    fn listening_hears_each_letter_its_pause_after_the_last_one_ends() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.recorder.latency_sec.set(0.25);
+            let lease = claim(&h);
+            let gap = LISTEN_LETTER_GAP_MS;
+            let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), gap));
+            h.pump();
+            assert!(h.run_until(10_000, |_| outcome.borrow().is_some()).await);
+            assert_eq!(*outcome.borrow(), Some(Ok(())));
+            let starts = h.recorder.starts();
+            assert_eq!(starts.len(), 3);
+            // When each is heard, and when its last element ends there.
+            let mut heard = (starts[0].at.0 as f64) + 250.0;
+            for pair in starts.windows(2) {
+                let ends = heard + pair[0].plan.wanted.chars[0].end_sec * 1_000.0;
+                let asked = pair[1].heard_in.expect("asked to be heard at a time");
+                heard = pair[1].at.0 as f64 + asked * 1_000.0;
+                assert!(
+                    (heard - ends - f64::from(gap)).abs() <= 1.0,
+                    "heard {:.0} ms after the last one ended",
+                    heard - ends
+                );
+            }
         });
     }
 
