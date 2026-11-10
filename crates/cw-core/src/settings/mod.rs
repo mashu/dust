@@ -127,7 +127,8 @@ pub enum AgcDecay {
     /// the band back in a word gap ([`crate::band::agc_timing`]): what most
     /// CW operators run. The hang stops short of the settings' shortest word
     /// gap, so with a wide speed range, and on the Listen screen at the
-    /// default speeds, the slowest letter gaps still let the band up.
+    /// default speeds, or any whose word gaps leave no room for its pause,
+    /// the slowest letter gaps still let the band up.
     #[default]
     Fast,
     /// Holds across word gaps too and comes back over a second or so: the

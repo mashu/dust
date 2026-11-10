@@ -68,7 +68,8 @@ pub const AGC_ATTACK_SEC: f64 = 0.002;
 /// decay: across the gaps between elements and characters at about 17 WPM
 /// and over (165 ms at 22 WPM). Settings that send slower, or with
 /// Farnsworth spacing, hold it longer, across their own letter gaps where
-/// their word gaps leave room for it, while a word gap still lets the band
+/// their word gaps leave room for it, and across the Listen screen's pause
+/// where they leave room for that, while a word gap still lets the band
 /// back ([`agc_timing`]). Operators prefer hang AGC on CW for exactly this:
 /// a per-element pumping AGC is the one everyone dislikes.
 pub const AGC_HANG_SEC: f64 = 0.22;
@@ -119,17 +120,28 @@ pub const AGC_WORD_MARGIN_SEC: f64 = 0.025;
 /// through. At Fast it stops [`AGC_WORD_MARGIN_SEC`] short of the shortest
 /// word gap they send, so the band still comes back between words, and
 /// where their speeds are too far apart for both the word gap wins; Slow
-/// holds across word gaps by design. Never shorter than the decay's own
-/// ([`agc_decay_sec`]). It follows the settings, not each send: a station
-/// the settings do not send, one of the band's own, may still be let go of
-/// between its letters.
+/// holds across word gaps by design. The Listen screen's pause counts at
+/// Fast only where it fits under that: one their word gaps leave no room
+/// for lets the band up across it however near the hang comes, and would
+/// cost every word gap they send for nothing. Never shorter than the
+/// decay's own ([`agc_decay_sec`]). It follows the settings, not each send:
+/// a station the settings do not send, one of the band's own, may still be
+/// let go of between its letters.
 pub fn agc_timing(settings: &TrainingSettings, decay: AgcDecay) -> (f64, f64) {
     let (shortest, release) = agc_decay_sec(decay);
-    let listen = f64::from(LISTEN_LETTER_GAP_MS) / 1_000.0;
-    let letters = longest_letter_gap_sec(settings).max(listen) + AGC_LETTER_MARGIN_SEC;
+    let letters = longest_letter_gap_sec(settings) + AGC_LETTER_MARGIN_SEC;
+    let listen = f64::from(LISTEN_LETTER_GAP_MS) / 1_000.0 + AGC_LETTER_MARGIN_SEC;
     let hang = match decay {
-        AgcDecay::Fast => letters.min(shortest_word_gap_sec(settings) - AGC_WORD_MARGIN_SEC),
-        AgcDecay::Slow => letters,
+        AgcDecay::Fast => {
+            let most = shortest_word_gap_sec(settings) - AGC_WORD_MARGIN_SEC;
+            let letters = if listen <= most {
+                letters.max(listen)
+            } else {
+                letters
+            };
+            letters.min(most)
+        }
+        AgcDecay::Slow => letters.max(listen),
     };
     let hang = if hang.is_finite() {
         hang.max(shortest)
@@ -1398,6 +1410,24 @@ mod tests {
             "30 of 15-30 WPM: back {:.1} dB",
             words[0].1
         );
+    }
+
+    /// At Fast the hiss comes back by the next word at the speeds between
+    /// as well: at a fixed 20 or 25 WPM the bulk of the strongest station's
+    /// duck is back across a word gap, as it was before the hang was sized
+    /// from letter gaps, whose own at those speeds the shortest hang spans.
+    /// The Listen screen's pause, which their word gaps leave no room for,
+    /// used to push the hang up to just short of the word gap all the same,
+    /// and the band came back 4 dB in it.
+    #[test]
+    fn the_hiss_comes_back_across_a_word_gap_at_fast_at_the_speeds_between() {
+        for wpm in [16.0, 20.0, 25.0] {
+            let settings = sending_at(wpm, wpm, AgcDecay::Fast);
+            let (keyed, hiss) = hiss_under(&settings, &keyer(wpm, wpm), &["PARIS PARIS"], 0.0);
+            let words = gap_swells(&keyed, &hiss, |gap| gap > 6.0 * 1.2 / wpm);
+            assert_eq!(words.len(), 1);
+            assert!(words[0].1 >= 10.0, "{wpm} WPM: back {:.1} dB", words[0].1);
+        }
     }
 
     /// A station fading as the band fades it holds its own hang from its
