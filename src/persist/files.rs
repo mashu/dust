@@ -109,7 +109,13 @@ const UNREAD_TOLD: &str = "unread-told.json";
 /// build's notices of a damage of its own. Until this build first writes
 /// it, [`TOLD`] stands for it, so that a record such a build told of, and
 /// this one cannot read either, is not told of a second time; written, it
-/// stays, though it names none.
+/// stays, though it names none. From then on, a record that such a build,
+/// used on the history again, tells of first, and that this one cannot
+/// read either, is told of here a second time: such a build writes
+/// [`TOLD`] over as it tells of one, and which of the names there it wrote
+/// since this build last left the note, this build cannot tell. A note of
+/// what this build left there would tell them apart; for so narrow a case,
+/// a build before formats used again after this one, it is not kept.
 const DAMAGED_TOLD: &str = "damaged-told.json";
 /// What a restore of many sessions at once is called while it runs:
 /// `restoring-<n>.json`.
@@ -1171,7 +1177,9 @@ impl HistoryFiles {
     /// build cannot read, by [`DAMAGED_TOLD`], which keeps each of those it
     /// cannot read now and each it told of that fails now, and drops the
     /// rest, as read or gone; until it is first written, [`TOLD`] stands
-    /// for it. One of a failure, by [`UNREAD_TOLD`], which keeps each told
+    /// for it, and from then on a record a build before formats told of
+    /// first is told of again here. One of a failure, by [`UNREAD_TOLD`],
+    /// which keeps each told
     /// of before, by this launch or by the app's tries
     /// ([`Self::still_unread`]), that still fails, and drops one that reads
     /// now or is gone: should it fail again, that is a failure of its own,
@@ -2741,6 +2749,55 @@ mod tests {
             Files::at(&dir.0).load().notices,
             [],
             "nor at the launch after"
+        );
+    }
+
+    /// A record a build before formats tells of first, once this build has
+    /// written its own note of damage, is told of again here, where this
+    /// build cannot read it either: such a build notes in told.json what it
+    /// tells of, writing the note over then with every record it cannot
+    /// read, as 0.16.9 and 95aa091 do, and which names there it wrote since
+    /// this build last left the note, this build cannot tell, so it goes by
+    /// its own note alone. Told of once here, it is told of no more. A note
+    /// of what told.json named as this build left it would keep it from
+    /// being told of twice; for so narrow a case, a build before formats
+    /// used on the history again after this one, it is left as it is.
+    #[test]
+    fn a_record_an_older_build_tells_of_after_this_build_noted_damage_is_told_of_again_here() {
+        let (dir, files) = history("older-tells-after-note");
+        files.load();
+        files.apply(&put(&[record(&finished(1_000))]));
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        let ours = RecordId {
+            order: 2_000_000,
+            nonce: 1,
+        };
+        fs::write(records.join(file_name(ours)), "[").unwrap();
+        assert_eq!(
+            Files::at(&dir.0).load().notices,
+            [HistoryNotice::Damaged { count: 1 }],
+            "told of here"
+        );
+        let theirs = RecordId {
+            order: 3_000_000,
+            nonce: 1,
+        };
+        fs::write(records.join(file_name(theirs)), "[").unwrap();
+        let told = dir.0.join(HISTORY).join(TOLD);
+        fs::write(
+            &told,
+            serde_json::to_vec(&[ours.name(), theirs.name()]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            Files::at(&dir.0).load().notices,
+            [HistoryNotice::Damaged { count: 1 }],
+            "told of by that build, and again here"
+        );
+        assert_eq!(
+            Files::at(&dir.0).load().notices,
+            [],
+            "not at the launch after"
         );
     }
 

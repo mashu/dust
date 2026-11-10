@@ -890,7 +890,13 @@ settings (`src/persist/files.rs`):
   damaged once more, is told of again, whatever a build before noted of it
   in `told.json`. No such build writes it; until this build first does,
   `told.json` stands for it, so a record such a build told of that this one
-  cannot read either is not told of twice.
+  cannot read either is not told of twice. This build writes it the first
+  time it finds `told.json`, or writes it. From then on a record that such
+  a build, used on the history again, tells of first, and that this one
+  cannot read either, is told of here a second time: such a build writes
+  `told.json` over as it tells of one, and this build keeps no note of what
+  it left there that would tell such a build's names from its own, for so
+  narrow a case.
 - `unread-told.json`: the records this build has said could not be read,
   a failure that outlasted its tries, until each reads again or is gone:
   one that reads, then fails once more, is told of again, whatever a build
