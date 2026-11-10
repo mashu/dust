@@ -1337,6 +1337,78 @@ fn a_setting_changed_while_it_syncs_stays_and_goes_next() {
     });
 }
 
+/// A setting another copy of the app on the same store, a tab or a window,
+/// changed and stored while a sync here was under way stays, laid over
+/// what that sync took from another device, as one changed here meanwhile
+/// does, and reaches that device next: the sync's end takes up what the
+/// store holds before it lays what it took over the settings. It used to
+/// lay what it took over the settings this copy held, which knew nothing of
+/// the other copy's change, and store that over it, the older value
+/// winning.
+#[test]
+fn a_setting_stored_in_another_copy_while_it_syncs_stays_and_goes_next() {
+    run(|| async {
+        let mut harness = Harness::new();
+        let remote = Rc::new(MemoryRemote::default());
+        let auth = FakeAuth::giving(&["t"]);
+        let (ctx, held) = turned_on_held(&mut harness, &remote, &auth).await;
+        let window = another_copy(&harness, &remote);
+        harness.in_app(|| window.take_up_store());
+        // Another device joins, and changes a setting there.
+        let (other, mut other_state) = another_device(&remote, "a long passphrase", &[]);
+        let mut theirs = harness.in_app(|| ctx.settings.peek().clone().clamp());
+        theirs.curriculum.num_groups = 4;
+        now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        held.hold(true);
+        harness.in_app(|| ctx.sync_now());
+        harness.pump();
+        // Changed in the other window meanwhile, after the other device's,
+        // and stored as the app stores it.
+        harness.in_app(|| {
+            let mut settings = window.settings;
+            settings.write().curriculum.num_groups = 7;
+            window.store_settings();
+        });
+        let store = Rc::clone(&harness.store);
+        let stored = move || store.read_settings().map(|s| s.curriculum.num_groups);
+        assert_eq!(stored(), Some(7), "stored there");
+        held.hold(false);
+        harness.advance(100).await;
+        assert_eq!(stored(), Some(7), "the other window's, the later");
+        let here = harness.in_app(|| ctx.settings.peek().curriculum.num_groups);
+        assert_eq!(here, 7, "taken up here");
+
+        harness.advance(u64::from(SYNC_SOON_MS) * 2).await;
+        let synced = now(sync_once(
+            &*other,
+            &*remote,
+            &mut other_state,
+            &theirs,
+            now_ms(),
+        ))
+        .expect("synced");
+        assert_eq!(
+            synced
+                .settings
+                .map(|settings| settings.curriculum.num_groups),
+            Some(7),
+            "the drive's word"
+        );
+        assert_eq!(stored(), Some(7));
+        let there = harness.in_app(|| window.settings.peek().curriculum.num_groups);
+        assert_eq!(there, 7);
+    });
+}
+
 /// Sync turned off here in another copy of the app on the same store, a
 /// tab or a window, is off in this one as well as it next syncs, or would
 /// keep what sync keeps, and the card says why: it syncs nothing more and

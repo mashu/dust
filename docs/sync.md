@@ -242,17 +242,20 @@ ends, so a putting back made in another tab or window meanwhile goes with
 the next sync. It begins from the settings the store holds as well: a tab or
 window that has not looked since another changed a setting and synced it
 takes that change up, rather than send its own older value back as a change
-made there. A note another tab or window left out goes only once the drive
-shows it sent, or no more to send, as a browser can hand one tab another's
-write late. Every such write reads what the store keeps for sync first, on
-the app's thread, which is one read of `sync.json`, or of `localStorage`,
-more than writing it whole was. They sync one at a time: a sync asked for
-while another tab or window syncs waits for it, the corner's cloud breathing
-meanwhile, ten minutes at most, then begins from what that one kept. Turning
-sync off with the copy waits for it too, so nothing is written into the
-folder after the copy is deleted. Where nothing locks, as in a browser
-without Web Locks, tabs sync as they come, and the merge alone keeps each
-one's notes (`docs/platforms.md`).
+made there. And it ends on them: a setting another tab or window stored
+while it synced stays over what the sync took, as one changed in the tab or
+window syncing does, and goes with the next sync. A note another tab or
+window left out goes only once the drive shows it sent, or no more to send,
+as a browser can hand one tab another's write late. Every such write reads
+what the store keeps for sync first, on the app's thread, which is one read
+of `sync.json`, or of `localStorage`, more than writing it whole was. They
+sync one at a time: a sync asked for while another tab or window syncs
+waits for it, the corner's cloud breathing meanwhile, ten minutes at most,
+then begins from what that one kept. Turning sync off with the copy waits
+for it too, so nothing is written into the folder after the copy is
+deleted. Where nothing locks, as in a browser without Web Locks, tabs sync
+as they come, and the merge alone keeps each one's notes
+(`docs/platforms.md`).
 
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that

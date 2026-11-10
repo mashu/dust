@@ -1063,7 +1063,11 @@ impl AppCtx {
                 let unreadable = passed_over(&synced);
                 // What the sync took is laid over the settings as they are
                 // now, not as they were as it began: one changed here
-                // meanwhile stays, and goes with the next sync.
+                // meanwhile stays, and goes with the next sync. So does one
+                // another copy stored meanwhile, taken up first: laid over
+                // what this copy held, which knew nothing of it, and stored,
+                // what the sync took would undo it.
+                self.take_up_stored_settings();
                 let now = self.settings.peek().clone().clamp();
                 let (kept, synced_as) = match synced.settings {
                     Some(taken) => (merge_settings(&here, &now, &taken), taken),
