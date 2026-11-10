@@ -51,6 +51,12 @@ const OUTGROWN: &str = "Your history here is past 20 MB, and Android's own backu
 /// ([`AppCtx::restore_blocked`]).
 const WAITING_ELSEWHERE: &str = "Waiting for a restore in another window…";
 
+/// How long the card waits between looks at a backup it handed to the app
+/// while a session or run has the app, which the restore waits for: as
+/// long as the app waits between its own looks at the session, rather than
+/// waking the app's thread every [`crate::time::POLL_MS`] through it.
+const SESSION_WAIT_MS: u32 = 1_000;
+
 /// What a restore does: no more, and no less.
 const RESTORING: &str = "adds the sessions missing here and takes its settings, level included, though not this device's volume and paddle keys. Undo, in the message that follows, puts both back";
 
@@ -256,22 +262,31 @@ impl Restoring {
             // file chosen while it still waits its turn is restored in its
             // place, once read: this one is made no more. While it waits for
             // another window's restore, or the Undo of it, the card says so.
+            // While it waits for a session or run to be over, it is looked
+            // at once a second, as the app looks at the session.
             let reading = under_way.peek().clone();
             let ticket = ctx.restore_backup(backup);
             while !ctx.restore_told(ticket) {
+                #[cfg(test)]
+                crate::testing::rendered("restore wait");
                 if !chosen_last() {
                     ctx.withdraw_restore(ticket);
                     return;
                 }
                 let said = if ctx.restore_blocked(ticket) {
-                    Some(WAITING_ELSEWHERE.to_string())
+                    Some(WAITING_ELSEWHERE)
                 } else {
-                    reading.clone()
+                    reading.as_deref()
                 };
-                if *under_way.peek() != said {
-                    under_way.set(said);
+                if under_way.peek().as_deref() != said {
+                    under_way.set(said.map(str::to_string));
                 }
-                crate::time::sleep_ms(crate::time::POLL_MS).await;
+                let wait = if ctx.session_running() {
+                    SESSION_WAIT_MS
+                } else {
+                    crate::time::POLL_MS
+                };
+                crate::time::sleep_ms(wait).await;
             }
             if chosen_last() {
                 under_way.set(None);

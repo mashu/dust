@@ -433,6 +433,35 @@ fn a_backup_read_during_a_session_is_restored_once_it_is_over() {
     });
 }
 
+/// A backup handed to the app while a session is under way has the card
+/// look at it once a second until the session is over, as the app looks
+/// at the session: not every 16 ms, waking the app's thread sixty times a
+/// second through the session, a new string made each time.
+#[test]
+fn a_backup_waiting_for_a_session_is_looked_at_once_a_second() {
+    run(|| async {
+        let all = history(5);
+        let mut ui = open(MemoryStore::default(), &all[3..]);
+        let file = write_backup(&test_settings(), &all, 0);
+        ui.hold_file_reads(true);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.click("nav-practice");
+        ui.click("btn-start-training");
+        ui.hold_file_reads(false);
+        ui.advance(100).await;
+        ui.take_renders("restore wait");
+        ui.advance(3_000).await;
+        let looks = ui.take_renders("restore wait");
+        assert!(looks <= 4, "looked {looks} times in 3 seconds");
+        ui.click("btn-end-session");
+        ui.advance(3_000).await;
+        assert_eq!(stored_dates(&ui).len(), 5, "restored once it is over");
+        ui.click("nav-stats");
+        ui.click("seg-history");
+        assert!(!ui.has("Reading dust-backup.json"), "{}", ui.html());
+    });
+}
+
 /// The Undo of a restore, clicked while a session is under way, its
 /// message still up, waits for the session to be over, and says so: it
 /// puts back the settings, the level among them, which a session is not to
