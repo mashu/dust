@@ -649,12 +649,15 @@ fn taken_through(
 
 /// Of `moved`, the records a move makes, those to write into a store that
 /// holds records already, each store saying for itself what it holds: one
-/// there under its own name, as `here` says, is written; one deleted by
-/// name, in `gone`, is not; one whose session is there under a name the
-/// move does not give, as `elsewhere`, what each record there under such a
-/// name holds, holds it ([`as_moved`]), is not, as many times as they hold
-/// it; nor is one whose session's key a tombstone names, in `gone_keys`.
-/// The rest are written.
+/// deleted by name, in `gone`, is not written, though its record is there
+/// too, left beside its tombstone by a deletion cut short, and damaged
+/// where it lies since, as the move would take for other bytes under its
+/// name and write it beside them; one there under its own name, as `here`
+/// says, is written; one whose session is there under a name the move does
+/// not give, as `elsewhere`, what each record there under such a name
+/// holds, holds it ([`as_moved`]), is not, as many times as they hold it;
+/// nor is one whose session's key a tombstone names, in `gone_keys`. The
+/// rest are written.
 pub(super) fn not_moved_yet(
     moved: Vec<record::Record>,
     here: impl Fn(RecordId) -> bool,
@@ -669,11 +672,11 @@ pub(super) fn not_moved_yet(
     moved
         .into_iter()
         .filter(|record| {
-            if here(record.id) {
-                return true;
-            }
             if gone.contains(&record.id) {
                 return false;
+            }
+            if here(record.id) {
+                return true;
             }
             if !held.is_empty()
                 && let Some(count) = held
@@ -2320,6 +2323,26 @@ mod tests {
         let raw = without.written().expect("written");
         let held: serde_json::Value = serde_json::from_slice(&raw).expect("JSON");
         assert!(held.get("takenThrough").is_none() && held.get("deletionsTaken").is_none());
+    }
+
+    /// A record of the move's that a store holds under its own name, and
+    /// has a tombstone of by that name, is deleted, and not written: its
+    /// deletion was cut short, the record left beside its tombstone, and
+    /// what it holds there may be damaged since, which the move would take
+    /// for other bytes and write beside. One there by its name with no
+    /// tombstone is written, which writes nothing.
+    #[test]
+    fn a_record_of_the_move_there_by_its_name_and_deleted_by_it_is_not_written() {
+        let moved = record::records_for_blob(&[finished(T), finished(T + DAY)]);
+        let gone: BTreeSet<RecordId> = [moved[0].id].into();
+        let left = not_moved_yet(
+            moved.clone(),
+            |_| true,
+            &gone,
+            std::iter::empty::<String>(),
+            &HashSet::new(),
+        );
+        assert_eq!(left, [moved[1].clone()]);
     }
 
     /// A browser's history kept whole, by the record API, on `shelf`.

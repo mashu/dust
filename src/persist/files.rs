@@ -4381,6 +4381,45 @@ mod tests {
         );
     }
 
+    /// A move made again leaves a session deleted here deleted, though its
+    /// deletion was cut short, its record left beside its tombstone, and
+    /// that record was damaged where it lies since: the move's record of it,
+    /// under the same name, is written nowhere. The record there was taken
+    /// for the session, there by its own name, before its tombstone was
+    /// looked at, so the move stored the session under the next name, which
+    /// no tombstone names, and it came back.
+    #[test]
+    fn a_move_made_again_leaves_deleted_a_session_whose_record_stayed_beside_its_tombstone_damaged()
+    {
+        let dir = TempDir::new("move-again-beside-tombstone");
+        let now = crate::time::now_ms();
+        let session = finished(now - 9 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&session));
+        let moved = Files::at(&dir.0).load();
+        let [(id, _)] = moved.sessions[..] else {
+            panic!("moved: {:?}", moved.sessions);
+        };
+        // Deleted by hand, cut short with its record still there, which is
+        // damaged since; then the layout is.
+        let history = dir.0.join(HISTORY);
+        fs::create_dir_all(history.join(TOMBSTONES)).unwrap();
+        fs::write(
+            history.join(TOMBSTONES).join(file_name(id)),
+            serde_json::to_vec(&Deleted::of(&session, 7)).unwrap(),
+        )
+        .unwrap();
+        fs::write(history.join(RECORDS).join(file_name(id)), "{ damaged").unwrap();
+        fs::write(history.join(LAYOUT_FILE), "{ damaged").unwrap();
+        let again = Files::at(&dir.0).load();
+        assert!(again.complete);
+        assert_eq!(stamps(&again), Vec::<u64>::new(), "still deleted");
+        assert!(
+            !history.join(RECORDS).join(file_name(id.bumped())).exists(),
+            "not stored under the next name"
+        );
+        assert_eq!(Files::at(&dir.0).listing(), Some(Vec::new()));
+    }
+
     /// Write a pack of `records` in the history in `root`, as a later
     /// build packs them, with `extra` lines after them.
     fn pack(root: &Path, name: &str, records: &[&Record], extra: &[&str]) -> PathBuf {
