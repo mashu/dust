@@ -23,7 +23,7 @@ use super::legacy::{Aside, BlobHistory, BlobKeys, Fingerprint, Gate, Layout, par
 use super::progress::{HistoryProgress, LoadProgress};
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
-    done, failed_for_now, key_of, read_record, records_for_blob, unreadable,
+    done, failed_for_now, read_record, records_for_blob, unreadable,
 };
 use super::record_store::notes::Note;
 use super::record_store::steps::{Steps, There, make_steps};
@@ -1067,9 +1067,10 @@ impl Backend for InMem<'_> {
         }
     }
 
-    /// As a change is made, its records' keys noted; how the history is
-    /// kept noted last. One with nothing to store stores nothing, where the
-    /// store would take no change.
+    /// As a change is made, how the history is kept noted last: no record's
+    /// session is noted until it is read, as the files note none. One with
+    /// nothing to store stores nothing, where the store would take no
+    /// change.
     async fn write_move(
         &self,
         records: &[Record],
@@ -1085,16 +1086,7 @@ impl Backend for InMem<'_> {
             };
             let writes = Writes::of(&change)
                 .map_err(|err| Refused(HistorySaved::Failed(err.to_string())))?;
-            let (placed, saved) = self.0.make(&writes);
-            let mut keys = self.0.keys.borrow_mut();
-            for (record, id) in records.iter().zip(&placed) {
-                if let Some(id) = id
-                    && let Some(key) = key_of(&record.json)
-                {
-                    keys.insert(*id, key);
-                }
-            }
-            (placed, saved)
+            self.0.make(&writes)
         };
         if saved.kept().is_none() {
             return Err(Refused(saved));
@@ -2177,6 +2169,39 @@ mod tests {
         assert_eq!(store.record_writes.get(), writes, "nothing taken up");
         store.held_open.borrow_mut().clear();
         assert_eq!(store.load_history().sessions.len(), 2, "taken up then");
+    }
+
+    /// A record the move made that could not be read as the history was
+    /// first read holds back the take-up of what an older build stores
+    /// after, until it reads, as on the files, whose move notes no record's
+    /// session: it may hold a session the older build holds too. Noted as
+    /// the move stored it, as since c01c5a9, the test store took that up
+    /// while the record could not be read.
+    #[test]
+    fn a_record_the_move_made_that_cannot_be_read_holds_back_a_take_up() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let whole = [finished(now_ms - 9 * DAY), finished(now_ms - 8 * DAY)];
+        store.keep_whole(&whole);
+        let moved = records_for_blob(&whole);
+        store.held_open.borrow_mut().insert(moved[1].id);
+        assert_eq!(store.load_history().failed, [moved[1].id]);
+        store.keep_whole(&[
+            whole[0].clone(),
+            whole[1].clone(),
+            finished(now_ms + 60_000),
+        ]);
+        assert_eq!(
+            now(store.history_listing()).map(|listed| listed.len()),
+            Some(2),
+            "nothing taken up"
+        );
+        store.held_open.borrow_mut().clear();
+        assert_eq!(
+            now(store.history_listing()).map(|listed| listed.len()),
+            Some(3),
+            "taken up once it reads"
+        );
     }
 
     /// A record here a later build stored, which says which session it
