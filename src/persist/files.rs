@@ -1210,11 +1210,16 @@ impl HistoryFiles {
     /// error where the tombstones cannot be listed, or one of them is there
     /// but cannot be read, as a folder in its place cannot, or one held
     /// open, as it may name a session to keep deleted. One that reads but
-    /// names none, as an empty one, names none.
+    /// names none, as an empty one, names none, and so does one gone since
+    /// the tombstones were listed, as a put-back elsewhere takes one away.
     fn tombstoned_keys(&self) -> io::Result<HashSet<SessionKey>> {
         let mut keys = HashSet::new();
         for id in ids_in(&self.tombstones())? {
-            let raw = fs::read(self.tombstones().join(file_name(id)))?;
+            let raw = match fs::read(self.tombstones().join(file_name(id))) {
+                Ok(raw) => raw,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
             keys.extend(tombstone_key(&raw));
         }
         Ok(keys)
@@ -3363,6 +3368,43 @@ mod tests {
             "taken up"
         );
         assert!(!files.changed(), "taken up");
+    }
+
+    /// A tombstone gone by the time it is read, as another copy's put-back
+    /// takes one away between the listing of the tombstones and its read,
+    /// names no session, as every other reader of them takes it: a move
+    /// made over it, and a take-up, go on without it. Taken for one that
+    /// cannot be read, it made the move pending, and held the take-up back
+    /// for that look.
+    #[cfg(unix)]
+    #[test]
+    fn a_tombstone_gone_as_it_is_read_names_no_session() {
+        let (dir, files) = raw_history("tombstone-gone-as-read");
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::create_dir_all(&tombstones).unwrap();
+        // Listed, and gone as it is read: a link to nothing.
+        let id = record(&finished(1_000)).id;
+        std::os::unix::fs::symlink(dir.0.join("nothing"), tombstones.join(file_name(id))).unwrap();
+        assert_eq!(
+            files.tombstoned_keys().map_err(|err| err.kind()),
+            Ok(HashSet::new())
+        );
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let moved = files.load();
+        assert!(
+            moved.complete && moved.notices.is_empty(),
+            "{:?}",
+            moved.notices
+        );
+        assert_eq!(stamps(&moved), [old.timestamp]);
+        keep_whole(&dir, &[old, finished(now + 60_000)]);
+        assert_eq!(
+            files.listing().map(|listed| listed.len()),
+            Some(2),
+            "taken up"
+        );
     }
 
     /// Which records were deleted by hand comes with when each was, as its
