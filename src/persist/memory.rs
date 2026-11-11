@@ -1330,7 +1330,8 @@ impl MemoryStore {
     /// what does not read set aside, the rest in its order, but what is
     /// here already ([`legacy::not_moved_yet`]), and the layout noted last. A store that takes no change makes no move, and says
     /// why: the history kept whole is not taken for moved, and the next
-    /// read moves it.
+    /// read moves it. So does one with a record held open, as the files
+    /// make none while a record they would read cannot be.
     fn migrate(&self, load: &mut HistoryLoad) -> Result<(), String> {
         let raw = self.legacy.borrow().clone();
         let read = raw.as_deref().map(read_history);
@@ -1364,9 +1365,16 @@ impl MemoryStore {
             crate::time::now_ms(),
         );
         // A move made over records stored since, as the files make one,
-        // writes no session held already, nor one deleted.
+        // writes no session held already, nor one deleted; and, where it
+        // has any to write, waits while one here cannot be read for now, as
+        // one held open cannot, as the files' move waits on each it reads:
+        // it may hold a session the move would write again.
         let moved = {
             let (records, tombstones) = (self.records.borrow(), self.tombstones.borrow());
+            let held_open = self.held_open.borrow();
+            if !moved.is_empty() && records.keys().any(|id| held_open.contains(id)) {
+                return Err("a record here could not be read just now".into());
+            }
             let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
             let gone: BTreeSet<RecordId> = tombstones.keys().copied().collect();
             let gone_keys: HashSet<SessionKey> = tombstones.values().map(Deleted::key).collect();
@@ -2100,6 +2108,63 @@ mod tests {
             .collect();
         assert_eq!(stamps, [first.timestamp, second.timestamp], "each once");
         assert!(store.record(restored.id).is_some(), "where it was restored");
+    }
+
+    /// The same move waits while a record here cannot be read, as one held
+    /// open cannot be, as the files' waits: it may hold a session the move
+    /// would write again. Once it reads, the move is made, each session once.
+    /// The test store read what each record held, held open or not, so its
+    /// move never waited, where the files' does.
+    #[test]
+    fn a_move_made_over_a_record_that_cannot_be_read_now_waits_for_it() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let (first, second) = (finished(now_ms - 9 * DAY), finished(now_ms - 8 * DAY));
+        store.keep_whole(&[first.clone(), second.clone()]);
+        store.full.set(true);
+        assert!(!store.load_history().complete, "the move waits");
+        store.full.set(false);
+        let restored =
+            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
+        assert_eq!(
+            now(store.change_history(put(std::slice::from_ref(&restored)))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        store.held_open.borrow_mut().insert(restored.id);
+        let waited = store.load_history();
+        assert!(
+            matches!(&waited.notices[..], [HistoryNotice::MovePending(_)]),
+            "{:?}",
+            waited.notices
+        );
+        assert!(!waited.complete);
+        assert_eq!(waited.failed, [restored.id]);
+        store.held_open.borrow_mut().clear();
+        let read = store.load_history();
+        assert!(read.complete && read.notices.is_empty());
+        let stamps: Vec<u64> = read
+            .sessions
+            .iter()
+            .map(|(_, session)| session.timestamp)
+            .collect();
+        assert_eq!(stamps, [first.timestamp, second.timestamp], "each once");
+    }
+
+    /// A move with nothing to move waits for no record, as the files' waits
+    /// for none: it writes nothing.
+    #[test]
+    fn a_move_with_nothing_to_move_waits_for_nothing() {
+        let store = MemoryStore::default();
+        let one = record(&finished(1_000));
+        now(store.change_history(put(std::slice::from_ref(&one))));
+        store.held_open.borrow_mut().insert(one.id);
+        let read = store.load_history();
+        assert!(
+            read.complete && read.notices.is_empty(),
+            "{:?}",
+            read.notices
+        );
+        assert_eq!(read.failed, [one.id]);
     }
 
     /// A store that takes no change, full or failing, makes no move, as the
