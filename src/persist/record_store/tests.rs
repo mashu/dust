@@ -1,10 +1,11 @@
 //! The records and tombstones as every store reads them.
 
-use std::collections::BTreeSet;
+use std::cell::Cell;
+use std::collections::VecDeque;
 
 use super::*;
-use crate::persist::Deleted;
-use crate::persist::record::{HistoryNotice, unreadable};
+use crate::persist::record::read_record;
+use crate::persist::record::unreadable;
 use crate::persist::tests::session;
 
 fn finished(at: u64) -> SessionResult {
@@ -281,4 +282,744 @@ fn records_still_unread_are_told_of_once() {
         noted_unread(&[id(2)], Some(b"not a note")),
         Some(names_of(&[id(2)]))
     );
+}
+
+// The order every store's reads and writes are made in, over a store that
+// answers from a script.
+
+/// Why the scripted store refused: in its words, raced or not.
+#[derive(Clone, Debug, PartialEq)]
+struct Said {
+    words: &'static str,
+    raced: bool,
+}
+
+impl Refusal for Said {
+    fn saved(&self) -> HistorySaved {
+        HistorySaved::Failed(self.words.into())
+    }
+
+    fn words(&self) -> String {
+        self.words.into()
+    }
+
+    fn raced(&self) -> bool {
+        self.raced
+    }
+}
+
+const REFUSED: Said = Said {
+    words: "refused",
+    raced: false,
+};
+
+const RACED: Said = Said {
+    words: "another copy moved it first",
+    raced: true,
+};
+
+/// A store that answers every call from what a test set, and notes each,
+/// by name, in the order made. `READ_FIRST` says whether it reads its
+/// records before the move, as a browser's database does, falling back to
+/// another store where it is refused, and noting nothing of records still
+/// unread; or after.
+struct Script<const READ_FIRST: bool> {
+    calls: RefCell<Vec<String>>,
+    keys: RefCell<KeyCache>,
+    gate: RefCell<Result<Gate, Said>>,
+    newer_unread: bool,
+    legacy: Result<Legacy, String>,
+    changed: Cell<bool>,
+    records: RefCell<BTreeMap<RecordId, String>>,
+    gone: RefCell<BTreeMap<RecordId, TombstoneRead>>,
+    refuse_list: Cell<bool>,
+    notes: RefCell<BTreeMap<String, Vec<u8>>>,
+    deleted: Vec<Deleted>,
+    commits: RefCell<VecDeque<Result<(), Said>>>,
+    moves: RefCell<VecDeque<Result<(), Said>>>,
+    /// How the history is kept, as the last change laid it.
+    laid: RefCell<Option<Layout>>,
+}
+
+impl<const READ_FIRST: bool> Script<READ_FIRST> {
+    fn new(gate: Result<Gate, Said>) -> Self {
+        Self {
+            calls: RefCell::new(Vec::new()),
+            keys: RefCell::new(KeyCache::new()),
+            gate: RefCell::new(gate),
+            newer_unread: false,
+            legacy: Ok(None),
+            changed: Cell::new(false),
+            records: RefCell::new(BTreeMap::new()),
+            gone: RefCell::new(BTreeMap::new()),
+            refuse_list: Cell::new(false),
+            notes: RefCell::new(BTreeMap::new()),
+            deleted: Vec::new(),
+            commits: RefCell::new(VecDeque::new()),
+            moves: RefCell::new(VecDeque::new()),
+            laid: RefCell::new(None),
+        }
+    }
+
+    fn call(&self, name: impl Into<String>) {
+        self.calls.borrow_mut().push(name.into());
+    }
+
+    /// The calls made since this was last asked.
+    fn calls(&self) -> Vec<String> {
+        std::mem::take(&mut *self.calls.borrow_mut())
+    }
+
+    fn hold(&self, id: RecordId, json: &str) {
+        self.records.borrow_mut().insert(id, json.into());
+    }
+
+    fn delete(&self, id: RecordId, read: TombstoneRead) {
+        self.gone.borrow_mut().insert(id, read);
+    }
+
+    fn listing(&self) -> Listing<()> {
+        Listing {
+            records: self.records.borrow().keys().copied().collect(),
+            gone: self.gone.borrow().keys().copied().collect(),
+            skipped: false,
+            listed: (),
+        }
+    }
+
+    fn read_of(&self, id: RecordId) -> RecordRead {
+        let json = self.records.borrow().get(&id).cloned()?;
+        Some(read_record(&json).ok_or_else(|| unreadable(&json)))
+    }
+}
+
+fn copy_of(read: &TombstoneRead) -> TombstoneRead {
+    match read {
+        TombstoneRead::Bytes(raw) => TombstoneRead::Bytes(raw.clone()),
+        TombstoneRead::NoText => TombstoneRead::NoText,
+        TombstoneRead::Failed(why) => TombstoneRead::Failed(why.clone()),
+    }
+}
+
+fn named(note: Note) -> String {
+    format!("{note:?}")
+}
+
+impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
+    type Refused = Said;
+    type Look = usize;
+    type Listed = ();
+    const ORDER: Order = if READ_FIRST {
+        Order::ReadThenMove
+    } else {
+        Order::MoveThenRead
+    };
+    const FALLS_BACK: bool = READ_FIRST;
+    const NOTES_STILL_UNREAD: bool = !READ_FIRST;
+
+    fn keys(&self) -> &RefCell<KeyCache> {
+        &self.keys
+    }
+
+    async fn open_gate(&self) -> Result<Opening, Said> {
+        self.call("open_gate");
+        if self.newer_unread {
+            return Ok(Opening::NewerUnread);
+        }
+        self.gate.borrow().clone().map(Opening::Gate)
+    }
+
+    async fn gate(&self) -> Result<Gate, Said> {
+        self.call("gate");
+        self.gate.borrow().clone()
+    }
+
+    async fn list(&self) -> Result<Listing<()>, Said> {
+        self.call("list");
+        if self.refuse_list.get() {
+            return Err(REFUSED);
+        }
+        Ok(self.listing())
+    }
+
+    async fn read_listed(&self, listing: &Listing<()>) -> Vec<(RecordId, RecordRead)> {
+        self.call("read_listed");
+        listing
+            .records
+            .difference(&listing.gone)
+            .map(|id| (*id, self.read_of(*id)))
+            .collect()
+    }
+
+    async fn read_whole(&self, keep: bool) -> Result<WholeRead<()>, Said> {
+        self.call(format!("read_whole({keep})"));
+        if self.refuse_list.get() {
+            return Err(REFUSED);
+        }
+        let listing = self.listing();
+        let read = listing
+            .records
+            .difference(&listing.gone)
+            .map(|id| (*id, self.read_of(*id)))
+            .collect();
+        let kept = if keep {
+            self.records.borrow().clone()
+        } else {
+            BTreeMap::new()
+        };
+        let tombstones = self
+            .gone
+            .borrow()
+            .iter()
+            .map(|(id, read)| Tombstone {
+                id: Some(*id),
+                read: copy_of(read),
+            })
+            .collect();
+        Ok(WholeRead {
+            listing,
+            read,
+            kept,
+            tombstones,
+        })
+    }
+
+    async fn read(&self, ids: &[RecordId], listed: Option<&()>) -> Vec<Raw> {
+        self.call(if listed.is_some() {
+            "read(listed)"
+        } else {
+            "read"
+        });
+        let records = self.records.borrow();
+        ids.iter()
+            .map(|id| match records.get(id) {
+                Some(json) => Raw::Text(json.clone()),
+                None => Raw::Missing,
+            })
+            .collect()
+    }
+
+    async fn tombstones(&self) -> Result<Vec<Tombstone>, Said> {
+        self.call("tombstones");
+        Ok(self
+            .gone
+            .borrow()
+            .iter()
+            .map(|(id, read)| Tombstone {
+                id: Some(*id),
+                read: copy_of(read),
+            })
+            .collect())
+    }
+
+    async fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
+        self.call("tombstones_of");
+        let gone = self.gone.borrow();
+        Some(
+            ids.iter()
+                .filter_map(|id| {
+                    let held = match gone.get(id)? {
+                        TombstoneRead::Bytes(raw) => Some(raw.clone()),
+                        _ => None,
+                    };
+                    Some((*id, held))
+                })
+                .collect(),
+        )
+    }
+
+    async fn note(&self, note: Note) -> Option<Vec<u8>> {
+        self.call(format!("note({note:?})"));
+        self.notes.borrow().get(&named(note)).cloned()
+    }
+
+    async fn write_note(&self, note: Note, names: Option<&BTreeSet<String>>) {
+        self.call(format!("write_note({note:?})"));
+        let mut notes = self.notes.borrow_mut();
+        match names {
+            Some(names) => {
+                notes.insert(named(note), serde_json::to_vec(names).unwrap());
+            }
+            None => {
+                notes.remove(&named(note));
+            }
+        }
+    }
+
+    async fn legacy_look(&self, _layout: &Layout) -> LegacyLook {
+        self.call("legacy_look");
+        if !self.changed.get() {
+            return LegacyLook::Same;
+        }
+        LegacyLook::Changed(READ_FIRST.then(|| self.legacy.clone().unwrap_or_default()))
+    }
+
+    async fn legacy(&self) -> Result<Legacy, String> {
+        self.call("legacy");
+        self.legacy.clone()
+    }
+
+    async fn legacy_deleted(&self) -> Vec<Deleted> {
+        self.call("legacy_deleted");
+        self.deleted.clone()
+    }
+
+    async fn set_aside_history(&self, _raw: &[u8]) -> (Option<SetAside>, bool) {
+        self.call("set_aside_history");
+        (Some(SetAside::History { kept: None }), false)
+    }
+
+    async fn set_aside_sessions(
+        &self,
+        _unread: &str,
+        count: usize,
+    ) -> Result<Option<SetAside>, String> {
+        self.call("set_aside_sessions");
+        Ok(Some(SetAside::Sessions { count, kept: None }))
+    }
+
+    async fn here(&self) -> Result<(BTreeSet<RecordId>, BTreeSet<RecordId>), Said> {
+        self.call("here");
+        let listing = self.listing();
+        Ok((listing.records, listing.gone))
+    }
+
+    async fn texts(&self, ids: &[RecordId]) -> Result<Vec<(RecordId, String)>, Said> {
+        self.call("texts");
+        let records = self.records.borrow();
+        Ok(ids
+            .iter()
+            .filter_map(|id| Some((*id, records.get(id)?.clone())))
+            .collect())
+    }
+
+    fn moving(&self) {
+        self.call("moving");
+    }
+
+    async fn cut_short(&self) -> Vec<HistoryNotice> {
+        self.call("cut_short");
+        Vec::new()
+    }
+
+    async fn unlink(&self, ids: &[RecordId]) {
+        self.call("unlink");
+        for id in ids {
+            self.records.borrow_mut().remove(id);
+        }
+    }
+
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<Said> {
+        let laid = match laid {
+            Laid::AsItIs => "as it is",
+            Laid::Over(next) => {
+                *self.laid.borrow_mut() = Some(next.clone());
+                "over"
+            }
+        };
+        self.call(format!("commit({by:?}, {laid})"));
+        if let Some(refused) = self.commits.borrow_mut().pop_front().and_then(Result::err) {
+            return Made {
+                placed: Vec::new(),
+                saved: Err(refused),
+            };
+        }
+        let change = writes.change;
+        let mut placed = Vec::new();
+        for record in &change.put {
+            self.hold(record.id, &record.json);
+            placed.push(Some(record.id));
+        }
+        for (id, held) in writes.tombstones() {
+            self.delete(id, TombstoneRead::Bytes(held.as_bytes().to_vec()));
+            self.records.borrow_mut().remove(&id);
+        }
+        Made {
+            placed,
+            saved: Ok(HistorySaved::Stored {
+                kept: change.put.len(),
+            }),
+        }
+    }
+
+    async fn write_move(&self, records: &[Record], _layout: &Layout) -> Result<(), Said> {
+        self.call(format!("write_move({})", records.len()));
+        if let Some(refused) = self.moves.borrow_mut().pop_front().and_then(Result::err) {
+            return Err(refused);
+        }
+        for record in records {
+            self.hold(record.id, &record.json);
+        }
+        Ok(())
+    }
+
+    async fn raced(&self) {
+        self.call("raced");
+    }
+
+    fn look(&self) -> usize {
+        self.call("look");
+        0
+    }
+
+    fn saw(&self, _look: usize) {
+        self.call("saw");
+    }
+
+    fn held_back(&self) {
+        self.call("held_back");
+    }
+
+    fn loaded(&self, _load: &mut HistoryLoad) {
+        self.call("loaded");
+    }
+}
+
+/// Done then and there, as every scripted call answers at once.
+fn now<T>(op: impl std::future::Future<Output = T>) -> T {
+    at_once(op).expect("answered at once")
+}
+
+fn calls(of: &[&str]) -> Vec<String> {
+    of.iter().map(|call| call.to_string()).collect()
+}
+
+fn moved_layout() -> Layout {
+    legacy::moved(&[], None, false, &[], 1_000).1
+}
+
+/// A history kept whole, of `sessions`, as an older build writes it.
+fn kept_whole(sessions: &[SessionResult]) -> Legacy {
+    let raw = serde_json::to_vec(sessions).unwrap();
+    let fingerprint = Fingerprint {
+        len: raw.len() as u64,
+        mtime: 1,
+    };
+    Some((raw, fingerprint))
+}
+
+/// A store that moves before it reads makes the move, each of its steps,
+/// and only then reads what it made: the history kept whole, where it
+/// sets aside what does not read, the deletions it remembers, what is here
+/// already, and the records with how the history is kept; then what a
+/// change cut short left, the records listed and read, as of a look taken
+/// before they were listed, and the notes of what was told, read before
+/// any is written.
+#[test]
+fn a_store_that_moves_first_makes_the_move_and_then_reads_what_it_made() {
+    let mut script = Script::<false>::new(Ok(Gate::Unmoved));
+    script.legacy = Ok(kept_whole(&[finished(1_000)]));
+    let load = now(load(&script)).expect("read");
+    assert!(load.complete);
+    assert_eq!(load.sessions.len(), 1);
+    assert_eq!(
+        script.calls(),
+        calls(&[
+            "open_gate",
+            "legacy",
+            "moving",
+            "legacy_deleted",
+            "here",
+            "write_move(1)",
+            "cut_short",
+            "legacy_look",
+            "look",
+            "list",
+            "saw",
+            "read_listed",
+            "note(Failing)",
+            "note(Told)",
+            "note(UnreadTold)",
+            "note(DamagedTold)",
+            "legacy_look",
+            "loaded",
+        ])
+    );
+}
+
+fn record_of(at: u64) -> Record {
+    let session = finished(at);
+    Record::of(&session, |json| RecordId::next(at, None, json)).unwrap()
+}
+
+/// A store that moves first, with a history moved already, an older
+/// build's change to take up, and a record left beside its tombstone: the
+/// tombstones are read before the records are listed, the record beside
+/// its tombstone is taken away once they are, and the take-up reads the
+/// history kept whole after the records, then the deletions it remembers,
+/// then the tombstones again, and makes its change, the gate read again
+/// first, as its own.
+#[test]
+fn a_store_that_moves_first_takes_up_after_the_records_reading_the_tombstones_before_and_after() {
+    let mut script = Script::<false>::new(Ok(Gate::Open(Box::new(moved_layout()))));
+    script.legacy = Ok(kept_whole(&[finished(crate::time::now_ms())]));
+    script.changed.set(true);
+    let (kept, beside) = (record_of(1_000), record_of(2_000));
+    script.hold(kept.id, &kept.json);
+    script.hold(beside.id, &beside.json);
+    script.delete(beside.id, TombstoneRead::Bytes(b"{}".to_vec()));
+    let load = now(load(&script)).expect("read");
+    assert_eq!(load.sessions.len(), 2, "the one here and the one taken up");
+    let laid = script.laid.borrow().clone().expect("laid");
+    let fingerprint = script
+        .legacy
+        .clone()
+        .unwrap()
+        .map(|(_, fingerprint)| fingerprint);
+    assert_eq!(
+        laid.taken_up(),
+        Some(fingerprint),
+        "what was taken up, noted"
+    );
+    assert_eq!(
+        script.calls(),
+        calls(&[
+            "open_gate",
+            "cut_short",
+            "legacy_look",
+            "tombstones",
+            "look",
+            "list",
+            "saw",
+            "unlink",
+            "read_listed",
+            "note(Failing)",
+            "note(Told)",
+            "note(UnreadTold)",
+            "note(DamagedTold)",
+            "legacy_look",
+            "legacy",
+            "legacy_deleted",
+            "tombstones",
+            "gate",
+            "commit(Store, over)",
+            "loaded",
+        ])
+    );
+}
+
+/// A store that reads first notes its look before anything is read, reads
+/// the records with the tombstones before them, and reads the tombstones
+/// again after them where it makes the move, over what it read, which it
+/// writes with its own look kept up; then tells, and takes up, the history
+/// kept whole read with its look.
+#[test]
+fn a_store_that_reads_first_reads_the_records_and_then_moves_over_them() {
+    let mut script = Script::<true>::new(Ok(Gate::Unmoved));
+    script.legacy = Ok(kept_whole(&[finished(1_000)]));
+    let load = now(load(&script)).expect("read");
+    assert!(load.complete);
+    assert_eq!(load.sessions.len(), 1, "what was moved, among what is read");
+    assert_eq!(
+        script.calls(),
+        calls(&[
+            "look",
+            "saw",
+            "open_gate",
+            "cut_short",
+            "read_whole(true)",
+            "tombstones",
+            "legacy",
+            "moving",
+            "legacy_deleted",
+            "write_move(1)",
+            "note(Failing)",
+            "note(Told)",
+            "note(UnreadTold)",
+            "note(DamagedTold)",
+            "legacy_look",
+            "loaded",
+        ])
+    );
+    // Moved already, with an older build's change to take up: the history
+    // kept whole is read with the look, and the deletions it remembers,
+    // before the tombstones and the records, those the move wrote read for
+    // the sessions they hold, as a move notes none.
+    script.changed.set(true);
+    *script.gate.borrow_mut() = Ok(Gate::Open(Box::new(moved_layout())));
+    now(listing(&script)).expect("listed");
+    assert_eq!(
+        script.calls(),
+        calls(&[
+            "gate",
+            "legacy_look",
+            "legacy_deleted",
+            "tombstones",
+            "list",
+            "read(listed)",
+            "tombstones",
+            "commit(Store, over)",
+            "look",
+            "list",
+            "saw",
+            "note(Failing)",
+            "note(UnreadTold)",
+            "note(DamagedTold)",
+        ])
+    );
+}
+
+/// A newer Dust's store whose head cannot be read is not read at all.
+#[test]
+fn a_newer_store_that_cannot_be_read_reads_nothing() {
+    let mut script = Script::<true>::new(Ok(Gate::Newer));
+    script.newer_unread = true;
+    let load = now(load(&script)).expect("read");
+    assert_eq!(load.notices, [HistoryNotice::Newer]);
+    assert_eq!(
+        script.calls(),
+        calls(&["look", "saw", "open_gate", "loaded"])
+    );
+}
+
+/// A move another copy makes first each time is tried as many times as
+/// MOVE_TRIES says, what it set aside kept across the tries, and then the
+/// store says why it keeps no history; a store that falls back is refused
+/// so where a read is.
+#[test]
+fn a_move_raced_each_time_is_tried_again_and_then_given_up() {
+    let mut script = Script::<true>::new(Ok(Gate::Unmoved));
+    script.legacy = Ok(Some((
+        b"{ not a list".to_vec(),
+        Fingerprint { len: 12, mtime: 1 },
+    )));
+    script
+        .moves
+        .borrow_mut()
+        .extend([Err(RACED), Err(RACED), Err(RACED)]);
+    let not = now(load(&script)).expect_err("raced");
+    assert_eq!(not.why, RACED.words);
+    assert_eq!(not.set_aside.len(), MOVE_TRIES, "each try's");
+    let tried = script.calls();
+    assert_eq!(
+        tried
+            .iter()
+            .filter(|call| call.starts_with("write_move"))
+            .count(),
+        MOVE_TRIES
+    );
+    let refused = Script::<true>::new(Ok(Gate::Unmoved));
+    refused.refuse_list.set(true);
+    assert_eq!(now(load(&refused)).expect_err("refused").why, REFUSED.words);
+}
+
+/// A take-up held back by a tombstone that cannot be read makes no change,
+/// and is still to take up once the listing has been seen; a move made
+/// over such a tombstone waits, and writes nothing.
+#[test]
+fn a_tombstone_that_cannot_be_read_holds_back_the_take_up_and_the_move() {
+    let script = Script::<false>::new(Ok(Gate::Open(Box::new(moved_layout()))));
+    script.changed.set(true);
+    let gone = record_of(1_000);
+    script.delete(gone.id, TombstoneRead::Failed("held open".into()));
+    now(listing(&script)).expect("listed");
+    assert_eq!(
+        script.calls(),
+        calls(&[
+            "gate",
+            "legacy_look",
+            "tombstones",
+            "look",
+            "list",
+            "saw",
+            "held_back",
+            "note(Failing)",
+            "note(UnreadTold)",
+            "note(DamagedTold)",
+        ])
+    );
+    let mut moving = Script::<false>::new(Ok(Gate::Unmoved));
+    moving.legacy = Ok(kept_whole(&[finished(1_000)]));
+    let here = record_of(500);
+    moving.hold(here.id, &here.json);
+    moving.delete(gone.id, TombstoneRead::Failed("held open".into()));
+    let load = now(load(&moving)).expect("read");
+    assert_eq!(
+        load.notices,
+        [HistoryNotice::MovePending("held open".into())]
+    );
+    assert!(!load.complete);
+    let calls = moving.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("write_move")),
+        "{calls:?}"
+    );
+}
+
+/// A read takes what it read out of the notes, the note of damage first,
+/// the gate read only where something goes; asks of records still unread
+/// read the gate whatever; deletions look at each record's tombstone, and
+/// the sessions deleted at every tombstone; a change refused by the gate
+/// is made nowhere.
+#[test]
+fn reads_and_asks_go_by_the_notes_and_the_tombstones_in_order() {
+    let script = Script::<false>::new(Ok(Gate::Unmoved));
+    let one = record_of(1_000);
+    script.hold(one.id, &one.json);
+    let names = |ids: &[RecordId]| {
+        serde_json::to_vec(&ids.iter().map(|id| id.name()).collect::<BTreeSet<_>>()).unwrap()
+    };
+    script
+        .notes
+        .borrow_mut()
+        .insert(named(Note::Failing), names(&[one.id]));
+    now(read(&script, &[one.id]));
+    assert_eq!(
+        script.calls(),
+        calls(&[
+            "read",
+            "note(DamagedTold)",
+            "note(Failing)",
+            "gate",
+            "write_note(Failing)",
+            "note(UnreadTold)",
+        ])
+    );
+    now(still_unread(&script, &[one.id]));
+    assert_eq!(
+        script.calls(),
+        calls(&[
+            "note(UnreadTold)",
+            "gate",
+            "write_note(UnreadTold)",
+            "note(Told)",
+            "write_note(Told)",
+            "note(DamagedTold)",
+            "write_note(DamagedTold)",
+            "note(Failing)",
+            "write_note(Failing)",
+        ])
+    );
+    now(still_unread(&script, &[one.id]));
+    assert_eq!(
+        script.calls(),
+        calls(&["note(UnreadTold)", "gate"]),
+        "told of once"
+    );
+    let browser = Script::<true>::new(Ok(Gate::Unmoved));
+    assert_eq!(
+        now(still_unread(&browser, &[one.id])),
+        [HistoryNotice::Unread { count: 1 }]
+    );
+    assert_eq!(browser.calls(), Vec::<String>::new(), "notes nothing");
+    now(deletions(&script, &[one.id]));
+    now(deleted_sessions(&script, &[one.id]));
+    now(deleted_keys(&script, vec![]));
+    assert_eq!(
+        script.calls(),
+        calls(&["tombstones_of", "tombstones_of", "tombstones"])
+    );
+    *script.gate.borrow_mut() = Ok(Gate::Newer);
+    let change = HistoryChange {
+        put: vec![one],
+        ..HistoryChange::default()
+    };
+    assert_eq!(now(apply(&script, &change)), HistorySaved::Newer);
+    assert_eq!(script.calls(), calls(&["gate"]));
+    *script.gate.borrow_mut() = Ok(Gate::Unmoved);
+    assert_eq!(
+        now(apply(&script, &change)),
+        HistorySaved::Stored { kept: 1 }
+    );
+    assert_eq!(script.calls(), calls(&["gate", "commit(App, as it is)"]));
 }

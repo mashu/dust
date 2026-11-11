@@ -924,7 +924,7 @@ impl HistoryFiles {
                         keys.insert(*id, key.clone());
                         key
                     }
-                    Raw::NoText(_) => continue,
+                    Raw::NoText(_) | Raw::Missing => continue,
                     Raw::Failed => return None,
                 },
             };
@@ -1432,7 +1432,7 @@ fn read_one(records: &Path, id: RecordId, packed: &BTreeMap<RecordId, String>) -
             Some((read, raw.len() as u64))
         }
         Raw::NoText(bytes) => Some((Err(Unreadable::default()), bytes)),
-        Raw::Failed => None,
+        Raw::Failed | Raw::Missing => None,
     }
 }
 
