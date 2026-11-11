@@ -1567,6 +1567,8 @@ mod tests {
             wait(self.0.deleted_sessions(ids.to_vec()))
         }
 
+        /// Asked only by tests that need a Unix file system.
+        #[cfg(unix)]
         fn deleted_keys(&self, keys: &[SessionKey]) -> Option<Vec<SessionKey>> {
             wait(self.0.deleted_keys(keys.to_vec()))
         }
