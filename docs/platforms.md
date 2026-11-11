@@ -1012,8 +1012,10 @@ holds; a damaged one does not, though it may still say one, and the older
 build's copy is taken up beside it, as a restore brings a backup's back
 beside it, and is left as it is when the older build deletes that session.
 While a record here cannot be read at all for now, or a pack of them opened,
-nothing is taken up: it may be the session, and the take-up waits for the
-next look at which every record reads.
+or a tombstone read, nothing is taken up: it may be the session, or say it
+was deleted, and the take-up waits for the next look at which every record
+and tombstone reads. A move made again over the records waits, as one that
+cannot be made yet does, while a tombstone here cannot be read.
 Going back to an older build shows the history as it was at the update,
 plus what it stores, and loses nothing kept since: the records stay for the
 next update. A history kept by a newer Dust in a way this build cannot

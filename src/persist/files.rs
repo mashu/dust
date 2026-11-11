@@ -1115,7 +1115,15 @@ impl HistoryFiles {
             }
         };
         let deleted = legacy_deleted(&self.root);
-        let gone = self.tombstoned_keys();
+        // A tombstone that cannot be read now may name a session to keep
+        // deleted: nothing is taken up until it reads.
+        let gone = match self.tombstoned_keys() {
+            Ok(gone) => gone,
+            Err(err) => {
+                eprintln!("could not read what was deleted here: {err}");
+                return None;
+            }
+        };
         let (change, next) =
             legacy::imported(layout, fingerprint, &sessions, &deleted, live, &gone)?;
         if !change.is_empty() && self.apply(&change).kept().is_none() {
@@ -1135,13 +1143,15 @@ impl HistoryFiles {
     /// on a first move. A move made again, as one whose layout no longer
     /// reads is, finds records already here: a session deleted since stays
     /// deleted, and one taken up from an older build since, under the name
-    /// it was taken up by, is not written a second time under another.
+    /// it was taken up by, is not written a second time under another. An
+    /// error where what is here cannot be looked at, a tombstone that
+    /// cannot be read now among it: the move waits.
     fn not_moved_yet(&self, moved: Vec<Record>) -> io::Result<Vec<Record>> {
         let (here, gone) = (ids_in(&self.records())?, ids_in(&self.tombstones())?);
         if here.is_empty() && gone.is_empty() {
             return Ok(moved);
         }
-        let gone_keys = self.tombstoned_keys();
+        let gone_keys = self.tombstoned_keys()?;
         let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
         // What each record here under a name the move does not give holds:
         // a session that needs no record of the move's.
@@ -1158,17 +1168,18 @@ impl HistoryFiles {
         ))
     }
 
-    /// The key of every session deleted here that its tombstone names.
-    fn tombstoned_keys(&self) -> HashSet<SessionKey> {
-        let Ok(gone) = ids_in(&self.tombstones()) else {
-            return HashSet::new();
-        };
-        gone.into_iter()
-            .filter_map(|id| {
-                let raw = fs::read(self.tombstones().join(file_name(id))).ok()?;
-                tombstone_key(&raw)
-            })
-            .collect()
+    /// The key of every session deleted here that its tombstone names: an
+    /// error where the tombstones cannot be listed, or one of them is there
+    /// but cannot be read, as a folder in its place cannot, or one held
+    /// open, as it may name a session to keep deleted. One that reads but
+    /// names none, as an empty one, names none.
+    fn tombstoned_keys(&self) -> io::Result<HashSet<SessionKey>> {
+        let mut keys = HashSet::new();
+        for id in ids_in(&self.tombstones())? {
+            let raw = fs::read(self.tombstones().join(file_name(id)))?;
+            keys.extend(tombstone_key(&raw));
+        }
+        Ok(keys)
     }
 
     /// What to tell of `unread`, the records this build cannot read, each
@@ -3093,6 +3104,78 @@ mod tests {
         );
     }
 
+    /// A session deleted here under a name an older build's copy of it is
+    /// not taken up by, as a fill-in's, is not taken up from that build's
+    /// history while its tombstone cannot be read, as a folder in its place
+    /// cannot, or a file held open: it may say the session was deleted. Nor
+    /// does a move made again, as one whose layout no longer reads is, write
+    /// it: the move waits. Once the tombstone reads, both are made, and the
+    /// session stays deleted. Taken for no deletion, it came back, at the
+    /// take-up and at the move. Which sessions the tombstones name, asked of
+    /// the store, leaves it out meanwhile, as it always has: that is no word
+    /// that it was not deleted.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_deleted_here_comes_back_from_no_older_build_while_its_tombstone_cannot_be_read() {
+        let dir = TempDir::new("unread-tombstone");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = Files::at(&dir.0);
+        let moved = files.load();
+        let [(moved, _)] = moved.sessions[..] else {
+            panic!("moved: {:?}", moved.sessions);
+        };
+        // Stored in the place of the one moved, as a restore fills one in,
+        // and deleted by hand; then the older build, still open, stores it,
+        // as one it holds as new; and its tombstone cannot be read.
+        let session = finished(now + 60_000);
+        let json = serde_json::to_string(&session).unwrap();
+        let filled = Record {
+            id: RecordId::beside(moved, &json),
+            json,
+        };
+        files.apply(&put(std::slice::from_ref(&filled)));
+        files.apply(&forget(&[(&filled, &session)]));
+        keep_whole(&dir, &[old, session.clone()]);
+        let tombstone = dir
+            .0
+            .join(HISTORY)
+            .join(TOMBSTONES)
+            .join(file_name(filled.id));
+        let held = fs::read(&tombstone).unwrap();
+        fs::remove_file(&tombstone).unwrap();
+        fs::create_dir(&tombstone).unwrap();
+        let files = Files::at(&dir.0);
+        assert_eq!(ids(&files.load()), [moved], "nothing taken up");
+        assert_eq!(
+            files.deleted_keys(&[SessionKey::of(&session)]),
+            Some(Vec::new()),
+            "left out, as one that does not read is"
+        );
+        assert_eq!(files.listing(), Some(vec![moved]), "nor at a listing");
+        // The layout damaged, the move made again waits.
+        fs::write(dir.0.join(HISTORY).join(LAYOUT_FILE), "{ damaged").unwrap();
+        let again = Files::at(&dir.0).load();
+        assert!(
+            matches!(&again.notices[..], [HistoryNotice::MovePending(_)]),
+            "{:?}",
+            again.notices
+        );
+        assert!(!again.complete);
+        assert_eq!(ids(&again), [moved], "nothing moved");
+        fs::remove_dir(&tombstone).unwrap();
+        fs::write(&tombstone, held).unwrap();
+        let read = Files::at(&dir.0).load();
+        assert!(
+            read.complete && read.notices.is_empty(),
+            "{:?}",
+            read.notices
+        );
+        assert_eq!(ids(&read), [moved], "still deleted");
+        assert_eq!(files.listing(), Some(vec![moved]));
+    }
+
     /// Which records were deleted by hand comes with when each was, as its
     /// tombstone says, none for one that does not say; and which session
     /// each was, where its tombstone says. On every platform, as the
@@ -4787,6 +4870,8 @@ mod tests {
         a_session_a_pack_here_holds_is_not_taken_up_from_an_older_build_while_that_pack_cannot_be_opened,
         a_session_a_later_build_stored_here_is_not_taken_up_from_an_older_build,
         a_session_whose_record_here_is_damaged_is_taken_up_from_an_older_build_beside_it,
+        #[cfg(unix)]
+        a_session_deleted_here_comes_back_from_no_older_build_while_its_tombstone_cannot_be_read,
         a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
