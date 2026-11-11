@@ -797,20 +797,36 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
         self.0.progress.moving(None);
     }
 
-    /// In one transaction, how the history is kept with it, written only
-    /// over the layout the database held as this copy last read or wrote
-    /// it, where the change takes something up: two tabs taking it up at
-    /// once take it up once ([`Refused::Raced`]). Any other change writes
-    /// the layout again only should the browser have cleared the database
-    /// meanwhile. Each record goes under the name the page script says it
-    /// went under.
+    /// In one transaction, how the history is kept with it, where the
+    /// change takes something up written only over the layout the take-up
+    /// was worked out from, as this copy last read or wrote it, and as the
+    /// database holds it still: two looks taking it up at once, in one tab
+    /// or in two, take it up once ([`Refused::Raced`]). Any other change
+    /// writes the layout again only should the browser have cleared the
+    /// database meanwhile. Each record goes under the name the page script
+    /// says it went under.
     async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, _by: By) -> Made<Refused> {
         let history = self.0;
         let change = writes.change;
-        let held = history.layout.borrow().as_ref().map(|(_, raw)| raw.clone());
         let (layout, next) = match laid {
-            Laid::AsItIs => (held.map(LayoutWrite::Missing), None),
-            Laid::Over(next) => {
+            Laid::AsItIs => {
+                let held = history.layout.borrow().as_ref().map(|(_, raw)| raw.clone());
+                (held.map(LayoutWrite::Missing), None)
+            }
+            Laid::Over { from, next } => {
+                // How the history is kept moved on since this take-up was
+                // worked out, as another look of this tab took something
+                // up: refused, as the database refuses one another tab's
+                // moved on.
+                let held = match history.layout.borrow().as_ref() {
+                    Some((cached, raw)) if cached == from => raw.clone(),
+                    _ => {
+                        return Made {
+                            placed: Vec::new(),
+                            saved: Err(Refused::Raced),
+                        };
+                    }
+                };
                 let Some(written) = layout_text(next) else {
                     return Made {
                         placed: Vec::new(),
@@ -818,7 +834,7 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
                     };
                 };
                 let layout = LayoutWrite::Over {
-                    expect: held,
+                    expect: Some(held),
                     write: written.clone(),
                 };
                 (Some(layout), Some((next.clone(), written)))

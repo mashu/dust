@@ -612,7 +612,7 @@ impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
     async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<Said> {
         let laid = match laid {
             Laid::AsItIs => "as it is",
-            Laid::Over(next) => {
+            Laid::Over { next, .. } => {
                 *self.laid.borrow_mut() = Some(next.clone());
                 "over"
             }

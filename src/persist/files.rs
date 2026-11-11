@@ -1171,7 +1171,7 @@ impl Backend for Disk<'_> {
             made
         };
         if made.is_ok()
-            && let Laid::Over(next) = laid
+            && let Laid::Over { next, .. } = laid
         {
             let noted = next
                 .written()

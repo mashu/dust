@@ -383,9 +383,15 @@ pub(super) enum Laid<'a> {
     /// As it is: written again only where a store lost it, as a browser's
     /// cleared database does.
     AsItIs,
-    /// As this says, once the change is made: what a take-up took is
-    /// noted in it.
-    Over(&'a Layout),
+    /// As `next` says, once the change is made: what a take-up took is
+    /// noted in it. `from` is how the history was kept as the take-up was
+    /// worked out from it: a store that may take up more than one at once
+    /// writes it over nothing else ([`Backend::commit`]).
+    Over {
+        #[cfg_attr(not(any(feature = "web", test)), allow(dead_code))]
+        from: &'a Layout,
+        next: &'a Layout,
+    },
 }
 
 /// Whose change a store makes ([`Backend::commit`]).
@@ -1025,7 +1031,11 @@ async fn take_up<B: Backend>(
         return Err(HeldBack);
     }
     let writes = Writes::of(&change).map_err(|_| HeldBack)?;
-    let made = store.commit(&writes, Laid::Over(&next), By::Store).await;
+    let laid = Laid::Over {
+        from: layout,
+        next: &next,
+    };
+    let made = store.commit(&writes, laid, By::Store).await;
     noted(store.keys(), &change, &made.placed, made.saved.is_ok());
     match made.saved {
         // Each session where it went, to be read there.

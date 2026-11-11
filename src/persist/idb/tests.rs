@@ -1063,6 +1063,155 @@ fn what_an_older_build_stores_after_the_move_is_taken_up_once() {
     assert_eq!(fake.records().len(), 2, "taken up once");
 }
 
+/// One tab's way to the database, each answer given a moment after it is
+/// asked for where it is set to wait, as a browser gives its answers: two
+/// looks of one tab then take turns, each where the other waits.
+#[derive(Clone)]
+struct Slow {
+    fake: Fake,
+    waits: Rc<Cell<bool>>,
+}
+
+impl Slow {
+    /// `answer`, made as it was asked for, and given at the second ask,
+    /// where this waits.
+    fn later<T: 'static>(&self, mut answer: Pending<T>) -> Pending<T> {
+        if !self.waits.get() {
+            return answer;
+        }
+        let mut asked = false;
+        Box::pin(std::future::poll_fn(move |waiting| {
+            if !std::mem::replace(&mut asked, true) {
+                waiting.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            answer.as_mut().poll(waiting)
+        }))
+    }
+}
+
+impl Glue for Slow {
+    fn head(&self) -> Pending<Result<Head, Refused>> {
+        self.later(self.fake.head())
+    }
+
+    fn page(&self, after: Option<String>, count: usize) -> Pending<Result<Stored, Refused>> {
+        self.later(self.fake.page(after, count))
+    }
+
+    fn tombstones(&self) -> Pending<Result<Stored, Refused>> {
+        self.later(self.fake.tombstones())
+    }
+
+    fn list(&self) -> Pending<Result<Listed, Refused>> {
+        self.later(self.fake.list())
+    }
+
+    fn read(&self, names: Vec<String>) -> Pending<Result<Vec<Option<String>>, Refused>> {
+        self.later(self.fake.read(names))
+    }
+
+    fn tombstones_of(&self, names: Vec<String>) -> Pending<Result<Stored, Refused>> {
+        self.later(self.fake.tombstones_of(names))
+    }
+
+    fn apply(&self, writes: Transaction) -> Pending<Result<Vec<Option<String>>, Refused>> {
+        self.later(self.fake.apply(writes))
+    }
+
+    fn stamp(&self) -> Option<String> {
+        self.fake.stamp()
+    }
+
+    fn news(&self) -> u64 {
+        self.fake.news()
+    }
+
+    fn next_news(&self) -> Pending<()> {
+        self.fake.next_news()
+    }
+
+    fn legacy_len(&self, key: &str) -> Result<Option<u64>, ()> {
+        self.fake.legacy_len(key)
+    }
+}
+
+/// What `future` comes to, asked of as often as it takes, as each answer
+/// that waits is given at the next ask.
+fn awaited<T>(future: impl Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    for _ in 0..10_000 {
+        if let Poll::Ready(value) = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            return value;
+        }
+    }
+    panic!("it waits, on nothing that answers");
+}
+
+/// Two looks of one tab taking up what an older build changed, as the
+/// app's looks at news, at the page shown again and at its timer may run
+/// at once, the later made first: the earlier, worked out from how the
+/// history was kept before the later noted what it took, makes nothing, as
+/// it would were the later another tab's, and a deletion the later took up
+/// stays taken up. Written over the later's, as since 4834961, the earlier
+/// noted the deletion as still to take up, and the next look deleted the
+/// session again once Undo had put it back.
+#[test]
+fn a_take_up_worked_out_before_another_look_of_the_tab_took_up_makes_nothing() {
+    let (first, second, third) = (ago(30), ago(20), ago(10));
+    let page = Page::holding(&[first.clone(), second.clone()]);
+    let fake = Fake::on(&page);
+    let slow = Slow {
+        fake: fake.clone(),
+        waits: Rc::default(),
+    };
+    let tab = done(BrowserHistory::open(
+        slow.clone(),
+        false,
+        page.clone(),
+        KEYS,
+    ))
+    .expect("opened");
+    let (id, _) = tab.load().sessions[1].clone();
+    let record = Record {
+        id,
+        json: fake.records()[&id].clone(),
+    };
+    // An older build stores a third session, and a look begins to take it
+    // up: it has read the history kept whole as the older build left it.
+    page.keep(&[first.clone(), second.clone(), third.clone()]);
+    slow.waits.set(true);
+    let mut earlier = std::pin::pin!(tab.listing());
+    assert!(
+        earlier
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending(),
+        "it waits on the database"
+    );
+    // The older build deletes the second; a later look takes both up.
+    page.keep(&[first, third]);
+    page.deleted(&[Deleted::of(&second, crate::time::now_ms())]);
+    let listed = awaited(tab.listing()).expect("listed");
+    assert!(!listed.contains(&id), "deleted: {listed:?}");
+    let taken = fake.layout();
+    awaited(earlier);
+    assert_eq!(fake.layout(), taken, "the earlier look made nothing");
+    // Undo puts the second back, and the next look leaves it there.
+    slow.waits.set(false);
+    let undo = HistoryChange {
+        put: vec![record],
+        unforget: vec![id],
+        ..HistoryChange::default()
+    };
+    assert_eq!(done(tab.apply(undo)), HistorySaved::Stored { kept: 1 });
+    let listed = done(tab.listing()).expect("listed");
+    assert!(listed.contains(&id), "put back, and kept: {listed:?}");
+}
+
 /// A session a later build stored in the database, in a record this build
 /// cannot read that says which session it holds, is not taken up a second
 /// time from the history an older build keeps whole, as the page opens nor

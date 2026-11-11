@@ -1050,7 +1050,7 @@ impl Backend for InMem<'_> {
                 saved: Err(Refused(saved)),
             };
         }
-        if let Laid::Over(next) = laid {
+        if let Laid::Over { next, .. } = laid {
             *self.0.layout.borrow_mut() = Some(next.clone());
         }
         Made {
