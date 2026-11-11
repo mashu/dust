@@ -1153,8 +1153,12 @@ impl HistoryFiles {
     /// it was taken up by, is not written a second time under another. An
     /// error where what is here cannot be looked at, a tombstone, or a
     /// record under a name the move does not give, that cannot be read now
-    /// among it: the move waits.
+    /// among it: the move waits. A move with nothing to write looks at
+    /// nothing, and waits for nothing.
     fn not_moved_yet(&self, moved: Vec<Record>) -> io::Result<Vec<Record>> {
+        if moved.is_empty() {
+            return Ok(moved);
+        }
         let (here, gone) = (ids_in(&self.records())?, ids_in(&self.tombstones())?);
         if here.is_empty() && gone.is_empty() {
             return Ok(moved);
@@ -4719,6 +4723,41 @@ mod tests {
         assert_eq!(names(&dir.0.join(HISTORY).join(RECORDS)).len(), 2);
     }
 
+    /// A move with nothing to move, as one made again over a layout that no
+    /// longer reads, where no history is kept whole, writes nothing, and so
+    /// waits for nothing: a record or a tombstone here that cannot be read
+    /// now holds it back no more than it holds back a first move. It
+    /// waited, and the app told of sessions from before this version that
+    /// could not be read, where there were none.
+    #[cfg(unix)]
+    #[test]
+    fn a_move_with_nothing_to_move_waits_for_nothing() {
+        let (dir, files) = history("move-nothing");
+        files.load();
+        let (first, second) = (finished(1_000), finished(2_000));
+        let (one, two) = (record(&first), record(&second));
+        files.apply(&put(&[one.clone(), two.clone()]));
+        files.apply(&forget(&[(&two, &second)]));
+        // The one left cannot be read now, nor the other's tombstone; and
+        // the layout is damaged.
+        let history = dir.0.join(HISTORY);
+        for path in [
+            history.join(RECORDS).join(file_name(one.id)),
+            history.join(TOMBSTONES).join(file_name(two.id)),
+        ] {
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        }
+        fs::write(history.join(LAYOUT_FILE), "{ damaged").unwrap();
+        let again = Files::at(&dir.0).load();
+        assert!(
+            again.complete && again.notices.is_empty(),
+            "{:?}",
+            again.notices
+        );
+        assert_eq!(again.failed, [one.id]);
+    }
+
     /// Write a pack of `records` in the history in `root`, as a later
     /// build packs them, with `extra` lines after them.
     fn pack(root: &Path, name: &str, records: &[&Record], extra: &[&str]) -> PathBuf {
@@ -5087,6 +5126,8 @@ mod tests {
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
         #[cfg(unix)]
         a_move_made_over_a_record_that_cannot_be_read_now_waits_for_it,
+        #[cfg(unix)]
+        a_move_with_nothing_to_move_waits_for_nothing,
         a_pack_and_a_loose_copy_of_one_record_read_as_one,
         a_record_packed_while_the_history_is_listed_is_listed_all_the_same,
         a_record_packed_while_the_history_is_read_is_read_all_the_same,
