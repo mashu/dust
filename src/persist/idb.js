@@ -336,14 +336,17 @@ return {
   },
 
   // How the history is kept, and the records told of: each null where none
-  // is held.
+  // is held. And how many records there are, as the read that follows it
+  // counts them.
   head: () =>
     withDb((base) =>
-      transact(base, [META], "readonly", (tx, said) => {
+      transact(base, [META, SESSIONS], "readonly", (tx, said) => {
         const meta = tx.objectStore(META);
         const layout = meta.get("layout");
         const told = meta.get("told");
-        told.onsuccess = () => said.answer({ layout: asText(layout.result), told: asText(told.result) });
+        const count = tx.objectStore(SESSIONS).count();
+        count.onsuccess = () =>
+          said.answer({ layout: asText(layout.result), told: asText(told.result), count: count.result });
       }),
     ),
 
@@ -393,14 +396,19 @@ return {
       }),
     ),
 
-  // Which of `keys` were deleted by hand: those with a tombstone.
-  deleted: (keys) =>
+  // Which of `keys` were deleted by hand: those with a tombstone, each beside
+  // what its tombstone holds, which says when.
+  tombstonesOf: (keys) =>
     withDb((base) =>
       transact(base, [DELETED], "readonly", (tx, said) => {
         const deleted = tx.objectStore(DELETED);
-        const counted = keys.map((key) => deleted.count(key));
-        said.answer([]);
-        lastOf(counted, () => said.answer(keys.filter((_, at) => counted[at].result > 0)));
+        const asked = keys.map((key) => deleted.get(key));
+        said.answer(pairs([], []));
+        lastOf(asked, () => {
+          const held = keys.filter((_, at) => asked[at].result !== undefined);
+          const tombstones = asked.map((one) => one.result).filter((one) => one !== undefined);
+          said.answer(pairs(held, tombstones));
+        });
       }),
     ),
 

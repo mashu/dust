@@ -1,9 +1,10 @@
 //! A sync, start to end, against a store and a folder: finding the keyring
 //! as sync is turned on ([`look`], [`join`]), and each sync after
-//! ([`sync_once`]). Nothing here knows which store or folder it has, nor
-//! touches the app: it says what it did, and the app takes it up.
+//! ([`sync_once_with`]). Nothing here knows which store or folder it has,
+//! nor touches the app: it says what it did, and the app takes it up.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::RangeInclusive;
 
 use cw_core::{SessionResult, TrainingSettings};
 use serde_json::Map;
@@ -19,7 +20,7 @@ use super::settings::{
     SETTINGS_PREFIX, SettingsFile, StampedSettings, Using, merge, stamp, stamps_of, taken,
 };
 use super::state::SyncState;
-use crate::persist::record::{HistoryChange, Record, RecordId, read_record};
+use crate::persist::record::{HistoryChange, Pending, Record, RecordId, read_record};
 use crate::persist::{Deleted, Store};
 
 /// What turning sync on found in the drive.
@@ -255,15 +256,9 @@ async fn read_packs(
     Ok((unreadable, newer))
 }
 
-/// Sync the history in `store` and the settings `here` with the drive
-/// `remote`, as `state` says this device stands, and say what it did. What
-/// it changes of `state` is changed as it goes, whether it ends well or
-/// not: the caller keeps it either way.
-///
-/// What the drive holds is taken into the store first, in one change,
-/// before anything is sent: a sync cut short leaves the store as it was or
-/// with all of it, and the next sends what this one did not. Packs read
-/// are noted only once what they hold is in the store.
+/// A sync with nothing put back by hand while it runs, kept as it ends, as
+/// a test syncs a device: [`sync_once_with`].
+#[cfg(test)]
 pub async fn sync_once(
     store: &dyn Store,
     remote: &dyn Remote,
@@ -271,6 +266,50 @@ pub async fn sync_once(
     here: &TrainingSettings,
     now: u64,
 ) -> Result<Synced, SyncFailed> {
+    let keep = |_: &SyncState| crate::persist::record::done(());
+    sync_once_with(store, remote, state, here, &|| now, &BTreeSet::new, &keep).await
+}
+
+/// Sync the history in `store` and the settings `here` with the drive
+/// `remote`, as `state` says this device stands, and say what it did. What
+/// it changes of `state` is changed as it goes, whether it ends well or
+/// not: the caller keeps it either way.
+///
+/// `clock` tells the time, as the app's clock does: the sync's own is when
+/// it begins, and it is asked again as the sync has listed the history, to
+/// bound the deletions by hand made meanwhile ([`planned`]).
+///
+/// What the drive holds is taken into the store first, in one change,
+/// before anything is sent: a sync cut short leaves the store as it was or
+/// with all of it, and the next sends what this one did not. Packs read
+/// are noted only once what they hold is in the store.
+///
+/// `put_back_since` says which records were put back by hand here since
+/// the sync began, after it took in the notes it plans from
+/// ([`SyncState::revived`]): none of them is let go, or taken back,
+/// whatever the drive says, and a deletion's note of one is of a deletion
+/// before that putting back, as for one put back before the sync. The app
+/// notes those as the sync ends, and the next sync sends them as put back.
+/// It is asked as the sync has listed the history, so that one deleted by
+/// hand again by then is sent as deleted by hand, and again once the sync
+/// has read all it reads of the store and the drive, just before it
+/// changes the store.
+///
+/// `keep` keeps `state` as it stands, which the caller does in any case as
+/// the sync ends: it is asked as a pack holding deletions by hand goes,
+/// once they are noted against it ([`send_pack`]), and the pack goes once
+/// it is kept, so that an app stopped before the sync ends knows of the
+/// pack all the same.
+pub async fn sync_once_with(
+    store: &dyn Store,
+    remote: &dyn Remote,
+    state: &mut SyncState,
+    here: &TrainingSettings,
+    clock: &dyn Fn() -> u64,
+    put_back_since: &dyn Fn() -> BTreeSet<RecordId>,
+    keep: &dyn Fn(&SyncState) -> Pending<()>,
+) -> Result<Synced, SyncFailed> {
+    let now = clock();
     let key = DataKey::from_hex(&state.key).ok_or(SyncFailed::NoKey)?;
     let keys = Keys::of(&key);
     let files = remote.list().await?;
@@ -293,6 +332,22 @@ pub async fn sync_once(
         remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
     )
     .await?;
+    take_unanswered(state, &files, &read, &drive);
+    // A sync that has read nothing of the drive yet, as one just turned on
+    // anew, stamped each putting back it notes knowing nothing of the
+    // drive: what sync knew before it was turned on anew went with it. Each
+    // is stamped again after what the drive holds of its record, as one
+    // noted now would be. One noted once this device knew the drive keeps
+    // its stamp: stamped again, it would beat a later deletion made
+    // elsewhere. Yet one a copy of the app noted under a sync another copy
+    // has since turned off, and kept for the next, is stamped again here
+    // all the same, however long ago it was noted: a deletion made
+    // elsewhere after it loses to it.
+    if state.read.is_empty() {
+        for (&id, at) in &mut state.revived {
+            *at = drive.stamp_change(id, *at);
+        }
+    }
 
     let listed: BTreeSet<RecordId> = store
         .history_listing()
@@ -300,20 +355,27 @@ pub async fn sync_once(
         .ok_or_else(|| SyncFailed::Store("the history here could not be read".into()))?
         .into_iter()
         .collect();
+    // Every deletion by hand of a session the listing left out was made by
+    // then, by the clock, unless the clock was set ahead as it was made,
+    // and set right since.
+    let listed_at = clock().max(now);
+    let put_back_by_then = put_back_since();
     // A deletion the drive holds is the last word here only while the
     // session stays gone: one listed here again, or put back here by hand
-    // since the last sync, and deleted after, was deleted by hand, which
-    // the drive is to hear of, or which a deletion it holds accounts for.
-    state
-        .applied
-        .retain(|id, _| !listed.contains(id) && !state.revived.contains_key(id));
+    // since the last sync, or since this one took in its notes, and deleted
+    // after, was deleted by hand, which the drive is to hear of, or which a
+    // deletion it holds accounts for.
+    state.applied.retain(|id, _| {
+        !listed.contains(id) && !state.revived.contains_key(id) && !put_back_by_then.contains(id)
+    });
     // Once, at the first sync after an update from a build that noted no
-    // deletion by hand: those it made that the drive holds, noted.
+    // deletion by hand: those it made that the drive holds, noted. Not
+    // spent at a sync at which the store could not say which those are:
+    // the sync goes on, and the next looks again.
     if !state.deletions_noted {
-        note_deletions_by_hand(store, &listed, state).await;
-        state.deletions_noted = true;
+        state.deletions_noted = note_deletions_by_hand(store, &listed, state).await;
     }
-    let mut planned = planned(store, &drive, &listed, state).await;
+    let (mut planned, mut stamped) = planned(store, &drive, &listed, state, now, listed_at).await;
     // A record to take that only a pack read before holds, as where the
     // store here lost one: every pack read again, once.
     let wanting = |planned: &Plan, bytes: &HashMap<RecordId, String>| {
@@ -332,7 +394,7 @@ pub async fn sync_once(
             remote, &keys, &files, &mut read, later, &mut drive, &mut bytes,
         )
         .await?;
-        planned = self::planned(store, &drive, &listed, state).await;
+        (planned, stamped) = self::planned(store, &drive, &listed, state, now, listed_at).await;
     }
 
     // The deletions made here by hand to send, the twins' below left out.
@@ -361,6 +423,15 @@ pub async fn sync_once(
 
     // What the drive holds, taken here.
     let here_bytes = read_here(store, &planned).await;
+    // Put back by hand since this sync began, after it took in the notes
+    // it planned from: not this sync's to let go, nor to take back, as each
+    // is back here already, or was deleted by hand again since, after the
+    // deletion a note of it accounts for. Asked after its last read, as
+    // nothing comes between this and the change.
+    let since = put_back_since();
+    planned.let_go.retain(|(id, _)| !since.contains(id));
+    planned.take_back.retain(|id| !since.contains(id));
+    state.applied.retain(|id, _| !since.contains(id));
     let mut change = HistoryChange::default();
     for &id in planned.take.iter().chain(&planned.take_back) {
         if let Some(json) = bytes.get(&id) {
@@ -431,12 +502,17 @@ pub async fn sync_once(
             })
         })
         .collect();
+    // Each deletion by hand stamped as it was made, where the store says
+    // when; a twin's, or one whose tombstone does not say, as made now.
     let forget: Vec<Forget> = planned
         .send_deleted
         .iter()
         .map(|&id| Forget {
             id: id.name(),
-            at: state.stamp_change(id, now),
+            at: stamped
+                .get(&id)
+                .copied()
+                .unwrap_or_else(|| state.stamp_change(id, now)),
         })
         .collect();
     let revive: Vec<Revive> = planned
@@ -455,23 +531,11 @@ pub async fn sync_once(
         .revived
         .retain(|id, _| sent_back.contains(id) && listed.contains(id));
     for pack in packs_of(&state.device, now, put, forget, revive) {
-        send_pack(remote, &keys, state, &pack).await?;
+        send_pack(remote, &keys, state, &pack, &by_hand, keep).await?;
         synced.sent += pack.put.len() + pack.forget.len() + pack.revive.len();
         for revive in &pack.revive {
             if let Some(id) = revive.record_id() {
                 state.revived.remove(&id);
-            }
-        }
-        // A deletion by hand, once the drive holds it, is the drive's,
-        // noted as one taken from it: a putting back the drive holds after
-        // it brings the session back here, as on every other device, rather
-        // than this device sending it again. A twin's is not: its session
-        // is kept under the other name.
-        for forget in &pack.forget {
-            if let Some(id) = forget.record_id()
-                && by_hand.contains(&id)
-            {
-                state.applied.insert(id, forget.at);
             }
         }
     }
@@ -482,53 +546,117 @@ pub async fn sync_once(
 }
 
 /// Note the deletions by hand made here that a build before this one,
-/// which noted none, left with no note: those of the sessions the drive
-/// held as deleted as this device last synced, each deleted by hand here
-/// and sent from here, or found deleted in the drive already. Each is noted
-/// with the drive's deletion, as this build notes one it finds the drive
-/// holding ([`Plan::deleted_too`]): a putting back the drive holds after it
-/// brings the session back here, rather than this device sending its
-/// deletion again. One put back here by hand since the last sync is left
-/// out: deleted again, it is a deletion by hand as any other.
+/// which noted none, left with no note: those of every record the drive
+/// held a deletion of as this device last synced, put back since or not,
+/// each deleted by hand here and sent from here, or found deleted in the
+/// drive already. A sync at which the store could not say which those are
+/// takes in what the drive holds all the same, a putting back after such a
+/// deletion among it, and the next looks for that deletion still. Each is
+/// noted with the drive's deletion, as this build notes one it finds the
+/// drive holding ([`Plan::deleted_too`]): a putting back the drive holds
+/// after it brings the session back here, rather than this device sending
+/// its deletion again. One put back here by hand since the last sync is left
+/// out: deleted again, it is a deletion by hand as any other. So is one
+/// made here after the drive's deletion, by this device's clock, which is
+/// the later word ([`Plan::send_deleted`]): should the drive put the
+/// session back, it is sent, stamped as it was made. And so is a twin let
+/// go here, its session kept under the other name ([`twin_kept_here`]):
+/// no deletion by hand, though it has a tombstone, it is not noted as one,
+/// as the sync that let it go did not note it ([`send_pack`]), and the
+/// drive putting its name back does not bring it back here beside the one
+/// kept. A deletion by hand of one of two sessions finished in the same
+/// millisecond is left out with it: it is not noted, as before this build.
+/// So are the record a restore filled in, its filled record named in the
+/// same millisecond in its place ([`RecordId::beside`]), and a filled
+/// record the Undo of that restore took out, the record it filled in back
+/// in its place: neither is noted, and the drive putting either back has
+/// its deletion sent again, stamped as it is sent ([`planned`]), the
+/// session staying here once, under the record kept.
+///
+/// Says whether it looked: not where the store could not say which were
+/// deleted by hand, which the next sync asks again.
 async fn note_deletions_by_hand(
     store: &dyn Store,
     listed: &BTreeSet<RecordId>,
     state: &mut SyncState,
-) {
+) -> bool {
     let unnoted: Vec<RecordId> = state
         .drive
         .tombs
         .keys()
         .copied()
         .filter(|&id| {
-            state.drive.deleted(id)
-                && !listed.contains(&id)
+            !listed.contains(&id)
                 && !state.applied.contains_key(&id)
                 && !state.revived.contains_key(&id)
+                && !twin_kept_here(id, listed)
         })
         .collect();
     if unnoted.is_empty() {
-        return;
+        return true;
     }
-    for id in store.forgotten(unnoted).await {
-        if let Some(&at) = state.drive.tombs.get(&id) {
+    let Some(found) = store.deletions(unnoted).await else {
+        return false;
+    };
+    for (id, made) in found {
+        if let Some(&at) = state.drive.tombs.get(&id)
+            && made.is_none_or(|made| made <= at)
+        {
             state.applied.insert(id, at);
         }
     }
+    true
 }
 
 /// The plan for this sync, the store asked which of what the drive holds
-/// and it does not list it deleted by hand: of what the drive holds alive,
-/// and of what it holds as deleted that this device has no note of, where
-/// the drive deleted it since the last sync, as a session deleted on two
-/// devices before either synced, or this device put it back by hand since
-/// and deleted it again.
+/// and it does not list it deleted by hand, and when: of what the drive
+/// holds alive, and of what it holds as deleted that this device has no
+/// note of, where the drive deleted it since the last sync, as a session
+/// deleted on two devices before either synced, or this device put it back
+/// by hand since and deleted it again. None of them, where the store could
+/// not say: missing is never deleted.
+///
+/// Beside it, the stamp of each deletion by hand whose tombstone says when
+/// it was made ([`SyncState::stamp_change`]): then, or just after what this
+/// device knew the drive to hold of its record before this sync read it,
+/// where that is later. So a putting back made elsewhere after it, by the
+/// clock, stands, though the deletion reaches the drive only after; and one
+/// this device knew of as it deleted the session does not. A tombstone
+/// that says it was made no later than `listed_at`, when this sync listed
+/// the history, by the clock that gives the sync's time, is taken as it
+/// says: bounded by when the sync began, `began`, one made while the sync
+/// waited on the drive, before it listed the history, was taken as made
+/// before a putting back made elsewhere meanwhile, earlier by the clock,
+/// and lost to it. One that says later was made with the clock set ahead,
+/// and set right since: no later than the listing, which left its session
+/// out, but when is not known, and it is taken as made as the sync began,
+/// as one made before the sync most likely was. Stamped as it said, the
+/// deletion would beat every putting back made elsewhere until then; and
+/// bounded by the listing, it beat one made elsewhere while the sync waited
+/// on the drive, after it. That time also tells whether it was made after
+/// the drive's deletion of the record ([`Here::made`]). But where a sync
+/// before this one read the drive and did not send a deletion, as the
+/// store could not say which were deleted by hand, as that sync listed the
+/// history before the deletion was made, or as it was cut short as it
+/// sent, the deletion is stamped after what that sync read as well: a
+/// putting back made elsewhere after it, by the clock, that the sync read
+/// loses to it. A twin let go here ([`twins`]) is no deletion by hand,
+/// though it has a tombstone: its deletion, sent again where the drive has
+/// its name put back, is made as it is sent, as it was as the twin was let
+/// go, after any putting back. The same rule ([`twin_kept_here`]) takes in
+/// the record a restore filled in, its filled record named in the same
+/// millisecond in its place ([`RecordId::beside`]), and a filled record the
+/// Undo of that restore took out: each deletion is stamped as it is sent,
+/// and never sent as made after the drive's deletion of the record, as
+/// every deletion by hand was before this build.
 async fn planned(
     store: &dyn Store,
     drive: &DriveState,
     listed: &BTreeSet<RecordId>,
     state: &SyncState,
-) -> Plan {
+    began: u64,
+    listed_at: u64,
+) -> (Plan, BTreeMap<RecordId, u64>) {
     let deleted_since = drive.tombs.keys().copied().filter(|&id| {
         drive.deleted(id)
             && (!state.drive.deleted(id) || state.revived.contains_key(&id))
@@ -540,20 +668,62 @@ async fn planned(
         .chain(deleted_since)
         .filter(|id| !listed.contains(id))
         .collect();
-    let forgotten: BTreeSet<RecordId> = if missing.is_empty() {
-        BTreeSet::new()
+    let found = if missing.is_empty() {
+        Vec::new()
     } else {
-        store.forgotten(missing).await.into_iter().collect()
+        store.deletions(missing).await.unwrap_or_default()
     };
-    plan(
+    let forgotten: BTreeSet<RecordId> = found.iter().map(|&(id, _)| id).collect();
+    let made: BTreeMap<RecordId, u64> = found
+        .iter()
+        .filter(|&&(id, _)| !twin_kept_here(id, listed))
+        .filter_map(|&(id, made)| {
+            let made = made?;
+            Some((id, if made > listed_at { began } else { made }))
+        })
+        .collect();
+    // `state` holds the drive as this device knew it before this sync.
+    let stamps = made
+        .iter()
+        .map(|(&id, &made)| (id, state.stamp_change(id, made)))
+        .collect();
+    let plan = plan(
         drive,
         Here {
             listed,
             forgotten: &forgotten,
+            made: &made,
             applied: &state.applied,
             revived: &state.revived,
         },
-    )
+    );
+    (plan, stamps)
+}
+
+/// The names of the sessions that finished in the same millisecond as the
+/// one `id` names, as a session's name falls where it finished
+/// ([`RecordId::next`], [`RecordId::placed`]).
+fn same_millisecond(id: RecordId) -> RangeInclusive<RecordId> {
+    let from = id.order / 1000 * 1000;
+    let start = RecordId {
+        order: from,
+        nonce: 0,
+    };
+    let end = RecordId {
+        order: from.saturating_add(999),
+        nonce: u64::MAX,
+    };
+    start..=end
+}
+
+/// Whether `id`, gone here, may be a twin let go here ([`twins`]): another
+/// record listed here names a session that finished in the same
+/// millisecond, which may be its session, kept under that name. So it is
+/// for a record a restore filled in, or a filled record the Undo of that
+/// restore took out: the record in its place is named in the same
+/// millisecond ([`RecordId::beside`]).
+fn twin_kept_here(id: RecordId, listed: &BTreeSet<RecordId>) -> bool {
+    listed.range(same_millisecond(id)).any(|&other| other != id)
 }
 
 /// A record the drive holds that is a session this device holds already
@@ -587,17 +757,8 @@ async fn twins(
         .collect();
     let mut near: Vec<(RecordId, Vec<RecordId>)> = Vec::new();
     for &theirs in &planned.take {
-        let from = theirs.order / 1000 * 1000;
-        let start = RecordId {
-            order: from,
-            nonce: 0,
-        };
-        let end = RecordId {
-            order: from.saturating_add(999),
-            nonce: u64::MAX,
-        };
         let here: Vec<RecordId> = listed
-            .range(start..=end)
+            .range(same_millisecond(theirs))
             .copied()
             .filter(|id| !busy.contains(id))
             .collect();
@@ -673,20 +834,71 @@ async fn read_here(store: &dyn Store, planned: &Plan) -> BTreeMap<RecordId, Stri
 }
 
 /// Send `pack`, and take it as read: what it holds is here already.
+///
+/// A deletion by hand it holds, of those `by_hand`, is the drive's once the
+/// drive holds it, noted as one taken from it: a putting back the drive
+/// holds after it brings the session back here, as on every other device,
+/// rather than this device sending it again. A twin's is not: its session
+/// is kept under the other name. Until the drive answers, they are noted
+/// against the pack's name ([`SyncState::unanswered`]): made though the
+/// answer was lost, the pack is found at the next sync, and they are the
+/// drive's then ([`take_unanswered`]). The note is kept (`keep`) before the
+/// pack goes, so that it holds though the app stops before the sync ends.
 async fn send_pack(
     remote: &dyn Remote,
     keys: &Keys,
     state: &mut SyncState,
     pack: &Pack,
+    by_hand: &BTreeSet<RecordId>,
+    keep: &dyn Fn(&SyncState) -> Pending<()>,
 ) -> Result<(), SyncFailed> {
     let name =
         pack_name().ok_or_else(|| SyncFailed::Store("this device could not name a file".into()))?;
     let sealed = seal_pack(keys, &name, pack)
         .ok_or_else(|| SyncFailed::Store("this device could not seal what it sends".into()))?;
+    let deletions: BTreeMap<RecordId, u64> = pack
+        .forget
+        .iter()
+        .filter_map(|forget| Some((forget.record_id()?, forget.at)))
+        .filter(|(id, _)| by_hand.contains(id))
+        .collect();
+    if !deletions.is_empty() {
+        state.unanswered.insert(name.clone(), deletions);
+        keep(state).await;
+    }
     remote.create(&name, sealed).await?;
+    state
+        .applied
+        .extend(state.unanswered.remove(&name).unwrap_or_default());
     state.read.insert(name);
     state.drive.take(pack);
     Ok(())
+}
+
+/// Take up the packs this device sent whose answer never came
+/// ([`SyncState::unanswered`]), as the drive's `files` and the packs `read`
+/// of them into `drive` show them now: one read was made all the same, and
+/// each deletion by hand in it the drive holds, as late or later, is noted
+/// as had the answer come ([`send_pack`]); one the drive does not list was
+/// never made, and what it held is sent again as never sent. One listed
+/// but not read yet waits.
+fn take_unanswered(
+    state: &mut SyncState,
+    files: &[RemoteFile],
+    read: &BTreeSet<String>,
+    drive: &DriveState,
+) {
+    for (name, deletions) in std::mem::take(&mut state.unanswered) {
+        if read.contains(&name) {
+            for (id, at) in deletions {
+                if drive.tombs.get(&id).is_some_and(|&tomb| tomb >= at) {
+                    state.applied.insert(id, at);
+                }
+            }
+        } else if files.iter().any(|file| file.name == name) {
+            state.unanswered.insert(name, deletions);
+        }
+    }
 }
 
 /// Sync everything a device uses beside its history, the settings `here`

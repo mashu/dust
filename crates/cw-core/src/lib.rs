@@ -40,6 +40,7 @@ mod speed;
 mod stats;
 mod streak;
 mod timing;
+mod unknown;
 
 pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, SKIPPED, align_group};
 pub use auto_level::{
@@ -50,9 +51,9 @@ pub use auto_level::{
 pub use belief::{Estimate, EstimatePoint, EstimateReading};
 pub use board::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, RATED_GROUP_CHARS,
-    Ranking, RunEntry, TimelinePoint, assisted_runs, board_kinds, board_modes, board_place,
-    board_place_at, contest_runs, latest_run_length, per_group, rating, run_kinds, run_lengths,
-    score_board, score_timeline,
+    Ranking, RunEntry, TimelinePoint, assisted_runs, board_kinds, board_modes, board_place_at,
+    contest_runs, latest_run_length, per_group, rating, run_kinds, run_lengths, score_board,
+    score_timeline,
 };
 pub use buckets::{
     PER_SESSION_UP_TO, POINTS_UP_TO, RECENT_SESSIONS, accuracy_buckets, chart_buckets, chart_day,
@@ -103,9 +104,9 @@ pub use rng::{Rng, SplitMix64};
 pub use sampling::{CharSamplingState, Sampler, SamplerPrior, generate_training_group};
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
-    Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, SendStart, SessionId,
-    SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys, Untimed,
-    answer_length_matches, settle_clock_ahead,
+    Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, SESSION_FORMAT,
+    SendStart, SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys,
+    Untimed, answer_length_matches, settle_clock_ahead,
 };
 pub use settings::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AgcDecay, Aim,
@@ -121,10 +122,10 @@ pub use settings::{
     QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RangeValues,
     SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STARTER_WORDS, STATIONS_MAX, STATIONS_MIN,
     STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, SpeedPath, StyleChoice, TrainingSettings,
-    VOLUME_MAX, VOLUME_MIN, WORD_LIST_MAX, WPM_MAX, WPM_MIN, WordList, adaptive_speed_on,
-    adapts_group_size, adapts_speed, aim_section, class_reading, clean_word, compute_char_pool,
-    current_practice_window, newest_unlocked, power_reading, section_code, state_code,
-    unlocked_practice_count,
+    UnreadValue, VOLUME_MAX, VOLUME_MIN, WORD_LIST_MAX, WPM_MAX, WPM_MIN, WordList,
+    adaptive_speed_on, adapts_group_size, adapts_speed, aim_section, class_reading, clean_word,
+    compute_char_pool, current_practice_window, newest_unlocked, power_reading, section_code,
+    state_code, unlocked_practice_count,
 };
 pub use span::LengthForecast;
 pub use speed::SpeedForecast;
@@ -140,7 +141,8 @@ pub use stats::{
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{
-    EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC,
-    StationVoice, ToneEvent, Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm,
-    edge_gain, envelope_shape, plan_morse_playback_for, plan_transmission, resolve_station,
+    EnvelopePoint, EnvelopeShape, Interferer, LISTEN_LETTER_GAP_MS, PlannedTransmission,
+    PlaybackPlan, SEND_RELEASE_SEC, StationVoice, ToneEvent, Transmission,
+    compute_after_group_gap_ms, compute_group_gap_for_wpm, edge_gain, envelope_shape,
+    plan_morse_playback_for, plan_transmission, resolve_station,
 };

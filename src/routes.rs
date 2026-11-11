@@ -484,7 +484,8 @@ fn ResultsRoute() -> Element {
         None => return rsx! { p { class: "muted", "No result." } },
     };
     // Found by its record, not by when it finished, which another session
-    // can share: no place where it is in no history.
+    // can share, and by the record holding it once a take-up names it
+    // anew ([`Finished::Kept`]): no place where it is in no history.
     let history = history();
     let at = kept.and_then(|id| history.index_of(id));
     let place = *history.figure("board place", at, |sessions| {
@@ -721,6 +722,74 @@ mod tests {
             ui.with_app(|ctx| crate::state::keep_and_show(ctx, worse));
             assert_eq!(ui.screen(), "results");
             assert!(ui.has("2nd best of your 2 Koch sessions"), "{}", ui.html());
+        });
+    }
+
+    /// The results of a session just finished keep its place on the board
+    /// while another copy of the app names its record anew, as a browser's
+    /// page storage may, and this copy takes the change up as it hears of
+    /// it: they follow the session to the one record that holds it, though
+    /// that copy, of an older build, wrote it saying no format. They found
+    /// it by the record it was kept under alone, which the history no
+    /// longer held, and the place went.
+    #[test]
+    fn a_sessions_results_keep_its_place_as_another_copy_names_its_record_anew() {
+        use crate::persist::Store;
+        use crate::persist::memory::MemoryStore;
+        use crate::persist::record::{HistoryChange, Record};
+
+        run(|| async {
+            let best = stored_session("2026-10-01", &[("KM", "KM"); 10]);
+            let store = Rc::new(MemoryStore::default());
+            store.save_settings(&test_settings());
+            store.save_sessions(&[best]);
+            store.mark_tutorial_done();
+            store.hears_news.set(true);
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            let copied: Vec<_> = [("KM", "KM"); 5]
+                .into_iter()
+                .chain([("KM", "MK"); 5])
+                .collect();
+            let worse = stored_session("2026-10-02", &copied);
+            ui.with_app(|ctx| crate::state::keep_and_show(ctx, worse));
+            assert!(ui.has("2nd best of your 2 Koch sessions"), "{}", ui.html());
+            let kept = |ui: &mut Ui| {
+                ui.with_app(|ctx| match &*ctx.result.peek() {
+                    Some(Finished::Kept(_, kept)) => *kept,
+                    _ => None,
+                })
+            };
+            let was = kept(&mut ui).expect("kept");
+            let mut older: serde_json::Value =
+                serde_json::from_str(&store.record(was).expect("stored")).expect("a session");
+            older
+                .as_object_mut()
+                .expect("an object")
+                .remove("format")
+                .expect("said");
+            let renamed = RecordId {
+                order: was.order + 1,
+                ..was
+            };
+            store.lose(was);
+            let put = HistoryChange {
+                put: vec![Record {
+                    id: renamed,
+                    json: older.to_string(),
+                }],
+                ..HistoryChange::default()
+            };
+            Store::change_history(&*store, put).await;
+            store.tell_news();
+            ui.advance(100).await;
+            let taken_up = ui.with_app(|ctx| {
+                let history = ctx.sessions.peek();
+                (history.index_of(was), history.index_of(renamed).is_some())
+            });
+            assert_eq!(taken_up, (None, true), "taken up by its new name");
+            assert_eq!(ui.screen(), "results");
+            assert!(ui.has("2nd best of your 2 Koch sessions"), "{}", ui.html());
+            assert_eq!(kept(&mut ui), Some(renamed), "followed");
         });
     }
 

@@ -7,8 +7,8 @@ use crate::time::{mono_ms, sleep_ms};
 use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
-    CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, TOUCH_BUILD, control_id,
-    html_bool,
+    CharacterComparison, INPUT_METHOD_KEY_CODE, Icon, IconName, ProgressHeader, StatusDot,
+    TOUCH_BUILD, control_id, html_bool, key_code,
 };
 
 /// Incomplete answers wait this long before the session sees them. Short
@@ -271,15 +271,6 @@ const KEY_AFTER_COMPOSITION: bool = cfg!(any(target_os = "macos", target_os = "i
 /// the two come together, far sooner than a key pressed after.
 const COMPOSITION_END_MS: u64 = 100;
 
-/// The key code a browser gives a key the input method took. WebKit, in
-/// Safari and in every browser on an iPhone, hands over the Enter or the
-/// Space that ends a composition once it is over, not as composing, but
-/// with this code; Chrome on Android hands over the Enter that both ends a
-/// word and confirms it with Enter's own. A script on the page reads it in
-/// every build, the run's keys among them
-/// ([`crate::ui::contest_keys`]).
-pub(crate) const INPUT_METHOD_KEY_CODE: u32 = 229;
-
 /// Whether `key`, at `code`, can end a composition: Enter, which takes what
 /// was composed, and Space, which chooses a candidate or finishes a
 /// syllable.
@@ -291,22 +282,6 @@ fn ends_composition(key: &Key, code: Code) -> bool {
 /// the input method's: an Enter or a Space with the input method's code.
 fn coded_as_input_methods(key: &Key, code: Code, key_code: u32) -> bool {
     key_code == INPUT_METHOD_KEY_CODE && ends_composition(key, code)
-}
-
-/// The key code the browser gave `pressed`: the web build's alone has it,
-/// the webview builds handing a key over without it.
-fn key_code(pressed: &KeyboardData) -> Option<u32> {
-    #[cfg(feature = "web")]
-    {
-        pressed
-            .downcast::<web_sys::KeyboardEvent>()
-            .map(web_sys::KeyboardEvent::key_code)
-    }
-    #[cfg(not(feature = "web"))]
-    {
-        let _ = pressed;
-        None
-    }
 }
 
 /// What a field typed in knows of the input method: when its composition

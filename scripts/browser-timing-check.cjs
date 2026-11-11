@@ -22,7 +22,8 @@
 // untimed.
 //
 // The page reaches nothing but the site served here: no font host, nor any
-// other, can hold a session up.
+// other, can hold a session up. Nothing in it may breach the page's content
+// security policy: a breach fails the check, as the app needs all it does.
 //
 // It is the regression check for characters left untimed that the Rust
 // tests cannot make: the browser's own audio clock, stream, event loop and
@@ -75,6 +76,20 @@ const TYPES = {
   '.ico': 'image/x-icon',
   '.txt': 'text/plain',
 };
+
+/// Every breach of a page's content security policy in `context`, its
+/// popups included, said into `breaches`: what was refused, under which
+/// directive, and where.
+async function watchPolicy(context, breaches) {
+  await context.exposeBinding('__dustBreach', ({ page }, breach) => {
+    breaches.push(`${page ? page.url() : 'a page'}: ${breach}`);
+  });
+  await context.addInitScript(() => {
+    document.addEventListener('securitypolicyviolation', e => {
+      window.__dustBreach(`${e.effectiveDirective} refused ${e.blockedURI || 'inline'} at ${e.sourceFile || 'the page'}:${e.lineNumber}`);
+    });
+  });
+}
 
 /// The site, as Pages serves it: under its base path, and its index for
 /// any page that is not a file.
@@ -225,6 +240,8 @@ const KEY_ALONG = `((wpm, reactMs, after, firstMs, gapMs) => {
 /// wrong, if anything.
 async function session(browser, url, after) {
   const context = await browser.newContext();
+  const breaches = [];
+  await watchPolicy(context, breaches);
   // Only the site itself. index.html asks Google for its type faces, and a
   // request there that the runner's network holds open keeps the page's
   // load event, and page.goto with it, from ever coming, though the app is
@@ -336,6 +353,7 @@ async function session(browser, url, after) {
   } finally {
     await context.close();
   }
+  for (const breach of breaches) problems.push(`the page's policy refused what the app needs: ${breach}`);
   if (problems.length) {
     console.error(`Characters ${way} went untimed in the browser:`);
     for (const problem of problems) console.error(`  ${problem}`);

@@ -467,7 +467,7 @@ fn the_preview_pause_lets_the_band_back_at_fast_and_holds_it_at_slow() {
         render(&mut mixer, sent);
         let pause = render(
             &mut mixer,
-            band_preview_gap_ms() as usize * SR as usize / 1_000,
+            band_preview_gap_ms(&settings) as usize * SR as usize / 1_000,
         );
         let last = &pause[pause.len() - SR as usize / 5..];
         -db(power(last) / before)
@@ -1288,6 +1288,45 @@ fn the_audio_callback_never_allocates_or_frees() {
         "no send was heard out"
     );
     assert!(peak > 0.1, "nothing much played: a peak of {peak}");
+}
+
+/// The look-ahead the sends wait out allocates and frees nothing once its
+/// room is made: played through, read out for a band coming in, cut, and
+/// reset within its room for a stream started again at the rate it had, at
+/// another and at the highest. The callback plays it, and the UI changes it
+/// holding the mixer the callback waits on.
+#[test]
+fn the_look_ahead_allocates_and_frees_nothing_once_its_room_is_made() {
+    let mut late = Mixer::new(48_000).late;
+    // Without this the rest would pass for nothing: a copy of its room,
+    // made and let go, is counted.
+    assert_eq!(
+        counted(|| drop(std::hint::black_box(late.clone()))),
+        Counts {
+            allocations: 1,
+            frees: 1
+        },
+        "the counting counts"
+    );
+    let counts = counted(|| {
+        for rate in [48_000, 44_100, HIGHEST_RATE, 48_000] {
+            late.reset(late_room(rate), agc_lookahead_samples(rate));
+            late.clear();
+            for i in 0..2 * late.len() {
+                let played = SendSample {
+                    heard: i as f64,
+                    dry: -(i as f64),
+                    keyed: i % 2 == 0,
+                };
+                std::hint::black_box(late.push(played));
+            }
+            for waiting in late.waiting() {
+                std::hint::black_box(waiting);
+            }
+            late.clear();
+        }
+    });
+    assert_eq!(counts, Counts::default());
 }
 
 /// How many samples the receiver's gate takes to move all the way.

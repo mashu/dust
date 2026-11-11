@@ -11,12 +11,12 @@
 //! them in.
 //!
 //! This device's side is the store's: the records it lists, those of them
-//! it deleted by hand ([`crate::persist::Store::forgotten`]), and two notes
-//! sync keeps of its own ([`super::state::SyncState`]): the deletions here
-//! the drive holds, those it took from the drive and those made here by
-//! hand that it holds, and the sessions put back here by hand since the
-//! last sync. A record the store does not list is never deleted on that
-//! account alone: missing is never deleted.
+//! it deleted by hand and when ([`crate::persist::Store::deletions`]), and
+//! two notes sync keeps of its own ([`super::state::SyncState`]): the
+//! deletions here the drive holds, those it took from the drive and those
+//! made here by hand that it holds, and the sessions put back here by hand
+//! since the last sync. A record the store does not list is never deleted
+//! on that account alone: missing is never deleted.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -78,6 +78,30 @@ impl DriveState {
             .filter(|id| !self.deleted(*id))
             .collect()
     }
+
+    /// Take in what `other` says of the drive, as had every pack it was
+    /// read from been read here too: the records either holds, and the
+    /// latest deletion and putting back of each that either knows. Two
+    /// copies of the app on one device each read packs of their own, and
+    /// what both read is put together ([`super::state::SyncState::merged`]).
+    pub fn join(&mut self, other: &DriveState) {
+        self.puts.extend(other.puts.iter().copied());
+        for (&id, &at) in &other.tombs {
+            latest(&mut self.tombs, id, at);
+        }
+        for (&id, &at) in &other.revives {
+            latest(&mut self.revives, id, at);
+        }
+    }
+
+    /// When a change to the record `id` made at `now` is stamped, as far
+    /// as this says of the drive: at `now`, or just after the latest
+    /// deletion or putting back of it, where that is later
+    /// ([`super::state::SyncState::stamp_change`]).
+    pub fn stamp_change(&self, id: RecordId, now: u64) -> u64 {
+        let seen = self.tombs.get(&id).max(self.revives.get(&id));
+        seen.map_or(now, |&seen| now.max(seen.saturating_add(1)))
+    }
 }
 
 /// `at` for `id` in `times`, where it is later than what is there.
@@ -96,6 +120,11 @@ pub struct Here<'a> {
     /// deleted since the last sync, or since this device put them back by
     /// hand.
     pub forgotten: &'a BTreeSet<RecordId>,
+    /// Of those `forgotten`, when each was deleted here, by this device's
+    /// clock, where its tombstone says: as the sync began, where it says
+    /// later than the sync listed the history, as a clock set ahead and set
+    /// right since says.
+    pub made: &'a BTreeMap<RecordId, u64>,
     /// The deletions here the drive holds, each with the time of the
     /// drive's deletion: those taken from the drive and made here, and
     /// those made here by hand once the drive holds them, sent from here or
@@ -119,11 +148,15 @@ pub struct Plan {
     /// Records this device has and the drive does not: to send.
     pub send: Vec<RecordId>,
     /// Records the drive holds that this device deleted by hand: to send
-    /// the deletion of.
+    /// the deletion of. And those the drive deleted as well, where this
+    /// device deleted them after it, by its own clock: sent, so that a
+    /// putting back made between the two loses to the later on every
+    /// device, as the drive reads them.
     pub send_deleted: Vec<RecordId>,
     /// Records this device deleted by hand that the drive deleted as well,
-    /// each with when the drive deleted it: nothing to send, and the
-    /// deletion noted here as one taken from the drive.
+    /// no earlier, or at a time the store cannot say, each with when the
+    /// drive deleted it: nothing to send, and the deletion noted here as
+    /// one taken from the drive.
     pub deleted_too: Vec<(RecordId, u64)>,
     /// Records the drive deleted that this device put back by hand since,
     /// each with when: to send that they are back.
@@ -190,9 +223,16 @@ pub fn plan(drive: &DriveState, here: Here) -> Plan {
     // Deleted here by hand, and in the drive as well, by another device
     // say: the drive's deletion is this device's word on it too, and a
     // putting back as late or later brings it back here as for one let go.
+    // But one made here after the drive's, by this device's clock, is the
+    // later word, and is sent: a putting back between the two loses to it.
     for &id in here.forgotten {
         if drive.deleted(id) && !here.listed.contains(&id) && !here.applied.contains_key(&id) {
-            plan.deleted_too.push((id, drive.tombs[&id]));
+            let tomb = drive.tombs[&id];
+            if here.made.get(&id).is_some_and(|&made| made > tomb) {
+                plan.send_deleted.push(id);
+            } else {
+                plan.deleted_too.push((id, tomb));
+            }
         }
     }
     plan
@@ -257,6 +297,7 @@ mod tests {
     struct Side {
         listed: BTreeSet<RecordId>,
         forgotten: BTreeSet<RecordId>,
+        made: BTreeMap<RecordId, u64>,
         applied: BTreeMap<RecordId, u64>,
         revived: BTreeMap<RecordId, u64>,
     }
@@ -266,6 +307,7 @@ mod tests {
             Self {
                 listed: ids(ns),
                 forgotten: BTreeSet::new(),
+                made: BTreeMap::new(),
                 applied: BTreeMap::new(),
                 revived: BTreeMap::new(),
             }
@@ -277,6 +319,7 @@ mod tests {
                 Here {
                     listed: &self.listed,
                     forgotten: &self.forgotten,
+                    made: &self.made,
                     applied: &self.applied,
                     revived: &self.revived,
                 },
@@ -422,6 +465,53 @@ mod tests {
 
         let there = drive(&[pack(&[1], &[(1, 50)], &[(1, 60)])]);
         assert_eq!(here.plan(&there).take_back, [id(1)]);
+    }
+
+    /// A session deleted here by hand after the drive's deletion of it, by
+    /// this device's clock, has its deletion sent, so that a putting back
+    /// made elsewhere between the two loses to it on every device; one
+    /// deleted here no later than the drive's, or at a time its tombstone
+    /// does not say, is the drive's. The later one used to be taken for the
+    /// drive's as well, and such a putting back brought the session back
+    /// here.
+    #[test]
+    fn a_deletion_made_here_after_the_drives_is_sent() {
+        let there = drive(&[pack(&[1], &[(1, 50)], &[])]);
+        let mut here = Side::listing(&[]);
+        here.forgotten = ids(&[1]);
+        here.made = times(&[(1, 60)]);
+        let plan = here.plan(&there);
+        assert_eq!(plan.send_deleted, [id(1)], "the later deletion");
+        assert!(plan.deleted_too.is_empty());
+        for made in [&[(1, 50)][..], &[(1, 40)], &[]] {
+            here.made = times(made);
+            let plan = here.plan(&there);
+            assert_eq!(plan.deleted_too, [(id(1), 50)], "made {made:?}");
+            assert!(!plan.sends(), "made {made:?}");
+        }
+    }
+
+    /// What two copies of the app read of the drive, put together, says
+    /// what every pack either read says, whichever is taken into which, and
+    /// again and again.
+    #[test]
+    fn what_two_copies_read_of_the_drive_is_joined() {
+        let packs = [
+            pack(&[1, 2, 3], &[], &[]),
+            pack(&[], &[(2, 10), (3, 10)], &[]),
+            pack(&[], &[], &[(3, 20)]),
+            pack(&[4], &[(3, 15), (4, 30)], &[(2, 5)]),
+        ];
+        let (one, other) = (drive(&packs[..2]), drive(&packs[2..]));
+        let mut joined = one.clone();
+        joined.join(&other);
+        assert_eq!(joined, drive(&packs), "every pack's word");
+        let mut the_other_way = other.clone();
+        the_other_way.join(&one);
+        assert_eq!(the_other_way, joined);
+        let mut again = joined.clone();
+        again.join(&one);
+        assert_eq!(again, joined, "taken in twice, the same");
     }
 
     /// Two devices that each sync until neither has anything to do end up

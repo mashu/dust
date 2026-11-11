@@ -18,8 +18,12 @@ use super::remote::{Remote, RemoteError, RemoteFile};
 use super::text::{query, random_hex};
 use crate::persist::record::Pending;
 
-const FILES: &str = "https://www.googleapis.com/drive/v3/files";
-const UPLOAD: &str = "https://www.googleapis.com/upload/drive/v3/files";
+/// Drive's files, and where they are uploaded: all the web app's sync
+/// connects to, its sign-in being a window of Google's own, so all the web
+/// page's policy lets it connect to beside the site (index.html, as a test
+/// in `src/app.rs` checks).
+pub(crate) const FILES: &str = "https://www.googleapis.com/drive/v3/files";
+pub(crate) const UPLOAD: &str = "https://www.googleapis.com/upload/drive/v3/files";
 /// The folder's name to Drive.
 const APP_FOLDER: &str = "appDataFolder";
 /// The most files Drive lists at once.

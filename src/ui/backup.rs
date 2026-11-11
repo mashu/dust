@@ -9,7 +9,7 @@ use crate::format::{counted, day_of, short_date};
 use crate::persist::backup::{
     BACKUP_DUE_AFTER, BACKUP_LARGE_BYTES, BACKUP_MAX_BYTES, Backup, read_backup_apart,
 };
-use crate::state::{AppCtx, in_root};
+use crate::state::{AppCtx, RESTORE_LOCK_POLL_MS, in_root};
 use crate::ui::file_pick::{ChosenFile, FileButton, PickedFile};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 
@@ -46,8 +46,15 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
 /// backup of the app takes, which then backs up none of it.
 const OUTGROWN: &str = "Your history here is past 20 MB, and Android's own backup of an app stops at 25 MB: save a backup file now and then, so a lost or new phone still has every session.";
 
-/// How long a backup read while a session or a run is under way waits
-/// before it looks again, to be restored once that is over.
+/// What the card says while a backup read waits for another window's
+/// restore, or the Undo of it, which has every window's restores
+/// ([`AppCtx::restore_blocked`]).
+const WAITING_ELSEWHERE: &str = "Waiting for a restore in another window…";
+
+/// How long the card waits between looks at a backup it handed to the app
+/// while a session or run has the app, which the restore waits for: as
+/// long as the app waits between its own looks at the session, rather than
+/// waking the app's thread every [`crate::time::POLL_MS`] through it.
 const SESSION_WAIT_MS: u32 = 1_000;
 
 /// What a restore does: no more, and no less.
@@ -190,12 +197,13 @@ impl Restoring {
     }
 
     /// Read `file` as a backup and restore what it holds, in a task of the
-    /// app's own, once no session or run, nor another restore or the Undo
-    /// of one, is under way: the card says it is being read at once, and
-    /// until it has been restored, and why not, if it could not be; with
-    /// no card drawn by then, a message does. Unless another file is
-    /// chosen before it is restored: then that one is, and nothing of this
-    /// is said.
+    /// app's own: the card says it is being read at once, and until it has
+    /// been restored, and why not, if it could not be; with no card drawn
+    /// by then, a message does, once no session or run has the app. Unless
+    /// another file is chosen before it is restored: then that one is, and
+    /// nothing of this is said. The app makes it in its turn
+    /// ([`AppCtx::restore_backup`]): once no session or run, nor another
+    /// restore or the Undo of one, is under way.
     fn start(self, ctx: AppCtx, file: PickedFile) {
         let Self {
             mut under_way,
@@ -233,18 +241,6 @@ impl Restoring {
                 Ok((name, text)) => backup_in(&name, text).await,
                 Err(why) => Err(why),
             };
-            // Restored between sessions, as a sync is, never under one: a
-            // restore takes its settings, the level among them. And after
-            // any restore, or Undo of one, still under way, to be merged
-            // with the history that one left.
-            while ctx.session_running() || ctx.restore_under_way() {
-                let wait = if ctx.session_running() {
-                    SESSION_WAIT_MS
-                } else {
-                    crate::time::POLL_MS
-                };
-                crate::time::sleep_ms(wait).await;
-            }
             // Another file chosen meanwhile is restored in its place.
             if !chosen_last() {
                 return;
@@ -253,6 +249,15 @@ impl Restoring {
                 Ok(backup) => backup,
                 Err(why) => {
                     under_way.set(None);
+                    // No card is drawn over a session or run, and no
+                    // message is said over it either: it is said once that
+                    // is over, where a card is drawn by then, on the card.
+                    while *cards.peek() == 0 && ctx.session_running() {
+                        crate::time::sleep_ms(SESSION_WAIT_MS).await;
+                    }
+                    if !chosen_last() {
+                        return;
+                    }
                     if *cards.peek() > 0 {
                         problem.set(Some(why));
                     } else {
@@ -261,11 +266,41 @@ impl Restoring {
                     return;
                 }
             };
-            // Said on the card until the store has said what became of it,
-            // as a browser's database takes a moment to.
-            ctx.restore_backup(backup);
-            while ctx.restore_under_way() {
-                crate::time::sleep_ms(crate::time::POLL_MS).await;
+            // Said on the card until the store has said what became of this
+            // restore, as a browser's database takes a moment to: of this
+            // one, not of an Undo clicked as soon as it is told of. Another
+            // file chosen while it still waits its turn is restored in its
+            // place, once read: this one is made no more. While it waits for
+            // another window's restore, or the Undo of it, the card says so,
+            // and looks at it as often as the app looks at that window's
+            // hold on the restores. While it waits for a session or run to
+            // be over, it is looked at once a second, as the app looks at
+            // the session.
+            let reading = under_way.peek().clone();
+            let ticket = ctx.restore_backup(backup);
+            while !ctx.restore_told(ticket) {
+                #[cfg(test)]
+                crate::testing::rendered("restore wait");
+                if !chosen_last() {
+                    ctx.withdraw_restore(ticket);
+                    return;
+                }
+                let said = if ctx.restore_blocked(ticket) {
+                    Some(WAITING_ELSEWHERE)
+                } else {
+                    reading.as_deref()
+                };
+                if under_way.peek().as_deref() != said {
+                    under_way.set(said.map(str::to_string));
+                }
+                let wait = if ctx.session_running() {
+                    SESSION_WAIT_MS
+                } else if said == Some(WAITING_ELSEWHERE) {
+                    RESTORE_LOCK_POLL_MS
+                } else {
+                    crate::time::POLL_MS
+                };
+                crate::time::sleep_ms(wait).await;
             }
             if chosen_last() {
                 under_way.set(None);

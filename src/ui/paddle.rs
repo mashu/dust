@@ -20,7 +20,7 @@ use crate::state::{AppCtx, AppState, Screen, Toasts, in_root};
 use crate::time::mono_ms;
 #[cfg(not(all(feature = "desktop", not(test))))]
 use crate::time::sleep_ms;
-use crate::ui::widgets::{TOUCH_BUILD, control_id};
+use crate::ui::widgets::{INPUT_METHOD_KEY_CODE, TOUCH_BUILD, control_id, key_code};
 
 /// How many decoded characters the practice pad keeps: about a line's worth.
 const HEARD_KEEP: usize = 32;
@@ -189,6 +189,66 @@ impl Contacts {
     }
 }
 
+/// What the paddles know of an input method's composition: whether a
+/// paddle key opened the one under way.
+///
+/// Within a composition something else opened, a letter Pinyin or Kana
+/// composes, a press of a paddle's key is the input method's, which may
+/// turn a page of candidates with `[` and `]`: it keys nothing, and is left
+/// to the input method. A dead key opens a composition of its own, and the
+/// dit key is dead on a French, Belgian or Spanish keyboard, the dah key on
+/// a Portuguese, Swiss or Nordic one. Safari, Chrome on a Mac and the macOS
+/// build hand its press over with the input method's key code
+/// ([`INPUT_METHOD_KEY_CODE`]), and each press after it, of either paddle,
+/// as composing: those are the paddles' still, a squeeze among them, until
+/// the composition ends, another key is pressed, or the window loses the
+/// focus. So is a press of a paddle's key the input method takes with no
+/// composition under way, which looks like a dead key: a `[` that begins a
+/// composition keys the dit, as it always did. And so, in WebKit, is a `[`
+/// or a `]` that ends a composition, handed over once it has ended, not as
+/// composing, with the input method's key code: it keys its paddle, for a
+/// dead paddle key's second press, which ends the composition its first
+/// opened, may be handed over the same way (docs/platforms.md).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct InputMethods {
+    /// A paddle key's press opened the composition under way, as far as
+    /// the paddles have heard.
+    paddle_opened: bool,
+}
+
+impl InputMethods {
+    /// Whether a press, of a paddle's key or not as `paddle` says, is the
+    /// input method's and keys nothing: a paddle's, `composing`, within a
+    /// composition no paddle key opened. A paddle key's press that opens
+    /// one, `dead` or given the input method's `key_code`, is remembered;
+    /// the press of any other key forgets.
+    fn left_to_it(
+        &mut self,
+        paddle: bool,
+        dead: bool,
+        composing: bool,
+        key_code: Option<u32>,
+    ) -> bool {
+        if !paddle {
+            self.paddle_opened = false;
+            return false;
+        }
+        if composing {
+            return !self.paddle_opened;
+        }
+        if dead || key_code == Some(INPUT_METHOD_KEY_CODE) {
+            self.paddle_opened = true;
+        }
+        false
+    }
+
+    /// The composition under way has ended, or the window has lost the
+    /// focus, which ends it.
+    fn ended(&mut self) {
+        self.paddle_opened = false;
+    }
+}
+
 /// How keys are read as paddles, as the settings say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Reading {
@@ -340,6 +400,9 @@ pub struct PaddleKeys {
     /// The paddle contacts the keys have closed, as the listeners keying
     /// the paddles hear them.
     contacts: CopyValue<Contacts>,
+    /// Whether a paddle key opened the input method's composition under
+    /// way, as the listeners keying the paddles hear it.
+    input_methods: CopyValue<InputMethods>,
     /// The wake the clock is waiting for. A timer that finds another one here
     /// has been superseded and does nothing.
     armed: CopyValue<Option<u64>>,
@@ -378,6 +441,7 @@ pub fn use_paddle_keys(
             PaddleKeys {
                 keyer: CopyValue::new(Keyer::new(playback.keyer_mode, playback.keyer_wpm)),
                 contacts: CopyValue::new(Contacts::default()),
+                input_methods: CopyValue::new(InputMethods::default()),
                 armed: CopyValue::new(None),
                 answer: CopyValue::new(None),
                 app: CopyValue::new(app),
@@ -431,7 +495,11 @@ pub fn use_paddle_keys(
 impl PaddleKeys {
     /// The page root's keydown. `[` and `]` are paddles, never text —
     /// another listener may key them ([`root_keys`]), but the answer box
-    /// must not type them.
+    /// must not type them — but within an input method's composition no
+    /// paddle key opened, where they are the input method's
+    /// ([`InputMethods`]). On Linux the window keys every bracket it
+    /// hears, and can tell of no composition, so the root keeps each from
+    /// the page, as it always did.
     pub fn keydown(self, e: Event<KeyboardData>) {
         let (key, code) = key_and_code(&e);
         let mods = e.modifiers();
@@ -440,14 +508,46 @@ impl PaddleKeys {
             alt: mods.alt(),
             meta: mods.meta(),
         };
+        let paddle = paddle_for_press(&key, &code, held, self.reading()).is_some();
+        if self.root != RootKeys::DroppedByWindow
+            && self.left_to_input_method(
+                paddle,
+                e.key() == Key::Dead,
+                e.is_composing(),
+                key_code(&e),
+            )
+        {
+            return;
+        }
         let paddle = if self.root_keys(&e, &code) {
             self.key_down(&key, &code, held, e.is_auto_repeating())
         } else {
-            paddle_for_press(&key, &code, held, self.reading()).is_some()
+            paddle
         };
         if paddle {
             e.prevent_default();
         }
+    }
+
+    /// Whether a key's press, a paddle's or not as `paddle` says, is the
+    /// input method's, and keys nothing ([`InputMethods::left_to_it`]).
+    fn left_to_input_method(
+        mut self,
+        paddle: bool,
+        dead: bool,
+        composing: bool,
+        key_code: Option<u32>,
+    ) -> bool {
+        self.input_methods
+            .write()
+            .left_to_it(paddle, dead, composing, key_code)
+    }
+
+    /// An input method's composition has ended: the next press of a
+    /// paddle's key within one is the input method's, unless a paddle key
+    /// opens it.
+    pub fn composition_ended(mut self) {
+        self.input_methods.write().ended();
     }
 
     /// The page root's keyup.
@@ -585,6 +685,7 @@ impl PaddleKeys {
     /// finishes, so the letter it ends is still heard.
     pub fn release_all(mut self) {
         self.contacts.write().open_all();
+        self.input_methods.write().ended();
         let now = mono_ms();
         for paddle in [Paddle::Dit, Paddle::Dah] {
             self.release_at(paddle, now);
@@ -912,7 +1013,17 @@ fn listen_document_paddles(keys: PaddleKeys) {
                 alt: e.alt_key(),
                 meta: e.meta_key(),
             };
-            if keys.key_down(&e.key(), &e.code(), held, e.repeat()) {
+            let (key, code) = (e.key(), e.code());
+            let paddle = paddle_for_press(&key, &code, held, keys.reading()).is_some();
+            if keys.left_to_input_method(
+                paddle,
+                key == "Dead",
+                e.is_composing(),
+                Some(e.key_code()),
+            ) {
+                return;
+            }
+            if keys.key_down(&key, &code, held, e.repeat()) {
                 e.prevent_default();
             }
         });
@@ -928,22 +1039,31 @@ fn listen_document_paddles(keys: PaddleKeys) {
         // Nor does any browser once the window has lost the focus.
         let blur: Closure<dyn FnMut(web_sys::Event)> =
             Closure::new(move |_: web_sys::Event| keys.release_all());
+        // A composition's end, in whichever field it was.
+        let ended: Closure<dyn FnMut(web_sys::Event)> =
+            Closure::new(move |_: web_sys::Event| keys.composition_ended());
         let listen = |name: &str, listener: &Listener| {
             let _ =
                 document.add_event_listener_with_callback(name, listener.as_ref().unchecked_ref());
         };
         listen("keydown", &down);
         listen("keyup", &up);
+        let _ = document
+            .add_event_listener_with_callback("compositionend", ended.as_ref().unchecked_ref());
         let _ = window.add_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
-        Some(Rc::new((window, document, down, up, blur)))
+        Some(Rc::new((window, document, down, up, blur, ended)))
     });
     use_drop(move || {
         if let Some(held) = listeners.as_deref() {
-            let (window, document, down, up, blur) = held;
+            let (window, document, down, up, blur, ended) = held;
             let _ = document
                 .remove_event_listener_with_callback("keydown", down.as_ref().unchecked_ref());
             let _ =
                 document.remove_event_listener_with_callback("keyup", up.as_ref().unchecked_ref());
+            let _ = document.remove_event_listener_with_callback(
+                "compositionend",
+                ended.as_ref().unchecked_ref(),
+            );
             let _ =
                 window.remove_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
         }
@@ -962,9 +1082,11 @@ fn listen_document_paddles(_keys: PaddleKeys) {}
 /// does not say otherwise ([`by_place_script`]) and the key is not typed in
 /// a field the paddles key nothing into ([`TypedField`]), and hands it
 /// over, a press that is a shortcut ([`paddle_for_press`]) or a repeat
-/// being nothing; a release is always heard, and so is the release of a
-/// key that closed a paddle, whatever it types by then; and the window
-/// losing the focus, or Command let go, opens both.
+/// being nothing, and so is one within an input method's composition no
+/// paddle key opened, left to the input method as the app's own listeners
+/// leave it ([`InputMethods`]); a release is always heard, and so is the
+/// release of a key that closed a paddle, whatever it types by then; and
+/// the window losing the focus, or Command let go, opens both.
 #[cfg(any(
     all(not(feature = "desktop"), not(feature = "web")),
     all(feature = "desktop", not(target_os = "linux")),
@@ -979,8 +1101,15 @@ const typedField = (e) => Boolean(e.target && e.target.closest && e.target.close
 const bracket = (e) => e.key === "[" || e.key === "]" || (byPlace() && bracketKey(e) && !typedField(e));
 const shortcut = (e) => e.metaKey || ((e.ctrlKey || e.altKey) && bracketKey(e));
 const held = new Set();
+let paddleOpened = false;
 const down = (e) => {
     if (bracket(e) && !shortcut(e)) {
+        if (e.isComposing && !paddleOpened) {
+            return;
+        }
+        if (!e.isComposing && (e.key === "Dead" || e.keyCode === 229)) {
+            paddleOpened = true;
+        }
         e.preventDefault();
         if (!e.repeat) {
             if (e.code) {
@@ -988,6 +1117,8 @@ const down = (e) => {
             }
             dioxus.send(["down", e.key, e.code]);
         }
+    } else {
+        paddleOpened = false;
     }
 };
 const up = (e) => {
@@ -1000,16 +1131,22 @@ const up = (e) => {
         dioxus.send(["open", "", ""]);
     }
 };
+const ended = () => {
+    paddleOpened = false;
+};
 const blur = () => {
     held.clear();
+    paddleOpened = false;
     dioxus.send(["open", "", ""]);
 };
 document.addEventListener("keydown", down);
 document.addEventListener("keyup", up);
+document.addEventListener("compositionend", ended);
 window.addEventListener("blur", blur);
 window.__dustPaddleKeys = () => {
     document.removeEventListener("keydown", down);
     document.removeEventListener("keyup", up);
+    document.removeEventListener("compositionend", ended);
     window.removeEventListener("blur", blur);
     window.__dustPaddleKeys = null;
 };"#;
@@ -1434,6 +1571,91 @@ mod tests {
         assert_eq!(
             paddle_for_press("[", "Digit5", command, Reading::DEFAULT),
             None
+        );
+    }
+
+    /// A press of a paddle's key within a composition no paddle key opened
+    /// is the input method's. A dead paddle key opens one of its own, its
+    /// press given the input method's key code or not, and so does a press
+    /// of a paddle's key that code with no composition under way: within
+    /// that one, a press of either paddle is the paddles', until the
+    /// composition ends, the window loses the focus, or another key is
+    /// pressed. A press with no composition under way is never the input
+    /// method's.
+    #[test]
+    fn a_composition_a_paddle_key_opened_is_the_paddles() {
+        const CODED: Option<u32> = Some(INPUT_METHOD_KEY_CODE);
+        let mut methods = InputMethods::default();
+        // Pinyin, begun with a letter, which the input method took.
+        assert!(!methods.left_to_it(false, false, false, CODED));
+        assert!(methods.left_to_it(true, false, true, None), "a [ in it");
+        assert!(methods.left_to_it(true, false, true, CODED), "a ] in it");
+        methods.ended();
+        // A dead paddle key, as the webviews hand it over, with no code.
+        assert!(!methods.left_to_it(true, true, false, None), "opens one");
+        assert!(!methods.left_to_it(true, true, true, None), "again");
+        assert!(!methods.left_to_it(true, false, true, CODED), "a squeeze");
+        // Another key typed in it: the input method's from then on.
+        assert!(!methods.left_to_it(false, false, true, CODED));
+        assert!(methods.left_to_it(true, false, true, CODED));
+        // A dead key as Safari hands it over, forgotten as the window
+        // loses the focus: a press composing after is the input method's.
+        assert!(!methods.left_to_it(true, true, false, CODED));
+        methods.ended();
+        assert!(methods.left_to_it(true, true, true, CODED));
+        // A paddle's key the input method takes with no composition under
+        // way looks like a dead key.
+        assert!(!methods.left_to_it(true, false, false, CODED));
+        assert!(!methods.left_to_it(true, false, true, None));
+        methods.ended();
+        // With none under way, a press is the paddles' whatever it is.
+        for (dead, code) in [(false, None), (true, None), (false, CODED), (true, CODED)] {
+            let mut fresh = InputMethods::default();
+            assert!(
+                !fresh.left_to_it(true, dead, false, code),
+                "{dead} {code:?}"
+            );
+            assert!(
+                !fresh.left_to_it(false, dead, false, code),
+                "{dead} {code:?}"
+            );
+        }
+    }
+
+    /// The page's script passes by a press of a paddle's key within a
+    /// composition no paddle key opened, as the app's own listeners do
+    /// ([`InputMethods`]): it remembers a paddle key's press that opens
+    /// one, a dead key or one given the input method's key code, and
+    /// forgets it at the press of any other key, at the composition's end,
+    /// which it listens for and stops listening for with the rest, and as
+    /// the window loses the focus.
+    #[test]
+    fn the_page_remembers_the_paddle_key_that_opened_a_composition() {
+        let script = PAGE_PADDLES_SCRIPT;
+        let opens = format!(
+            r#"if (!e.isComposing && (e.key === "Dead" || e.keyCode === {INPUT_METHOD_KEY_CODE})) {{
+            paddleOpened = true;
+        }}"#
+        );
+        for listened in [
+            "let paddleOpened = false;",
+            "    if (bracket(e) && !shortcut(e)) {\n        if (e.isComposing && !paddleOpened) {\n            return;\n        }",
+            &opens,
+            "    } else {\n        paddleOpened = false;\n    }",
+            "const ended = () => {\n    paddleOpened = false;\n};",
+            "const blur = () => {\n    held.clear();\n    paddleOpened = false;",
+            r#"document.addEventListener("compositionend", ended)"#,
+            r#"document.removeEventListener("compositionend", ended)"#,
+        ] {
+            assert!(script.contains(listened), "{listened}\n{script}");
+        }
+        // Only a press within a composition is passed by, before it is
+        // kept from the page or handed over.
+        let passed = script.find("if (e.isComposing && !paddleOpened)");
+        let kept = script.find("e.preventDefault();");
+        assert!(
+            passed.zip(kept).is_some_and(|(passed, kept)| passed < kept),
+            "{script}"
         );
     }
 

@@ -93,6 +93,7 @@ fn Keyed(
             id: crate::ui::widgets::control_id("keyed", "root"),
             onkeydown: move |e| keys.keydown(e),
             onkeyup: move |e| keys.keyup(e),
+            oncompositionend: move |_| keys.composition_ended(),
             {children}
             // What the window losing the focus, or the page going, does.
             button {
@@ -2153,6 +2154,85 @@ fn results_say_where_the_session_stands_on_the_board() {
     assert!(short.contains("Sessions of 10 groups or more go on the score board."));
 }
 
+/// One share reads one way wherever it is shown, a half between two whole
+/// percents going to the even one, as `format::percent` gives it: a session
+/// that copied two of the sixteen K it was sent, 12.5%, reads 12% on its
+/// results, on Home, and on Stats in the overview, its History row and the
+/// board, as K's own row and its taking for M twice of the sixteen do; and
+/// a threshold of 86.5% marks the chart at 86%, as the help names it. They
+/// read 13% and 87% before, rounding the half away from zero.
+#[test]
+fn a_share_half_way_between_two_percents_reads_the_even_one_on_every_screen() {
+    crate::testing::run(|| async {
+        let copies: Vec<(&str, &str)> = [("K", "K"); 2]
+            .into_iter()
+            .chain([("K", "M"); 2])
+            .chain([("K", "E"); 12])
+            .collect();
+        let session = crate::testing::stored_session("2026-10-01", &copies);
+        assert_eq!(session.accuracy, 0.125);
+        let results = results_of(session.clone(), false);
+        assert!(results.contains(">12%</text>"), "{results}");
+
+        let mut settings = crate::testing::test_settings();
+        settings.auto_level.auto_adjust_level = true;
+        settings.auto_level.auto_adjust_threshold = 86.5;
+        let (mut ui, _recorder) = crate::testing::Ui::app_with_history(settings, &[session]);
+        let tile =
+            |label: &str| format!(r#"<div class="tiny">{label}</div><div class="value">12%</div>"#);
+        assert!(ui.has(&tile("Last accuracy")), "Home: {}", ui.html());
+        ui.click("nav-stats");
+        assert!(ui.has(&tile("Average")), "{}", ui.html());
+        assert!(ui.has(&tile("Best")), "{}", ui.html());
+        assert!(ui.has("1 session · latest 12%"), "{}", ui.html());
+        assert!(ui.has("Level up at 86%"), "{}", ui.html());
+        ui.click("seg-history");
+        assert!(ui.has(r#"<span class="value">12%</span>"#), "{}", ui.html());
+        ui.click("seg-scores");
+        assert!(ui.has("12% accuracy"), "{}", ui.html());
+        assert!(ui.has("16 groups · 40 WPM · 12%"), "{}", ui.html());
+        ui.click("seg-letters");
+        assert!(
+            ui.has(r#"<span class="mono muted stat-value">12%</span>"#),
+            "{}",
+            ui.html()
+        );
+        ui.click("seg-mistakes");
+        assert!(
+            ui.has(r#"<span class="tiny confusion-of">12% of every K</span>"#),
+            "{}",
+            ui.html()
+        );
+    });
+}
+
+/// A run's shares read as every other share does: one QSO logged clean of
+/// eight, 12.5%, and four of its thirty-two characters right, read 12% in
+/// its ring and its Accuracy; and an everyday QSO's names copied once in
+/// eight read 12% in its table. They read 13% before.
+#[test]
+fn a_runs_shares_half_way_between_two_percents_read_the_even_one() {
+    let mut qsos = vec![("K1A", "1", "K1A", "1")];
+    qsos.extend([("K2B", "2", "XXX", "9"); 7]);
+    let run = crate::testing::stored_run("2026-10-20", &qsos);
+    assert_eq!(run.accuracy, 0.125);
+    let html = results_of(run, false);
+    for shown in [
+        r#"aria-label="12% of QSOs logged clean""#,
+        ">12%</text>",
+        r#"<div class="tiny">Accuracy</div><div class="value">12%</div>"#,
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    let mut names = vec![[("K1A", "K1A"), ("599", "599"), ("A", "A")]];
+    names.extend([[("K2B", "K2B"), ("599", "599"), ("B", "C")]; 7]);
+    let html = results_of(
+        crate::testing::stored_simple_qso_run("2026-10-20", &names),
+        false,
+    );
+    assert!(html.contains("<td>12%</td>"), "{html}");
+}
+
 #[test]
 fn listen_renders_the_selected_character() {
     let html = render(|| {
@@ -3018,6 +3098,19 @@ mod interactions {
         let seventh = " 14% chance of the first callers<";
         assert_eq!(even.html().matches(seventh).count(), 6, "{}", even.html());
         assert_ne!(adapting.html().matches(seventh).count(), 6);
+        // Copied at 26 WPM, the range's slowest speed is all but never a
+        // first caller's, but can be: under one percent, as What comes up
+        // next gives a chance, not none. It read 0%.
+        assert!(
+            adapting.has(" &#60;1% chance of the first callers<"),
+            "{}",
+            adapting.html()
+        );
+        assert!(
+            !adapting.has(" 0% chance of the first callers<"),
+            "{}",
+            adapting.html()
+        );
     }
 
     /// On a board of every mode, a run is flagged with its contest and
@@ -5009,6 +5102,77 @@ mod interactions {
             assert!(!ui.press_key_held("keyed-root", bracket.clone(), Code::Digit8, altgr));
             ui.advance(30).await;
             ui.release_key("keyed-root", bracket, Code::Digit8);
+            ui.advance(1_000).await;
+            assert!(ui.has(">E<"), "{}", ui.html());
+        });
+    }
+
+    /// Within a composition no paddle key opened, Pinyin's begun with a
+    /// letter, a `[` is the input method's, which may turn a page of
+    /// candidates with it: the root keys no paddle and leaves it to the
+    /// box. A dead dit key, as on a French keyboard, keys all the same:
+    /// its first press, which opens a composition of its own, and its next,
+    /// within that one.
+    #[test]
+    fn a_bracket_in_a_composition_no_paddle_key_opened_keys_no_paddle() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let letter = Key::Character("n".into());
+            assert!(ui.press_key("keyed-root", letter.clone(), Code::KeyN));
+            ui.release_key("keyed-root", letter, Code::KeyN);
+            let bracket = Key::Character("[".into());
+            assert!(
+                ui.press_key_composing("keyed-root", bracket.clone(), Code::BracketLeft),
+                "the [ was kept from the input method"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", bracket, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">· −<"), "a paddle keyed: {}", ui.html());
+            ui.end_composition("keyed-root");
+            assert!(
+                !ui.press_key("keyed-root", Key::Dead, Code::BracketLeft),
+                "the dead key was left to the box"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">E<"), "{}", ui.html());
+            assert!(
+                !ui.press_key_composing("keyed-root", Key::Dead, Code::BracketLeft),
+                "the dead key was left to the composition it opened"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">EE<"), "{}", ui.html());
+        });
+    }
+
+    /// On Linux the window keys every bracket it hears, with no word of an
+    /// input method's composition, so the root keeps a `[` typed within
+    /// one from the box as before, and keys nothing itself; a dead dit
+    /// key, which the window drops, it keys, composing or not.
+    #[test]
+    fn on_linux_a_bracket_while_composing_is_kept_from_the_page_as_before() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(LinuxPadHarness, ());
+            let bracket = Key::Character("[".into());
+            assert!(
+                !ui.press_key_composing("keyed-root", bracket.clone(), Code::BracketLeft),
+                "the [ was left to the input method"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", bracket, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(
+                ui.has(">· −<"),
+                "the root keyed the window's: {}",
+                ui.html()
+            );
+            assert!(!ui.press_key_composing("keyed-root", Key::Dead, Code::BracketLeft));
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
             ui.advance(1_000).await;
             assert!(ui.has(">E<"), "{}", ui.html());
         });

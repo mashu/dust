@@ -1,5 +1,6 @@
 # Build the WASM web app as GitHub Pages serves it, and check the site it
-# makes: a stylesheet, the tab icon, the privacy page.
+# makes: a stylesheet, the tab icon, the privacy page, and each page's
+# content security policy.
 #
 # CI runs this on every pull request and push, and the Pages workflow runs it
 # again, with `upload`, to deploy what passed. Project sites are served at
@@ -116,6 +117,12 @@ jobs:
           # Where Google's sign-in sends a browser back to, as sync is
           # turned on (src/sync/auth/web.rs): beside the app.
           cp docs/oauth.html site/oauth.html
+          # Each page's content security policy, set in a meta as Pages sets
+          # no headers: the hash of every inline script dx bundle left in
+          # the app's page is added to its policy, and the step fails on a
+          # page with no policy, or with anything inline its policy does not
+          # cover (scripts/check-site-policy.cjs).
+          node scripts/check-site-policy.cjs site index.html 404.html
           touch site/.nojekyll
           if ! find site -name '*.css' | grep -q .; then
             echo "Bundled site has no stylesheet"
@@ -145,7 +152,8 @@ jobs:
       # typing while sending off, and every character keyed right timed on
       # Results and in the browser's database
       # (scripts/browser-timing-check.cjs; src/timing_tests.rs runs the same
-      # in the app's test harness).
+      # in the app's test harness). Nothing the app does may breach the
+      # page's content security policy.
       - name: Key a session along in a browser
         env:
           PLAYWRIGHT_VERSION: "1.63.0"
@@ -166,7 +174,9 @@ jobs:
       # Google: nothing reaches Google before sync is on, nothing in the
       # drive is in the clear, and one device's history and settings reach
       # another. A build made without a web client ID offers no sync, and
-      # the check says so and passes.
+      # the check says so and passes. Either way the app's page refuses a
+      # connection anywhere else, and no page breaches its content security
+      # policy, the sign-in page among them.
       - name: Sync two browsers through a fake Google Drive
         run: |
           set -euo pipefail

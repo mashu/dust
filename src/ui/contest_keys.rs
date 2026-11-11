@@ -23,7 +23,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::{change_speed, pause_run, press_key, resume_run};
 use crate::session_runtime::finish_run;
 use crate::state::AppCtx;
-use crate::ui::training::INPUT_METHOD_KEY_CODE;
+use crate::ui::widgets::INPUT_METHOD_KEY_CODE;
 
 /// How far − / + move your speed, in WPM: MorseRunner's step.
 pub const SPEED_STEP_WPM: i32 = 2;

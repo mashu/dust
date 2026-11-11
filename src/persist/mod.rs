@@ -8,6 +8,8 @@
 //! that cannot read something gives back the most it can, and never writes
 //! over what it could not read.
 
+#[cfg(all(feature = "native-runtime", any(windows, test)))]
+mod acl;
 #[cfg(all(target_os = "android", not(test)))]
 mod android;
 pub mod backup;
@@ -20,8 +22,12 @@ mod files;
 #[cfg(any(feature = "web", test))]
 mod idb;
 mod legacy;
+mod lock;
+#[cfg(any(feature = "web", test))]
+mod marks;
 #[cfg(test)]
 pub mod memory;
+pub mod progress;
 pub mod record;
 mod saved;
 mod session;
@@ -34,6 +40,7 @@ mod worker;
 
 #[cfg(all(test, feature = "native-runtime"))]
 pub(crate) use desktop::tests::TempDir;
+pub use lock::{Lock, LockHeld, Locking};
 pub use saved::HistorySaved;
 pub use session::{Deleted, SessionKey};
 pub use set_aside::SetAside;
@@ -48,7 +55,8 @@ use cw_core::{
 };
 use serde::Deserialize;
 
-use record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+use progress::HistoryProgress;
+use record::{Deletions, HistoryChange, HistoryLoad, Pending, Record, RecordId, Unopened, done};
 use settings::{load_settings_from, unmarked};
 
 pub trait Store {
@@ -142,9 +150,32 @@ pub trait Store {
     /// stopped while it was marked was cut off ([`Store::take_cut_off`]).
     fn mark_open(&self, open: Option<OpenSession>);
     /// The sessions or runs copies of the app left marked open, and stopped
-    /// under: closed, crashed, killed, reloaded. Taken, so each is told of
-    /// once; one a copy is still running is left to it.
+    /// under: closed, crashed, killed, reloaded. One a copy is still running
+    /// is left to it, and so is one another copy took. Each taken is held by
+    /// this copy, and left where it is, until this copy lets go of it
+    /// ([`Store::release_cut_off`]): so each is told of once, and one this
+    /// copy stops under before it holds what the mark carried is taken
+    /// again by the next copy to look.
     fn take_cut_off(&self) -> CutOffTaking;
+    /// Let go of the marks this copy took ([`Store::take_cut_off`]). Those
+    /// `carried`, whose sessions this copy's mark holds now, as it was last
+    /// written, or the history does, go: once this copy's mark is as safe
+    /// as the store makes a mark, and, where it could not be written, once
+    /// it is. Those `left` are let go of as they are, for the next look.
+    /// What it hands back is done once those carried have gone, or are
+    /// left waiting for a write of this copy's mark that goes in: at once
+    /// on a computer or a phone, and in a browser a moment later, once its
+    /// tab's mark is in place.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) -> Pending<()>;
+    /// How far the history read as the app opens has come, while it is
+    /// still being read, or moved from where an older build kept it whole:
+    /// none once it is in, and [`Store::load_history`] hands it over at
+    /// once, and none where the store reads it then and there. Asked
+    /// without waiting on the read: the app shows its boot screen until the
+    /// history is in, and nothing of it acts on a history half read.
+    fn history_progress(&self) -> Option<HistoryProgress> {
+        None
+    }
     /// The whole history, by record ([`record`]): moved first, where an
     /// older build kept it whole, and with whatever an older build stored
     /// there since taken up.
@@ -159,12 +190,54 @@ pub trait Store {
     /// cannot be listed, which is no word that anything is missing.
     fn history_listing(&self) -> Pending<Option<Vec<RecordId>>>;
     /// The records `ids`, as they are stored. One that cannot be read
-    /// comes back as its id.
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>>;
-    /// Which of `ids` were deleted by hand: of those missing from the
+    /// comes back as why ([`record::Unopened`]): it could not be read just
+    /// now, or, where the store can tell, its bytes are no text, damaged.
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>>;
+    /// Which of `ids` were deleted by hand, each beside when its tombstone
+    /// says it was ([`record::Deletions`]): of those missing from the
     /// listing, the ones to let go. Any other was lost in passing, and is
-    /// to be stored again: missing is never deleted.
-    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>>;
+    /// to be stored again: missing is never deleted. None where the store
+    /// could not look, which is no word that none of them was: sync takes
+    /// none for deleted then, as missing is never deleted, and looks again
+    /// at its next sync for what it may do only once it has looked
+    /// ([`crate::sync::state::SyncState::deletions_noted`]).
+    fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>>;
+    /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
+    /// where the store could not look, as missing is never deleted.
+    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
+        let found = self.deletions(ids);
+        Box::pin(async move {
+            found
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        })
+    }
+    /// Which of `ids` were deleted by hand, each beside the session its
+    /// tombstone remembers, by when and on what day it finished: one whose
+    /// tombstone remembers none is left out. None where the store could not
+    /// look, which is no word that none of them was.
+    fn deleted_sessions(&self, ids: Vec<RecordId>) -> Pending<Option<Vec<(RecordId, SessionKey)>>>;
+    /// Which of the sessions `keys` a tombstone remembers as deleted by
+    /// hand, whatever record it named: one stored under the name it was
+    /// given as it finished ([`record::RecordId::next`]), and deleted by
+    /// hand since, is found, though a mark would store it under another
+    /// ([`record::RecordId::placed`]). One whose tombstone does not read is
+    /// left out. None where the store could not look, which is no word
+    /// that none of them was.
+    fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>>;
+    /// What to tell of `ids`, records listed that could not be read at all
+    /// at any of the app's tries since it found them so
+    /// ([`HistoryLoad::failed`]): of those not told of before, how many,
+    /// as records that could not be read ([`record::HistoryNotice::Unread`]),
+    /// each noted as told so it is told of once, at this launch or a later
+    /// one. Every one of them, where the store notes nothing, as a browser's
+    /// does not: its database reads each record whole, or nothing.
+    fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<record::HistoryNotice>> {
+        record::done(record::unread_notices(ids.iter().map(|_| None)))
+    }
     /// Whether the history may have changed, elsewhere, since this copy
     /// last read or listed it: whether it is worth listing again.
     fn history_changed(&self) -> bool;
@@ -202,11 +275,28 @@ pub trait Store {
     fn save_sync(&self, _state: Option<&str>) -> Result<(), String> {
         Err("this device keeps nothing for sync".into())
     }
+    /// A wait that ends as another copy of the app tells of a change it
+    /// made to what sync keeps, so that this one takes it up at once: sync
+    /// turned off there, or on anew, and what it synced and signed in with.
+    /// None where no copy tells, as only a browser's tabs do: a copy takes
+    /// up what another kept as it syncs or keeps, and as it comes back into
+    /// sight.
+    fn sync_news(&self) -> Option<Pending<()>> {
+        None
+    }
     /// Whether the history here can sync: kept by record, as every store
     /// keeps it but a browser's small page storage, which keeps it whole
     /// and lets the oldest go for room.
     fn syncs_history(&self) -> bool {
         true
+    }
+    /// Try `lock`, which every copy of the app on this store shares, and
+    /// say whether this copy holds it now ([`Locking`]). It never waits for
+    /// another copy to let go of it: a browser answers a moment later, as
+    /// it grants a Web Lock, and every other store at once. A store that
+    /// keeps no locks says so ([`Locking::Unlockable`]).
+    fn try_lock(&self, _lock: Lock) -> Pending<Locking> {
+        done(Locking::Unlockable)
     }
 }
 
@@ -354,10 +444,35 @@ impl CutOff {
     }
 }
 
+/// A mark of a session or run cut off, by its name in the store: what a copy
+/// that took it lets go of it by ([`Store::release_cut_off`]). The mark's
+/// file name on a computer or a phone, its key in a browser.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MarkId(String);
+
+impl MarkId {
+    fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The mark's name in its store.
+    fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A mark of a session or run cut off, as a copy of the app took it, held
+/// by that copy until it lets go of it ([`Store::take_cut_off`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TakenMark {
+    pub id: MarkId,
+    pub cut: CutOff,
+}
+
 /// The sessions cut off, being looked for: already, or still, where only the
 /// platform can tell which copies are running, as in a browser. Every one,
-/// for what each kept so far.
-pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<CutOff>>>>;
+/// for what each kept so far, by the mark it was told of in.
+pub type CutOffTaking = Pin<Box<dyn Future<Output = Vec<TakenMark>>>>;
 
 /// A backup file on its way: saved already, as a browser hands one over, or
 /// still being written on the history's own thread, as on a computer or a
@@ -407,9 +522,10 @@ pub fn default_store() -> Rc<dyn Store> {
 }
 
 /// Start reading the history as the app starts, on a thread of its own, so
-/// that the app's window comes up meanwhile and opens on it: the store the
-/// app opens takes what was read ([`default_store`]). A browser has its
-/// own, which the page waits on before the app starts ([`web::preload`]).
+/// that the app's window comes up meanwhile, on its boot screen, and opens
+/// on it once it is in ([`Store::history_progress`]): the store the app
+/// opens takes what was read ([`default_store`]). A browser has its own,
+/// which the page waits on before the app starts ([`web::preload`]).
 #[cfg(feature = "native-runtime")]
 pub fn preload() {
     desktop::preload();
@@ -486,6 +602,10 @@ fn read_settings_from(raw: &str) -> Option<TrainingSettings> {
 /// own since, and a copy that wrote all of its settings back would put each
 /// of those back as it was: only what changed here is written, setting by
 /// setting, as a save names them.
+///
+/// What comes of it is read as a store reads its own: a value the store
+/// holds that this build cannot read, a later build's choice, is kept to be
+/// written back as it is ([`TrainingSettings::unread_values`]).
 pub fn merge_settings(
     base: &TrainingSettings,
     ours: &TrainingSettings,
@@ -509,8 +629,29 @@ pub fn merge_settings(
             None => merged.remove(key),
         };
     }
-    serde_json::from_value::<TrainingSettings>(serde_json::Value::Object(merged))
-        .map_or_else(|_| ours.clone(), TrainingSettings::clamp)
+    settings::settings_of_keys(&merged)
+}
+
+/// `settings` with each setting `keys` names as `from` holds it, and the
+/// rest as they are, read as [`merge_settings`] reads what it comes to: as
+/// a merge lays one copy's change over another's, setting by setting.
+pub fn settings_with(
+    settings: &TrainingSettings,
+    from: &TrainingSettings,
+    keys: &std::collections::BTreeSet<String>,
+) -> TrainingSettings {
+    let keys_of = |settings: &TrainingSettings| match serde_json::to_value(settings) {
+        Ok(serde_json::Value::Object(keys)) => keys,
+        _ => serde_json::Map::new(),
+    };
+    let (mut merged, from_keys) = (keys_of(settings), keys_of(from));
+    for key in keys {
+        match from_keys.get(key) {
+            Some(value) => merged.insert(key.clone(), value.clone()),
+            None => merged.remove(key),
+        };
+    }
+    settings::settings_of_keys(&merged)
 }
 
 #[cfg(test)]
@@ -736,6 +877,64 @@ pub(crate) mod tests {
         assert_eq!(out.curriculum.num_groups, 9);
     }
 
+    /// Settings set back, setting by setting, to what another copy holds
+    /// lose a key that copy's settings do not write: Contest, written as
+    /// Callsign with `contestActive` beside it, set back to the Callsign it
+    /// was is Callsign again, with no `contestActive` left over to read as
+    /// Contest, and the rest stays as it is. As a sync's end gives way to
+    /// its own later word on a setting another copy's sync took meanwhile
+    /// (`given_way` in `state::sync`).
+    #[test]
+    fn settings_set_back_to_another_copys_lose_a_key_it_does_not_write() {
+        let on = |mode| {
+            let mut settings = TrainingSettings::default();
+            settings.curriculum.char_set_mode = mode;
+            settings
+        };
+        let mut now = on(CharSetMode::Contest);
+        now.curriculum.num_groups = 9;
+        let here = on(CharSetMode::Callsign);
+        let keys = std::collections::BTreeSet::from(["contestActive".to_string()]);
+        let back = settings_with(&now, &here, &keys);
+        assert_eq!(back.curriculum.char_set_mode, CharSetMode::Callsign);
+        assert_eq!(back.curriculum.num_groups, 9, "the rest as it was");
+        let written = serde_json::to_value(&back).expect("settings write");
+        assert!(written.get("contestActive").is_none(), "{written}");
+        // And the other way: a key the other copy writes comes back.
+        let there = settings_with(&back, &now, &keys);
+        assert_eq!(there.curriculum.char_set_mode, CharSetMode::Contest);
+    }
+
+    /// A merge keeps what the store holds that this build cannot read, a
+    /// later build's choices, as it is stored, beside a change made here.
+    /// It used to read the merge again as this build reads it, and put
+    /// this build's reading of each in its place.
+    #[test]
+    fn a_merge_keeps_what_this_build_cannot_read() {
+        let later = r#"{"filterShape":"notch","filterWidthHz":300,"charSetMode":"morse",
+            "contestKind":"cwt","numGroups":7}"#;
+        let theirs = load_settings_from(later);
+        let base = theirs.clone();
+        let mut ours = base.clone();
+        ours.curriculum.num_groups = 9;
+        let merged = serde_json::to_value(merge_settings(&base, &ours, &theirs)).expect("JSON");
+        assert_eq!(
+            (
+                &merged["filterShape"],
+                &merged["charSetMode"],
+                &merged["contestKind"]
+            ),
+            (&"notch".into(), &"morse".into(), &"cwt".into())
+        );
+        assert_eq!(merged["numGroups"], 9, "the change made here");
+        // Stored by another copy since this one read the store: kept too.
+        let merged = merge_settings(&TrainingSettings::default(), &ours, &theirs);
+        assert_eq!(
+            serde_json::to_value(merged).expect("JSON")["filterShape"],
+            "notch"
+        );
+    }
+
     /// A session finished at `timestamp`, a day of its own.
     pub(crate) fn at(timestamp: u64) -> SessionResult {
         SessionResult {
@@ -759,6 +958,16 @@ pub(crate) mod tests {
             char_wpm: 20.0,
             ..SessionResult::empty_for_test()
         }
+    }
+
+    /// `session` as builds from before sessions said their format wrote
+    /// it ([`cw_core::SESSION_FORMAT`]): as this build does, with no
+    /// format.
+    pub(crate) fn as_an_older_build_wrote(session: &SessionResult) -> String {
+        let written = serde_json::to_string(session).expect("a session writes");
+        let says = format!("\"format\":{},", cw_core::SESSION_FORMAT);
+        assert!(written.contains(&says), "{written}");
+        written.replacen(&says, "", 1)
     }
 
     /// A save from before the AGC threshold went comes back with a raised

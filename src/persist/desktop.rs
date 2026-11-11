@@ -9,13 +9,19 @@ use std::sync::{Mutex, PoisonError};
 use cw_core::{AutoLevelCounters, CountersKey, TrainingSettings};
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
-use super::disk::{aside_name, move_aside, save_streamed, shown, sync_dir, temporary, write_whole};
+use super::disk::{
+    aside_name, flush, move_aside, save_streamed, shown, sync_dir, temporary, write_whole,
+};
 use super::files::HistoryFiles;
-use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId};
+use super::progress::HistoryProgress;
+use super::record::{
+    Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
+};
 use super::worker::{FLUSH_WITHIN, HistoryJobs, Loading};
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
-    over_stored, read_settings_from, unmarked,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, Lock, LockHeld, Locking, MarkId, OpenSession,
+    SETTINGS_HELD, SessionKey, SetAside, Store, TakenMark, over_stored, read_settings_from,
+    unmarked,
 };
 
 const THEME: &str = "theme.txt";
@@ -30,7 +36,8 @@ const SYNC: &str = "sync.json";
 /// the app's as `<id>.json`, beside `<id>.lock`, which that copy holds
 /// locked for as long as its session runs. A copy that stops, however it
 /// stops, lets go of its lock, so a mark nobody holds was cut off, and one
-/// held belongs to a window still running it.
+/// held belongs to a window still running it, or to one that took it as
+/// cut off and holds it until its own mark holds what it carried.
 const OPEN: &str = "open";
 
 /// How large the history may grow before the backup card says Android's
@@ -66,6 +73,16 @@ pub struct DesktopStore {
     set_aside: RefCell<Vec<SetAside>>,
     /// This copy's mark, while its session is marked open.
     open_held: RefCell<Option<HeldMark>>,
+    /// The marks of sessions cut off that this copy took, held locked and
+    /// left where they are until it lets go of them
+    /// ([`Store::release_cut_off`]).
+    taken: RefCell<Vec<HeldMark>>,
+    /// Of those, the ones whose sessions this copy's mark carries, to go
+    /// once that mark is on the disk for good ([`Self::release_carried`]).
+    releasing: RefCell<Vec<HeldMark>>,
+    /// This copy's mark could not be written as it was last asked to be:
+    /// what the marks it carries for held, it may hold none of.
+    mark_failed: Cell<bool>,
     /// The history by record, under `history/` ([`HistoryFiles`]), read and
     /// written on a thread of its own ([`HistoryJobs`]).
     history: HistoryJobs,
@@ -86,7 +103,8 @@ static PRELOADED: Mutex<Option<Preloaded>> = Mutex::new(None);
 
 /// Start reading the history, on its own thread, as the app starts: before
 /// its window is up, so the webview starts up meanwhile, and the app opens
-/// on what is left of it to read, if anything.
+/// on its boot screen only for what is left of it to read, if anything
+/// ([`Store::history_progress`]).
 pub(super) fn preload() {
     let root = data_dir();
     let history = HistoryJobs::on_worker(HistoryFiles::at(&root));
@@ -98,7 +116,8 @@ pub(super) fn preload() {
     });
 }
 
-/// A copy's mark ([`OPEN`]): its id, and the lock it holds on it.
+/// A copy's mark ([`OPEN`]), or one of a session cut off that it took: its
+/// id, and the lock it holds on it.
 struct HeldMark {
     id: String,
     lock: fs::File,
@@ -159,6 +178,9 @@ impl DesktopStore {
             settings_held: Cell::new(false),
             set_aside: RefCell::new(Vec::new()),
             open_held: RefCell::new(None),
+            taken: RefCell::new(Vec::new()),
+            releasing: RefCell::new(Vec::new()),
+            mark_failed: Cell::new(false),
         }
     }
 
@@ -253,7 +275,10 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let written = (|| {
         let mut file = private_file(&tmp)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        flush(&file)?;
+        // Closed before it takes its name: on Windows no one else may open
+        // it while it is open, and another copy reads what sync keeps.
+        drop(file);
         fs::rename(&tmp, dir.join(name))
     })();
     if written.is_err() {
@@ -261,6 +286,38 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     }
     written?;
     sync_dir(dir)
+}
+
+/// Try the lock that the file `name` in `dir` is, made there where it is
+/// not. The system holds a file's lock for whoever opened it, and lets go of
+/// it as the file is closed, or as the process that opened it ends, however
+/// it ends. A lock file is never deleted: a copy deleting one could do so
+/// under another that has it open and locked, while a third made it anew and
+/// locked that, and two copies would hold the lock at once. It holds nothing.
+fn lock_file(dir: &Path, name: &str) -> Locking {
+    let opened = fs::create_dir_all(dir).and_then(|()| {
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(name))
+    });
+    let file = match opened {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("{} cannot be locked: {err}", dir.join(name).display());
+            return Locking::Unlockable;
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => Locking::Held(LockHeld::new(file)),
+        Err(fs::TryLockError::WouldBlock) => Locking::Busy,
+        // A volume that takes no lock, as some network shares do not.
+        Err(fs::TryLockError::Error(err)) => {
+            eprintln!("{} cannot be locked: {err}", dir.join(name).display());
+            Locking::Unlockable
+        }
+    }
 }
 
 /// The file at `path`, made empty, that the user alone can read and write:
@@ -278,8 +335,48 @@ fn private_file(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// On Windows, the same by the file's access list, set while the file is
+/// still empty: the account the app runs as alone may open it, and it
+/// inherits nothing from its folder ([`super::acl`]). The file is made new,
+/// never one already there, which another account could have made to be
+/// written into, and no one else may open it while it is open, so no one
+/// opens it in the moment before its list is set. Where the list cannot be
+/// set, as on a volume that keeps none (FAT) or a share that will not take
+/// one, the file is made as any other is, new all the same, with its
+/// folder's list, and the log says why: sync goes on as before.
+#[cfg(windows)]
+fn private_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let new = |access: Option<u32>| {
+        let mut options = fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .share_mode(super::acl::SHARED_TO_DELETE_ALONE);
+        if let Some(access) = access {
+            options.access_mode(access);
+        }
+        options.open(path)
+    };
+    let file = match new(Some(super::acl::OPENED_TO_SET_ACCESS)) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            eprintln!(
+                "{} keeps its folder's access list, as it could not be opened to change it: {err}",
+                path.display()
+            );
+            return new(None);
+        }
+        Err(err) => return Err(err),
+    };
+    if let Err(err) = super::acl::keep_to_the_user(&file) {
+        eprintln!("{} keeps its folder's access list: {err}", path.display());
+    }
+    Ok(file)
+}
+
 /// Elsewhere, as any other file is made.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn private_file(path: &Path) -> io::Result<fs::File> {
     fs::File::create(path)
 }
@@ -502,7 +599,9 @@ impl Store for DesktopStore {
     /// write is whole, so a copy killed as it writes what its session has
     /// done so far leaves the mark as it was before or after, never half of
     /// one; one a power cut leaves empty still tells of a session cut off
-    /// ([`CutOff::Unread`]).
+    /// ([`CutOff::Unread`]). Once it is written, or gone, the marks of
+    /// sessions cut off whose sessions it carries go
+    /// ([`Self::release_carried`]).
     fn mark_open(&self, open: Option<OpenSession>) {
         let mut held = self.open_held.borrow_mut();
         match open {
@@ -511,12 +610,16 @@ impl Store for DesktopStore {
                     Some(mark) => (mark, false),
                     None => match self.new_mark() {
                         Some(mark) => (mark, true),
-                        None => return,
+                        None => {
+                            self.mark_failed.set(true);
+                            return;
+                        }
                     },
                 };
                 let written = serde_json::to_vec(&open)
                     .map_err(io::Error::other)
                     .and_then(|raw| self.write_mark(&mark.id, &raw));
+                self.mark_failed.set(written.is_err());
                 // A mark that will not take what its session has done since
                 // keeps what it held.
                 if written.is_ok() || !new {
@@ -529,12 +632,49 @@ impl Store for DesktopStore {
                 if let Some(mark) = held.take() {
                     self.unmark(mark);
                 }
+                self.mark_failed.set(false);
             }
         }
+        drop(held);
+        self.release_carried();
     }
 
     fn take_cut_off(&self) -> CutOffTaking {
         Box::pin(std::future::ready(self.cut_off()))
+    }
+
+    /// Those `left` are let go of there and then, their files left as they
+    /// are; those `carried` go once this copy's mark is on the disk for
+    /// good ([`Self::release_carried`]): there and then too, but where its
+    /// mark could not be written, as they wait for a write that is.
+    fn release_cut_off(&self, carried: Vec<MarkId>, left: Vec<MarkId>) -> Pending<()> {
+        {
+            let named = |ids: &[MarkId], mark: &HeldMark| ids.iter().any(|id| id.name() == mark.id);
+            let mut taken = self.taken.borrow_mut();
+            // Dropped, and with them their locks.
+            taken.retain(|mark| !named(&left, mark));
+            let (going, kept): (Vec<HeldMark>, Vec<HeldMark>) = std::mem::take(&mut *taken)
+                .into_iter()
+                .partition(|mark| named(&carried, mark));
+            *taken = kept;
+            self.releasing.borrow_mut().extend(going);
+        }
+        self.release_carried();
+        done(())
+    }
+
+    /// While the history read as the app started is still on its way from
+    /// the history's thread ([`preload`]), how far it has come: asked of
+    /// nothing on the disk, and without waiting for the read. None once it
+    /// is in, held for the first load to take at once, and none where no
+    /// read was started, as the first load then reads it then and there.
+    fn history_progress(&self) -> Option<HistoryProgress> {
+        let arrived = self
+            .loading
+            .borrow_mut()
+            .as_mut()
+            .is_none_or(Loading::arrived);
+        (!arrived).then(|| self.history.progress())
     }
 
     /// The history read as the app started, once it is; or read now.
@@ -555,12 +695,24 @@ impl Store for DesktopStore {
         self.history.listing()
     }
 
-    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+    fn read_records(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>> {
         self.history.read(ids)
     }
 
-    fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
-        self.history.forgotten(ids)
+    fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
+        self.history.deletions(ids)
+    }
+
+    fn deleted_sessions(&self, ids: Vec<RecordId>) -> Pending<Option<Vec<(RecordId, SessionKey)>>> {
+        self.history.deleted_sessions(ids)
+    }
+
+    fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>> {
+        self.history.deleted_keys(keys)
+    }
+
+    fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
+        self.history.still_unread(ids)
     }
 
     fn load_sync(&self) -> Option<String> {
@@ -590,6 +742,12 @@ impl Store for DesktopStore {
 
     fn history_changed(&self) -> bool {
         self.history.changed()
+    }
+
+    /// A file of its own for each lock, beside what sync keeps
+    /// ([`Lock::file_name`]), answered at once.
+    fn try_lock(&self, lock: Lock) -> Pending<Locking> {
+        done(lock_file(&self.sync_dir, lock.file_name()))
     }
 
     fn flush_history(&self) {
@@ -646,32 +804,98 @@ impl DesktopStore {
         drop(mark.lock);
     }
 
-    /// Every mark no copy holds, taken: what each tells of is read under its
-    /// lock, so a copy that has just marked its session is never taken for
-    /// one cut off.
-    fn cut_off(&self) -> Vec<CutOff> {
+    /// Every mark no copy holds, taken and held: what each tells of is read
+    /// under its lock, so a copy that has just marked its session is never
+    /// taken for one cut off, and the mark is left where it is, its lock
+    /// held, until this copy lets go of it ([`Store::release_cut_off`]). A
+    /// copy that stops first lets go of its lock as it stops, and the next
+    /// look takes the mark again; until then, any other copy's look, of
+    /// this build or an earlier one, finds it held and leaves it be.
+    fn cut_off(&self) -> Vec<TakenMark> {
         let mine = self.open_held.borrow().as_ref().map(|mark| mark.id.clone());
         let Ok(marks) = fs::read_dir(self.root.join(OPEN)) else {
             return Vec::new();
         };
-        marks
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let id = path.file_stem()?.to_str()?.to_string();
-                if path.extension()? != "lock" || mine.as_ref() == Some(&id) {
-                    return None;
+        let mut cut = Vec::new();
+        for entry in marks.flatten() {
+            let path = entry.path();
+            let Some(id) = mark_id(&path) else {
+                continue;
+            };
+            if mine.as_ref() == Some(&id) || self.took(&id) {
+                continue;
+            }
+            let Ok(lock) = fs::OpenOptions::new().write(true).open(&path) else {
+                continue;
+            };
+            // Held: another copy is running it, or took it.
+            if lock.try_lock().is_err() {
+                continue;
+            }
+            let mark = HeldMark { id, lock };
+            match fs::read(self.mark_path(&mark.id, "json")) {
+                Ok(raw) => {
+                    cut.push(TakenMark {
+                        id: MarkId::new(mark.id.clone()),
+                        cut: CutOff::read(&raw),
+                    });
+                    self.taken.borrow_mut().push(mark);
                 }
-                let lock = fs::OpenOptions::new().write(true).open(&path).ok()?;
-                // Held: another copy is running it.
-                lock.try_lock().ok()?;
-                let mark = HeldMark { id, lock };
-                let read = fs::read(self.mark_path(&mark.id, "json"));
-                self.unmark(mark);
-                read.ok().map(|raw| CutOff::read(&raw))
-            })
-            .collect()
+                // Made, and never written, as a copy that stopped as it
+                // made its mark leaves it: it tells of nothing.
+                Err(err) if err.kind() == io::ErrorKind::NotFound => self.unmark(mark),
+                // Not to be read just now: left, for the next look.
+                Err(_) => {}
+            }
+        }
+        cut
     }
+
+    /// Whether this copy took the mark `id`, and holds it still.
+    fn took(&self, id: &str) -> bool {
+        let named = |mark: &HeldMark| mark.id == id;
+        self.taken.borrow().iter().any(named) || self.releasing.borrow().iter().any(named)
+    }
+
+    /// Take away the marks of sessions cut off that this copy let go of as
+    /// carried ([`Store::release_cut_off`]), once its own mark, which holds
+    /// their sessions, is on the disk for good: written unsynced, as every
+    /// mark is, it may not be there yet, and a power cut would leave their
+    /// sessions in no mark at all. Not while its own mark could not be
+    /// written as it was last asked to be: they wait for one that is, or for
+    /// it to go, as it does once there is nothing left for it to carry.
+    fn release_carried(&self) {
+        if self.releasing.borrow().is_empty() || self.mark_failed.get() {
+            return;
+        }
+        if let Some(own) = self.open_held.borrow().as_ref()
+            && let Err(err) = self.mark_durable(&own.id)
+        {
+            eprintln!("could not make this copy's mark safe on the disk: {err}");
+            return;
+        }
+        for mark in self.releasing.take() {
+            self.unmark(mark);
+        }
+    }
+
+    /// Make mark `id`, as it was last written, as durable as the data it
+    /// names ([`flush`], [`sync_dir`]).
+    fn mark_durable(&self, id: &str) -> io::Result<()> {
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .open(self.mark_path(id, "json"))?;
+        flush(&written)?;
+        sync_dir(&self.root.join(OPEN))
+    }
+}
+
+/// The id of the mark whose lock file is at `path`: none for any other file.
+fn mark_id(path: &Path) -> Option<String> {
+    if path.extension()? != "lock" {
+        return None;
+    }
+    Some(path.file_stem()?.to_str()?.to_string())
 }
 
 /// Save a backup file in `folder`, written by `write` ([`save_streamed`]),
@@ -867,6 +1091,21 @@ pub(super) mod tests {
         OpenSession::starting(false, started_at)
     }
 
+    /// What each mark taken tells of.
+    fn cuts(taken: &[TakenMark]) -> Vec<CutOff> {
+        taken.iter().map(|taken| taken.cut.clone()).collect()
+    }
+
+    /// The id of the mark `store` holds of its own.
+    fn own_id(store: &DesktopStore) -> String {
+        let id = store
+            .open_held
+            .borrow()
+            .as_ref()
+            .map(|mark| mark.id.clone());
+        id.expect("marked")
+    }
+
     /// What a change came to: the files make every change then and there.
     fn now<T>(mut pending: Pending<T>) -> T {
         let mut asked = std::task::Context::from_waker(std::task::Waker::noop());
@@ -915,8 +1154,14 @@ pub(super) mod tests {
         // once, and so would the next to open have been.
         drop(second);
         let third = DesktopStore::at(dir.0.clone());
-        assert_eq!(first.cut_off(), [CutOff::Marked(open_at(2))]);
+        let taken = first.cut_off();
+        assert_eq!(cuts(&taken), [CutOff::Marked(open_at(2))]);
         assert_eq!(third.cut_off(), [], "told of once");
+        assert_eq!(first.cut_off(), [], "and held by the copy that took it");
+        // Carried by the first, which has no mark of its own: the history
+        // holds what it carried.
+        let carried = taken.into_iter().map(|taken| taken.id).collect();
+        now(first.release_cut_off(carried, Vec::new()));
         let left = fs::read_dir(dir.0.join(OPEN)).unwrap().count();
         assert_eq!(left, 0, "nothing left behind");
     }
@@ -989,7 +1234,10 @@ pub(super) mod tests {
         assert_eq!(left, [format!("{id}.json"), format!("{id}.lock")]);
         drop(cut);
         let cut = DesktopStore::at(dir.0.clone()).cut_off();
-        let so_far = cut[..].first().and_then(CutOff::so_far).expect("kept");
+        let so_far = cut
+            .first()
+            .and_then(|taken| taken.cut.so_far())
+            .expect("kept");
         assert_eq!(so_far.result.groups.len(), 3);
         assert_eq!(so_far.settings, Some(TrainingSettings::default()));
     }
@@ -1003,7 +1251,329 @@ pub(super) mod tests {
         fs::write(cut.mark_path(&id.expect("marked"), "json"), b"").unwrap();
         drop(cut);
         let next = DesktopStore::at(dir.0.clone());
-        assert_eq!(next.cut_off(), [CutOff::Unread]);
+        assert_eq!(cuts(&next.cut_off()), [CutOff::Unread]);
+    }
+
+    /// A mark whose text cannot be read just now, though it is there, is
+    /// left where it is, and the next look takes it once it reads. It used
+    /// to be deleted unread as it was taken, and what it carried with it.
+    #[test]
+    fn a_mark_whose_text_cannot_be_read_now_is_left_for_the_next_look() {
+        let (dir, cut) = store("open-unreadable-now");
+        cut.mark_open(Some(open_at(7)));
+        let id = own_id(&cut);
+        drop(cut);
+        let next = DesktopStore::at(dir.0.clone());
+        let (json, lock) = (next.mark_path(&id, "json"), next.mark_path(&id, "lock"));
+        let said = fs::read(&json).unwrap();
+        // A folder where its text is: the read fails, though the mark is
+        // there.
+        fs::remove_file(&json).unwrap();
+        fs::create_dir(&json).unwrap();
+        assert_eq!(now(next.take_cut_off()), [], "not to be read now");
+        assert!(lock.exists(), "left where it is");
+        drop(next);
+
+        fs::remove_dir(&json).unwrap();
+        fs::write(&json, said).unwrap();
+        let next = DesktopStore::at(dir.0.clone());
+        assert_eq!(
+            cuts(&now(next.take_cut_off())),
+            [CutOff::Marked(open_at(7))],
+            "taken at the next look, once it reads"
+        );
+    }
+
+    /// A mark a copy took, which that copy stopped under before its own
+    /// mark held what the other carried, is found again by the next copy
+    /// to look. It used to be deleted as it was taken, and what it carried
+    /// was then in no mark at all.
+    #[test]
+    fn a_mark_taken_by_a_copy_that_stops_before_holding_it_is_found_again() {
+        let (dir, cut) = store("open-taken-then-stopped");
+        cut.mark_open(Some(open_at(7)));
+        drop(cut);
+        let took = DesktopStore::at(dir.0.clone());
+        assert_eq!(now(took.take_cut_off()).len(), 1, "taken");
+        // Stopped before it held anything of it.
+        drop(took);
+        let next = DesktopStore::at(dir.0.clone());
+        let found = now(next.take_cut_off());
+        assert_eq!(found.len(), 1, "found again");
+        assert_eq!(cuts(&found), [CutOff::Marked(open_at(7))]);
+    }
+
+    /// A mark taken as cut off goes once the copy that took it lets go of
+    /// it as carried, and its own mark, which holds what it carried, is
+    /// written and made safe on the disk: while its own mark would not take
+    /// a write, it stays, and it goes with the next write that takes. One
+    /// let go of as it was stays, for the next copy to take.
+    #[test]
+    fn a_mark_carried_goes_once_this_copys_mark_holds_it() {
+        let (dir, cut) = store("open-carried");
+        cut.mark_open(Some(open_at(1)));
+        let cut_id = own_id(&cut);
+        drop(cut);
+        let other = DesktopStore::at(dir.0.clone());
+        other.mark_open(Some(open_at(2)));
+        drop(other);
+
+        let took = DesktopStore::at(dir.0.clone());
+        took.mark_open(Some(open_at(3)));
+        let own = own_id(&took);
+        let taken = now(took.take_cut_off());
+        let id_of = |at: u64| {
+            let taken = taken
+                .iter()
+                .find(|taken| matches!(&taken.cut, CutOff::Marked(open) if open.started_at == at));
+            taken.expect("taken").id.clone()
+        };
+        let (carried, left) = (id_of(1), id_of(2));
+        // Its own mark will not take a write: a folder is in the way of the
+        // name it is written under first.
+        fs::create_dir(took.mark_path(&own, "writing")).unwrap();
+        let carrying = OpenSession {
+            unstored: vec![session("2026-10-01")],
+            ..open_at(3)
+        };
+        took.mark_open(Some(carrying.clone()));
+        now(took.release_cut_off(vec![carried], vec![left]));
+        assert!(
+            took.mark_path(&cut_id, "json").exists(),
+            "kept, as this copy's mark holds nothing of it"
+        );
+        let next = DesktopStore::at(dir.0.clone());
+        assert_eq!(
+            cuts(&now(next.take_cut_off())),
+            [CutOff::Marked(open_at(2))],
+            "the one let go of as it was, for the next look; the other held"
+        );
+        drop(next);
+
+        fs::remove_dir(took.mark_path(&own, "writing")).unwrap();
+        took.mark_open(Some(carrying.clone()));
+        assert!(!took.mark_path(&cut_id, "json").exists(), "gone");
+        assert!(!took.mark_path(&cut_id, "lock").exists());
+        let next = DesktopStore::at(dir.0.clone());
+        assert_eq!(
+            cuts(&now(next.take_cut_off())),
+            [CutOff::Marked(open_at(2))],
+            "the other still there"
+        );
+        drop(next);
+        drop(took);
+        assert_eq!(
+            cuts(&now(DesktopStore::at(dir.0.clone()).take_cut_off()))
+                .into_iter()
+                .filter(|cut| *cut == CutOff::Marked(carrying.clone()))
+                .count(),
+            1,
+            "what it carried is in its own mark"
+        );
+    }
+
+    /// A mark's lock file that cannot be opened to be locked, a folder where
+    /// it goes say, or one its copy took away between the look's listing
+    /// and the open, is passed over: the look takes every other mark, one
+    /// listed after it as well as one before, and leaves it where it is.
+    /// The look goes through the folder in the order the disk lists it: by
+    /// name, by when each was made, or by a hash of each name, as ext4 does.
+    /// So marks and such locks are made in turn until the disk lists one of
+    /// the locks before a mark, and a look that stopped at the first lock it
+    /// could not open leaves that mark, whatever the order. With two such
+    /// locks beside one mark, it was caught only where a hash order happened
+    /// to list one of them first.
+    #[test]
+    fn a_mark_whose_lock_cannot_be_opened_is_passed_over() {
+        let dir = TempDir::new("open-lock-unopened");
+        let listed = || -> Vec<PathBuf> {
+            fs::read_dir(dir.0.join(OPEN))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect()
+        };
+        // Whether the disk lists the first of `odd` before the last of
+        // `marks`.
+        let odd_first = |marks: &[PathBuf], odd: &[PathBuf]| {
+            let listed = listed();
+            let at = |path: &PathBuf| listed.iter().position(|listed| listed == path);
+            let first_odd = odd.iter().map(|odd| at(odd).expect("listed")).min();
+            let last_mark = marks.iter().map(|mark| at(mark).expect("listed")).max();
+            first_odd < last_mark
+        };
+        let (mut marks, mut odd) = (Vec::new(), Vec::new());
+        for n in 1..=64 {
+            let cut = DesktopStore::at(dir.0.clone());
+            cut.mark_open(Some(open_at(n)));
+            marks.push(cut.mark_path(&own_id(&cut), "lock"));
+            odd.push(cut.mark_path(&format!("{n:016x}"), "lock"));
+            drop(cut);
+            fs::create_dir(odd.last().unwrap()).unwrap();
+            if odd_first(&marks, &odd) {
+                break;
+            }
+        }
+        assert!(
+            odd_first(&marks, &odd),
+            "one listed before a mark: {:?}",
+            listed()
+        );
+        let next = DesktopStore::at(dir.0.clone());
+        let taken = cuts(&now(next.take_cut_off()));
+        let made: Vec<CutOff> = (1..=marks.len() as u64)
+            .map(|n| CutOff::Marked(open_at(n)))
+            .collect();
+        assert!(
+            taken.len() == made.len() && made.iter().all(|made| taken.contains(made)),
+            "every mark beside them taken, {} made: {taken:?}",
+            made.len()
+        );
+        assert!(odd.iter().all(|odd| odd.is_dir()), "left where they are");
+    }
+
+    /// Where this copy's mark cannot be made, the marks it took of sessions
+    /// cut off stay, though it lets go of them as carried: no mark of its
+    /// own holds what they carry. They go once its mark is made.
+    #[test]
+    fn marks_carried_stay_while_this_copys_mark_cannot_be_made() {
+        let (dir, cut) = store("open-unmade");
+        cut.mark_open(Some(open_at(1)));
+        let cut_id = own_id(&cut);
+        drop(cut);
+        let took = DesktopStore::at(dir.0.clone());
+        let carried: Vec<MarkId> = now(took.take_cut_off())
+            .into_iter()
+            .map(|taken| taken.id)
+            .collect();
+        assert_eq!(carried.len(), 1, "taken");
+        // The name its mark would be made under is a folder's.
+        crate::time::pin_seeds(Some(7));
+        let id = format!("{:016x}", crate::time::seed_rng());
+        crate::time::pin_seeds(Some(7));
+        let making = took.mark_path(&id, "making");
+        fs::create_dir(&making).unwrap();
+        let carrying = OpenSession {
+            unstored: vec![session("2026-10-01")],
+            ..open_at(3)
+        };
+        took.mark_open(Some(carrying.clone()));
+        assert!(took.open_held.borrow().is_none(), "no mark of its own");
+        now(took.release_cut_off(carried, Vec::new()));
+        for extension in ["json", "lock"] {
+            assert!(
+                took.mark_path(&cut_id, extension).exists(),
+                "{extension}: kept, as nothing else holds what it carried"
+            );
+        }
+        fs::remove_dir(&making).unwrap();
+        took.mark_open(Some(carrying));
+        crate::time::pin_seeds(None);
+        assert!(took.open_held.borrow().is_some(), "made");
+        for extension in ["json", "lock"] {
+            assert!(
+                !took.mark_path(&cut_id, extension).exists(),
+                "{extension}: gone"
+            );
+        }
+    }
+
+    /// Where this copy's mark, written, cannot be made safe on the disk, the
+    /// marks it let go of as carried stay: a power cut could leave what
+    /// they carry in no mark at all. They go once a write of its mark is
+    /// made safe.
+    #[test]
+    fn marks_carried_stay_while_this_copys_mark_cannot_be_made_safe() {
+        let (dir, cut) = store("open-unsafe");
+        cut.mark_open(Some(open_at(1)));
+        let cut_id = own_id(&cut);
+        drop(cut);
+        let took = DesktopStore::at(dir.0.clone());
+        let carrying = OpenSession {
+            unstored: vec![session("2026-10-01")],
+            ..open_at(3)
+        };
+        took.mark_open(Some(carrying.clone()));
+        let own = own_id(&took);
+        let carried: Vec<MarkId> = now(took.take_cut_off())
+            .into_iter()
+            .map(|taken| taken.id)
+            .collect();
+        assert_eq!(carried.len(), 1, "taken");
+        // Its text a folder, it cannot be opened to be flushed.
+        let json = took.mark_path(&own, "json");
+        let said = fs::read(&json).unwrap();
+        fs::remove_file(&json).unwrap();
+        fs::create_dir(&json).unwrap();
+        now(took.release_cut_off(carried, Vec::new()));
+        for extension in ["json", "lock"] {
+            assert!(
+                took.mark_path(&cut_id, extension).exists(),
+                "{extension}: kept, as this copy's mark may not be on the disk"
+            );
+        }
+        fs::remove_dir(&json).unwrap();
+        fs::write(&json, said).unwrap();
+        took.mark_open(Some(carrying));
+        for extension in ["json", "lock"] {
+            assert!(
+                !took.mark_path(&cut_id, extension).exists(),
+                "{extension}: gone"
+            );
+        }
+    }
+
+    /// A store whose history is still being read on its thread, as the one
+    /// the app opens on is, says how far the read has come, asked without
+    /// waiting on it, so the app's first frame need not wait either; and
+    /// once the read is in, says so, and hands the history over at once.
+    #[test]
+    fn a_store_still_reading_its_history_says_so_without_waiting_on_it() {
+        use crate::persist::progress::HistoryProgress;
+        use std::time::{Duration, Instant};
+        let (dir, files) = store("still-reading");
+        let sessions: Vec<SessionResult> = (1..=600)
+            .map(|n| SessionResult {
+                timestamp: n * 60_000,
+                ..session(&format!("day {n}"))
+            })
+            .collect();
+        store_sessions(&files, &sessions);
+        drop(files);
+        let store = DesktopStore::on_worker_at(dir.0.clone());
+        // The history's thread is busy a while before it reads, as with a
+        // long history.
+        let (go, busy) = std::sync::mpsc::channel::<()>();
+        let _busy = store.history.ask(move |_| {
+            let _ = busy.recv();
+        });
+        *store.loading.borrow_mut() = Some(store.history.start_load());
+        let asked = Instant::now();
+        assert_eq!(
+            store.history_progress(),
+            Some(HistoryProgress {
+                moving: false,
+                count: None,
+            }),
+            "still being read"
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "asked, not waited on"
+        );
+        go.send(()).unwrap();
+        let given_up = Instant::now() + Duration::from_secs(60);
+        while store.history_progress().is_some() {
+            assert!(Instant::now() < given_up, "the read never came in");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            store.history.progress(),
+            HistoryProgress {
+                moving: false,
+                count: Some((600, 600)),
+            }
+        );
+        assert_eq!(store.load_history().sessions.len(), 600);
     }
 
     #[test]
@@ -1355,7 +1925,7 @@ pub(super) mod tests {
             put: vec![record],
             ..HistoryChange::default()
         }));
-        let read: [Result<Record, RecordId>; 1] = now(store.read_records(vec![moved]))
+        let read: [Result<Record, Unopened>; 1] = now(store.read_records(vec![moved]))
             .try_into()
             .expect("one");
         let [Ok(held)] = read else {
@@ -1968,6 +2538,58 @@ pub(super) mod tests {
         );
     }
 
+    /// A lock across copies of the app is held by one copy at a time, each
+    /// lock apart from the other, and is taken by the next copy to try it
+    /// once let go of: each in a file of its own beside what sync keeps,
+    /// which it leaves as it is. The lock files stay, for the next copy to
+    /// lock.
+    #[test]
+    fn a_lock_across_copies_is_held_by_one_copy_at_a_time() {
+        let (dir, first) = store("locks");
+        let second = DesktopStore::at(dir.0.clone());
+        let kept = r#"{"key":"secret"}"#;
+        first.save_sync(Some(kept)).expect("saved");
+        let held = |store: &DesktopStore, lock: Lock, why: &str| match now(store.try_lock(lock)) {
+            Locking::Held(held) => held,
+            other => panic!("{why}: {other:?}"),
+        };
+        let run = held(&first, Lock::SyncRun, "held by the first copy to try it");
+        let busy = now(second.try_lock(Lock::SyncRun));
+        assert!(matches!(busy, Locking::Busy), "held by the other: {busy:?}");
+        let state = held(&second, Lock::SyncState, "what sync keeps is a lock apart");
+        let busy = now(first.try_lock(Lock::SyncState));
+        assert!(matches!(busy, Locking::Busy), "{busy:?}");
+        drop(run);
+        let run = held(&second, Lock::SyncRun, "free once let go of");
+        drop((run, state));
+        // Restores, a lock apart, one window's at a time.
+        let restores = held(&first, Lock::Restore, "restores are a lock apart");
+        let busy = now(second.try_lock(Lock::Restore));
+        assert!(matches!(busy, Locking::Busy), "{busy:?}");
+        drop(restores);
+        let restores = held(&second, Lock::Restore, "free once let go of");
+        drop(restores);
+        assert_eq!(second.load_sync().as_deref(), Some(kept), "left as it is");
+        let names = files(&dir);
+        for name in ["sync-run.lock", "sync.lock", "restore.lock", SYNC] {
+            assert!(names.iter().any(|held| held == name), "{name}: {names:?}");
+        }
+        let _ = held(&first, Lock::SyncRun, "locked again where it stayed");
+    }
+
+    /// Where the folder of the lock files cannot be made, there is no lock,
+    /// and sync goes on without one, as it did before there were locks.
+    #[test]
+    fn a_lock_whose_file_cannot_be_made_is_none() {
+        let dir = TempDir::new("locks-nowhere");
+        fs::create_dir_all(&dir.0).unwrap();
+        let not_a_folder = dir.0.join("a file");
+        fs::write(&not_a_folder, "").unwrap();
+        let store = DesktopStore::at(not_a_folder);
+        let none = now(store.try_lock(Lock::SyncRun));
+        assert!(matches!(none, Locking::Unlockable), "{none:?}");
+    }
+
     /// What sync keeps, the key to the synced copy and the sign-in, is the
     /// user's alone to read, whatever the folder's other files are; and so
     /// is one an earlier build left open to every user, once written again.
@@ -1997,6 +2619,65 @@ pub(super) mod tests {
         );
         store.save_sync(None).expect("cleared");
         assert_eq!(store.load_sync(), None);
+    }
+
+    /// On Windows, what sync keeps is the user's alone by its access list:
+    /// the account the app runs as alone may open it, and it inherits
+    /// nothing from its folder; and so is one an earlier build left with
+    /// its folder's list, once written again. CI's Windows lint compiles
+    /// this, and runs no test: it is run by hand on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn what_sync_keeps_is_for_the_user_alone_to_read_on_windows() {
+        use crate::persist::acl::{access_list, the_users_alone};
+        let (dir, store) = store("sync-kept");
+        let the_users = the_users_alone().expect("the user's list");
+        let list = || access_list(&fs::File::open(dir.0.join(SYNC)).expect("kept")).expect("read");
+        store.save_sync(Some(r#"{"key":"secret"}"#)).expect("saved");
+        assert_eq!(list(), the_users);
+        assert_eq!(store.load_sync().as_deref(), Some(r#"{"key":"secret"}"#));
+        fs::remove_file(dir.0.join(SYNC)).unwrap();
+        fs::write(dir.0.join(SYNC), "{}").unwrap();
+        assert_ne!(
+            list(),
+            the_users,
+            "a file made as any other is has its folder's list"
+        );
+        store.save_sync(Some("{}")).expect("saved");
+        assert_eq!(list(), the_users);
+        assert_eq!(store.load_sync().as_deref(), Some("{}"));
+        assert!(
+            files(&dir).iter().all(|name| !name.ends_with(".tmp")),
+            "{:?}",
+            files(&dir)
+        );
+        store.save_sync(None).expect("cleared");
+        assert_eq!(store.load_sync(), None);
+    }
+
+    /// On Windows, what sync keeps goes only into a file made for it: one
+    /// already where it is made, another account's say, is never written
+    /// into, and no one else may open the one made while it is open, before
+    /// its list is set or after. CI's Windows lint compiles this, and runs
+    /// no test: it is run by hand on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn what_sync_keeps_goes_into_no_file_already_there_on_windows() {
+        let dir = TempDir::new("sync-new");
+        fs::create_dir_all(&dir.0).unwrap();
+        let theirs = dir.0.join(".sync.json.theirs.tmp");
+        fs::write(&theirs, "theirs").unwrap();
+        let refused = private_file(&theirs).expect_err("not written into");
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists, "{refused}");
+        assert_eq!(fs::read_to_string(&theirs).unwrap(), "theirs");
+        let ours = dir.0.join(".sync.json.ours.tmp");
+        let open = private_file(&ours).expect("made");
+        assert!(
+            fs::File::open(&ours).is_err(),
+            "no one else opens it while it is open"
+        );
+        drop(open);
+        assert!(fs::File::open(&ours).is_ok(), "the user, once it is shut");
     }
 
     /// On Android, a history past 20 MB is about to outgrow Android's own

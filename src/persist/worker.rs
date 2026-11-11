@@ -9,9 +9,10 @@
 //! made before that look, as it would be were both made then and there.
 //! Each answer comes back as the app's [`Pending`], which the app takes up
 //! once it comes ([`crate::history::settle_or_spawn`]). It waits there and
-//! then only for the history read as it opens, which starts as the app
-//! does ([`super::preload`]), and, for a moment, for what it asked to be
-//! written as it closes ([`HistoryJobs::flush`]).
+//! then only for what it asked to be written as it closes, for a moment
+//! ([`HistoryJobs::flush`]). The history read as it opens, which starts as
+//! the app does ([`super::preload`]), it asks after without waiting
+//! ([`Loading::arrived`]), its boot screen up until the read is in.
 //!
 //! A test asks the same of the files then and there, on its own thread
 //! ([`HistoryJobs::inline`]), so whatever it asked for is done once it
@@ -19,6 +20,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -26,8 +28,12 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use super::files::{HistoryFiles, THREAD, Watch};
-use super::record::{HistoryChange, HistoryLoad, Pending, Record, RecordId, done};
+use super::progress::{HistoryProgress, LoadProgress};
+use super::record::{
+    Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened, done,
+};
 use super::saved::HistorySaved;
+use super::session::SessionKey;
 
 /// How long a change the files would not take waits, at the head of the
 /// queue, before it is tried again: twice, before the app is told. A file
@@ -56,6 +62,9 @@ pub(super) struct HistoryJobs {
     watch: Watch,
     /// How many bytes the sessions stored hold, as the files last knew.
     size: Arc<AtomicU64>,
+    /// How far the read of the whole history has come, as the files count
+    /// it ([`HistoryFiles::progress`]).
+    progress: Arc<LoadProgress>,
 }
 
 enum Run {
@@ -79,12 +88,31 @@ impl Loading {
     pub(super) fn wait(self) -> HistoryLoad {
         match self {
             Self::Read(load) => load,
-            Self::Coming(coming) => coming.recv().unwrap_or_else(|_| {
-                eprintln!("the history could not be read as the app opened");
-                HistoryLoad::default()
-            }),
+            Self::Coming(coming) => coming.recv().unwrap_or_else(|_| unread()),
         }
     }
+
+    /// Whether the history is read, asked without waiting for it: once it
+    /// is, it is held here, for [`Self::wait`] to hand over at once.
+    pub(super) fn arrived(&mut self) -> bool {
+        let Self::Coming(coming) = self else {
+            return true;
+        };
+        let load = match coming.try_recv() {
+            Ok(load) => load,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => unread(),
+        };
+        *self = Self::Read(load);
+        true
+    }
+}
+
+/// The history the worker stopped short of reading: none, which the next
+/// look at the files takes up.
+fn unread() -> HistoryLoad {
+    eprintln!("the history could not be read as the app opened");
+    HistoryLoad::default()
 }
 
 impl HistoryJobs {
@@ -94,6 +122,7 @@ impl HistoryJobs {
         Self {
             watch: files.watch(),
             size: files.size(),
+            progress: files.progress(),
             run: Run::Inline(Box::new(files)),
         }
     }
@@ -101,7 +130,7 @@ impl HistoryJobs {
     /// The files reached on a thread of their own, which takes them; or
     /// then and there, should no thread start.
     pub(super) fn on_worker(files: HistoryFiles) -> Self {
-        let (watch, size) = (files.watch(), files.size());
+        let (watch, size, progress) = (files.watch(), files.size(), files.progress());
         let root = files.root().to_path_buf();
         let (jobs, queue) = mpsc::channel::<Job>();
         let started = thread::Builder::new()
@@ -112,6 +141,7 @@ impl HistoryJobs {
                 run: Run::Worker(jobs),
                 watch,
                 size,
+                progress,
             },
             Err(err) => {
                 eprintln!(
@@ -174,22 +204,53 @@ impl HistoryJobs {
         Box::pin(async move { listed.await.flatten() })
     }
 
-    /// The records `ids`, as stored ([`HistoryFiles::read`]).
-    pub(super) fn read(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, RecordId>>> {
+    /// The records `ids`, as stored ([`HistoryFiles::read`]): none read,
+    /// for now, where the files cannot be reached.
+    pub(super) fn read(&self, ids: Vec<RecordId>) -> Pending<Vec<Result<Record, Unopened>>> {
         let asked = ids.clone();
         let read = self.ask(move |files| files.read(&asked));
         Box::pin(async move {
-            read.await
-                .unwrap_or_else(|| ids.into_iter().map(Err).collect())
+            read.await.unwrap_or_else(|| {
+                ids.into_iter()
+                    .map(|id| Err(Unopened::Failed(id)))
+                    .collect()
+            })
         })
     }
 
-    /// Which of `ids` were deleted by hand ([`HistoryFiles::forgotten`]):
-    /// none, where the files cannot be reached, as missing is never
-    /// deleted.
-    pub(super) fn forgotten(&self, ids: Vec<RecordId>) -> Pending<Vec<RecordId>> {
-        let found = self.ask(move |files| files.forgotten(&ids));
-        Box::pin(async move { found.await.unwrap_or_default() })
+    /// Which of `ids` were deleted by hand, and when
+    /// ([`HistoryFiles::deletions`]): no word at all, where the files
+    /// cannot be reached, which is no word that none was.
+    pub(super) fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
+        let found = self.ask(move |files| files.deletions(&ids));
+        Box::pin(async move { found.await.flatten() })
+    }
+
+    /// Which of `ids` were deleted by hand, each beside the session its
+    /// tombstone remembers ([`HistoryFiles::deleted_sessions`]): no word at
+    /// all, where the files cannot be reached.
+    pub(super) fn deleted_sessions(
+        &self,
+        ids: Vec<RecordId>,
+    ) -> Pending<Option<Vec<(RecordId, SessionKey)>>> {
+        let found = self.ask(move |files| files.deleted_sessions(&ids));
+        Box::pin(async move { found.await.flatten() })
+    }
+
+    /// Which of the sessions `keys` a tombstone remembers
+    /// ([`HistoryFiles::deleted_keys`]): no word at all, where the files
+    /// cannot be reached.
+    pub(super) fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>> {
+        let found = self.ask(move |files| files.deleted_keys(&keys));
+        Box::pin(async move { found.await.flatten() })
+    }
+
+    /// What to tell of `ids`, records that still could not be read at the
+    /// app's last try ([`HistoryFiles::still_unread`]): nothing, where the
+    /// files cannot be reached.
+    pub(super) fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
+        let told = self.ask(move |files| files.still_unread(&ids));
+        Box::pin(async move { told.await.unwrap_or_default() })
     }
 
     /// Whether the history changed elsewhere since this copy last looked:
@@ -202,6 +263,12 @@ impl HistoryJobs {
     /// history and every change since: asked here, of nothing on the disk.
     pub(super) fn bytes(&self) -> u64 {
         self.size.load(Ordering::Relaxed)
+    }
+
+    /// How far the read of the whole history has come, as the files count
+    /// it: asked here, of nothing on the disk.
+    pub(super) fn progress(&self) -> HistoryProgress {
+        self.progress.now()
     }
 
     /// Do `job` with the files, behind whatever was asked for before: none,
@@ -355,14 +422,17 @@ mod tests {
             ..HistoryChange::default()
         });
         let after = jobs.listing();
-        let forgotten = jobs.forgotten(vec![records[0].id, records[1].id]);
+        let deleted = jobs.deletions(vec![records[0].id, records[1].id]);
         assert_eq!(wait(stored), HistorySaved::Stored { kept: 3 });
         assert_eq!(wait(before).expect("listed").len(), 3);
         assert_eq!(wait(gone), HistorySaved::Stored { kept: 0 });
         assert_eq!(wait(after).expect("listed"), [records[1].id, records[2].id]);
-        assert_eq!(wait(forgotten), [records[0].id]);
+        assert_eq!(wait(deleted), Some(vec![(records[0].id, Some(7))]));
         let read = wait(jobs.read(vec![records[1].id, records[0].id]));
-        assert_eq!(read, [Ok(records[1].clone()), Err(records[0].id)]);
+        assert_eq!(
+            read,
+            [Ok(records[1].clone()), Err(Unopened::Failed(records[0].id))]
+        );
         assert!(!jobs.changed(), "its own changes are none to take up");
     }
 

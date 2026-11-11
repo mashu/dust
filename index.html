@@ -2,17 +2,32 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- What the page may load and run, and where it may connect, ahead of
+         all it governs: a meta, as GitHub Pages sets no headers. Scripts
+         come from the site, the one below by its hash, or are built by the
+         app as it runs (Dioxus's eval, the history's, the marks' and the
+         tabs' scripts), with its WebAssembly; styles from the site, inline,
+         as Dioxus writes style attributes, and Google's sheet of type
+         faces; faces from Google, or inline in the stylesheet; the icons
+         inline, and no image from the site; connections to the site and
+         Google Drive alone; nothing else from anywhere. Sign-in is a window
+         of Google's own. src/app.rs's tests hold this to what the
+         app needs; CI adds the hash of any inline script dx bundle puts in,
+         and fails on anything inline it leaves uncovered
+         (scripts/check-site-policy.cjs). -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' 'sha256-UZOQyJWpGk74Y4LfOiiOwGIpysKjfFS3eQAvtIc+dzk='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com; img-src data:; connect-src 'self' https://www.googleapis.com; object-src 'none'; base-uri 'self'; form-action 'none'; frame-src 'none'; worker-src 'none'" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#1b2436" />
     <title>{app_title}</title>
     <!-- The type faces, asked for as the page loads rather than once the app
          has mounted: they are display=optional, used only if they arrive in
          time for the first text. Loaded as print media and switched on once
-         they arrive, so the first paint never waits on them; offline, the
-         system's faces stand in. The same sheet as src/app.rs's
-         FONT_CSS_URL, as a test there checks. -->
+         they arrive, by the script below, as the page's policy runs no
+         handler written into the markup, so the first paint never waits on
+         them; offline, the system's faces stand in. The same sheet as
+         src/app.rs's FONT_CSS_URL, as a test there checks. -->
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&amp;family=Figtree:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@500;700&amp;display=optional" media="print" onload="this.media='all'" />
+    <link id="fonts" rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&amp;family=Figtree:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@500;700&amp;display=optional" media="print" />
     <!-- The tab's icon, inline. A project site lives under /<repo>/, and a
          browser with no icon linked asks for /favicon.ico at the root of the
          domain, outside the site. These are assets/linux/32x32.png and
@@ -27,6 +42,21 @@
           document.documentElement.setAttribute("data-theme", saved);
         }
       } catch (e) {}
+      // Switch the type faces' sheet on once it has arrived.
+      (function () {
+        var fonts = document.getElementById("fonts");
+        if (!fonts) {
+          return;
+        }
+        var all = function () {
+          fonts.media = "all";
+        };
+        if (fonts.sheet) {
+          all();
+        } else {
+          fonts.addEventListener("load", all);
+        }
+      })();
     </script>
     <style>
       html, body, #main {
@@ -90,6 +120,19 @@
         0% { transform: translateX(-120%); }
         100% { transform: translateX(350%); }
       }
+      /* How far the history read as the page opens has come, written in by
+         the app's own code once the read has taken a while
+         (src/persist/web.rs): its line kept from the start, so nothing
+         moves as it comes. */
+      .boot-note {
+        margin: 0;
+        min-height: 1.4em;
+        font-size: 0.94rem;
+        line-height: 1.4;
+        opacity: 0.72;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+      }
       @media (prefers-color-scheme: dark) {
         html:not([data-theme="light"]) body,
         html:not([data-theme="light"]) #main,
@@ -120,6 +163,7 @@
       <div class="boot-mark" aria-hidden="true">·−</div>
       <div class="boot-name">Dust</div>
       <div class="boot-pulse" aria-hidden="true"><span></span></div>
+      <p class="boot-note" id="boot-note" role="status" aria-live="polite"></p>
     </div>
   </body>
 </html>

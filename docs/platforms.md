@@ -458,7 +458,17 @@ What no test runs: the web build's audio (`src/audio/web`), which needs a
 browser's Web Audio, and the platform audio code, which needs the phone —
 the iOS audio session, Android's volume keys and output latency. The
 mixer, the receiver stream and the timing of a send that they hand their
-work to are tested natively.
+work to are tested natively. Nor does any test run a real input method:
+the keys of a composition, a dead key's among them, are made up in Node
+as Safari, Chrome and the macOS build are known to hand them over, so a
+paddle key that is dead, and a `[` typed in Pinyin or Kana, are checked
+by hand on a Mac, an iPhone and in Safari. In WebKit — Safari, every
+browser on an iPhone and the macOS build — a `[` or a `]` that ends a
+composition, as Pinyin's pick of the first or last character of a word
+does, still keys its paddle: it arrives after `compositionend` and, like
+a dead key's press, not as composing but with the input method's key
+code, 229. On the Linux desktop every bracket keys its paddle, composing
+or not, as the window that keys them tells of no composition.
 
 ## Desktop bundles
 
@@ -556,12 +566,28 @@ static-head `asset!` (`src/app.rs`), and shows its boot screen until the app
 mounts. The phones used to put the sheet in from the app once it had
 mounted, and Android drew the first frames raw before it arrived.
 
+The app waits for the whole history before anything of it runs, so nothing
+acts on a history half read; it never waits on it to draw a frame. A
+history still being read, or moved to this version's records, as the first
+frame is drawn holds the app on a boot screen of its own (`src/app.rs`):
+the paper alone for the first second, as most reads are over by then, then
+the app's mark and "Reading your history… n of N", or "Moving your
+history… n of N" during a move, until the history is in, with no time
+after which it gives up. The app used to read it as it drew its first
+frame: a Linux window stood blank meanwhile, a Mac's or a Windows PC's
+showed nothing at all, and Android's event loop waited on it. In a browser
+the page's own boot screen (`index.html`'s `#boot`) shows from the first
+frame, as the history is read before the app starts, and gains the same
+words after about a second, written in by the app's code, so the page runs
+no script of its own for it.
+
 The rest of what a frame needs is in the head too: a phone's viewport, edge
 to edge from the start, and every build's link to the type faces, which are
 asked for as the page loads. The faces never hold up the first paint: the
-sheet loads as print media and switches itself on, and its faces are
-`display=optional`, so a face that is late, or a phone offline, leaves the
-system's for that page rather than swapping it in under the reader. Before
+sheet loads as print media and is switched on once it has arrived, and its
+faces are `display=optional`, so a face that is late, or a phone offline,
+leaves the system's for that page rather than swapping it in under the
+reader. Before
 the page has loaded, the desktop window and Android's webview are the light
 theme's paper, not white; iOS keeps its webview's own colour, which wry
 would make translucent to change.
@@ -621,6 +647,27 @@ project site along with it), or a user or organisation site
 store, so users move with a backup, and the policy and
 `PRIVACY_POLICY_URL` change with it.
 
+The web app's page sets a content security policy, in a `<meta>` of
+`index.html`, as Pages sets no headers. Scripts come only from the site:
+the page's one inline script by its hash, and the code the app builds as
+it runs (Dioxus's eval, the history's, the marks' and the tabs' page
+scripts) and its WebAssembly, by `'unsafe-eval'` and
+`'wasm-unsafe-eval'`. Styles come from the site, inline (Dioxus writes
+style attributes) and from Google's sheet of type faces; the faces from
+Google, or inline in the stylesheet; images only inline, the icons. The
+page connects to the site and to Google Drive alone, and has no frames,
+workers, plugins or form posts, and loads nothing else from anywhere, the
+site included (`default-src 'none'`). Sign-in is a window of Google's own,
+which the page's policy does not govern; `oauth.html`, where it comes back,
+runs its own script alone, by its hash, and the privacy page runs none.
+Tests in `src/app.rs` hold each page's policy to that. The Pages step adds
+the hash of any inline script `dx bundle` puts in the page, and fails on
+anything inline a page's policy leaves uncovered
+(`scripts/check-site-policy.cjs`), and both browser checks fail on any
+breach. A meta cannot set `frame-ancestors`, so another site can still
+frame the app. The policy limits what the page loads and where it
+connects; it keeps no other page of the same origin from Dust's store.
+
 A session or contest run is marked open while it runs, and the mark goes
 once it ends and the store has taken it, or once it is discarded. Each copy of the app marks its own, a
 window or a tab of its own, and holds a lock on it for as long as it runs. A
@@ -628,14 +675,39 @@ copy that stops lets go of its lock, however it stops: closed, crashed,
 killed, reloaded, or rebuilt under `dx serve`. So a mark nobody holds was cut
 off, and the app says so, once, on the screen it opens on, or once the
 session it starts next is over, if the window that was running it stopped
-meanwhile. A mark another window still holds is left to it. Each group
+meanwhile. A mark another window still holds is left to it. The copy that
+finds a mark cut off holds its lock in turn, and leaves it where it is
+until its own mark holds what the other carried, written and, on desktop
+and mobile, flushed to the disk then and there, a wait the app makes only
+after it has found a mark cut off; only then does it go. While its own
+mark will not take a write, the disk or the page storage full say, it
+waits for one that does, or for that mark to go. A copy that stops
+before that lets go of it as it stops, and the next copy to look finds it
+again: what a mark carried is in one mark or another all along, told of
+twice at worst and kept once. Each group
 answered, and each QSO logged, puts in the mark what Exit would keep were
 it pressed then; the history itself is written only once the session ends.
 A session the store has yet to take, for want of room say, rides along in
 every mark after it until it is stored (`OpenSession::unstored`), so a copy
 that stops first leaves it to the next launch all the same.
 A session cut off is kept from its mark as Exit would have kept it, in the
-history and towards its level's run, and the app says that it was. Closing
+history and towards its level's run, and the app says that it was. It is
+kept once the marks that carried it have gone, so its level counts it once;
+only while this copy's mark will not take a write is it kept before then,
+and a copy that stops in between may count it again. One whose session a
+tombstone names, deleted by hand under whatever record, is not kept: as
+one its copy stored as it ended, under the name it gave it then, whose
+mark was left behind, as a page closed under a browser's database leaves
+it, and which the user deleted by hand in another copy before the mark was
+taken. One the store holds already in a record that cannot be read for
+now, as its copy stored it just before it stopped, waits with this copy's
+mark until that record reads, and is then the record's; it is kept beside
+it only once the record is no more, or is told of as one that could not be
+read, and not at all where the record is no more as another copy that read
+it had its session deleted by hand there, as its tombstone says. A record
+is named when its session finished or after, just after a later one where
+the clock was set back, so every session cut off that finished no later
+than such a record is named waits so. Closing
 the desktop window, or leaving or reloading the page, ends a session there
 and then as Exit does, so nothing is left to find, and stores the settings
 with it, a level it earned included. On desktop and
@@ -648,8 +720,52 @@ be held. In a browser they are `dust_open_session_<id>` in `localStorage`,
 each held by a Web Lock of the same name. The browser grants a lock a moment
 after it is asked for, so the mark goes in only once its lock is held, and
 under the lock a tab looking for marks holds while it looks; it goes again
-before its lock is let go of. A browser without Web Locks marks nothing,
-rather than take a tab still running for one cut off.
+before its lock is let go of. A tab that finds a mark cut off asks for its
+lock under that same look, and holds it until the mark can go. A browser
+without Web Locks marks nothing, rather than take a tab still running for
+one cut off.
+
+Copies of the app on one device sync one at a time, and lay what each did
+over what sync keeps one at a time ([sync.md](sync.md)). On desktop and
+mobile each holds a lock file beside `sync.json` for it: `sync-run.lock`
+for the whole of a sync, and while the synced copy is deleted, and
+`sync.lock` only while it reads what sync keeps, lays what it did over it
+and writes it back. They are files of their own rather than `sync.json`
+locked, as on Windows a file locked cannot be read through another handle;
+they hold nothing, are never deleted, and are let go of however the copy
+holding one stops. A browser's tabs hold the Web Lock `dust_sync_run` for a
+sync, and none for what sync keeps: a tab reads and writes `dust_sync` in
+`localStorage` there and then, while a Web Lock is granted only a moment
+after it is asked for, so a change kept under one would wait, and be lost
+with a tab closed in that moment. A sync that finds another copy's under
+way waits for it, ten minutes at most, then goes on without it, as copies
+do where the store takes no lock at all: a browser without Web Locks, or a
+folder that takes none, on some network shares. Two copies syncing at once
+each plan from what sync kept as they began, which the merge as each ends
+does not change: one can send again the deletion of a session the other
+let go here, undoing everywhere a putting back made on another device, or
+take back a session deleted here by hand meanwhile. Of the settings each
+took or sent, the later word on each, by its stamp, is the one kept here,
+setting by setting; and one changed by hand in a copy while its sync ran
+stays there, the later word, whatever either took, though it is back to
+what it was as that sync began. An edit made in a copy before its sync
+began, which that sync took in and sent, is no change made meanwhile,
+though it is stored only as the sync runs or after it: it gives way to a
+later word the sync took, unless another copy stored that setting while
+the sync ran and this one took that up first, as a sync that changed the
+history does as it ends: then it is taken for one set by hand meanwhile,
+and stays. A restore of a backup holds `restore.lock`
+beside them (in a browser the Web Lock `dust_restore`) from its start
+until neither it nor its Undo is under way
+or offered, so a restore in another copy waits for its Undo rather than
+take what both bring back for sessions already here, which the Undo would
+then delete; where the store takes no lock, restores are made as they come.
+The Undo is offered until its message is taken down, after eight seconds,
+or another takes its place. A browser that suspends a tab out of sight, as
+Safari on iOS does, or freezes it to save power, runs no timer there, and
+the tab keeps `dust_restore` meanwhile: a restore in another tab waits, its
+card saying so, until that tab is shown again, its message taken down, or
+it is closed. No test suspends a page.
 
 Updating the app does not clear any of it. The `localStorage` keys
 (`dust_settings`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
@@ -664,11 +780,50 @@ with a threshold raised under the AGC as the RF gain backed off as far, which
 is how the AGC heard it. A setting a later build added, which this one does
 not read, is kept and written back with the rest, as are the keys a later
 build added to a session, a group, its timing or a counter: a copy of this
-build left open beside a newer one never strips them. A session is stored
+build left open beside a newer one never strips them. So are the keys a later
+build added to what sync keeps: this build lays what it changes there over
+what the store holds as it writes, so they stay as a later build last left
+them, and one it let go stays gone. So is a value this
+build cannot read under a key it reads, a later build's choice of a filter
+shape or a contest, say (`TrainingSettings::unread_values`): read as this
+build can, it goes back as it was stored, to the file, a backup and sync
+alike, until that setting is changed here, and from then on as chosen here.
+In a setting of named entries, the callers' odds or their styles in each
+contest, an entry this build does not read, a later build's share or the
+styles of a contest it has no name for, stays as it was stored though the
+rest of that setting is changed here, a card's reset included; so does one it
+reads only in part, a contest's styles with a knob a later build added, until
+that entry is changed here. A number past this build's range is not one: it
+is read, held to the range, as it always was. A session is stored
 once, as the build that stored it wrote it, and never written over, so what
-a later build adds to it stays. One this build cannot read, a later build's
-say, is left where it is, and the app says so once; a build that reads it
-shows it. Settings that do not read at all, a `settings.json` edited by hand
+a later build adds to it stays; and one this build writes again, as a restore
+adds or fills it in, or an Undo puts it back, keeps every key a later build
+added to it: on the session, its groups and their timings, inside a group's
+times (`"charTimes"`), and inside a letter's entry of the tally
+(`"letterAccuracy"`). The tally's maps themselves, `"letterAccuracy"` and
+`"inserted"`, are keyed by one character each: a later build's key there that
+is no one character, a prosign's say, makes the session one this build cannot
+read, so a change that puts one there raises the format, and a later build
+puts what it adds of a letter inside the letter's entry, and anything else
+of the tally on the session. Each says the format it is stored in,
+`"format"`: the oldest format a build must know to read it
+(`SESSION_FORMAT`, `crates/cw-core/src/session.rs`), 1 so far, raised only
+by a change an earlier build would misread; one that says none is from
+before sessions said it. A build reads every format up to its own. A session
+stored in a later one is a later build's: left where it is, and the app says
+so once, as saved by a newer Dust; a build that reads it shows it, and a
+restore leaves out a backup's copy of the session it says it holds. One that
+says no later format and does not read is damaged, as is one whose bytes are
+no text at all: left where it is too, and told of as damaged; a restore
+brings a backup's copy of it back beside it. One that cannot be read at all
+for now, as a file another program holds open for a moment cannot be, is
+neither: it is read again at every look at the history, and on its own two,
+ten and sixty seconds after it was found so; one that still cannot be read
+at the last, or as the app opens again, is told of once, as one that could
+not be read, and a restore asked for meanwhile is refused once, as the
+backup could store its session a second time. One that reads after it was
+told of, then fails once more, is told of again: a failure of its own.
+Settings that do not read at all, a `settings.json` edited by hand
 and left with a stray comma say, are set aside before the defaults the app
 opens with are written over them: `settings.unreadable-*.json` beside it, or
 `dust_settings_unreadable` in a browser. So are the sessions of a history
@@ -711,9 +866,12 @@ history and what it holds, `<order>-<hash>`: twenty digits from when it
 finished, in milliseconds, raised past the newest where a clock set back
 says earlier, so such a session goes after the newest rather than among
 older ones; then the FNV-1a hash of the record's bytes (`RecordId`,
-`src/persist/record.rs`). Two copies storing one session name it alike, and
-store it once; a restore names each session it adds by when it finished, so
-two copies restoring one backup store each once too.
+`src/persist/record.rs`). Two copies of one build storing one session name
+it alike, and store it once; a restore names each session it adds by when it
+finished, so two copies restoring one backup store each once too. Builds
+from before sessions said their format wrote none, so name a session
+otherwise; a move made again over their records finds each session there
+all the same, by what it holds less its format.
 
 On a computer or a phone the history is the folder `history/`, beside the
 settings (`src/persist/files.rs`):
@@ -724,7 +882,34 @@ settings (`src/persist/files.rs`):
   deleted, and nothing else of it.
 - `layout.json`: how the history is kept, `{"layout": 1, "compatible": 1,
   …}`, and what the move from `sessions.json` took of it, written last.
-- `told.json`: the records this build cannot read and has said so of.
+- `told.json`: the records this build cannot read and has said so of,
+  each as a newer Dust's or as damaged, and those it has said could not be
+  read, so a build before records' formats, which goes by this note alone,
+  does not tell of them again. Such a build notes there every record it
+  could not open, a moment's failure among them, and every one it could
+  not make out. This build only adds names to it, so those stay; such a
+  build writes it over, as it tells of a record the note does not name,
+  with every record it cannot read just then.
+- `damaged-told.json`: the records this build has said are damaged, or a
+  newer Dust's, until each reads again or is gone: one that reads, then is
+  damaged once more, is told of again, whatever a build before noted of it
+  in `told.json`. No such build writes it; until this build first does,
+  `told.json` stands for it, so a record such a build told of that this one
+  cannot read either is not told of twice. This build writes it the first
+  time it finds `told.json`, or writes it. From then on a record that such
+  a build, used on the history again, tells of first, and that this one
+  cannot read either, is told of here a second time: such a build writes
+  `told.json` over as it tells of one, and this build keeps no note of what
+  it left there that would tell such a build's names from its own, for so
+  narrow a case.
+- `unread-told.json`: the records this build has said could not be read,
+  a failure that outlasted its tries, until each reads again or is gone:
+  one that reads, then fails once more, is told of again, whatever a build
+  before noted of it in `told.json`. No such build writes it.
+- `failing.json`: the records that could not be read at all as the history
+  was last read whole, or at the app's last try, and have not read since,
+  nor gone, so that one that still cannot be read at the next launch is
+  told of then.
 - `restoring-<n>.json`: held locked while a restore of many sessions stores
   them, so one Dust stopped under is told of as cut short.
 - `packs/*.jsonl.gz`: older records packed together, gzip, a record a line.
@@ -736,13 +921,15 @@ to the disk, renamed into place, and the folder flushed too. The files are
 read and written on a thread of their own, `dust-history`, one job at a time
 in the order asked (`src/persist/worker.rs`), so a long history never holds
 the window up. It starts reading the history as the app starts, before the
-window or webview is up, and the app waits for it as it closes, three
-seconds at most, so a session kept as the window closes is stored before it
-goes. A change that fails is tried twice more there, within half a second,
-before the app is told. One that still fails, or that the disk has no room
-for, leaves the session in the app and in its mark, and it is tried again
-with the next change, as the app comes back into sight, and every minute
-until it is stored.
+window or webview is up, counting what it reads, and what it moves, for the
+boot screen to say ([The first frame](#the-first-frame)); the app asks
+without waiting, and opens once the read is in. The app waits for it as it
+closes, three seconds at most, so a session kept as the window closes is
+stored before it goes. A change that fails is tried twice more there,
+within half a second, before the app is told. One that still fails, or that
+the disk has no room for, leaves the session in the app and in its mark,
+and it is tried again with the next change, as the app comes back into
+sight, and every minute until it is stored.
 
 In a browser the history is the IndexedDB database `dust_history`
 (`src/persist/idb.rs`, `src/persist/idb.js`), whose keys and values are all
@@ -751,7 +938,10 @@ and `deleted`, by record name, as the folders above, and `meta`, which holds
 `layout` and `told`. Each change is one transaction, whole or not at all; a
 browser that has no room for one keeps none of it, and the app says the
 browser is full. The database is opened, and the history read 2,000 records
-at a time, while the page's boot screen shows, before the app starts. A
+at a time, while the page's boot screen shows, before the app starts; it
+counts them as it goes, against how many the database says it holds, for
+the boot screen to say. A move from the page storage is one change, made
+whole, and the boot screen says only that it is being made. A
 newer Dust that opens it in another tab closes it under this one, which then
 asks to be reloaded before it stores anything; a database a newer Dust keeps
 is only read.
@@ -787,8 +977,42 @@ in `history/` or the database. It opens the history as it was at the move,
 stores its sessions there, up to its own 500, and remembers its deletions
 beside it, but it cannot delete or write over a record. A build that keeps
 records takes up, once, each session an older build stores there that
-finished no earlier than a day before the move and is neither here already
-nor deleted here, and makes here each deletion the older build made since.
+finished no earlier than a day before the newest session the move took
+(`takenThrough` in the layout: the newest no later than the clock said as
+the move was made, so a clock set ahead holds nothing back; where it took
+none, the newest it remembers deleting, and where there was no history kept
+whole at all, none, so nothing is cut off) and is neither here already nor
+deleted here, nor named among the deletions it remembers: one deleted by
+hand there by a build that keeps them, before the move or after, that a
+copy left open of a build that keeps none stores back, stays deleted, as
+every build that keeps them takes a session it puts back out of them. One
+deleted there by a build that keeps none, which finished after that
+cut-off, a later one than every session the move took among them, comes
+back with such a copy, as it does in that build. It
+makes here each deletion the older build made since, once, by what it is,
+whatever its clock said (`deletionsTaken`,
+beside `deletedSeen`, which builds before them go by). But where a build
+before those rules took deletions up first, moving `deletedSeen` on, every
+deletion stamped after what this build had seen and no later than that
+counts as one that build took, and is not made here. That includes one a
+build before records made after that build looked, with its clock behind:
+its session stays here. This is by choice: such a build notes nothing of
+the deletions it took, so nothing tells that deletion from one it took
+whose session was put back here since, by a restore say, which making it
+again would undo. A change there that
+a build before those rules took up first, by its own, is taken up again by
+them: such a build moves `legacy` on, and leaves `takenLegacy`, this
+build's note of what it took, as it was. Where such a build made the move
+as well, as every build from 0.16.3 to 0.16.9 did, the layout holds no
+`takenLegacy`, and this build takes the history kept whole up once by its
+rules, whatever `legacy` says, and notes it there.
+A record here that a later build stored counts as the session it says it
+holds; a damaged one does not, though it may still say one, and the older
+build's copy is taken up beside it, as a restore brings a backup's back
+beside it, and is left as it is when the older build deletes that session.
+While a record here cannot be read at all for now, or a pack of them opened,
+nothing is taken up: it may be the session, and the take-up waits for the
+next look at which every record reads.
 Going back to an older build shows the history as it was at the update,
 plus what it stores, and loses nothing kept since: the records stay for the
 next update. A history kept by a newer Dust in a way this build cannot
@@ -800,7 +1024,10 @@ seconds, or will not take the move, the history is kept for that visit as
 builds before records kept it: whole, in `dust_sessions`, to a budget of
 3,000,000 characters (`HISTORY_BUDGET`, `src/persist/legacy.rs`). Should it
 outgrow that, the newest sessions that fit are kept and the oldest let go
-(`store_newest_that_fit`), as before. The app says all this at every launch
+(`store_newest_that_fit`), as before. Only what a change stores is written as
+this build writes a session; every other session goes back as the history
+held it, byte for byte, so a tab of an older build that shares the history
+finds each as it left it. The app says all this at every launch
 that falls back, and to save a backup; the database is left as it is, and
 tried again at the next visit, which takes up what the visit stored as it
 takes up an older build's sessions.
@@ -846,15 +1073,34 @@ card:
   differed. Undo, in the message that follows,
   puts both back as they were: what the restore added taken out, and what it
   filled in as it was, while whatever another window kept or deleted
-  meanwhile stands. A file that is not a backup, or larger than 1 GB, is
-  refused, and the card says why. One past 50 MB takes a while to read, and
-  the card says so as it reads it; in a browser that says it has less
-  room left for the site than the file holds, the card says so first, as a
-  restore that does not fit stores none of it. A session or a setting the
-  file can no longer read is left out, as when the store is read. A backup
-  saved by any build restores on any other: the web app's on a phone, a
-  phone's on a computer. A build from before records takes one of up to
-  50 MB, and keeps the newest 500 sessions of it.
+  meanwhile stands. A restore asked for while a session or run is under
+  way is made once it is over, and so is an Undo clicked then, as the
+  message says: either changes the settings, the level among them. An
+  Undo clicked just before one began, which the store made only once it
+  had, as a browser's database takes a moment to, takes out what the
+  restore added then, and puts the settings back once the session or run
+  is over. Either waits with the app: closed before the session or run is
+  over, the app leaves the restore standing, or, for the second, its
+  settings. One window restores at a time: a restore asked for in another
+  window while this one's, or its Undo, is under way or still offered
+  waits for it, its card saying so, and is made over what the Undo left.
+  A failed Undo is offered again. A file that is not a backup, or larger
+  than 1 GB, is refused, and the card says why; with no card drawn by
+  then, a message does, once no session or run is under way. One past
+  50 MB takes a while to read, and the card says so as it reads it; in a
+  browser that says it has less room left for the site than the file
+  holds, the card says so first, as a restore that does not fit stores
+  none of it. A session or a setting the file can no longer read is left
+  out, as when the store is read; so is a session past the memory the
+  sessions read are held to, in all: about three times the file's length,
+  or 16 MB for a short one, for what this build reads of them, and beside
+  it 256 MB for what they hold that it does not read, a later build's
+  keys, and 300 MB for contest runs' logs, each counted as the memory it
+  takes. No history Dust stored reaches them, only a file made up to swell
+  far past its length. The message says how many sessions were left out.
+  A backup saved by any build restores on any other: the web app's on a
+  phone, a phone's on a computer. A build from before records takes one of
+  up to 50 MB, and keeps the newest 500 sessions of it.
 - After ten sessions without a backup the card says so, and its Save button
   stands out. When the last one was saved is kept under `dust_last_backup`,
   or in `last_backup.txt`. A restored backup counts as the last one only when

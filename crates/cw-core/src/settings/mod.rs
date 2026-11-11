@@ -122,8 +122,13 @@ pub enum FilterShape {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgcDecay {
-    /// Holds across the gaps inside a word and lets the band back in a word
-    /// gap: what most CW operators run.
+    /// Holds across the gaps inside a word, at the slowest speed and spacing
+    /// the settings send where their word gaps leave room for it, and lets
+    /// the band back in a word gap ([`crate::band::agc_timing`]): what most
+    /// CW operators run. The hang stops short of the settings' shortest word
+    /// gap, so with a wide speed range, and on the Listen screen at the
+    /// default speeds, or any whose word gaps leave no room for its pause,
+    /// the slowest letter gaps still let the band up.
     #[default]
     Fast,
     /// Holds across word gaps too and comes back over a second or so: the
@@ -745,6 +750,34 @@ pub struct TrainingSettings {
     /// so that a copy of an older build left open never strips them
     /// ([`save`]).
     pub unread: serde_json::Map<String, serde_json::Value>,
+    /// What a save held under a key this build reads, as a value it cannot
+    /// read: a later build's choice, such as a filter shape or a contest
+    /// this build has no name for. The setting is read as this build can,
+    /// and the value is written back as it was stored for as long as the
+    /// setting still writes what it was read as, so neither a copy of this
+    /// build nor sync puts this build's reading of it in its place. Changed
+    /// here, the setting is written as it now is
+    /// ([`TrainingSettings::keeping_values_of`]), but for the entries of an
+    /// object this build does not read, a later build's share of the
+    /// callers' odds or the styles of a contest it has no name for, and
+    /// those it reads only in part and has not changed, which stay beside
+    /// it.
+    pub unread_values: std::collections::BTreeMap<String, UnreadValue>,
+}
+
+/// A value a save held under a key this build reads, which this build
+/// cannot read: kept as it was stored, beside what the settings wrote
+/// under its key when they were read ([`TrainingSettings::unread_values`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnreadValue {
+    /// The value as the save held it, or, for an object changed here since,
+    /// as it is now written with the entries this build does not read
+    /// beside it.
+    pub stored: serde_json::Value,
+    /// What the settings wrote under its key when they were read, or last
+    /// changed here. While they still write it, the setting is as it was
+    /// read, and `stored` goes in its place.
+    pub read_as: serde_json::Value,
 }
 
 mod adapt;

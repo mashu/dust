@@ -207,7 +207,7 @@ impl MorsePlayer {
             volume: 1.0,
             ..gains
         };
-        let key = BandKey::of(&settings.band);
+        let key = BandKey::of(settings);
         let rate = self.ctx.sample_rate() as u32;
         let mut change = key.change_from(self.band_key.as_ref());
         if change == BandChange::Retune {

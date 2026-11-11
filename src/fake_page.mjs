@@ -1,6 +1,7 @@
 // A page for the app's page scripts to run on in Node, as the tests have no
-// webview: the window and the document they listen on, and the keys pressed
-// there (`crate::testing::on_fake_page`).
+// webview: the window and the document they listen on, the keys pressed
+// there, and an input method's compositions ending
+// (`crate::testing::on_fake_page`).
 //
 // It reads the steps as JSON from stdin, takes them in order, and writes, for
 // each, what the scripts sent the app during it and whether they kept the
@@ -12,8 +13,9 @@
 // A script waited on runs to its end before the next step is taken, as one
 // that waits on the browser's database has to.
 //
-// The page has a browser's database, broadcast channels and page storage too,
-// made up in memory (`src/fake_idb.mjs`), for the history's script.
+// The page has a browser's database, broadcast channels, page storage and Web
+// Locks too, made up in memory (`src/fake_idb.mjs`), for the history's script
+// and the tabs' (src/persist/tabs.js).
 
 import { readFileSync } from "node:fs";
 import { install } from "./fake_idb.mjs";
@@ -60,7 +62,8 @@ const document = new Target();
 document.body = body;
 document.activeElement = body;
 document.fullscreenElement = null;
-const navigator = {};
+// The page's own, with the Web Locks of its tab (src/fake_idb.mjs).
+const navigator = globalThis.navigator;
 window.document = document;
 window.navigator = navigator;
 
@@ -164,6 +167,11 @@ for (const step of steps) {
     document.dispatchEvent(key);
     window.dispatchEvent(key);
     heard.prevented = key.defaultPrevented;
+  } else if (step.step === "compositionend") {
+    // From the field that composed, up through the document to the window.
+    const ended = event("compositionend", { data: "" });
+    document.dispatchEvent(ended);
+    window.dispatchEvent(ended);
   } else if (step.step === "blur") {
     window.dispatchEvent(event("blur"));
   } else {

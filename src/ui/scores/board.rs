@@ -2,7 +2,7 @@ use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode, Ranking};
 use dioxus::prelude::*;
 
 use super::{Marked, focus, mode_label, pick, run_rule, speed};
-use crate::format::day_and_clock;
+use crate::format::{day_and_clock, percent};
 use crate::state::SessionPick;
 use crate::ui::help;
 use crate::ui::standing::{Medal, rating_label};
@@ -71,11 +71,7 @@ fn detail(entry: &BoardEntry) -> String {
         (Some(qsos), None) => format!("{qsos} QSO{}", if qsos == 1 { "" } else { "s" }),
         (None, _) => format!("{} groups", entry.groups),
     };
-    format!(
-        "{count} · {} · {}%",
-        speed(entry),
-        (entry.accuracy * 100.0).round()
-    )
+    format!("{count} · {} · {}", speed(entry), percent(entry.accuracy))
 }
 
 /// The board itself, best first: the top ten until asked for every row,

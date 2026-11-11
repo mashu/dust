@@ -5,12 +5,12 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::band::agc_decay_sec;
+use cw_core::band::agc_timing;
 use cw_core::{
-    AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, HeardTurn, MonoMs, Sampler,
-    Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX, VOLUME_MIN,
-    compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
-    generate_training_group, hear_qsos, plan_turn, resolve_station,
+    AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, HeardTurn, LISTEN_LETTER_GAP_MS,
+    MonoMs, Sampler, Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX,
+    VOLUME_MIN, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    generate_training_group, hear_qsos, plan_transmission, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -22,9 +22,6 @@ use crate::time::{local_hour, mono_ms, seed_rng};
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
 
-/// The pause between letters on the Listen screen.
-const LETTER_GAP_MS: u32 = 420;
-
 /// How many QSOs Hear a QSO plays: a few, enough to hear one follow
 /// another.
 const HEAR_QSOS: u32 = 3;
@@ -32,14 +29,15 @@ const HEAR_QSOS: u32 = 3;
 /// What the band preview calls.
 pub(crate) const BAND_PREVIEW_CALL: &str = "CQ";
 
-/// The pause between the band preview's calls: long enough for the AGC at
-/// Fast to let the band back after the loudest of them. Its hang and five of
+/// The pause between the band preview's calls under `settings`: long
+/// enough for the AGC at Fast to let the band back after the loudest of
+/// them. Its hang, which the speeds sent size ([`agc_timing`]), and five of
 /// its release's time constants bring a 26 dB duck within a fifth of a
 /// decibel, so the hiss is heard coming back a quarter of a second or so
-/// before the next call, which then starts on a gain of its own. At Slow the band is still held down at the end of it,
-/// which is what Slow is.
-pub(crate) fn band_preview_gap_ms() -> u32 {
-    let (hang, release) = agc_decay_sec(AgcDecay::Fast);
+/// before the next call, which then starts on a gain of its own. At Slow
+/// the band is still held down at the end of it, which is what Slow is.
+pub(crate) fn band_preview_gap_ms(settings: &TrainingSettings) -> u32 {
+    let (hang, release) = agc_timing(settings, AgcDecay::Fast);
     ((hang + 5.0 * release) * 1_000.0).round() as u32
 }
 
@@ -112,7 +110,7 @@ where
 /// The Listen screen: `chars`, one at a time.
 pub fn start_letters(ctx: AppCtx, chars: String) {
     start_preview(ctx, Preview::Letters, |lease, settings| {
-        play_chars(lease, settings, chars, LETTER_GAP_MS)
+        play_chars(lease, settings, chars, LISTEN_LETTER_GAP_MS)
     });
 }
 
@@ -141,12 +139,7 @@ pub fn start_sample(ctx: AppCtx, text: String) {
 /// The band-conditions preview, calling until it is stopped.
 pub fn start_band_preview(ctx: AppCtx) {
     start_preview(ctx, Preview::Band, |lease, _| {
-        loop_band_preview(
-            lease,
-            ctx.settings,
-            BAND_PREVIEW_CALL,
-            band_preview_gap_ms(),
-        )
+        loop_band_preview(lease, ctx.settings, BAND_PREVIEW_CALL)
     });
 }
 
@@ -354,7 +347,25 @@ fn new_station(settings: &TrainingSettings) -> (cw_core::StationVoice, SplitMix6
     (resolve_station(settings, &mut rng), rng)
 }
 
-/// Play `chars` one at a time, `gap_ms` apart.
+/// Play `chars` one at a time, each `gap_ms` after the last one's last
+/// element ends: as one send, the letters laid out in it
+/// ([`letters_apart`]), so the pause is on the player's own clock, the one
+/// the band plays to, on every player, whatever its latency, its lead, its
+/// poll or its callback, and the gap the AGC's hang is sized for is the gap
+/// the band hears ([`LISTEN_LETTER_GAP_MS`]). Sent one at a time, each
+/// asked for only once the last had been heard out, a letter a device too
+/// far behind its output could no longer have heard on time was heard late.
+/// A Stop ends the one send, wherever it is, and a send the audio fails is
+/// tried again whole, from its first letter, as every send is. A run the
+/// browser's stream skipped some of, the page held up past the half second
+/// it renders ahead, is stopped there and goes on at once from the first
+/// letter it did not play whole, as a send per letter went on after the
+/// page came back. What waits on a send to be over waits on the whole run:
+/// natively, an output the system has moved to meanwhile, headphones
+/// plugged in, is taken up once the run has been heard out; in a browser,
+/// an audio clock that stops with the page in view is taken for stalled
+/// once the run's length and two seconds have gone by, each try as long
+/// again.
 async fn play_chars(
     lease: Lease,
     settings: TrainingSettings,
@@ -364,19 +375,89 @@ async fn play_chars(
     // One operator for the whole run: a different pitch per letter would make
     // the screen harder to learn from, not more realistic.
     let (voice, _) = new_station(&settings);
-    for (i, ch) in chars.chars().enumerate() {
-        if i > 0 {
-            lease.sleep(gap_ms).await?;
+    let gap_sec = f64::from(gap_ms) / 1_000.0;
+    // Where in `chars` the letters still to be played begin.
+    let mut from = 0;
+    loop {
+        let rest = &chars[from..];
+        let plan = letters_apart(rest, &settings, voice, gap_sec);
+        if plan.wanted.chars.is_empty() {
+            return Ok(());
         }
-        lease
-            .send(
-                &Transmission::alone(ch.to_string(), voice),
-                &settings,
-                |_| {},
-            )
-            .await?;
+        let transcript = Transmission::alone(rest, voice);
+        // Where the browser's stream first skipped some of the run, if it
+        // did: the run is stopped there, rather than left to lose what of
+        // it the skip took, the rest of it whole where the skip was longer
+        // than the stream runs on over unheard.
+        let mut skipped = None;
+        let asked = lease.ask_to_send();
+        let sent = lease
+            .send_planned(asked, &plan, &transcript, &settings, None, |news| {
+                if let SendNews::Missed { from_sec, .. } = news
+                    && skipped.is_none()
+                {
+                    skipped = Some(from_sec);
+                    lease.stop_sending();
+                }
+            })
+            .await;
+        let Some(skipped_sec) = skipped else {
+            return sent.map(|_| ());
+        };
+        if !lease.is_current() {
+            return Err(AudioError::Cancelled);
+        }
+        // On from the first letter it did not play whole.
+        let first_unheard = plan
+            .wanted
+            .chars
+            .iter()
+            .find(|span| span.end_sec > skipped_sec);
+        match first_unheard {
+            Some(span) => from += span.at,
+            None => return Ok(()),
+        }
     }
-    Ok(())
+}
+
+/// `chars` sent by `voice` one at a time, as one send: each letter planned
+/// alone, as it would be sent alone, the first where it falls, and each
+/// after it `gap_sec` after the last one's last element ends. A character
+/// with no Morse is left out.
+fn letters_apart(
+    chars: &str,
+    settings: &TrainingSettings,
+    voice: StationVoice,
+    gap_sec: f64,
+) -> cw_core::PlannedTransmission {
+    let mut run = plan_transmission(&Transmission::alone(String::new(), voice), settings);
+    let mut next: Option<f64> = None;
+    for (at, ch) in chars.char_indices() {
+        let letter =
+            plan_transmission(&Transmission::alone(ch.to_string(), voice), settings).wanted;
+        let (Some(first), Some(last)) = (letter.chars.first(), letter.chars.last()) else {
+            continue;
+        };
+        let by = next.map_or(0.0, |next| next - first.start_sec);
+        run.wanted
+            .events
+            .extend(letter.events.iter().cloned().map(|mut tone| {
+                tone.start_sec += by;
+                tone
+            }));
+        run.wanted.chars.extend(letter.chars.iter().map(|span| {
+            let mut span = *span;
+            span.at += at;
+            span.start_sec += by;
+            span.end_sec += by;
+            span
+        }));
+        run.wanted.duration_sec = letter.duration_sec + by;
+        run.wanted.resolved_char_wpm = letter.resolved_char_wpm;
+        run.wanted.resolved_effective_wpm = letter.resolved_effective_wpm;
+        next = Some(last.end_sec + by + gap_sec);
+    }
+    run
 }
 
 /// Send one short sample once — the keying-envelope test chips.
@@ -392,14 +473,15 @@ async fn play_sample(
         .map(|_| ())
 }
 
-/// Call `text` over and over, `gap_ms` apart, loud, medium and weak in turn
+/// Call `text` over and over, loud, medium and weak in turn
 /// ([`BAND_PREVIEW_STRENGTHS`]), under the settings as they are at each
-/// call. Ends only when the lease does, or the audio fails.
+/// call, and as far apart as they let the band back between calls
+/// ([`band_preview_gap_ms`]). Ends only when the lease does, or the audio
+/// fails.
 async fn loop_band_preview(
     lease: Lease,
     settings: Signal<TrainingSettings>,
     text: &'static str,
-    gap_ms: u32,
 ) -> Result<(), AudioError> {
     // One station, kept, so moving a band slider changes the band and not
     // the signal you are judging it against: the same pitch and speed every
@@ -421,6 +503,7 @@ async fn loop_band_preview(
             generate_callsign(CALLSIGN_TIER_MAX, rng)
         });
         lease.send(&call, &settings_now, |_| {}).await?;
+        let gap_ms = band_preview_gap_ms(&settings.peek().clone().clamp());
         lease.sleep(gap_ms).await?;
     }
 }
@@ -654,6 +737,9 @@ mod tests {
         }
     }
 
+    /// The Listen screen's letters go as one send, one letter at a time:
+    /// each in its own span, in order, the next its pause after the last
+    /// one's last element ends.
     #[test]
     fn listening_plays_one_character_at_a_time() {
         run(|| async {
@@ -663,10 +749,121 @@ mod tests {
             h.pump();
             assert!(h.run_until(10_000, |_| outcome.borrow().is_some()).await);
             assert_eq!(*outcome.borrow(), Some(Ok(())));
-            assert_eq!(h.texts(), vec!["K".to_string(), "M".to_string()]);
+            assert_eq!(h.texts(), vec!["KM".to_string()], "one send");
+            let starts = h.recorder.starts();
+            let chars = &starts[0].plan.wanted.chars;
+            assert_eq!(chars.iter().map(|span| span.at).collect::<Vec<_>>(), [0, 1]);
+            assert!((chars[1].start_sec - chars[0].end_sec - 0.2).abs() < 1e-9);
         });
     }
 
+    /// The Listen screen's letters are laid out in their one send each
+    /// [`LISTEN_LETTER_GAP_MS`] after the last one's last element ends, and
+    /// the send ends with the last letter, so the pause is on the clock the
+    /// band plays to, as the AGC's hang is sized for, on every player. Sent
+    /// one at a time, the pause was waited out first only once a send was
+    /// heard to its end, and then asked of the player from as soon as it
+    /// was told so, which a device far enough behind its output could no
+    /// longer keep.
+    #[test]
+    fn listening_hears_each_letter_its_pause_after_the_last_one_ends() {
+        run(|| async {
+            let mut h = Harness::new();
+            let lease = claim(&h);
+            let gap = LISTEN_LETTER_GAP_MS;
+            let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), gap));
+            h.pump();
+            assert!(h.run_until(10_000, |_| outcome.borrow().is_some()).await);
+            assert_eq!(*outcome.borrow(), Some(Ok(())));
+            let starts = h.recorder.starts();
+            assert_eq!(starts.len(), 1, "one send");
+            let plan = &starts[0].plan.wanted;
+            assert_eq!(plan.chars.len(), 3);
+            for pair in plan.chars.windows(2) {
+                let apart = (pair[1].start_sec - pair[0].end_sec) * 1_000.0;
+                assert!(
+                    (apart - f64::from(gap)).abs() < 1e-6,
+                    "laid {apart:.3} ms after the last one ended"
+                );
+            }
+            let last = plan.chars[2].end_sec;
+            assert!(
+                plan.duration_sec >= last,
+                "the send ends with its last letter"
+            );
+            let keyed = plan
+                .events
+                .iter()
+                .map(|tone| tone.start_sec + tone.keyed_sec)
+                .fold(0.0, f64::max);
+            assert!(
+                (keyed - last).abs() < 1e-9,
+                "the last key-up is the last letter's"
+            );
+        });
+    }
+
+    /// The Listen screen's letters are heard their pause apart when the
+    /// player plays them, however far behind its output the ear is, up to
+    /// the most a player believes (half a second), and however the player is
+    /// asked for them: each letter's first element is heard the pause after
+    /// the last one's last element ends. Sent one at a time, each asked for
+    /// only once the last had been heard out, a letter the device could no
+    /// longer have heard on time played as soon as it could, and so later
+    /// than its pause: 435 ms at 0.42 s, 529 ms at 0.5 s.
+    #[test]
+    fn listening_letters_are_heard_their_pause_apart_however_late_the_ear() {
+        for latency in [0.0, 0.25, 0.42, 0.5] {
+            run(move || async move {
+                let mut h = Harness::new();
+                h.recorder.latency_sec.set(latency);
+                let lease = claim(&h);
+                let gap = LISTEN_LETTER_GAP_MS;
+                let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), gap));
+                h.pump();
+                assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
+                assert_eq!(*outcome.borrow(), Some(Ok(())));
+                // Where each letter is heard, from every send the player was
+                // handed: the test player waits for the moment asked, if that
+                // is still to come, then its latency.
+                let letters: Vec<(f64, f64)> = h
+                    .recorder
+                    .starts()
+                    .iter()
+                    .flat_map(|start| {
+                        let wait = start
+                            .heard_in
+                            .map_or(0.0, |asked| (asked - latency).max(0.0));
+                        let heard = start.at.0 as f64 + (wait + latency) * 1_000.0;
+                        start
+                            .plan
+                            .wanted
+                            .chars
+                            .iter()
+                            .map(|span| {
+                                (
+                                    heard + span.start_sec * 1_000.0,
+                                    heard + span.end_sec * 1_000.0,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                assert_eq!(letters.len(), 3, "{latency} s behind: K, M and U");
+                for pair in letters.windows(2) {
+                    let apart = pair[1].0 - pair[0].1;
+                    assert!(
+                        (apart - f64::from(gap)).abs() <= 1.0,
+                        "{latency} s behind: heard {apart:.0} ms after the last one ended"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Leaving the Listen screen part way through its letters ends the one
+    /// send there and then: nothing more is played, and the run says it was
+    /// stopped, well before the letters it had yet to play would have ended.
     #[test]
     fn listening_stops_when_the_user_leaves() {
         run(|| async {
@@ -675,15 +872,58 @@ mod tests {
             let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), 400));
             h.pump();
             assert!(h.run_until(5_000, |h| h.texts().len() == 1).await);
+            let plan = h.recorder.starts()[0].plan.wanted.clone();
+            // Into the run, between its first letter and its last.
+            h.advance(300).await;
+            assert!(outcome.borrow().is_none(), "still playing");
             h.app.player.release();
+            assert!(h.run_until(100, |_| outcome.borrow().is_some()).await);
+            assert!(plan.duration_sec > 1.0, "{} s to play", plan.duration_sec);
+            assert_eq!(*outcome.borrow(), Some(Err(AudioError::Cancelled)));
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), 1, "nothing is played after leaving");
-            assert_eq!(*outcome.borrow(), Some(Err(AudioError::Cancelled)));
         });
     }
 
+    /// A run the browser's stream skipped some of, the page held up past
+    /// what the stream renders ahead, goes on at once from the first letter
+    /// it did not play whole: one skipped inside a letter, and one dropped
+    /// from there to its end, the page held up longer than the stream runs
+    /// on over unheard. Left to play on, it lost those letters, all of the
+    /// rest for the longer hold-up, while the screen said it played; a send
+    /// per letter lost none, each sent as the page came back.
     #[test]
-    fn listening_gives_up_on_the_first_character_the_audio_fails() {
+    fn listening_goes_on_from_the_first_letter_the_stream_skipped() {
+        // K ends a little over a quarter of a second in, M sounds from
+        // 0.69 s to 0.89 s.
+        for skip in [(0.75, 0.8), (0.5, 1_000.0)] {
+            run(move || async move {
+                let mut h = Harness::new();
+                let lease = claim(&h);
+                h.recorder.skip_next.set(Some(skip));
+                let gap = LISTEN_LETTER_GAP_MS;
+                let outcome = spawn_into(&h, play_chars(lease, test_settings(), "KMU".into(), gap));
+                h.pump();
+                assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
+                assert_eq!(*outcome.borrow(), Some(Ok(())));
+                assert_eq!(h.texts(), ["KMU", "MU"], "{skip:?}");
+                let starts = h.recorder.starts();
+                let again = &starts[1].plan.wanted.chars;
+                assert_eq!(again.iter().map(|span| span.at).collect::<Vec<_>>(), [0, 1]);
+                let after_ms = starts[1].at.0 - starts[0].at.0;
+                assert!(
+                    (after_ms as f64) < skip.0 * 1_000.0 + 200.0,
+                    "{skip:?}: sent again {after_ms} ms in, of a run of {:.0} ms",
+                    starts[0].plan.sound_end_sec() * 1_000.0
+                );
+            });
+        }
+    }
+
+    /// The audio failing gives up on the Listen screen's letters whole,
+    /// tried again as the one send it is, never letter by letter.
+    #[test]
+    fn listening_gives_up_on_its_letters_as_the_audio_fails() {
         run(|| async {
             let mut h = Harness::new();
             let lease = claim(&h);
@@ -697,8 +937,8 @@ mod tests {
                     "Audio stream: device is gone".into()
                 )))
             );
-            // It gave up on the first character rather than grinding through both.
-            assert!(h.texts().iter().all(|text| text == "K"));
+            assert!(!h.texts().is_empty(), "tried");
+            assert!(h.texts().iter().all(|text| text == "KM"), "whole");
         });
     }
 
@@ -720,7 +960,7 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             let lease = claim(&h);
-            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
+            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ"));
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             assert!(h.texts().iter().all(|text| text == "CQ"));
@@ -749,7 +989,7 @@ mod tests {
             settings.band.filter_width_hz = cw_core::FILTER_WIDTH_MAX;
             let mut h = Harness::with_settings(settings);
             let lease = claim(&h);
-            let _outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
+            let _outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ"));
             h.pump();
             assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
             h.app.player.release();
@@ -781,7 +1021,7 @@ mod tests {
             let mut h = Harness::new();
             let lease = claim(&h);
             h.set_behaviour(Behaviour::RefuseToStart);
-            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ", 100));
+            let outcome = spawn_into(&h, loop_band_preview(lease, h.ctx.settings, "CQ"));
             h.pump();
             assert!(h.run_until(20_000, |_| outcome.borrow().is_some()).await);
             assert!(matches!(

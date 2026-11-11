@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <!-- What this page may run and load: its own style, by its hash, and
+       nothing else. A change to the style changes its hash, which the
+       tests in src/app.rs say. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'sha256-+lpDgB85rPEjrup6/zpcJsj4TPlFFGlkVDu2DbgsUVM='; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privacy policy — Dust</title>
   <meta name="description" content="Privacy policy for Dust, a CW Morse trainer. No account, no ads, no analytics: Dust keeps your practice on your device, and sends it nowhere unless you turn on sync, which keeps it encrypted in your own Google Drive.">
@@ -195,6 +199,11 @@
           it, and every project the developer publishes on GitHub Pages is a
           page under mashu.github.io. Only the developer’s GitHub repositories
           can publish there, and whatever a page there loads shares its access.
+          Dust’s pages tell the browser to run scripts only from the site
+          itself, and to load nothing but the site, Google Drive and the
+          app’s typefaces from Google Fonts (a content security policy), so
+          no script from anywhere else runs in them; no such policy can keep
+          another page under mashu.github.io from the site’s storage.
           Dust keeps the practice history in the browser’s database for the
           site (IndexedDB), in one named <code>dust_history</code>, and the
           rest in the site’s page storage (localStorage). It keeps everything

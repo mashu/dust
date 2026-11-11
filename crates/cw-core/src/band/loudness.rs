@@ -13,7 +13,7 @@
 //! With the AGC off nothing rides a pile-up down, so there full volume
 //! leaves room for the stations that can sound together.
 
-use super::agc::{AGC_MAX_DUCK_DB, Agc, agc_lookahead_samples};
+use super::agc::{AGC_MAX_DUCK_DB, Agc, agc_lookahead_samples, agc_timing};
 use super::calibration::{heard_floor_rms, noise_level};
 use super::delay::DelayLine;
 use super::dsp::db_to_gain;
@@ -51,9 +51,10 @@ const LISTEN_AT: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 /// a little short of it, for a crest between two samples, a pitch between
 /// two listened to and a fist that is not a keyer's, which take 3%, and for
 /// a station slower than the fastest, which is the one listened to. Slower,
-/// its gaps run longer and the AGC has opened further by its next element,
-/// whose first crests come out up to 7% over the fastest station's: at 9 to
-/// 16 WPM with the fast decay, and at the slowest with the slow one
+/// its gaps run longer and the AGC may have opened further by its next
+/// element, whose first crests come out up to 7% over the fastest
+/// station's, at 9 to 14 WPM at either decay, though the hang is sized from
+/// the slowest letter gap the settings send where their word gaps let it
 /// (`a_slower_station_stays_clean_at_full_volume`).
 const CLEAN_MARGIN: f64 = 0.90;
 
@@ -82,6 +83,8 @@ struct LoudestAsk {
     receiver: FilterDesign,
     knee: Option<Exact>,
     decay: AgcDecay,
+    /// How long the AGC's hang holds, as the speeds sent size it.
+    hang: Exact,
     noise: Exact,
     low_hz: Exact,
     high_hz: Exact,
@@ -107,6 +110,7 @@ impl LoudestAsk {
         Self {
             knee: knee.map(Exact),
             decay: settings.band.agc_decay,
+            hang: Exact(agc_timing(settings, settings.band.agc_decay).0),
             noise: Exact(noise_level(&settings.band)),
             receiver,
             low_hz: Exact(*range.start()),
@@ -227,7 +231,7 @@ fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
     let (low, high) = (ask.low_hz.0, ask.high_hz.0);
     let crest = HISS_CREST * heard_floor_rms(ask.noise.0, ask.receiver.noise_bandwidth_hz());
     let agc = match ask.knee {
-        Some(knee) => Agc::new(LISTEN_RATE, knee.0, ask.decay),
+        Some(knee) => Agc::with_hang(LISTEN_RATE, knee.0, ask.decay, ask.hang.0),
         None => Agc::off(LISTEN_RATE),
     };
     LISTEN_AT
@@ -532,7 +536,8 @@ mod tests {
 
     /// Asked again of the same receiver, the answer is the one remembered,
     /// whatever else moved, the RF gain included; anything the receiver is
-    /// made of asks anew.
+    /// made of asks anew, the AGC's hang among it, which the speeds sent
+    /// size.
     #[test]
     fn only_the_receiver_and_the_keying_ask_again() {
         let base = TrainingSettings::default();
@@ -549,10 +554,22 @@ mod tests {
             |s| s.band.side_tone_max = 900.0,
             |s| s.band.agc_enabled = false,
             |s| s.playback.char_wpm_max = 40.0,
+            |s| s.playback.extra_word_space_multiplier = 2.0,
         ] {
             let mut moved = base.clone();
             edit(&mut moved);
             assert_ne!(LoudestAsk::of(&base), LoudestAsk::of(&moved));
         }
+        let mut word_space = base.clone();
+        word_space.playback.extra_word_space_multiplier = 2.0;
+        let (asked, moved) = (LoudestAsk::of(&base), LoudestAsk::of(&word_space));
+        assert_ne!(asked.hang, moved.hang, "the hang moved, and only it");
+        assert_eq!(
+            LoudestAsk {
+                hang: asked.hang,
+                ..moved
+            },
+            asked
+        );
     }
 }

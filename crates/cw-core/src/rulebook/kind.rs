@@ -121,8 +121,27 @@ pub enum CallerHabits {
     Rough,
 }
 
+/// How much slower a caller of skill 1, 2 and 3 sends once it slows down
+/// for you ([`CallerHabits::slow_down_for_you`]), and how much slower still
+/// from its fourth incomplete try on.
+pub(crate) const QRS_DROP: [f64; 3] = [0.20, 0.16, 0.12];
+pub(crate) const QRS_MORE: f64 = 0.02;
+/// The most a caller slows down for you, at skill 1 from its fourth
+/// incomplete try on: the slowest a run's callers can send. The receiver's
+/// AGC holds the band down between the letters of a caller slowed by this
+/// or less ([`crate::band::agc_timing`]).
+pub(crate) const QRS_MOST: f64 = QRS_DROP[0] + QRS_MORE;
+
 impl CallerHabits {
     pub const ALL: [Self; 3] = [Self::Easy, Self::Real, Self::Rough];
+
+    /// Whether a caller tried often enough without getting its QSO through
+    /// slows down for you ([`QRS_DROP`]): a courtesy to a learner, under
+    /// easy habits only. Under real and rough ones callers keep their
+    /// speed, as contesters do.
+    pub(crate) fn slow_down_for_you(self) -> bool {
+        self == Self::Easy
+    }
 
     /// The name it is saved under.
     pub fn name(self) -> &'static str {

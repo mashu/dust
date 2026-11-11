@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use cw_core::{
     Completion, CountersKey, CountersUpdate, SessionResult, TrainingSettings, apply_auto_level,
@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 
 use super::{AppCtx, Finished, Notice, Screen};
 use crate::persist::record::{Record, RecordId};
-use crate::persist::{CutOff, SessionKey};
+use crate::persist::{CutOff, SessionKey, SoFar};
 
 /// Store what finishing a session did to its level's run, and move the
 /// level if the run earned it, saying so. A change the level has moved
@@ -46,16 +46,31 @@ pub fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
 ///
 /// Each is kept once, or not at all: one the history holds already, by
 /// when and on what day it finished, as the app stopped under it as it was
-/// stored, is not kept again, nor one deleted by hand under the record it
-/// would be stored as. Two marks that carry one session store it once:
-/// each is stored where it finished ([`RecordId::placed`]).
+/// stored, is not kept again, nor one a tombstone names, whatever record it
+/// was deleted by hand under: the one it would be stored as, or the one
+/// its copy stored it as as it ended ([`RecordId::next`]), whose mark was
+/// left behind, as a page closed under a browser's database leaves it, and
+/// which the user deleted by hand in another copy before the mark was
+/// taken. Looked for under the first alone, it was stored again under it,
+/// in every copy. Two marks that carry one session store it once:
+/// each is stored where it finished ([`RecordId::placed`]). One that a
+/// record the store could not read for now may hold, as it finished no
+/// later than such a record is named ([`AppCtx::unread_for_now_finished`]),
+/// waits with this copy's mark until the record reads, when the history
+/// holds it, or is no more, or is told of as one that could not be read,
+/// when it is kept beside it ([`AppCtx::wait_for_unread`]): kept at once,
+/// it would be held twice once the record read. But one whose record is no
+/// more as its session was deleted by hand, in another copy that read it,
+/// stays deleted ([`AppCtx::keep_what_waited`]).
 pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
     let store = ctx.app().store;
     // Each as it is to be stored, on today's scale, as every session of the
     // history is read, with the settings a session of groups is judged by.
     let mut kept: Vec<(Record, SessionResult, Option<TrainingSettings>)> = Vec::new();
+    let mut waiting = Vec::new();
     {
         let history = ctx.sessions.peek();
+        let unread = ctx.unread_for_now_finished();
         let mut keys = HashSet::new();
         let so_far = cut.iter().filter_map(CutOff::so_far).map(|so_far| {
             let settings = so_far.settings.clone().map(TrainingSettings::clamp);
@@ -70,6 +85,10 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
             if history.has_key(&key) || !keys.insert(key) {
                 continue;
             }
+            if unread.is_some_and(|through| result.timestamp <= through) {
+                waiting.push(SoFar { result, settings });
+                continue;
+            }
             result.score = result.points();
             let Some(record) = Record::of(&result, |json| RecordId::placed(result.timestamp, json))
             else {
@@ -78,14 +97,15 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
             kept.push((record, result, settings));
         }
     }
+    ctx.wait_for_unread(waiting);
     if kept.is_empty() {
         ctx.let_go_of_carried(&cut);
         return;
     }
     // In the history, and held with this copy's mark as sessions the store
     // has yet to take, before the store is asked anything: the marks they
-    // came from were taken from it as they were told of, and this copy's
-    // mark has held what they carried since only for their sake
+    // came from went from it once this copy's mark held what they carried,
+    // which it has held since only for their sake
     // ([`AppCtx::let_go_of_carried`]).
     let put = kept
         .iter()
@@ -97,9 +117,20 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
         return;
     }
     // One deleted by hand under the record it would be stored as is let
-    // go again, and so is one deleted here meanwhile.
+    // go again, and so is one deleted here meanwhile; and so is one whose
+    // session a tombstone of any other record names.
     let ids = held.iter().map(|record| record.id).collect();
-    let gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
+    let mut gone: HashSet<RecordId> = store.forgotten(ids).await.into_iter().collect();
+    let named: HashMap<SessionKey, RecordId> = kept
+        .iter()
+        .filter(|(record, _, _)| held.iter().any(|held| held.id == record.id))
+        .map(|(record, result, _)| (SessionKey::of(result), record.id))
+        .collect();
+    let deleted = store
+        .deleted_keys(named.keys().cloned().collect())
+        .await
+        .unwrap_or_default();
+    gone.extend(deleted.iter().filter_map(|key| named.get(key)));
     ctx.let_go_of_held(&gone);
     let held: Vec<Record> = {
         let history = ctx.sessions.peek();

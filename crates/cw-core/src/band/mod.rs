@@ -21,9 +21,10 @@
 //!    the AGC ([`crate::TrainingSettings::rf_gain`]), and the AGC rides the
 //!    gain: a steady few decibels down under a keyed station, back up in the
 //!    pauses, and only a moment's duck for a crash. Its knee is set from the
-//!    band's own floor ([`agc_knee`]), clear of the hiss. It listens
-//!    [`AGC_LOOKAHEAD_SEC`] ahead of what it plays, so its gain is down
-//!    before the first element of an over is.
+//!    band's own floor ([`agc_knee`]), clear of the hiss, and its hang
+//!    carries the gain across the longest gap between letters the settings
+//!    send ([`agc_timing`]). It listens [`AGC_LOOKAHEAD_SEC`] ahead of what
+//!    it plays, so its gain is down before the first element of an over is.
 //! 4. The receiver's audio stage adds a very faint, wide hiss of its own
 //!    ([`AudioFloor`]), after the filter and the AGC, so the band is never
 //!    quite silent outside the passband — as no real receiver is.
@@ -61,7 +62,7 @@ mod source;
 
 // What the players, the settings screen and the pile-up planner use. The rest
 // is the band's own business.
-pub use agc::{AGC_LOOKAHEAD_SEC, agc_decay_sec, agc_lookahead_samples};
+pub use agc::{AGC_LOOKAHEAD_SEC, agc_decay_sec, agc_lookahead_samples, agc_timing};
 #[cfg(doc)]
 pub(crate) use calibration::noise_floor_snr_db;
 pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
@@ -148,15 +149,20 @@ impl Receiver {
     pub fn new(sample_rate: u32, settings: &TrainingSettings) -> Self {
         let settings = settings.clone().clamp();
         let design = FilterDesign::from_settings(&settings);
-        Self::through(sample_rate.max(1), &settings.band, &design)
+        Self::through(sample_rate.max(1), &settings, &design)
     }
 
-    /// The receiver `design` is, set for `band`.
-    fn through(sample_rate: u32, band: &BandSettings, design: &FilterDesign) -> Self {
+    /// The receiver `design` is, set for `settings`: their band, and the
+    /// hang their sending asks of the AGC ([`agc_timing`]).
+    fn through(sample_rate: u32, settings: &TrainingSettings, design: &FilterDesign) -> Self {
+        let band = &settings.band;
         Self {
             filter: ReceiverFilter::new(sample_rate, design),
             agc: match agc_knee(band, design) {
-                Some(knee) => Agc::new(sample_rate, knee, band.agc_decay),
+                Some(knee) => {
+                    let (hang, _) = agc_timing(settings, band.agc_decay);
+                    Agc::with_hang(sample_rate, knee, band.agc_decay, hang)
+                }
                 None => Agc::off(sample_rate),
             },
             tuning: Tuning::new(band, design),
@@ -172,7 +178,7 @@ impl BandMixer {
         let settings = settings.clone().clamp();
         let band = &settings.band;
         let design = FilterDesign::from_settings(&settings);
-        let Receiver { filter, agc, .. } = Receiver::through(sample_rate, band, &design);
+        let Receiver { filter, agc, .. } = Receiver::through(sample_rate, &settings, &design);
         Self {
             source: BandSource::new(sample_rate, band, &design, seed),
             receiver: filter,

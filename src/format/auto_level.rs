@@ -16,12 +16,13 @@ pub fn percent_to_tenth(value: f64) -> String {
     }
 }
 
-/// An accuracy beside the `threshold` it was held to, in whole percent,
-/// unless rounding would carry it across the threshold: then to the tenth,
-/// cut towards its own side. A session at 89.6% read "accuracy 90%,
-/// threshold 90%" as it went down a level.
+/// An accuracy beside the `threshold` it was held to, in whole percent, a
+/// half going to the even one as every share on screen does, unless
+/// rounding would carry it across the threshold: then to the tenth, cut
+/// towards its own side. A session at 89.6% read "accuracy 90%, threshold
+/// 90%" as it went down a level.
 fn percent_beside(value: f64, threshold: f64) -> String {
-    let whole = value.round();
+    let whole = value.round_ties_even();
     match (value >= threshold, whole >= threshold) {
         (false, true) => format!("{:.1}%", (value * 10.0).floor() / 10.0),
         (true, false) => format!("{:.1}%", (value * 10.0).ceil() / 10.0),
@@ -113,6 +114,17 @@ mod tests {
         assert_eq!(percent_beside(90.45, 90.45), "90.5%");
         assert_eq!(percent_beside(40.0, 90.0), "40%");
         assert_eq!(percent_to_tenth(87.5), "87.5%");
+    }
+
+    /// Read whole, a share half way between two percents goes to the even
+    /// one, as every share on screen does, and beside its threshold it
+    /// still keeps to its own side.
+    #[test]
+    fn a_half_beside_a_threshold_goes_to_the_even_percent() {
+        assert_eq!(percent_beside(86.5, 90.0), "86%");
+        assert_eq!(percent_beside(90.5, 80.0), "90%");
+        assert_eq!(percent_beside(88.5, 89.0), "88%");
+        assert_eq!(percent_beside(89.5, 90.0), "89.5%");
     }
 
     #[test]

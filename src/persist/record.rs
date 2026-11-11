@@ -133,10 +133,18 @@ impl fmt::Display for RecordId {
 /// holds. Written out here rather than taken from a crate, as it is part of
 /// what every record is named by, and must never change with a dependency.
 pub fn fnv64(bytes: &[u8]) -> u64 {
+    fnv64_parts([bytes])
+}
+
+/// The same hash of `parts` one after another: of the bytes they come to
+/// joined, with none of them copied to join them.
+pub fn fnv64_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for part in parts {
+        for &byte in part {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     }
     hash
 }
@@ -220,6 +228,66 @@ pub fn key_of(json: &str) -> Option<SessionKey> {
         .map(|key| SessionKey::new(key.timestamp, key.date))
 }
 
+/// What a record that holds no session this build reads says of itself,
+/// as its text is read ([`unreadable`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unreadable {
+    /// When, and on what day, it says its session finished, where it says
+    /// both as every format says them ([`cw_core::SESSION_FORMAT`]).
+    pub key: Option<SessionKey>,
+    /// It says a format later than this build's: a later build stored it,
+    /// and reads it. A record that says none, or one this build reads, is
+    /// damaged: no build reads it.
+    pub later: bool,
+}
+
+/// What `raw`, the text of a record that holds no session this build
+/// reads, says of itself ([`Unreadable`]): that it is a later build's,
+/// where it says a format past this build's, and what session it holds.
+/// Text that is no JSON object says nothing: damaged.
+pub fn unreadable(raw: &str) -> Unreadable {
+    use serde_json::Value;
+    // An object, as every session is written: a reader of a struct would
+    // take an array for one, its first item for the format.
+    let Ok(Value::Object(says)) = serde_json::from_str::<Value>(raw) else {
+        return Unreadable::default();
+    };
+    let later = says
+        .get("format")
+        .and_then(Value::as_u64)
+        .is_some_and(|format| format > u64::from(cw_core::SESSION_FORMAT));
+    let key = match (says.get("timestamp"), says.get("date")) {
+        (Some(Value::Number(timestamp)), Some(Value::String(date))) => timestamp
+            .as_u64()
+            .map(|timestamp| SessionKey::new(timestamp, date.clone())),
+        _ => None,
+    };
+    Unreadable { key, later }
+}
+
+impl Unreadable {
+    /// The session a record a later build stored holds, as it says: none
+    /// for a damaged one, which holds none any build reads, whatever it
+    /// says ([`held_key`]).
+    pub fn later_key(&self) -> Option<&SessionKey> {
+        self.key.as_ref().filter(|_| self.later)
+    }
+}
+
+/// The session a record whose text is `raw` holds, as the history an older
+/// build keeps whole is taken up ([`super::legacy::imported`]): its own,
+/// where it reads as one, or the one a later build that stored it says it
+/// holds ([`Unreadable::later_key`]). None for a damaged one, though it may
+/// still say when and on what day its session finished: no build reads it,
+/// so the older build's copy of that session may be the only good one, as
+/// a restore takes a backup's beside it.
+pub(super) fn held_key(raw: &str) -> Option<SessionKey> {
+    match serde_json::from_str::<SessionResult>(raw) {
+        Ok(session) => Some(SessionKey::of(&session)),
+        Err(_) => unreadable(raw).later_key().cloned(),
+    }
+}
+
 /// The key of the session a tombstone names, `raw` being what it holds as
 /// it is stored ([`Deleted`]). None for one that is empty or does not
 /// read, which deletes its record all the same.
@@ -229,22 +297,67 @@ pub(super) fn tombstone_key(raw: &[u8]) -> Option<SessionKey> {
         .map(|gone| gone.key())
 }
 
-/// How many of `unread`, the records this build cannot read, are new to
-/// it, `told` being the names of those told of before, as they were noted:
-/// none, once each has been told of. A note that does not read told of
+/// When a tombstone says its record was deleted, by the clock of the device
+/// that deleted it, `raw` being what it holds as it is stored
+/// ([`Deleted::at`]). None for one that is empty or does not read, which
+/// deletes its record all the same.
+pub(super) fn tombstone_at(raw: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<Deleted>(raw)
+        .ok()
+        .map(|gone| gone.at)
+}
+
+/// What to tell of `unread`, the records this build cannot read, each
+/// beside what its text says of it ([`unreadable`]), or none where it could
+/// not be read at all, `told` being the names of those told of before, as
+/// they were noted: of those new to it, by what they are
+/// ([`unread_notices`]), and nothing once each has been told of. A note
+/// that does not read told of none.
+pub(super) fn not_told(
+    unread: &[(RecordId, Option<Unreadable>)],
+    told: Option<&[u8]>,
+) -> Vec<HistoryNotice> {
+    let told = names_noted(told);
+    unread_notices(
+        unread
+            .iter()
+            .filter(|(id, _)| !told.contains(&id.name()))
+            .map(|(_, said)| said.as_ref()),
+    )
+}
+
+/// The names of the records a note of them, `raw`, holds, as the note of
+/// those told of holds them: none, where it does not read, or there is
 /// none.
-pub(super) fn not_told(unread: &[RecordId], told: Option<&[u8]>) -> Option<usize> {
-    let told: HashSet<String> = told
-        .and_then(|raw| serde_json::from_slice(raw).ok())
-        .unwrap_or_default();
-    let new = unread
-        .iter()
-        .filter(|id| !told.contains(&id.name()))
-        .count();
-    if new == 0 {
-        return None;
+pub(super) fn names_noted(raw: Option<&[u8]>) -> HashSet<String> {
+    raw.and_then(|raw| serde_json::from_slice(raw).ok())
+        .unwrap_or_default()
+}
+
+/// What to tell of `new`, records this build cannot read found for the
+/// first time, each by what its text says of it, or none where it could
+/// not be read at all: how many a later build stored, how many are
+/// damaged, and how many could not be read, each where there are any.
+pub(super) fn unread_notices<'a>(
+    new: impl IntoIterator<Item = Option<&'a Unreadable>>,
+) -> Vec<HistoryNotice> {
+    let (mut later, mut damaged, mut unread) = (0, 0, 0);
+    for said in new {
+        match said {
+            Some(said) if said.later => later += 1,
+            Some(_) => damaged += 1,
+            None => unread += 1,
+        }
     }
-    Some(new)
+    [
+        (later, HistoryNotice::Later { count: later }),
+        (damaged, HistoryNotice::Damaged { count: damaged }),
+        (unread, HistoryNotice::Unread { count: unread }),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(_, notice)| notice)
+    .collect()
 }
 
 /// Every record of `sessions` by its session's key.
@@ -304,6 +417,37 @@ impl HistoryChange {
     }
 }
 
+/// A record a read could not hand back ([`super::Store::read_records`]),
+/// by why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unopened {
+    /// It could not be read at all just now, as a file another program
+    /// holds open for a moment cannot be: it may read a moment later, as
+    /// one that fails as the history is read whole may ([`HistoryLoad::failed`]).
+    Failed(RecordId),
+    /// It was read, and its bytes are no text, as damage to a disk leaves
+    /// them: no build reads it, now or later, as the history read whole
+    /// finds such a record damaged ([`HistoryLoad::unread`]). Only files
+    /// hold bytes that are no text: a browser holds text alone.
+    #[cfg_attr(not(feature = "native-runtime"), allow(dead_code))]
+    Damaged(RecordId),
+}
+
+/// Records deleted by hand ([`super::Store::deletions`]): each beside when
+/// its tombstone says it was deleted, none where it does not say, as one
+/// that is empty or does not read.
+pub type Deletions = Vec<(RecordId, Option<u64>)>;
+
+/// `read`, as a store that reads each record whole or not at all, and holds
+/// text alone, answers a read ([`super::Store::read_records`]): a record it
+/// could not read could not be read just now ([`Unopened::Failed`]).
+#[cfg(any(feature = "web", test))]
+pub(super) fn failed_for_now(read: Vec<Result<Record, RecordId>>) -> Vec<Result<Record, Unopened>> {
+    read.into_iter()
+        .map(|read| read.map_err(Unopened::Failed))
+        .collect()
+}
+
 /// The history as a store read it ([`super::Store::load_history`]).
 #[derive(Debug, Default, PartialEq)]
 pub struct HistoryLoad {
@@ -313,6 +457,17 @@ pub struct HistoryLoad {
     /// Records there that this build cannot read: left where they are, for
     /// a build that can.
     pub unread: Vec<RecordId>,
+    /// Records there that could not be read at all just now, as a file
+    /// another program holds open for a moment cannot be: kept apart from
+    /// `unread`, as they may read a moment later. The app reads them again
+    /// at every look, and soon after on its own
+    /// ([`crate::state::READ_AGAIN_MS`]); one is told of only where it
+    /// could not be read as the history was read before either
+    /// ([`HistoryNotice::Unread`]).
+    pub failed: Vec<RecordId>,
+    /// Of `unread`, those a later build stored ([`Unreadable::later`]),
+    /// each with the session it says it holds.
+    pub later: Vec<(RecordId, SessionKey)>,
     /// What the move from a history kept whole set aside, as it could not
     /// read it.
     pub set_aside: Vec<SetAside>,
@@ -328,9 +483,20 @@ pub struct HistoryLoad {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "web", allow(dead_code))]
 pub enum HistoryNotice {
-    /// `count` records this build cannot read, found for the first time.
-    /// They are left where they are: a build that reads them shows them.
+    /// `count` records that could not be read at all, found for the first
+    /// time once they still could not be read at the app's last try
+    /// ([`crate::state::READ_AGAIN_MS`]), or as the history was read again
+    /// at a later launch ([`HistoryLoad::failed`]): left where they are, and
+    /// read again at every look, and every launch.
     Unread { count: usize },
+    /// `count` records a later build stored, in a format this one does not
+    /// read ([`cw_core::SESSION_FORMAT`]), found for the first time. They
+    /// are left where they are: a build that reads them shows them.
+    Later { count: usize },
+    /// `count` records that hold no session any build reads, damaged, found
+    /// for the first time. They are left where they are, and a restore
+    /// brings back the backup's copy of each session beside them.
+    Damaged { count: usize },
     /// A restore of `meant` sessions stopped before it was done, as Dust
     /// stopped: `stored` of them were stored, or are deleted by hand and
     /// left so ([`HistoryChange::restore`]).
@@ -358,17 +524,24 @@ impl HistoryNotice {
     pub fn text(&self) -> String {
         match self {
             Self::Unread { count } => {
-                let (a_session, left, them) = if *count == 1 {
-                    ("1 session".to_string(), "it was left as it is", "it")
-                } else {
-                    (
-                        format!("{count} sessions"),
-                        "they were left as they are",
-                        "them",
-                    )
-                };
+                let (a_session, left, them) = unread_words(*count);
+                let they = if *count == 1 { "it" } else { "they" };
                 format!(
-                    "{a_session} in your history could not be read, perhaps saved by a newer Dust, so {left}. A Dust that reads {them} shows {them} again."
+                    "{a_session} in your history could not be read, so {left}. Dust keeps trying, and shows {them} once {they} can be read."
+                )
+            }
+            Self::Later { count } => {
+                let (a_session, left, them) = unread_words(*count);
+                let was = if *count == 1 { "was" } else { "were" };
+                format!(
+                    "{a_session} in your history {was} saved by a newer Dust, which this one cannot read, so {left}. A Dust that reads {them} shows {them} again."
+                )
+            }
+            Self::Damaged { count } => {
+                let (a_session, left, them) = unread_words(*count);
+                let is = if *count == 1 { "is" } else { "are" };
+                format!(
+                    "{a_session} in your history {is} damaged and could not be read, so {left}. Restoring a backup that holds {them} brings {them} back."
                 )
             }
             Self::CutShort { meant, stored } => format!(
@@ -382,6 +555,20 @@ impl HistoryNotice {
                 "This browser would not keep your history in its database just now ({why}), so this visit keeps it in the browser's small page storage, as Dust did before: that has room for only your newest sessions, and lets older ones go as it fills. Sessions in the database are not lost, and Dust opens it again the next time it starts. Save a backup to keep every session safe."
             ),
         }
+    }
+}
+
+/// How the notices of records this build cannot read say `count` of them:
+/// as sessions, what became of them, and how they are named after.
+fn unread_words(count: usize) -> (String, &'static str, &'static str) {
+    if count == 1 {
+        ("1 session".to_string(), "it was left as it is", "it")
+    } else {
+        (
+            format!("{count} sessions"),
+            "they were left as they are",
+            "them",
+        )
     }
 }
 
@@ -458,6 +645,34 @@ mod tests {
         ] {
             assert_eq!(RecordId::parse(not_a_name), None, "{not_a_name}");
         }
+    }
+
+    /// The hash of parts one after another is the hash of the bytes they
+    /// come to joined, wherever they are cut: what the page storage hashes
+    /// its history and its deletions by, without a copy of them joined.
+    #[test]
+    fn the_hash_of_parts_is_the_hash_of_them_joined() {
+        use cw_core::{Rng, SplitMix64};
+        let mut rng = SplitMix64::new(0x0f17_64a7);
+        for _ in 0..1_000 {
+            let joined: Vec<u8> = (0..rng.usize_in(0, 300))
+                .map(|_| rng.usize_in(0, 255) as u8)
+                .collect();
+            let mut cuts: Vec<usize> = (0..rng.usize_in(0, 4))
+                .map(|_| rng.usize_in(0, joined.len()))
+                .collect();
+            cuts.sort_unstable();
+            let mut parts = Vec::new();
+            let mut from = 0;
+            for cut in cuts {
+                parts.push(&joined[from..cut]);
+                from = cut;
+            }
+            parts.push(&joined[from..]);
+            assert_eq!(fnv64_parts(parts), fnv64(&joined), "{joined:?}");
+        }
+        let parts: [&[u8]; 3] = [b"foo", b"", b"bar"];
+        assert_eq!(fnv64_parts(parts), 0x8594_4171_f739_67e8);
     }
 
     /// A session a clock set back stamped before the newest goes after it,
@@ -602,15 +817,97 @@ mod tests {
         assert_eq!(read_record(&raw.to_string()), Some(stored));
     }
 
+    /// A record that holds no session this build reads is a later build's
+    /// where it says a format past this build's, and damaged otherwise:
+    /// where it says none, or one this build reads, or says it in a way no
+    /// build writes one, or is no JSON object at all. Either way it says
+    /// what session it holds where it says when, and on what day, that
+    /// finished, as every format says them.
+    #[test]
+    fn a_record_no_session_reads_from_says_whether_a_later_build_stored_it() {
+        let later = cw_core::SESSION_FORMAT + 1;
+        let day = || Some(SessionKey::new(1_790_000_000_000, "2026-10-02".into()));
+        let said = |raw: &str| unreadable(raw);
+        assert_eq!(
+            said(&format!(
+                r#"{{"format":{later},"date":"2026-10-02","timestamp":1790000000000,"x":[1]}}"#
+            )),
+            Unreadable {
+                key: day(),
+                later: true
+            }
+        );
+        assert_eq!(
+            said(&format!(r#"{{"format":{later}}}"#)),
+            Unreadable {
+                key: None,
+                later: true
+            },
+            "a later build's, saying no session"
+        );
+        let damaged = |key| Unreadable { key, later: false };
+        for (raw, key) in [
+            (
+                r#"{"date":"2026-10-02","timestamp":1790000000000,"by":"damage"}"#,
+                day(),
+            ),
+            (
+                r#"{"format":1,"date":"2026-10-02","timestamp":1790000000000}"#,
+                day(),
+            ),
+            (
+                r#"{"format":"2","date":"2026-10-02","timestamp":1790000000000}"#,
+                day(),
+            ),
+            (r#"{"format":2.5}"#, None),
+            (r#"{"format":-2}"#, None),
+            (r#"{"date":"2026-10-02","timestamp":null}"#, None),
+            (r#"{"date":2,"timestamp":1790000000000}"#, None),
+            ("{ damaged", None),
+            ("[2]", None),
+            ("", None),
+        ] {
+            assert_eq!(said(raw), damaged(key), "{raw}");
+        }
+    }
+
     /// Each notice says what happened and what to do, in plain words.
     #[test]
     fn what_became_of_the_history_is_said_plainly() {
         let one = HistoryNotice::Unread { count: 1 }.text();
-        assert!(one.starts_with("1 session in your history"), "{one}");
+        assert!(
+            one.starts_with("1 session in your history could not be read,"),
+            "{one}"
+        );
         assert!(one.contains("so it was left as it is."), "{one}");
+        assert!(one.contains("shows it once it can be read"), "{one}");
         let many = HistoryNotice::Unread { count: 3 }.text();
         assert!(many.starts_with("3 sessions"), "{many}");
-        assert!(many.contains("shows them again"), "{many}");
+        assert!(many.contains("shows them once they can be read"), "{many}");
+        let later = HistoryNotice::Later { count: 1 }.text();
+        assert!(
+            later.starts_with("1 session in your history was saved by a newer Dust"),
+            "{later}"
+        );
+        assert!(later.contains("shows it again"), "{later}");
+        let later = HistoryNotice::Later { count: 2 }.text();
+        assert!(
+            later.starts_with("2 sessions in your history were saved"),
+            "{later}"
+        );
+        assert!(!later.contains("perhaps"), "{later}");
+        let damaged = HistoryNotice::Damaged { count: 1 }.text();
+        assert!(
+            damaged.starts_with("1 session in your history is damaged"),
+            "{damaged}"
+        );
+        assert!(!damaged.contains("newer Dust"), "{damaged}");
+        assert!(damaged.ends_with("brings it back."), "{damaged}");
+        let damaged = HistoryNotice::Damaged { count: 4 }.text();
+        assert!(
+            damaged.starts_with("4 sessions in your history are damaged"),
+            "{damaged}"
+        );
         let cut = HistoryNotice::CutShort {
             meant: 40,
             stored: 12,

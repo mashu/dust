@@ -17,7 +17,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::format::{counted, counted_in_words, minutes_seconds, short_date};
+use crate::format::{counted, counted_in_words, minutes_seconds, percent, short_date};
 use crate::state::SessionPick;
 use crate::ui::contest::LogRowView;
 use crate::ui::figures::History;
@@ -72,9 +72,9 @@ pub fn ContestResults(
     let RunSummary {
         qsos, clean, rate, ..
     } = shown_figures;
-    let share = (qsos > 0).then(|| clean as f64 / qsos as f64 * 100.0);
-    let shown = share.map_or("—".to_string(), |share| format!("{:.0}%", share.round()));
-    let acc_pct = (result.accuracy * 100.0).round();
+    let share = (qsos > 0).then(|| clean as f64 / qsos as f64);
+    let shown = share.map_or("—".to_string(), percent);
+    let accuracy_shown = percent(result.accuracy);
     let mut about = format!("{kind} · {}", minutes_seconds(run_ms));
     if on_again.is_none() {
         // The date kept whole, however narrow the line.
@@ -106,7 +106,7 @@ pub fn ContestResults(
                     // whole to a screen reader.
                     div { class: "run-ring", role: "img", aria_label: "{shown} of QSOs logged clean",
                         ScoreRing {
-                            pct: share.unwrap_or(0.0),
+                            pct: share.map_or(0.0, |share| share * 100.0),
                             value: shown.clone(),
                             caption: "CLEAN".to_string(),
                         }
@@ -154,7 +154,7 @@ pub fn ContestResults(
                 }
                 div { class: "kpi purple",
                     div { class: "tiny", "Accuracy" }
-                    div { class: "value", "{acc_pct}%" }
+                    div { class: "value", "{accuracy_shown}" }
                 }
                 div { class: "kpi indigo",
                     div { class: "tiny", "Points" }
@@ -339,7 +339,7 @@ fn FieldTable(parts: Vec<(Option<Field>, f64)>, errors: RunErrors) -> Element {
                     for (part, accuracy) in parts {
                         tr {
                             th { scope: "row", "{part_label(part)}" }
-                            td { "{(accuracy * 100.0).round()}%" }
+                            td { "{percent(accuracy)}" }
                         }
                     }
                 }

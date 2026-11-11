@@ -1,6 +1,7 @@
 //! Devices syncing through one folder: each a store of its own and a state
 //! of its own, as each install has, the folder shared.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use cw_core::{SessionResult, TrainingSettings};
@@ -8,7 +9,7 @@ use cw_core::{SessionResult, TrainingSettings};
 use super::*;
 use crate::persist::Store;
 use crate::persist::memory::MemoryStore;
-use crate::persist::record::{HistoryChange, Record, RecordId};
+use crate::persist::record::{HistoryChange, Pending, Record, RecordId, done};
 use crate::persist::tests::at;
 use crate::sync::remote::MemoryRemote;
 use crate::sync::seal::Stretch;
@@ -446,10 +447,10 @@ fn a_session_deleted_on_one_device_and_put_back_on_another_comes_back_on_both() 
 
 /// A session deleted by hand on two devices before either synced, and put
 /// back after on one, comes back on the other too: the drive holding the
-/// first's deletion as the second synced, the second's was the same, with
-/// nothing of its own to send, and a putting back after it stands. The
-/// second used to send its deletion as it found the session back in the
-/// drive, and the session was gone from both.
+/// first's deletion as the second synced, the second's, made after it, is
+/// sent as the later, and noted as the drive's once sent; a putting back
+/// after it stands. The second used to send its deletion as it found the
+/// session back in the drive, and the session was gone from both.
 #[test]
 fn a_session_deleted_on_two_devices_and_put_back_on_one_comes_back_on_both() {
     let remote = MemoryRemote::default();
@@ -464,7 +465,10 @@ fn a_session_deleted_on_two_devices_and_put_back_on_one_comes_back_on_both() {
     phone.delete(2, 120);
     computer.delete(2, 125);
     phone.sync(&remote, 130).expect("synced");
-    assert_eq!(computer.sync(&remote, 140).expect("synced").sent, 0);
+    // The computer's deletion, made after the phone's by the clock, is the
+    // later word: sent, so that a putting back made between the two loses
+    // to it on every device.
+    assert_eq!(computer.sync(&remote, 140).expect("synced").sent, 1);
 
     phone.undo(two, &session, 150);
     phone.sync(&remote, 160).expect("synced");
@@ -519,7 +523,10 @@ fn a_session_deleted_with_an_earlier_build_and_put_back_elsewhere_comes_back() {
             computer.delete(2, 120);
             computer.sync(&remote, 130).expect("synced");
             phone.delete(2, 135);
-            assert_eq!(phone.sync(&remote, 140).expect("synced").sent, 0);
+            // Deleted here after the drive's deletion, by the clock: sent
+            // all the same, so that a putting back made between the two
+            // loses to it on every device.
+            assert_eq!(phone.sync(&remote, 140).expect("synced").sent, 1);
         }
         phone.delete(3, 145);
         // Updated since: what sync keeps, as the earlier build kept it.
@@ -591,6 +598,203 @@ fn a_session_put_back_and_deleted_again_before_a_sync_is_deleted_everywhere() {
         joined.sync(&remote, 210).expect("synced");
         assert_eq!(joined.stamps(), phone.stamps(), "the drive's word");
     }
+}
+
+/// A deletion by hand an earlier build made, and kept no note of, is
+/// looked for at each sync until the store can say which sessions were
+/// deleted by hand, and noted then: a session put back on another device
+/// after it comes back here, and stays on both. A sync at which the store
+/// could not look took that for a look that found none, and never looked
+/// again: once the session was put back elsewhere, it sent its deletion
+/// again, and the session was gone from every device.
+#[test]
+fn deletions_an_earlier_build_made_are_looked_for_until_the_store_can_say() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = computer.id_of(2);
+    let session = computer.session(two);
+    phone.delete(2, 120);
+    phone.sync(&remote, 130).expect("synced");
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "let go");
+
+    // Updated since: what sync keeps, as the earlier build kept it. The
+    // store cannot say, for now, which sessions were deleted by hand.
+    phone.state = as_an_earlier_build_kept(&phone.state, two);
+    phone.store.deletions_unknown.set(true);
+    phone.sync(&remote, 150).expect("synced all the same");
+    assert!(!phone.state.deletions_noted, "to look for at the next sync");
+    phone.store.deletions_unknown.set(false);
+
+    computer.undo(two, &session, 160);
+    computer.sync(&remote, 165).expect("synced");
+    phone.sync(&remote, 170).expect("synced");
+    assert!(phone.state.deletions_noted, "looked for");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    computer.sync(&remote, 180).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 190).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// A deletion by hand an earlier build made, and kept no note of, is noted
+/// once the store can say which sessions were deleted by hand, though a
+/// sync at which it could not took in a putting back of that session made
+/// elsewhere after it: the session comes back here, and stays on every
+/// device. Only the sessions the drive held as deleted were looked for, and
+/// the drive held that one put back by then: never noted, its deletion was
+/// sent again, stamped after the putting back, and the session was gone
+/// from every device.
+#[test]
+fn a_session_put_back_before_a_sync_that_could_not_look_for_deletions_comes_back() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = computer.id_of(2);
+    let session = computer.session(two);
+    phone.delete(2, 120);
+    phone.sync(&remote, 130).expect("synced");
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "let go");
+    // Put back there, and in the drive, before the phone syncs again.
+    computer.undo(two, &session, 145);
+    computer.sync(&remote, 148).expect("synced");
+
+    // Updated since: what sync keeps, as the earlier build kept it. The
+    // store cannot say, for now, which sessions were deleted by hand.
+    phone.state = as_an_earlier_build_kept(&phone.state, two);
+    phone.store.deletions_unknown.set(true);
+    phone.sync(&remote, 150).expect("synced all the same");
+    assert!(!phone.state.deletions_noted, "to look for at the next sync");
+    phone.store.deletions_unknown.set(false);
+
+    phone.sync(&remote, 170).expect("synced");
+    assert!(phone.state.deletions_noted, "looked for");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    computer.sync(&remote, 180).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 190).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// A session deleted by hand on one device, and put back on another after
+/// that by the clock, comes back on the first, and stays on both, though
+/// the deletion reaches the drive only after the putting back: a deletion
+/// is stamped when it was made, and the putting back after it stands. It
+/// used to be stamped when it was sent, after the putting back, and the
+/// session was gone from both.
+#[test]
+fn a_session_put_back_elsewhere_after_it_was_deleted_here_by_the_clock_comes_back() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = computer.id_of(2);
+    let session = computer.session(two);
+    computer.delete(2, 115);
+    computer.sync(&remote, 116).expect("synced");
+    // Deleted on the phone after the computer's deletion and before its
+    // putting back, the phone not syncing meanwhile.
+    phone.delete(2, 120);
+    computer.undo(two, &session, 150);
+    computer.sync(&remote, 155).expect("synced");
+
+    phone.sync(&remote, 200).expect("synced");
+    phone.sync(&remote, 210).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    computer.sync(&remote, 220).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 230).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// A session deleted by hand on one device after another device deleted
+/// it, and put back on that other device between the two deletions by the
+/// clock, stays deleted on both: the deletion the drive held was not the
+/// later, so the first device sends its own, which the putting back loses
+/// to. It used to note the drive's deletion as its own, and the putting
+/// back brought the session back on the device that deleted it last.
+#[test]
+fn a_deletion_made_here_after_one_the_drive_holds_wins_over_a_putting_back_between_them() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = computer.id_of(2);
+    let session = computer.session(two);
+    computer.delete(2, 120);
+    computer.sync(&remote, 125).expect("synced");
+    // Put back on the computer, which knows of its own deletion alone.
+    computer.undo(two, &session, 150);
+
+    phone.delete(2, 200);
+    let sent = phone.sync(&remote, 210).expect("synced").sent;
+    computer.sync(&remote, 220).expect("synced");
+    assert_eq!(computer.stamps(), [1], "deleted after it was put back");
+    phone.sync(&remote, 230).expect("synced");
+    assert_eq!(phone.stamps(), [1], "not taken back");
+    assert_eq!(sent, 1, "the later deletion");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 240).expect("synced");
+    assert_eq!(joined.stamps(), [1], "the drive's word");
+}
+
+/// A session deleted by hand on a device whose clock was set an hour
+/// ahead, and put back on another device after the deletion was sent, the
+/// clock set right by then, comes back on both: a deletion is taken as made
+/// no later than the sync that sends it. Stamped as its tombstone said, an
+/// hour ahead, it beat every putting back made elsewhere until that hour,
+/// and the session was gone from both.
+#[test]
+fn a_session_put_back_after_a_deletion_made_with_the_clock_ahead_was_sent_comes_back() {
+    const HOUR: u64 = 3_600_000;
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = computer.id_of(2);
+    let session = computer.session(two);
+    computer.delete(2, 115);
+    computer.sync(&remote, 116).expect("synced");
+    // Deleted on the phone, its clock an hour ahead, then set right.
+    phone.delete(2, HOUR + 120);
+    phone.sync(&remote, 200).expect("synced");
+
+    // Put back on the computer after that, from its own deletion.
+    computer.undo(two, &session, 300);
+    computer.sync(&remote, 305).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "put back after the deletion");
+    phone.sync(&remote, 310).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 320).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
 }
 
 /// A setting changed on one device reaches the other, and one changed on
@@ -905,6 +1109,113 @@ fn a_session_under_two_names_not_alike_is_kept_both_ways() {
     assert_eq!(listing(&phone.store), listing(&computer.store));
 }
 
+/// A session kept under one name on one device, and restored from a
+/// backup under another on a second, which let its own name go as a twin,
+/// is held once on every device though a third restores the backup after:
+/// the second sends its twin's deletion again, made as it sends it, and it
+/// stands over the third's putting back, which came after the first. Were
+/// it stamped when the twin was let go, as a deletion by hand is stamped
+/// when it was made, it would lose to that putting back, and the second
+/// would take the twin back beside the session kept.
+#[test]
+fn a_twin_let_go_here_and_put_back_elsewhere_is_let_go_again() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1]));
+    let mut computer = Device::keeping(&[]);
+    restore(&computer.store, &sessions(&[1]));
+    let twin = listing(&computer.store)[0];
+    let session = computer.session(twin);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    computer.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    computer.sync(&remote, 110).expect("synced");
+    assert_eq!(computer.stamps(), [1]);
+    assert!(
+        !listing(&computer.store).contains(&twin),
+        "let go as a twin"
+    );
+
+    // The backup restored on a third device after: the twin's name is put
+    // back there.
+    let mut third = Device::keeping(&[]);
+    third.turn_on(&remote, "passphrase").expect("on");
+    third.undo(twin, &session, 130);
+    third.sync(&remote, 135).expect("synced");
+
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "held once");
+    computer.sync(&remote, 150).expect("synced");
+    assert_eq!(computer.stamps(), [1], "the twin not taken back");
+    third.sync(&remote, 160).expect("synced");
+    assert_eq!(third.stamps(), [1], "let go there too");
+    phone.sync(&remote, 170).expect("synced");
+    assert_eq!(phone.stamps(), [1]);
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 180).expect("synced");
+    assert_eq!(joined.stamps(), [1], "the drive's word");
+}
+
+/// What sync keeps, `state`, as a build before deletions by hand were
+/// noted wrote it over this build's: with no word of having looked for
+/// such deletions, so that this build looks again.
+fn as_written_by_a_build_that_drops_the_look(state: &SyncState) -> SyncState {
+    let mut kept: serde_json::Value =
+        serde_json::from_str(&state.written().expect("written")).expect("JSON");
+    let fields = kept.as_object_mut().expect("fields");
+    assert!(fields.remove("deletionsNoted").is_some(), "looked for");
+    SyncState::read(&kept.to_string()).expect("read")
+}
+
+/// A twin let go here, its session kept under the other name, is no
+/// deletion by hand when the deletions an earlier build made are looked
+/// for again, as after a build that drops the word of having looked wrote
+/// what sync keeps: a putting back of the twin's name on another device,
+/// from the same backup, is not taken back here beside the session kept.
+/// It was noted as a deletion by hand the drive held, and taken back, and
+/// the session was here twice.
+#[test]
+fn a_twin_let_go_here_is_no_deletion_by_hand_when_deletions_are_looked_for_again() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1]));
+    let mut computer = Device::keeping(&[]);
+    restore(&computer.store, &sessions(&[1]));
+    let twin = listing(&computer.store)[0];
+    let session = computer.session(twin);
+    phone.turn_on(&remote, "passphrase").expect("on");
+    computer.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    computer.sync(&remote, 110).expect("synced");
+    assert!(
+        !listing(&computer.store).contains(&twin),
+        "let go as a twin"
+    );
+
+    computer.state = as_written_by_a_build_that_drops_the_look(&computer.state);
+    computer.sync(&remote, 120).expect("synced");
+    assert!(computer.state.deletions_noted, "looked for again");
+    assert!(
+        !computer.state.applied.contains_key(&twin),
+        "no deletion by hand"
+    );
+
+    // The backup restored on a third device after: the twin's name is put
+    // back there.
+    let mut third = Device::keeping(&[]);
+    third.turn_on(&remote, "passphrase").expect("on");
+    third.undo(twin, &session, 130);
+    third.sync(&remote, 135).expect("synced");
+    computer.sync(&remote, 140).expect("synced");
+    computer.sync(&remote, 150).expect("synced");
+    assert_eq!(computer.stamps(), [1], "held once");
+    third.sync(&remote, 160).expect("synced");
+    assert_eq!(third.stamps(), [1], "let go there too");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 170).expect("synced");
+    assert_eq!(joined.stamps(), [1], "the drive's word");
+}
+
 /// A pack a later build wrote, which this one cannot read, is told of at
 /// each sync as a later build's, not as damaged, and fetched once: not
 /// passed over for good, it is read again once a build of a later layout
@@ -1010,6 +1321,499 @@ fn a_sync_cut_short_picks_up_where_it_left_off() {
     computer.turn_on(&remote, "passphrase").expect("on");
     computer.sync(&remote, 150).expect("synced");
     assert_eq!(computer.stamps(), [1, 2, 3]);
+}
+
+/// A session deleted by hand, whose pack the drive made though its answer
+/// was lost on the way back, is the drive's deletion once the next sync
+/// finds that pack there, as it would have been had the answer come: a
+/// putting back made on another device after it brings the session back,
+/// and the deletion is not sent again. It used to be sent again, later than
+/// the putting back, and the session was gone from every device.
+#[test]
+fn a_deletion_in_a_pack_whose_upload_went_unanswered_is_the_drives_once_found() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    let session = computer.session(two);
+    phone.delete(2, 120);
+    remote.answer_lost.set(true);
+    assert!(
+        matches!(
+            phone.sync(&remote, 130),
+            Err(SyncFailed::Remote(RemoteError::Failed(_)))
+        ),
+        "no answer"
+    );
+    remote.answer_lost.set(false);
+    let unanswered: Vec<&RecordId> = phone
+        .state
+        .unanswered
+        .values()
+        .flat_map(|deletions| deletions.keys())
+        .collect();
+    assert_eq!(unanswered, [&two], "noted until a sync finds the pack");
+    assert!(!phone.state.applied.contains_key(&two));
+
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "the pack was made");
+    computer.undo(two, &session, 150);
+    computer.sync(&remote, 155).expect("synced");
+
+    phone.sync(&remote, 160).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    assert!(phone.state.unanswered.is_empty(), "found");
+    computer.sync(&remote, 170).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 180).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// The same where the app stops once the drive has made the pack, before
+/// the sync ends and the app keeps what it came to, as a tab closed then
+/// does: what sync keeps is kept as such a pack goes, its deletions by hand
+/// noted against it, and the app opens again knowing of it, so the next
+/// sync finds the pack there as it would one whose answer was lost. It used
+/// to open with what sync kept before that sync, which knew nothing of the
+/// pack, and sent the deletion again, later than a putting back made
+/// elsewhere since: the session was gone from every device.
+#[test]
+fn a_deletion_in_a_pack_made_as_the_app_stopped_is_the_drives_once_found() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    let session = computer.session(two);
+    phone.delete(2, 120);
+
+    // What the app keeps as the sync asks; stopped before the sync ends, it
+    // opens with what it kept last, from before that sync where the sync
+    // asked nothing.
+    let kept = RefCell::new(phone.state.clone());
+    now(sync_once_with(
+        &*phone.store,
+        &remote,
+        &mut phone.state,
+        &phone.settings,
+        &|| 130,
+        &BTreeSet::new,
+        &|state| {
+            *kept.borrow_mut() = state.clone();
+            done(())
+        },
+    ))
+    .expect("synced");
+    phone.state = kept.into_inner();
+
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "the pack was made");
+    computer.undo(two, &session, 150);
+    computer.sync(&remote, 155).expect("synced");
+
+    phone.sync(&remote, 160).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    assert!(phone.state.unanswered.is_empty(), "found");
+    computer.sync(&remote, 170).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 180).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// A pack the drive never made, full say, is sent again by the next sync,
+/// its deletions by hand with it: none is taken for the drive's for having
+/// been asked for once.
+#[test]
+fn a_pack_whose_upload_failed_is_sent_again() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    phone.delete(2, 120);
+    remote.full.set(true);
+    assert_eq!(
+        phone.sync(&remote, 130),
+        Err(SyncFailed::Remote(RemoteError::Full))
+    );
+    assert_eq!(phone.state.unanswered.len(), 1, "until a sync looks");
+    remote.full.set(false);
+    assert_eq!(phone.sync(&remote, 140).expect("synced").sent, 1);
+    assert!(phone.state.unanswered.is_empty(), "never made, so dropped");
+    assert!(phone.state.applied.contains_key(&two), "sent, and answered");
+    computer.sync(&remote, 150).expect("synced");
+    assert_eq!(computer.stamps(), [1], "let go");
+}
+
+/// A folder that is `remote` but for the file `gone`, which it lists, and
+/// then answers is gone as it is read: as one deleted as a sync reads it.
+struct GoneAsRead<'a> {
+    remote: &'a MemoryRemote,
+    gone: String,
+}
+
+impl Remote for GoneAsRead<'_> {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        self.remote.list()
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        if id == self.gone {
+            return done(Err(RemoteError::Gone));
+        }
+        self.remote.get(id)
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        self.remote.create(name, bytes)
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        self.remote.update(id, bytes)
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        self.remote.delete(id)
+    }
+}
+
+/// A pack whose answer was lost, which the drive lists but a sync could not
+/// read, gone as it was read, keeps its deletions by hand noted against it
+/// until a sync reads it, as one not listed yet does not: that sync takes
+/// them for the drive's, as had the answer come, and so takes back the
+/// putting back another device made since, sending nothing. Here the
+/// deletion that the sync between sent again went nowhere, the drive full.
+/// With the note dropped as the pack went unread, the sync that read it
+/// took the session for one deleted by hand that the drive had yet to hear
+/// of, kept it deleted here, and sent its deletion once more.
+#[test]
+fn a_pack_whose_answer_was_lost_waits_while_the_drive_lists_it_unread() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = phone.id_of(2);
+    let session = computer.session(two);
+    phone.delete(2, 120);
+    remote.answer_lost.set(true);
+    assert!(phone.sync(&remote, 130).is_err(), "no answer");
+    remote.answer_lost.set(false);
+    let noted = phone.state.unanswered.clone();
+    let [sent] = &noted.keys().cloned().collect::<Vec<_>>()[..] else {
+        panic!("one pack noted: {noted:?}");
+    };
+    computer.sync(&remote, 140).expect("synced");
+    assert_eq!(computer.stamps(), [1], "the pack was made");
+    computer.undo(two, &session, 150);
+    computer.sync(&remote, 155).expect("synced");
+
+    let listed = now(remote.list()).expect("listed");
+    let file = listed.iter().find(|file| file.name == *sent).expect("made");
+    let unread = GoneAsRead {
+        remote: &remote,
+        gone: file.id.clone(),
+    };
+    remote.full.set(true);
+    let between = now(sync_once(
+        &*phone.store,
+        &unread,
+        &mut phone.state,
+        &phone.settings,
+        158,
+    ));
+    assert_eq!(between, Err(SyncFailed::Remote(RemoteError::Full)));
+    remote.full.set(false);
+    assert_eq!(
+        phone.state.unanswered.get(sent),
+        noted.get(sent),
+        "waits, its deletions with it"
+    );
+    assert!(!phone.state.applied.contains_key(&two));
+
+    let synced = phone.sync(&remote, 160).expect("synced");
+    assert!(phone.state.unanswered.is_empty(), "found");
+    assert_eq!(phone.stamps(), [1, 2], "taken back");
+    assert_eq!(synced.sent, 0, "nothing of the deletion sent again");
+    computer.sync(&remote, 170).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "not deleted again");
+}
+
+/// A session put back by hand under a sync turned on anew, before that
+/// sync has read the drive, is put back after the drive's deletion of it,
+/// stamped ahead on another device though that deletion is: the putting
+/// back was stamped knowing nothing of the drive, what sync knew before it
+/// was turned on anew gone with it, and is stamped again once the first
+/// read finds the deletion, as one made after that read would be. It used
+/// to keep the bare stamp of this device's clock, earlier than the
+/// deletion, and its sync let the session go again.
+#[test]
+fn a_session_put_back_before_a_new_syncs_first_read_is_put_back_after_the_drives_deletion() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    // The computer's clock is an hour ahead of the phone's.
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 3_600_110).expect("synced");
+    let two = phone.id_of(2);
+    let session = phone.session(two);
+    computer.delete(2, 3_600_120);
+    computer.sync(&remote, 3_600_130).expect("synced");
+    // Deleted on the phone too, and synced: the drive's deletion known,
+    // stamped when the computer made it.
+    phone.delete(2, 150);
+    phone.sync(&remote, 160).expect("synced");
+    assert!(phone.state.stamp_change(two, 200) > 3_600_120);
+
+    // Turned on anew, and the session put back before that sync reads.
+    phone.turn_on(&remote, "passphrase").expect("on anew");
+    phone.undo(two, &session, 200);
+    phone.sync(&remote, 210).expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "not let go");
+    assert!(
+        phone.state.drive.revives[&two] > phone.state.drive.tombs[&two],
+        "put back after the deletion"
+    );
+    computer.sync(&remote, 3_600_220).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "taken back");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 230).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// A folder that does what a test asks as it is first listed: what the
+/// user does here as a sync begins, before that sync lists the store.
+struct ListedAfter<'a> {
+    remote: &'a MemoryRemote,
+    first: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl Remote for ListedAfter<'_> {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        let first = self.first.borrow_mut().take();
+        if let Some(first) = first {
+            first();
+        }
+        self.remote.list()
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        self.remote.get(id)
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        self.remote.create(name, bytes)
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        self.remote.update(id, bytes)
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        self.remote.delete(id)
+    }
+}
+
+/// A session put back by hand here as a sync begins, its deletion sent
+/// before, is not let go by that sync, though the sync finds it listed and
+/// the drive holding its deletion, with no note of the putting back in
+/// what it plans from: a sync lets go of nothing the app says was put back
+/// since it began, and the next sends it as put back. The sync used to let
+/// it go again as the drive's deletion.
+#[test]
+fn a_sync_lets_go_of_nothing_put_back_since_it_began() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let two = phone.id_of(2);
+    let session = phone.session(two);
+    phone.delete(2, 120);
+    phone.sync(&remote, 130).expect("synced");
+
+    // Put back as the next sync begins, and noted once it is over, as the
+    // app notes one.
+    let since = RefCell::new(BTreeSet::new());
+    let store = Rc::clone(&phone.store);
+    let folder = ListedAfter {
+        remote: &remote,
+        first: RefCell::new(Some(Box::new(|| {
+            let json = serde_json::to_string(&session).expect("JSON");
+            let saved = now(store.change_history(HistoryChange {
+                put: vec![Record { id: two, json }],
+                unforget: vec![two],
+                ..HistoryChange::default()
+            }));
+            assert!(saved.kept().is_some());
+            since.borrow_mut().insert(two);
+        }))),
+    };
+    let synced = now(sync_once_with(
+        &*phone.store,
+        &folder,
+        &mut phone.state,
+        &phone.settings,
+        &|| 140,
+        &|| since.borrow().clone(),
+        &|_| done(()),
+    ))
+    .expect("synced");
+    assert_eq!(phone.stamps(), [1, 2], "not let go");
+    assert_eq!(synced.let_go, 0);
+    assert!(
+        !phone.state.applied.contains_key(&two),
+        "nor noted as the drive's"
+    );
+    let at = phone.state.stamp_change(two, 150);
+    phone.state.revived.insert(two, at);
+    assert_eq!(phone.sync(&remote, 160).expect("synced").sent, 1);
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 170).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
+}
+
+/// A folder listed before what a test asks happens, as it is first listed:
+/// what another device, or another copy of the app on this one, does once
+/// a sync has listed the folder and before it reads what it listed. A
+/// memory folder lists at once, so what the sync reads is what was there.
+struct ListedBefore<'a> {
+    remote: &'a MemoryRemote,
+    then: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl Remote for ListedBefore<'_> {
+    fn list(&self) -> Pending<Result<Vec<RemoteFile>, RemoteError>> {
+        let listed = self.remote.list();
+        let then = self.then.borrow_mut().take();
+        if let Some(then) = then {
+            then();
+        }
+        listed
+    }
+
+    fn get(&self, id: &str) -> Pending<Result<Vec<u8>, RemoteError>> {
+        self.remote.get(id)
+    }
+
+    fn create(&self, name: &str, bytes: Vec<u8>) -> Pending<Result<String, RemoteError>> {
+        self.remote.create(name, bytes)
+    }
+
+    fn update(&self, id: &str, bytes: Vec<u8>) -> Pending<Result<(), RemoteError>> {
+        self.remote.update(id, bytes)
+    }
+
+    fn delete(&self, id: &str) -> Pending<Result<(), RemoteError>> {
+        self.remote.delete(id)
+    }
+}
+
+/// Two copies of the app on the phone sync at once, each from what the
+/// phone kept: one lets a session go as the drive deleted it, while the
+/// other, which listed it here before it went, reads it put back on the
+/// computer since and so takes nothing back. Whichever ends last lays what
+/// it kept over the other's, and the note that the drive's deletion
+/// accounts for the session gone here stays, though the drive the two read
+/// between them shows it put back since: no sync here took it back. So the
+/// next sync takes it back, and the putting back stands everywhere. The
+/// note used to be dropped on that evidence alone, and the next sync found
+/// the session gone here with nothing to account for it, as one deleted by
+/// hand, and sent its deletion: the putting back was deleted everywhere.
+#[test]
+fn a_session_one_copy_lets_go_while_another_finds_it_put_back_is_taken_back() {
+    let remote = MemoryRemote::default();
+    let mut phone = Device::keeping(&sessions(&[1, 2]));
+    phone.turn_on(&remote, "passphrase").expect("on");
+    phone.sync(&remote, 100).expect("synced");
+    let mut computer = Device::keeping(&[]);
+    computer.turn_on(&remote, "passphrase").expect("on");
+    computer.sync(&remote, 110).expect("synced");
+    let two = computer.id_of(2);
+    let session = computer.session(two);
+    computer.delete(2, 120);
+    computer.sync(&remote, 130).expect("synced");
+
+    // One copy lists the folder; the computer puts 2 back; the other copy
+    // syncs, finding 2 here, and reads it put back.
+    let kept = phone.state.clone();
+    let mut one = kept.clone();
+    let other = RefCell::new(kept.clone());
+    let store = Rc::clone(&phone.store);
+    let settings = phone.settings.clone();
+    {
+        let folder = ListedBefore {
+            remote: &remote,
+            then: RefCell::new(Some(Box::new(|| {
+                computer.undo(two, &session, 150);
+                computer.sync(&remote, 160).expect("synced");
+                let synced = now(sync_once(
+                    &*store,
+                    &remote,
+                    &mut other.borrow_mut(),
+                    &settings,
+                    170,
+                ))
+                .expect("synced");
+                assert_eq!(synced.took, 0, "2 here");
+            }))),
+        };
+        // The first goes on with what it listed, which holds only the
+        // deletion, and lets 2 go.
+        now(sync_once(
+            &*phone.store,
+            &folder,
+            &mut one,
+            &phone.settings,
+            140,
+        ))
+        .expect("synced");
+    }
+    assert_eq!(phone.stamps(), [1], "let go");
+    let other = other.into_inner();
+    let (gone, back) = (one.applied[&two], other.drive.revives[&two]);
+    assert!(back >= gone, "put back since: {back} after {gone}");
+
+    let laid = [
+        one.merged(Some(&kept), &other),
+        other.merged(Some(&kept), &one),
+    ];
+    for merged in &laid {
+        assert_eq!(
+            merged.applied.get(&two),
+            Some(&gone),
+            "the drive's deletion accounts for 2 gone here"
+        );
+    }
+    phone.state = laid[0].clone();
+    let synced = phone.sync(&remote, 180).expect("synced");
+    assert_eq!((synced.took, synced.sent), (1, 0), "taken back, none sent");
+    assert_eq!(phone.stamps(), [1, 2]);
+    computer.sync(&remote, 190).expect("synced");
+    assert_eq!(computer.stamps(), [1, 2], "the putting back stands");
+    let mut joined = Device::keeping(&[]);
+    joined.turn_on(&remote, "passphrase").expect("on");
+    joined.sync(&remote, 200).expect("synced");
+    assert_eq!(joined.stamps(), [1, 2], "the drive's word");
 }
 
 /// A device whose store lost what sync took, though sync remembers reading

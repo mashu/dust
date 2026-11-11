@@ -45,7 +45,8 @@ Each sync (`src/sync/run.rs`):
    (`DriveState` puts every pack together: of each record, whether some pack
    holds it, and the latest time it was deleted and put back);
 2. asks the store what it lists, and which of the drive's records it does
-   not list it deleted by hand (`Store::forgotten`);
+   not list it deleted by hand, and when (`Store::deletions`): none where
+   the store cannot say, as missing is never deleted;
 3. works out the plan (`src/sync/plan.rs`): records to take, deletions to
    make here, records and deletions to send;
 4. makes the local change in one `HistoryChange`, before anything is sent;
@@ -59,29 +60,86 @@ by a restore, after a deletion the drive holds is sent as *put back*, so
 that the deletion does not take it again; a device that let it go takes it
 back, and so does a device that deleted it by hand, whose deletion the
 drive holds then, sent from it or made on another device as well, rather
-than send it again. Deleted by hand again after it is put back here, it is
-a deletion by hand as any other, whatever was noted of the one before. A
-putting back as late as a deletion stands, here as in the drive.
-Missing is never deleted: a record is let go only for a deletion.
-A deletion or a putting back is stamped when it is made, or just after the
-latest of the record the device knows the drive to hold, where that is
-later (`SyncState::stamp_change`): one made after another is the later,
-however far apart the devices' clocks are. One made while a sync is under
-way is stamped again as it ends, after what that sync read and sent.
+than send it again. One a device deleted by hand after the drive's
+deletion, by its own clock, is the later word, and is sent all the same:
+a putting back made between the two loses to it on every device. Deleted
+by hand again after it is put back here, it is a deletion by hand as any
+other, whatever was noted of the one before: so too where both were made
+while a sync waited on the drive, before it listed the history, which that
+sync then sends. A putting back as late as a deletion stands, here as in
+the drive. Missing is never deleted: a record
+is let go only for a deletion. A device updated from a build that noted no
+deletion by hand notes those it made that the drive holds, put back since
+or not, at its first sync at which the store can say which they are, and
+looks again at each sync until then.
+A deletion or a putting back is stamped when it is made (a deletion by
+hand when its tombstone says, though it is sent later: one made while the
+sync that sends it waited on the drive, before it listed the history, is
+stamped as made, after a putting back made elsewhere before it; or as that
+sync began, where its tombstone says it was made after that sync listed
+the history, as a clock set ahead and set right since says, so that a
+putting back made elsewhere while the sync waited stands), or just after
+the latest of the record the device knew the drive to hold by then, where
+that is later (`SyncState::stamp_change`): one made after another is the
+later, however far apart the devices' clocks are. But where a sync read the
+drive and did not send a deletion by hand, as the store could not say which
+were deleted, as the sync listed the history before the deletion was made,
+or as it was cut short as it sent, the deletion is stamped after what that
+sync read as well: a putting back made elsewhere after it by the clock,
+read there, loses to it. A putting back made while a sync is under way is
+stamped again as it ends, after what that sync read and sent, so that it
+beats the deletion that sync sent, which it may undo; and so it beats, too,
+a deletion of that session made on another device after it by the clock,
+where the sync read that deletion: the putting back is the later word
+then, on every device. One whose session was deleted by hand again since,
+in that tab or window or in another, is spent, and is not noted, nor is
+the drive's deletion it undid: the deletion is the later word, which that
+sync sends stamped as it was made, where it was made before the sync
+listed the history, so that a putting back made elsewhere after it by the
+clock stands; or the next sync, as above, though the drive has the session
+put back since. A note of the drive's deletion as late as that putting
+back, or as the deletion, is of the deletion, sent or found in the drive
+by another tab's or window's sync, and stays: the drive's stamp is by the
+clock of the device that made it, so one made before the putting back on a
+device whose clock was ahead can read so too, and then the session comes
+back where the drive has it put back since. And a session put back by hand
+meanwhile, in that tab or window or in another on the device, is not let
+go by that sync, which planned with no note of it, even where sync is
+turned off before it ends: the next sends it as put back, where sync is on
+still. A putting back noted while sync knows nothing of the drive, as just
+after it is turned on anew, when what it knew before went with it, is
+stamped again after what the drive holds once its first sync reads it.
 
 One session can be two records: a backup restored on one device names each
 session where it finished (`RecordId::placed`), while the device it came
 from named each as it kept it. A record to take that is alike in everything
 to one this device holds under another name is its twin: the smaller name
 is kept on every device, and the other let go everywhere, as a deletion
-sent only once the one kept is in the drive. Two records of a session that
-differ, as one a restore filled in, are both kept.
+sent only once the one kept is in the drive. A twin let go is no deletion
+by hand: should another device put its name back, restoring the same
+backup, it is let go again, never taken back beside the one kept. Two
+records of a session that differ, as one a restore filled in, are both
+kept. The record a restore filled in, its filled record named in the same
+millisecond in its place (`RecordId::beside`), and a filled record the
+Undo of that restore took out, the record it filled in back in its place,
+are deleted as a twin let go is: each deletion is stamped as it is sent,
+never sent as made after the drive's deletion, and not noted by the first
+sync after an update from a build that noted no deletion by hand, so that
+the drive putting the old record back has it let go again on that device,
+the session staying once, under the record kept. The record that Undo puts
+back is put back by hand, as by the Undo of a deletion, and sent as put
+back where the drive holds its deletion.
 
 What a device keeps of the drive (`SyncState`: the packs read and what they
 said) is only so as not to read it all again. Lost, the next sync reads
 every pack again and comes to the same. A sync cut short leaves the store
 as it was, or with all it took, and the next one sends what this one did
-not.
+not. A pack the drive made though its answer was lost on the way back, or
+though the app stopped before the sync ended, is found there by the next
+sync, and the deletions by hand it holds are the drive's from then on, as
+they would have been had the answer come (`SyncState::unanswered`, kept
+before the pack goes): not sent again, so a putting back made elsewhere
+since still stands. One the drive never made is sent again.
 
 ## Everything else a device uses
 
@@ -103,9 +161,14 @@ and its own, so a change made on one device and another made on another
 both come through, and no device writes over another's file. A change is
 stamped after the newest stamp of its key the device has taken up, so one
 made after another is the newer, however far apart the devices' clocks
-are. A device joining a sync takes what the drive holds, as a restore takes
-a backup's settings, and adds nothing of its own until it changes
-something.
+are. A setting's value a device's build cannot read, a later build's
+choice, is taken up and sent as it was stored, at its own stamp, never as
+that build reads it: it stays the later build's on every device until a
+device changes that setting; and in a setting of named entries, such as
+the callers' odds, what a later build wrote in an entry stays though a
+device changes another entry. A device joining a sync takes what the drive
+holds, as a restore takes a backup's settings, and adds nothing of its own
+until it changes something.
 
 All that stays each device's own: when it last saved a backup file, which
 is a file on that device, and a session or run it has under way, which is
@@ -130,9 +193,12 @@ stored, and synced, once it ends.
 
 The passphrase never leaves the device it is typed on, and is not kept.
 Each device keeps the data key, in what sync keeps
-(`Store::save_sync`): `sync.json` in the store's folder on a computer;
-`dust/sync.json` in the app's no-backup folder on Android, which Android's
-Auto Backup leaves out; `dust_sync` in a browser's `localStorage`.
+(`Store::save_sync`): `sync.json` in the store's folder on a computer, for
+the user alone to read (mode 0600 on Linux and macOS; on Windows an access
+list that lets in the user alone and inherits nothing from the folder,
+wherever the volume keeps one); `dust/sync.json` in the app's no-backup
+folder on Android, which Android's Auto Backup leaves out; `dust_sync` in a
+browser's `localStorage`.
 
 What Google can see: how many files there are, how large, and when each
 device reads or writes them, with the account and the IP address of each
@@ -185,18 +251,82 @@ cloud stays, and a tap on it signs in again from any screen, as a browser
 opens Google's window only for a tap. The corner is never shown over a
 session or a run, and takes no tap but that one.
 
+Two tabs or windows of the app on one device keep what sync keeps in the
+same place (`SyncState`), and each lays what it did over what the store
+holds as it writes, note by note, rather than writing its own whole over
+the other's (`SyncState::merged`): a session one of them puts back by Undo,
+a deletion the other's sync sent, a sign-in made in either, and the
+settings, the later word on each by its stamp, all stay. Each sync begins
+from what the store holds, and lays what it did over what the store holds
+as it ends, so a putting back made in another tab or window meanwhile goes with
+the next sync. It begins from the settings the store holds as well: a tab or
+window that has not looked since another changed a setting and synced it
+takes that change up, rather than send its own older value back as a change
+made there. And it ends on them: a setting another tab or window stored
+while it synced stays over what the sync took, as one changed in the tab or
+window syncing does, and goes with the next sync. One that the other's own
+sync took and stored meanwhile, as two sync at once where nothing locks
+(below), is that sync's word on it: the later word of the two, by its
+stamp, is the one kept, as the drive keeps the newest of each. One changed
+by hand in the tab or window syncing meanwhile is its own, and stays,
+whatever its sync or the other's took, though it is back to what it was as
+the sync began; but the tab or window tells the other's take from a change
+made in a third one only by its value, and one set there to the value the
+other's sync took gives way with it. An edit made in the tab or window
+before its sync began, which that sync took in and sent, is no change made
+meanwhile, though it is stored only as the sync runs or after it, as an
+edit on the settings screen is once it has been still for a moment: it
+gives way to a later word the sync took. But where another tab or window
+stored that setting while the sync ran, and this one took that up before
+the edit was stored, or before the sync ended with the edit unstored (a
+sync that changed the history takes the store up as it ends), the edit is
+taken for one set by hand meanwhile: it stays over the later word, and
+goes with the next sync. A note another
+tab or window left out goes only once the drive shows it sent, or no more
+to send, as a browser can hand one tab another's write late; and the note of a
+deletion the drive holds, which a sync drops as its session is put back
+here, goes from what sync keeps only once the drive holds the putting back,
+so that no tab or window reading the store meanwhile keeps it for one of
+its own and lays it back, to take a later deletion by hand for the drive's.
+Every such write reads what the store keeps for sync first, on the app's
+thread, which is one read of `sync.json`, or of `localStorage`, more than
+writing it whole was. They sync one at a time: a sync asked for while
+another tab or window syncs waits for it, the corner's cloud breathing
+meanwhile, ten minutes at most, then begins from what that one kept.
+Turning sync off with the copy waits for it too, so nothing is written into
+the folder after the copy is deleted. Where nothing locks, as in a browser
+without Web Locks or a share that takes no lock, or once the ten minutes
+are out, tabs and windows sync as they come. The merge keeps the notes
+each made, but not what a sync planned without the other's
+(`SyncState::merged`): two syncing at once can send again the deletion of
+a session one let go here, undoing everywhere a putting back made
+elsewhere, or take back a session deleted here by hand meanwhile
+(`docs/platforms.md`).
+
 Turning sync off on one device forgets the key and the sign-in there; the
 copy stays for the other devices. Another tab or window of the app on that
-device, which keeps what sync keeps in the same place, finds it gone as it
-next syncs, or keeps what it keeps, and turns sync off too, saying so. One
-that finds there instead what another tab or window kept as it turned sync
-on anew turns off as well, saying so, rather than write its own over it:
-opened again, it syncs as that one does. Neither clears anything from the
-store, nor does a tab or window that finds the store so as sync is turned
-off in it, by hand or as the copy is gone from the drive. Turning it off
-with the copy deletes every file of Dust's from the folder, the keyring
-first, and every other device then finds it gone, says so, and turns sync
-off too.
+device, which keeps what sync keeps in the same place, finds it gone and
+turns sync off too, saying so: a browser's other tabs at once, as the
+browser tells each of the write (a `storage` event), and a window as it
+comes back into sight, syncs, or keeps what it keeps. One that finds there
+instead what another tab or window kept as it turned sync on anew turns off
+as well, saying so, rather than write its own over it: opened again, it
+syncs as that one does. A session it put back by hand that sync had yet to
+send is not forgotten with it: it goes with the sync turned on anew in the
+other, or, where sync was turned off there, waits with this tab or window
+for the next sync turned on in it; closed first, the tab or window loses it.
+Either sync sends it as put back after every deletion of it that sync knows
+of, or finds at its first read of the drive: a deletion made on another
+device after the putting back among them, which it then undoes. One left off
+notes no putting back at all. So, too, a tab or window takes up what another
+synced: when this device last synced, which its card shows, so that coming
+back into sight it does not sync again just after the other did, and a
+sign-in made there, which it signs in with from then on. Neither clears
+anything from the store, nor does a tab or window that finds the store so as
+sync is turned off in it, by hand or as the copy is gone from the drive.
+Turning it off with the copy deletes every file of Dust's from the folder,
+the keyring first, and every other device then finds it gone, says so, and
+turns sync off too.
 
 ## Setting up
 

@@ -23,6 +23,9 @@ impl TrainingSettings {
     /// current one, which is read at its own top by
     /// [`TrainingSettings::level`]: trying a shorter alphabet, or another
     /// character set, does not cost a level a longer one reached.
+    ///
+    /// A value kept for a later build whose setting has been changed since
+    /// it was read is let go of ([`TrainingSettings::unread_values`]).
     #[must_use = "clamp returns the clamped settings; it does not change them in place"]
     pub fn clamp(mut self) -> Self {
         self.replace_non_finite();
@@ -160,6 +163,7 @@ impl TrainingSettings {
         k.my_power = super::contest::clean_power(&k.my_power);
         k.my_class = super::contest::clean_class(&k.my_class);
         k.my_section = super::contest::clean_section(&k.my_section);
+        self.let_go_of_changed_values();
         self
     }
 

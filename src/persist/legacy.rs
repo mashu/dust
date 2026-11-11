@@ -9,20 +9,19 @@
 //! whole, behind the record API, where its database will not open
 //! ([`BlobHistory`]).
 
-use std::borrow::Borrow;
 #[cfg(any(feature = "web", test))]
 use std::cell::{Cell, RefCell};
 #[cfg(any(feature = "web", test))]
 use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::Hash;
 
 use cw_core::SessionResult;
 use serde::Deserialize;
+use serde_json::value::RawValue;
 
 use super::record::{self, HistoryChange, RecordId};
 #[cfg(any(feature = "web", test))]
-use super::record::{HistoryLoad, Record};
+use super::record::{Deletions, HistoryLoad, Record};
 #[cfg(any(feature = "web", test))]
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -55,25 +54,42 @@ pub(super) const HISTORY_BUDGET: usize = 3_000_000;
 /// now would otherwise move them for good at the next save. The screens
 /// settle a session stamped ahead of the clock for themselves
 /// ([`crate::time::as_shown`]).
-pub(super) fn read_history(raw: &str) -> Option<ReadHistory> {
+///
+/// Beside each session that reads is its text, as the history holds it: a
+/// browser that keeps the history whole writes that back of a session a
+/// change leaves as it is (`BlobHistory::apply`, built for the web alone).
+pub(super) fn read_history(raw: &str) -> Option<ReadHistory<'_>> {
     let raw = super::settings::unmarked(raw);
-    // Almost always the whole list reads; only when it does not is it worth
-    // reading again a session at a time to keep the ones that do.
-    let (sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {
-        Ok(sessions) => (sessions, Vec::new()),
+    let held: Vec<&RawValue> = serde_json::from_str(raw).ok()?;
+    // Almost always every session reads; only when one does not is it
+    // worth reading each again, as JSON, to keep the ones that do.
+    let read: Result<Vec<SessionResult>, _> = held
+        .iter()
+        .map(|session| serde_json::from_str(session.get()))
+        .collect();
+    let (sessions, stored, unread) = match read {
+        Ok(sessions) => (sessions, held.iter().map(|s| s.get()).collect(), Vec::new()),
         Err(_) => {
-            let (mut sessions, mut unread) = (Vec::new(), Vec::new());
-            for value in serde_json::from_str::<Vec<serde_json::Value>>(raw).ok()? {
+            let (mut sessions, mut stored, mut unread) = (Vec::new(), Vec::new(), Vec::new());
+            for session in held {
+                let value: serde_json::Value = serde_json::from_str(session.get()).ok()?;
                 match SessionResult::deserialize(&value) {
-                    Ok(session) => sessions.push(session),
+                    Ok(read) => {
+                        sessions.push(read);
+                        stored.push(session.get());
+                    }
                     Err(_) => unread.push(value),
                 }
             }
-            (sessions, unread)
+            (sessions, stored, unread)
         }
     };
     let sessions = sessions.into_iter().map(record::scored).collect();
-    Some(ReadHistory { sessions, unread })
+    Some(ReadHistory {
+        sessions,
+        stored,
+        unread,
+    })
 }
 
 /// The sessions of a stored history that still parse ([`read_history`]),
@@ -86,14 +102,17 @@ pub(super) fn parse_sessions(raw: &str) -> Option<Vec<SessionResult>> {
 
 /// A stored history as it was read ([`read_history`]).
 #[derive(Debug, PartialEq)]
-pub(super) struct ReadHistory {
+pub(super) struct ReadHistory<'a> {
     /// Every session that still parses, oldest first.
     pub(super) sessions: Vec<SessionResult>,
+    /// The text of each of them, by its place there, as the history holds
+    /// it.
+    pub(super) stored: Vec<&'a str>,
     /// Every one that does not, as it is stored.
     pub(super) unread: Vec<serde_json::Value>,
 }
 
-impl ReadHistory {
+impl ReadHistory<'_> {
     /// The sessions that could not be read, as one JSON list to set aside;
     /// none when every one could.
     #[cfg(any(feature = "web", feature = "native-runtime", test))]
@@ -288,9 +307,13 @@ pub(super) fn set_aside_from(
 ///
 /// What it lets go is said by how many it kept: the oldest of `sessions`
 /// ([`BlobHistory::apply`] names them).
+///
+/// Each session goes in as the text beside it: what the history held of
+/// it, for one a change leaves as it is, so that a tab of an older build
+/// that shares the history reads it as it did.
 #[cfg(any(feature = "web", test))]
 pub(super) fn store_newest_that_fit(
-    sessions: &[SessionResult],
+    sessions: &[(impl AsRef<str>, &SessionResult)],
     budget: usize,
     mut set: impl FnMut(&str) -> bool,
 ) -> HistorySaved {
@@ -298,8 +321,7 @@ pub(super) fn store_newest_that_fit(
     // The room the newest session takes on its own, as a list of one.
     let newest_alone = sessions
         .last()
-        .and_then(|session| serde_json::to_string(session).ok())
-        .map_or(0, |json| json.len() + "[]".len());
+        .map_or(0, |(json, _)| json.as_ref().len() + "[]".len());
     let mut budget = budget;
     loop {
         let (raw, kept) = newest_that_fit(sessions, budget);
@@ -308,7 +330,9 @@ pub(super) fn store_newest_that_fit(
         }
         if set(&raw) {
             return if kept < sessions.len() {
-                let runs = sessions.iter().any(|session| session.contest.is_some());
+                let runs = sessions
+                    .iter()
+                    .any(|(_, session)| session.contest.is_some());
                 HistorySaved::Squeezed {
                     kept,
                     runs,
@@ -325,19 +349,20 @@ pub(super) fn store_newest_that_fit(
     }
 }
 
-/// The newest of `sessions` whose JSON fits in `budget` bytes, as one JSON
-/// list, and how many it holds.
+/// The newest of `sessions` whose JSON, the text beside each, fits in
+/// `budget` bytes, as one JSON list, and how many it holds.
 ///
 /// A browser gives a site a few megabytes, and a session's size follows its
 /// number of groups, so the cap on a browser's history is room, not count.
 #[cfg(any(feature = "web", test))]
-fn newest_that_fit(sessions: &[SessionResult], budget: usize) -> (String, usize) {
-    let mut parts: Vec<String> = Vec::new();
+fn newest_that_fit(
+    sessions: &[(impl AsRef<str>, &SessionResult)],
+    budget: usize,
+) -> (String, usize) {
+    let mut parts: Vec<&str> = Vec::new();
     let mut used = "[]".len();
-    for session in sessions.iter().rev() {
-        let Ok(json) = serde_json::to_string(session) else {
-            continue;
-        };
+    for (json, _) in sessions.iter().rev() {
+        let json = json.as_ref();
         let cost = json.len() + usize::from(!parts.is_empty());
         if used + cost > budget {
             break;
@@ -359,8 +384,9 @@ pub(super) const LAYOUT: u64 = 1;
 /// it, and this one then only reads ([`Gate::Newer`]).
 pub(super) const COMPATIBLE: u64 = 1;
 
-/// How long before the move a session may have finished and still be one
-/// an older build stored after it: one finished a day before the move,
+/// How long before the newest session the move took
+/// ([`Layout::taken_through`]) a session may have finished and still be one
+/// an older build stored after the move: one finished a day before it,
 /// stored by a copy left open since, is still taken up.
 const MOVE_SLACK_MS: u64 = 86_400_000;
 
@@ -388,13 +414,102 @@ pub(super) struct Layout {
     /// them is ever taken up again, though an older build keeps it there.
     #[serde(default)]
     pub(super) imported_keys: Vec<SessionKey>,
-    /// When the latest deletion taken up from an older build was made: one
-    /// made after it is made here too.
+    /// When the latest deletion taken up from an older build was made.
+    /// Builds before [`Self::deletions_taken`] take up each made after it,
+    /// and move it on: this build moves it on as they do, for them.
     #[serde(default)]
     pub(super) deleted_seen: u64,
+    /// The newest session the move took that finished no later than the
+    /// clock said as it was made, `takenThrough`: a session finished after
+    /// it, less a day, is one an older build may have stored since
+    /// ([`imported`]). The clock as the move was made could be ahead by
+    /// years, and a session stamped ahead of it by more. Where the move
+    /// took none, what stands for it ([`taken_through`]). None, where an
+    /// earlier build moved the history, and nothing has been taken up
+    /// since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) taken_through: Option<u64>,
+    /// Every deletion an older build made that the history here has taken,
+    /// `deletionsTaken` ([`DeletionsTaken`]): one not among them is made
+    /// here, whatever its stamp. None, where an earlier build wrote the
+    /// layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) deletions_taken: Option<DeletionsTaken>,
+    /// The history kept whole as this build's take-up last took it,
+    /// `takenLegacy`: a build before its rules, which takes up a change
+    /// there by its own, moves [`Self::legacy`] on and carries this as it
+    /// is, so this build takes that change up again by its own
+    /// ([`Self::taken_up`]). None, where an earlier build wrote the layout;
+    /// noted as none where there was no history kept whole.
+    #[serde(
+        default,
+        deserialize_with = "noted",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) taken_legacy: Option<Option<Fingerprint>>,
     /// What a later build added.
     #[serde(flatten)]
     pub(super) unread: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Layout {
+    /// The history kept whole as this build last took it up, its own note
+    /// ([`Self::taken_legacy`]): none, where an earlier build wrote the
+    /// layout, which this build has not taken up by its rules then, though
+    /// that build moved [`Self::legacy`] on as it took it up by its own. So
+    /// [`imported`] takes it up once by this build's, and notes what it
+    /// took; it takes no session twice, as it leaves out those it took
+    /// before and those here, nor one from before the move, but for one a
+    /// build that keeps no deletions deleted there and a copy of it brought
+    /// back, which finished after the newest the move took, less a day, a
+    /// later one than every one it took among them. A change since is taken
+    /// up by it, though a build before this one's
+    /// rules took it up first.
+    pub(super) fn taken_up(&self) -> Option<Option<Fingerprint>> {
+        self.taken_legacy
+    }
+}
+
+/// A key a layout holds, as it holds it, a null among it: none only where
+/// it holds no such key ([`Layout::taken_legacy`]).
+fn noted<'de, D, T>(read: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(read).map(Some)
+}
+
+/// The deletions an older build made that the history here has taken, by
+/// what each is, and when they were noted ([`Layout::deletions_taken`]):
+/// `{"seen": …, "taken": [[timestamp, "date", at], …]}`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(super) struct DeletionsTaken {
+    /// [`Layout::deleted_seen`] as this build left it beside them. Where it
+    /// says more now, a build that does not note them took deletions up
+    /// since, as it does, by when they were made: each made no later than
+    /// that is taken.
+    pub(super) seen: u64,
+    /// Each deletion taken, of those an older build still remembers.
+    pub(super) taken: BTreeSet<DeletionSeen>,
+    /// What a later build added.
+    #[serde(flatten)]
+    pub(super) unread: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A deletion an older build made, as the take-up tells it from another
+/// ([`DeletionsTaken`]): when its session finished, on what day, and when
+/// it was deleted, `[timestamp, "date", at]`. The same deletion remembered
+/// again is the same.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub(super) struct DeletionSeen(u64, String, u64);
+
+impl DeletionSeen {
+    pub(super) fn of(gone: &Deleted) -> Self {
+        Self(gone.timestamp, gone.date.clone(), gone.at)
+    }
 }
 
 /// What tells one state of the history kept whole from another without
@@ -412,7 +527,7 @@ pub(super) struct Fingerprint {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Gate {
     /// Moved, in a layout this build writes.
-    Open(Layout),
+    Open(Box<Layout>),
     /// Not moved yet: there is no layout. Records are still read and
     /// written; the move is made when it can be.
     Unmoved,
@@ -441,7 +556,7 @@ impl Gate {
         match held.get("compatible").and_then(serde_json::Value::as_u64) {
             Some(compatible) if compatible > COMPATIBLE => Self::Newer,
             Some(_) => serde_json::from_value(serde_json::Value::Object(held))
-                .map_or(Self::Unread, Self::Open),
+                .map_or(Self::Unread, |layout| Self::Open(Box::new(layout))),
             None => Self::Unread,
         }
     }
@@ -470,7 +585,12 @@ pub(super) fn deleted_of(raw: Option<&[u8]>) -> Vec<Deleted> {
 /// The move from a history kept whole: each of `sessions`, oldest first,
 /// as a record ([`record::records_for_blob`]), and the layout to write once
 /// every record is, `now`. `fingerprint` is the history kept whole as it
-/// was read, and `deleted` the deletions it remembers, already done to it.
+/// was read, and `deleted` the deletions it remembers, already done to it,
+/// and so taken. What a later take-up looks at is cut off at the newest
+/// session moved that finished no later than `now`, or what stands for it
+/// where it moves none ([`taken_through`]): a clock ahead of the time, or a
+/// session stamped ahead of the clock, holds back no session an older build
+/// stores after the move.
 pub(super) fn moved(
     sessions: &[SessionResult],
     fingerprint: Option<Fingerprint>,
@@ -491,25 +611,61 @@ pub(super) fn moved(
         legacy: fingerprint,
         imported_keys: keys,
         deleted_seen: latest(deleted),
+        taken_through: Some(taken_through(sessions, fingerprint.is_some(), deleted, now)),
+        deletions_taken: Some(DeletionsTaken {
+            seen: latest(deleted),
+            taken: deleted.iter().map(DeletionSeen::of).collect(),
+            unread: serde_json::Map::new(),
+        }),
+        taken_legacy: Some(fingerprint),
         unread: serde_json::Map::new(),
     };
     (record::records_for_blob(sessions), layout)
 }
 
+/// The newest of `sessions`, those a move takes, that finished no later
+/// than `now`, the clock as it is made ([`Layout::taken_through`]).
+///
+/// Where it takes none, the newest session the history kept whole says it
+/// deleted, `deleted`, at the clock or before it, stands for it: what an
+/// older copy left open brings back from before that stays out. Where it
+/// says it deleted none either, and the move found no history kept whole
+/// (`kept_whole` false: none was there, or what was there did not read and
+/// was set aside), no session it took can come back, and an older build's
+/// found there after it is one the history here never held: nothing is cut
+/// off. Else the clock: an empty history says nothing of what came before
+/// it.
+fn taken_through(
+    sessions: &[SessionResult],
+    kept_whole: bool,
+    deleted: &[Deleted],
+    now: u64,
+) -> u64 {
+    let newest = |finished: &mut dyn Iterator<Item = u64>| finished.filter(|&at| at <= now).max();
+    newest(&mut sessions.iter().map(|session| session.timestamp))
+        .or_else(|| newest(&mut deleted.iter().map(|gone| gone.timestamp)))
+        .unwrap_or(if kept_whole { now } else { 0 })
+}
+
 /// Of `moved`, the records a move makes, those to write into a store that
 /// holds records already, each store saying for itself what it holds: one
 /// there under its own name, as `here` says, is written; one deleted by
-/// name, in `gone`, is not; one whose bytes are there under a name the
-/// move does not give, as `elsewhere` counts them, is not, as many times as
-/// it counts them; nor is one whose session's key a tombstone names, in
-/// `gone_keys`. The rest are written.
-pub(super) fn not_moved_yet<K: Borrow<str> + Hash + Eq>(
+/// name, in `gone`, is not; one whose session is there under a name the
+/// move does not give, as `elsewhere`, what each record there under such a
+/// name holds, holds it ([`as_moved`]), is not, as many times as they hold
+/// it; nor is one whose session's key a tombstone names, in `gone_keys`.
+/// The rest are written.
+pub(super) fn not_moved_yet(
     moved: Vec<record::Record>,
     here: impl Fn(RecordId) -> bool,
     gone: &BTreeSet<RecordId>,
-    mut elsewhere: HashMap<K, usize>,
+    elsewhere: impl IntoIterator<Item = impl AsRef<str>>,
     gone_keys: &HashSet<SessionKey>,
 ) -> Vec<record::Record> {
+    let mut held: HashMap<String, usize> = HashMap::new();
+    for json in elsewhere {
+        *held.entry(as_moved(json.as_ref())).or_default() += 1;
+    }
     moved
         .into_iter()
         .filter(|record| {
@@ -519,9 +675,10 @@ pub(super) fn not_moved_yet<K: Borrow<str> + Hash + Eq>(
             if gone.contains(&record.id) {
                 return false;
             }
-            if let Some(count) = elsewhere
-                .get_mut(record.json.as_str())
-                .filter(|count| **count > 0)
+            if !held.is_empty()
+                && let Some(count) = held
+                    .get_mut(&as_moved(&record.json))
+                    .filter(|count| **count > 0)
             {
                 *count -= 1;
                 return false;
@@ -531,20 +688,66 @@ pub(super) fn not_moved_yet<K: Borrow<str> + Hash + Eq>(
         .collect()
 }
 
+/// What a record holds, `json`, as a move tells it from what another holds
+/// ([`not_moved_yet`]): the session without the format it says it is stored
+/// in ([`cw_core::SESSION_FORMAT`]). Builds before the format wrote none,
+/// and one of them writes this build's back with it at the end, as a key it
+/// does not know: as they are written, the move's records, this build's,
+/// would never be the bytes an older build stored of the same session.
+/// Text that holds no JSON object is itself.
+fn as_moved(json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(serde_json::Value::Object(session)) => {
+            let session: serde_json::Map<String, serde_json::Value> = session
+                .into_iter()
+                .filter(|(key, _)| key != "format")
+                .collect();
+            serde_json::to_string(&session).unwrap_or_else(|_| json.to_string())
+        }
+        _ => json.to_string(),
+    }
+}
+
 /// What to take up of a history kept whole that an older build changed
 /// since the move: `sessions`, what it holds now, as `fingerprint`, and
 /// `deleted`, the deletions it remembers. `live` is every record here by
 /// its session's key, and `gone` the key of every one deleted here.
 ///
-/// A session is taken up once, where it finished after the move, less a
-/// day, and is neither here already nor deleted here: only one an older
+/// A session is taken up once, where it finished after the newest the move
+/// took ([`Layout::taken_through`]), less a day, and is neither here
+/// already nor deleted here, nor named among `deleted`: only one an older
 /// build finished since, or a copy of it left open stored since. One from
 /// before, which an older copy brings back as it stores the history it
-/// held, is never taken up again, nor one deleted here. Each goes where it
-/// finished ([`RecordId::placed`]).
+/// held, is never taken up again, nor one deleted here, nor one deleted
+/// there by hand before or after the move, by a build that keeps its
+/// deletions, and stored back by a copy left open of one that keeps none:
+/// every build that keeps them takes a session it puts back, by Undo or a
+/// restore, out of them. Only one deleted there by a build that keeps none,
+/// which finished after that cut-off, a later one than every session the
+/// move took among them, comes back with such a copy, as it does in that
+/// build. Each goes where it finished ([`RecordId::placed`]).
+/// A layout an earlier build wrote says nothing of what the move took: the
+/// newest session taken, at the clock as the move was made or before it,
+/// stands for it, and is noted.
 ///
-/// A deletion the older build made since is made here too, of every
-/// record with its key, as it would have been there.
+/// A deletion the older build made is made here too, of every record with
+/// its key, as it would have been there, once: each taken is noted
+/// ([`Layout::deletions_taken`]), whatever its stamp says. Where a layout
+/// notes none, as an earlier build wrote it, each made no later than the
+/// latest taken is taken, as such builds take them; where a build that
+/// notes none has taken deletions up since ([`DeletionsTaken::seen`]),
+/// each it took, made after what this build had seen and no later than the
+/// latest taken now. One stamped no later than what this build had seen,
+/// and not noted, it did not take, and is made here. But one stamped in
+/// between that was made after that build looked, with a clock behind, is
+/// taken for one it took, and never made here: such a build notes nothing
+/// of what it took, and a session of one it took may have been put back
+/// here since, by a restore say, which making it again would undo.
+///
+/// A change a build before these rules took up first, by its own, is
+/// taken up again by them: such a build moves [`Layout::legacy`] on, and
+/// leaves this build's note of what it took as it was
+/// ([`Layout::taken_up`]).
 ///
 /// The change and the layout to write once it is made, or none where
 /// there is nothing new.
@@ -556,11 +759,24 @@ pub(super) fn imported(
     live: &HashMap<SessionKey, Vec<RecordId>>,
     gone: &HashSet<SessionKey>,
 ) -> Option<(HistoryChange, Layout)> {
-    if fingerprint == layout.legacy {
+    if Some(fingerprint) == layout.taken_up() {
         return None;
     }
     let taken: HashSet<&SessionKey> = layout.imported_keys.iter().collect();
-    let since = layout.migrated_at.saturating_sub(MOVE_SLACK_MS);
+    let through = layout.taken_through.unwrap_or_else(|| {
+        layout
+            .imported_keys
+            .iter()
+            .map(SessionKey::timestamp)
+            .filter(|&finished| finished <= layout.migrated_at)
+            .max()
+            .unwrap_or(layout.migrated_at)
+    });
+    let since = through.saturating_sub(MOVE_SLACK_MS);
+    // Deleted by hand there, and stored again by a copy that keeps no
+    // deletions: every build that keeps them takes a session it puts back,
+    // by Undo or a restore, out of them.
+    let deleted_there: HashSet<SessionKey> = deleted.iter().map(Deleted::key).collect();
     let mut change = HistoryChange::default();
     let mut put = HashSet::new();
     let mut keys = Vec::new();
@@ -569,7 +785,8 @@ pub(super) fn imported(
         let new = session.timestamp > since
             && !taken.contains(&key)
             && !gone.contains(&key)
-            && !live.contains_key(&key);
+            && !live.contains_key(&key)
+            && !deleted_there.contains(&key);
         let Some(record) = new
             .then(|| record::Record::of(session, |json| RecordId::placed(session.timestamp, json)))
             .flatten()
@@ -584,15 +801,58 @@ pub(super) fn imported(
             }
         }
     }
-    for gone in deleted.iter().filter(|gone| gone.at > layout.deleted_seen) {
+    let mut made = layout
+        .deletions_taken
+        .as_ref()
+        .map(|noted| noted.taken.clone())
+        .unwrap_or_default();
+    // Taken by a build that takes them by when they were made, each made
+    // after the latest it had taken and moved on to the latest it took: of
+    // a layout that notes none, each made no later than that; of one this
+    // build noted them in, each made after what it had seen as it did, no
+    // later than that. One made no later than what it had seen that it did
+    // not note, made since with a clock behind, no such build took.
+    let seen = layout.deletions_taken.as_ref().map(|noted| noted.seen);
+    if seen != Some(layout.deleted_seen) {
+        made.extend(
+            deleted
+                .iter()
+                .filter(|gone| gone.at <= layout.deleted_seen)
+                .filter(|gone| seen.is_none_or(|seen| gone.at > seen))
+                .map(DeletionSeen::of),
+        );
+    }
+    for gone in deleted
+        .iter()
+        .filter(|gone| !made.contains(&DeletionSeen::of(gone)))
+    {
         for id in live.get(&gone.key()).into_iter().flatten() {
             change.forget.push((*id, gone.clone()));
         }
     }
     let mut next = layout.clone();
     next.legacy = fingerprint;
+    next.taken_legacy = Some(fingerprint);
     next.imported_keys.extend(keys);
     next.deleted_seen = layout.deleted_seen.max(latest(deleted));
+    next.taken_through = Some(through);
+    // Every deletion the older build remembers is taken now; one it no
+    // longer remembers need not be noted. None remembered may be a list
+    // that could not be read: what was noted stays.
+    let taken = if deleted.is_empty() {
+        made
+    } else {
+        deleted.iter().map(DeletionSeen::of).collect()
+    };
+    next.deletions_taken = Some(DeletionsTaken {
+        seen: next.deleted_seen,
+        taken,
+        unread: layout
+            .deletions_taken
+            .as_ref()
+            .map(|noted| noted.unread.clone())
+            .unwrap_or_default(),
+    });
     Some((change, next))
 }
 
@@ -660,9 +920,9 @@ impl<S: Aside> BlobHistory<S> {
     /// The whole history, by record. What it held is noted as seen only
     /// where it could be read: a history held is still to take up.
     pub(super) fn load(&self) -> HistoryLoad {
-        let sessions = self.current();
+        let (sessions, looked) = self.current_looked();
         if !self.held.get() {
-            self.seen.set(Some(self.look()));
+            self.seen.set(Some(looked));
         }
         HistoryLoad {
             sessions: sessions
@@ -690,10 +950,22 @@ impl<S: Aside> BlobHistory<S> {
     /// The history is read out of the store once: what tells whether it
     /// changed is what the change is made to, and what it leaves is what
     /// was written, which reads back the same.
+    ///
+    /// Only what the change puts is written as this build writes a
+    /// session. Every other session goes back as the history held it, byte
+    /// for byte: a tab of an older build that shares the history, which
+    /// knows a session by what it holds, finds each as it left it.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
         let stored = self.shelf.get(self.keys.history);
         let looked = self.look_at(stored.as_ref().ok().and_then(Option::as_deref));
-        let mut held = self.current_from(stored);
+        // Each session beside its text as the history holds it, none for
+        // one the change puts.
+        let mut held: Vec<(Record, SessionResult, Option<&str>)> = self
+            .current_from(&stored)
+            .0
+            .into_iter()
+            .map(|(record, session, stored)| (record, session, Some(stored)))
+            .collect();
         if self.held.get() {
             return HistorySaved::Held;
         }
@@ -727,11 +999,11 @@ impl<S: Aside> BlobHistory<S> {
                 .insert(record.id.order, record.id);
             let key = SessionKey::of(&session);
             self.seen_keys.borrow_mut().insert(record.id, key.clone());
-            let kept_already = held.iter().any(|(kept, _)| kept.json == json);
+            let kept_already = held.iter().any(|(kept, _, _)| kept.json == json);
             if kept_already || (gone.contains(&key) && !undone.contains(&record.id)) {
                 continue;
             }
-            let at = held.partition_point(|(kept, _)| kept.id < record.id);
+            let at = held.partition_point(|(kept, _, _)| kept.id < record.id);
             held.insert(
                 at,
                 (
@@ -740,6 +1012,7 @@ impl<S: Aside> BlobHistory<S> {
                         json,
                     },
                     session,
+                    None,
                 ),
             );
         }
@@ -748,9 +1021,9 @@ impl<S: Aside> BlobHistory<S> {
             // named it.
             let at = held
                 .iter()
-                .position(|(kept, _)| kept.id == *id)
+                .position(|(kept, _, _)| kept.id == *id)
                 .or_else(|| {
-                    held.iter().position(|(kept, session)| {
+                    held.iter().position(|(kept, session, _)| {
                         SessionKey::of(session) == gone.key()
                             && (kept.id.nonce == id.nonce
                                 || record::fnv64(kept.json.as_bytes()) == id.nonce)
@@ -767,7 +1040,7 @@ impl<S: Aside> BlobHistory<S> {
         // tab would then let go for good should it go missing in passing.
         let live: HashSet<SessionKey> = held
             .iter()
-            .map(|(_, session)| SessionKey::of(session))
+            .map(|(_, session, _)| SessionKey::of(session))
             .collect();
         for (_, gone) in &change.forget {
             if !live.contains(&gone.key()) && !deleted.contains(gone) {
@@ -781,8 +1054,11 @@ impl<S: Aside> BlobHistory<S> {
         if remembered {
             self.save_deleted(&deleted);
         }
-        let ids: Vec<RecordId> = held.iter().map(|(record, _)| record.id).collect();
-        let sessions: Vec<SessionResult> = held.into_iter().map(|(_, session)| session).collect();
+        let ids: Vec<RecordId> = held.iter().map(|(record, _, _)| record.id).collect();
+        let sessions: Vec<(&str, &SessionResult)> = held
+            .iter()
+            .map(|(record, session, stored)| (stored.unwrap_or(&record.json), session))
+            .collect();
         let mut written = None;
         let saved = store_newest_that_fit(&sessions, self.budget, |raw| {
             let took = self.shelf.set(self.keys.history, raw);
@@ -818,11 +1094,11 @@ impl<S: Aside> BlobHistory<S> {
     /// Every record there is: none where the history cannot be read. What
     /// it held is noted as seen only once it is listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
-        let held = self.current();
+        let (held, looked) = self.current_looked();
         if self.held.get() {
             return None;
         }
-        self.seen.set(Some(self.look()));
+        self.seen.set(Some(looked));
         Some(held.into_iter().map(|(record, _)| record.id).collect())
     }
 
@@ -847,14 +1123,68 @@ impl<S: Aside> BlobHistory<S> {
     }
 
     /// Which of `ids` were deleted by hand: those whose key the deletions
-    /// remember. One never seen here is taken as not deleted.
-    pub(super) fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
-        let gone: HashSet<SessionKey> = self.deleted().iter().map(Deleted::key).collect();
+    /// remember, each beside when it was deleted, the latest where the key
+    /// is remembered more than once. One never seen here is taken as not
+    /// deleted. None where the deletions cannot be read: that is no word
+    /// that a record was not deleted.
+    pub(super) fn deletions(&self, ids: &[RecordId]) -> Option<Deletions> {
+        let raw = self.shelf.get(self.keys.deleted).ok()?;
+        let mut gone: HashMap<SessionKey, u64> = HashMap::new();
+        for deleted in deleted_of(raw.as_deref().map(str::as_bytes)) {
+            let at = gone.entry(deleted.key()).or_insert(deleted.at);
+            *at = (*at).max(deleted.at);
+        }
         let keys = self.seen_keys.borrow();
-        ids.iter()
-            .copied()
-            .filter(|id| keys.get(id).is_some_and(|key| gone.contains(key)))
-            .collect()
+        Some(
+            ids.iter()
+                .filter_map(|id| Some((*id, Some(*gone.get(keys.get(id)?)?))))
+                .collect(),
+        )
+    }
+
+    /// Which of `ids` were deleted by hand, each beside the session its
+    /// deletion remembers ([`Self::deletions`]). None where the deletions
+    /// cannot be read.
+    pub(super) fn deleted_sessions(&self, ids: &[RecordId]) -> Option<Vec<(RecordId, SessionKey)>> {
+        let raw = self.shelf.get(self.keys.deleted).ok()?;
+        let gone: HashSet<SessionKey> = deleted_of(raw.as_deref().map(str::as_bytes))
+            .iter()
+            .map(Deleted::key)
+            .collect();
+        let keys = self.seen_keys.borrow();
+        Some(
+            ids.iter()
+                .filter_map(|id| {
+                    let key = keys.get(id)?;
+                    gone.contains(key).then(|| (*id, key.clone()))
+                })
+                .collect(),
+        )
+    }
+
+    /// Which of the sessions `keys` its deletions remember
+    /// ([`super::Store::deleted_keys`]). None where the deletions cannot be
+    /// read.
+    pub(super) fn deleted_keys(&self, keys: &[SessionKey]) -> Option<Vec<SessionKey>> {
+        let raw = self.shelf.get(self.keys.deleted).ok()?;
+        let gone: HashSet<SessionKey> = deleted_of(raw.as_deref().map(str::as_bytes))
+            .iter()
+            .map(Deleted::key)
+            .collect();
+        Some(
+            keys.iter()
+                .filter(|key| gone.contains(key))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
+    /// where that could not be looked for.
+    #[cfg(test)]
+    pub(super) fn forgotten(&self, ids: &[RecordId]) -> Vec<RecordId> {
+        let found = self.deletions(ids).unwrap_or_default();
+        found.into_iter().map(|(id, _)| id).collect()
     }
 
     /// Whether the history or its deletions changed since last looked at.
@@ -882,7 +1212,7 @@ impl<S: Aside> BlobHistory<S> {
     fn look_at(&self, history: Option<&str>) -> u64 {
         let deleted = self.shelf.get(self.keys.deleted).ok().flatten();
         let (history, deleted) = (history.unwrap_or_default(), deleted.unwrap_or_default());
-        record::fnv64(format!("{history}\n{deleted}").as_bytes())
+        record::fnv64_parts([history.as_bytes(), b"\n", deleted.as_bytes()])
     }
 
     /// The deletions remembered: none, where they cannot be read, which
@@ -912,50 +1242,80 @@ impl<S: Aside> BlobHistory<S> {
     /// aside; where it cannot be, the history is held, and only what reads
     /// of it comes back.
     fn current(&self) -> Vec<(Record, SessionResult)> {
-        self.current_from(self.shelf.get(self.keys.history))
+        let stored = self.shelf.get(self.keys.history);
+        self.current_from(&stored)
+            .0
+            .into_iter()
+            .map(|(record, session, _)| (record, session))
+            .collect()
+    }
+
+    /// The history as [`Self::current`] reads it, beside what it and its
+    /// deletions held as it was read ([`Self::look_at`]): read out of the
+    /// store once, and looked at again only where reading it set anything
+    /// aside, which may write it anew.
+    fn current_looked(&self) -> (Vec<(Record, SessionResult)>, u64) {
+        let stored = self.shelf.get(self.keys.history);
+        let looked = self.look_at(stored.as_ref().ok().and_then(Option::as_deref));
+        let (current, set_aside) = self.current_from(&stored);
+        let current = current
+            .into_iter()
+            .map(|(record, session, _)| (record, session))
+            .collect();
+        (current, if set_aside { self.look() } else { looked })
     }
 
     /// The history as it is stored, `stored` being what the store gave of
-    /// it, as [`Self::current`] reads it.
-    fn current_from(&self, stored: Result<Option<String>, ()>) -> Vec<(Record, SessionResult)> {
+    /// it, as [`Self::current`] reads it, each session beside its text
+    /// there. What reads beside what is set aside stays as it was held.
+    /// Beside it, whether anything was set aside: the history may have been
+    /// written anew.
+    fn current_from<'a>(
+        &self,
+        stored: &'a Result<Option<String>, ()>,
+    ) -> (Vec<(Record, SessionResult, &'a str)>, bool) {
         self.held.set(false);
         let raw = match stored {
             Ok(Some(raw)) => raw,
-            Ok(None) => return Vec::new(),
+            Ok(None) => return (Vec::new(), false),
             Err(()) => {
                 self.held.set(true);
-                return Vec::new();
+                return (Vec::new(), false);
             }
         };
         let (history, aside) = (self.keys.history, self.keys.aside);
-        let Some(read) = read_history(&raw) else {
-            let kept = set_aside_from(&self.shelf, history, &raw, aside, &raw, None);
+        let Some(read) = read_history(raw) else {
+            let kept = set_aside_from(&self.shelf, history, raw, aside, raw, None);
             if !self.noted(kept, SetAside::History { kept: None }) {
                 self.held.set(true);
             }
-            return Vec::new();
+            return (Vec::new(), true);
         };
-        if let Some(unread) = read.unread_json() {
-            let kept = match serde_json::to_string(&read.sessions) {
-                Ok(rest) => set_aside_from(&self.shelf, history, &raw, aside, &unread, Some(&rest)),
-                Err(_) => Kept::Not,
-            };
+        let unread = read.unread_json();
+        if let Some(unread) = &unread {
+            let rest = format!("[{}]", read.stored.join(","));
+            let kept = set_aside_from(&self.shelf, history, raw, aside, unread, Some(&rest));
             let count = read.unread.len();
             if !self.noted(kept, SetAside::Sessions { count, kept: None }) {
                 self.held.set(true);
             }
         }
-        self.named(read.sessions)
+        (self.named(read.sessions, read.stored), unread.is_some())
     }
 
     /// `sessions`, the history in its order, each by its record: where this
-    /// copy placed it, or else at its stamp, or just after the one before.
-    fn named(&self, sessions: Vec<SessionResult>) -> Vec<(Record, SessionResult)> {
+    /// copy placed it, or else at its stamp, or just after the one before;
+    /// each beside its text there, `stored`, by its place.
+    fn named<'a>(
+        &self,
+        sessions: Vec<SessionResult>,
+        stored: Vec<&'a str>,
+    ) -> Vec<(Record, SessionResult, &'a str)> {
         let placed = self.placed.borrow();
         let mut keys = self.seen_keys.borrow_mut();
         let mut last: Option<u64> = None;
         let mut named = Vec::with_capacity(sessions.len());
-        for session in sessions {
+        for (session, stored) in sessions.into_iter().zip(stored) {
             let Ok(json) = serde_json::to_string(&session) else {
                 continue;
             };
@@ -970,7 +1330,7 @@ impl<S: Aside> BlobHistory<S> {
                 });
             last = Some(id.order);
             keys.insert(id, SessionKey::of(&session));
-            named.push((Record { id, json }, session));
+            named.push((Record { id, json }, session, stored));
         }
         named
     }
@@ -979,7 +1339,7 @@ impl<S: Aside> BlobHistory<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persist::tests::{at, session, stamps};
+    use crate::persist::tests::{as_an_older_build_wrote, at, session, stamps};
     use cw_core::CharSetMode;
 
     #[test]
@@ -1269,7 +1629,7 @@ mod tests {
         let raw = serde_json::to_string(&[written.clone()]).unwrap();
         let back = parse_sessions(&raw).expect("a list");
         assert_eq!(back[0].char_set_mode, CharSetMode::Contest);
-        let (saved, kept) = newest_that_fit(&back, usize::MAX);
+        let (saved, kept) = newest_that_fit(&as_written(&back), usize::MAX);
         assert_eq!(kept, 1);
         let saved: Vec<serde_json::Value> = serde_json::from_str(&saved).unwrap();
         assert_eq!(saved[0]["charSetMode"], "callsign");
@@ -1277,12 +1637,21 @@ mod tests {
         assert_eq!(saved[0]["contest"], written["contest"]);
     }
 
+    /// Each of `sessions` beside its text as this build writes it.
+    fn as_written(sessions: &[SessionResult]) -> Vec<(String, &SessionResult)> {
+        sessions
+            .iter()
+            .map(|session| (serde_json::to_string(session).unwrap(), session))
+            .collect()
+    }
+
     #[test]
     fn only_the_newest_sessions_that_fit_are_kept() {
-        let all: Vec<SessionResult> = (0..10)
+        let sessions: Vec<SessionResult> = (0..10)
             .map(|i| session(&format!("2026-01-{i:02}")))
             .collect();
-        let one = serde_json::to_string(&all[0]).unwrap().len();
+        let all = as_written(&sessions);
+        let one = all[0].0.len();
         let (raw, kept) = newest_that_fit(&all, 2 + 3 * one + 2);
         assert_eq!(kept, 3);
         let back = parse_sessions(&raw).expect("a list");
@@ -1307,12 +1676,13 @@ mod tests {
     /// whole history as "the newest 0".
     #[test]
     fn a_store_short_of_room_never_writes_an_empty_history() {
-        let mut all: Vec<SessionResult> = (0..5)
+        let mut sessions: Vec<SessionResult> = (0..5)
             .map(|i| session(&format!("2026-01-{i:02}")))
             .collect();
         // The newest is far larger than the others, as a long run is.
-        all[4].alphabet_fingerprint = "x".repeat(20_000);
-        let newest = serde_json::to_string(&all[4]).unwrap().len() + 2;
+        sessions[4].alphabet_fingerprint = "x".repeat(20_000);
+        let all = as_written(&sessions);
+        let newest = all[4].0.len() + 2;
         let writes = std::cell::RefCell::new(Vec::<String>::new());
         let written = &writes;
         let with_room = |room: usize| {
@@ -1344,7 +1714,8 @@ mod tests {
         let saved = store_newest_that_fit(&all, usize::MAX, |_| true);
         assert_eq!(saved, HistorySaved::Stored { kept: 5 });
         // A history every session was deleted from is stored empty.
-        let saved = store_newest_that_fit(&[], usize::MAX, |raw| raw == "[]");
+        let none: [(&str, &SessionResult); 0] = [];
+        let saved = store_newest_that_fit(&none, usize::MAX, |raw| raw == "[]");
         assert_eq!(saved, HistorySaved::Stored { kept: 0 });
     }
 
@@ -1387,6 +1758,568 @@ mod tests {
         ] {
             assert_eq!(gate(unread), Gate::Unread, "{unread}");
         }
+    }
+
+    const DAY: u64 = 86_400_000;
+    const YEAR: u64 = 365 * DAY;
+    /// When the sessions of these tests finish, as a clock that is right
+    /// says.
+    const T: u64 = 1_790_000_000_000;
+
+    /// Every record of `records` by its session's key, as the history here
+    /// holds them.
+    fn live_of(records: &[Record]) -> HashMap<SessionKey, Vec<RecordId>> {
+        let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
+        for held in records {
+            let key = record::key_of(&held.json).expect("a session");
+            live.entry(key).or_default().push(held.id);
+        }
+        live
+    }
+
+    /// When each session `change` stores finished.
+    fn put_stamps(change: &HistoryChange) -> Vec<u64> {
+        change
+            .put
+            .iter()
+            .filter_map(|held| record::read_record(&held.json))
+            .map(|session| session.timestamp)
+            .collect()
+    }
+
+    /// The history kept whole as an older build wrote it the `n`th time.
+    fn written(n: u64) -> Option<Fingerprint> {
+        Some(Fingerprint { len: n, mtime: n })
+    }
+
+    /// The layout an earlier build wrote, as `raw` holds it.
+    fn earlier(raw: serde_json::Value) -> Layout {
+        let Gate::Open(layout) = Gate::of(Some(raw.to_string().as_bytes())) else {
+            panic!("a layout this build writes to: {raw}");
+        };
+        *layout
+    }
+
+    /// A move made with the clock ten years ahead leaves what an older build
+    /// stores after it to be taken up: what it takes up is cut off at the
+    /// newest session the move took, a day before it, and not at the clock.
+    /// It was the clock, and nothing was taken up until it came round.
+    #[test]
+    fn a_session_an_older_build_stores_after_a_move_made_with_the_clock_ahead_is_taken_up() {
+        let first = finished(T);
+        let (records, layout) = moved(std::slice::from_ref(&first), written(1), &[], T + 10 * YEAR);
+        let since = finished(T + DAY);
+        let (change, next) = imported(
+            &layout,
+            written(2),
+            &[first, since.clone()],
+            &[],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(put_stamps(&change), [since.timestamp]);
+        assert_eq!(layout.taken_through, Some(T));
+        assert_eq!(next.taken_through, Some(T), "as the move left it");
+    }
+
+    /// A layout an earlier build wrote, at a move made with the clock ahead,
+    /// says nothing of what the move took through: the newest session it
+    /// took up to then, at the clock or before it, stands for it, and is
+    /// noted. What an older build stored since is taken up.
+    #[test]
+    fn a_layout_an_earlier_build_moved_with_the_clock_ahead_takes_up_what_an_older_build_stored_since()
+     {
+        let first = finished(T);
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 10 * YEAR,
+            "importedKeys": [[T, first.date]],
+            "deletedSeen": 0,
+        }));
+        assert_eq!(layout.taken_through, None);
+        let since = finished(T + DAY);
+        let records = record::records_for_blob(std::slice::from_ref(&first));
+        let (change, next) = imported(
+            &layout,
+            written(2),
+            &[first, since.clone()],
+            &[],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(put_stamps(&change), [since.timestamp]);
+        assert_eq!(next.taken_through, Some(T));
+    }
+
+    /// A move that takes no session, made with the clock ahead, leaves what
+    /// an older build stores after it to be taken up. Where it found no
+    /// history kept whole, nothing it took can come back, and nothing is cut
+    /// off. Where the history kept whole was empty, the newest session it
+    /// says it deleted, at the clock or before it, stands for the newest the
+    /// move took, so what an older copy left open since brings back from
+    /// before it stays out. It was the clock, and nothing was taken up until
+    /// it came round.
+    #[test]
+    fn a_session_an_older_build_stores_after_a_move_of_no_session_made_with_the_clock_ahead_is_taken_up()
+     {
+        let since = finished(T + DAY);
+        let (_, layout) = moved(&[], None, &[], T + 10 * YEAR);
+        let (change, next) = imported(
+            &layout,
+            written(2),
+            std::slice::from_ref(&since),
+            &[],
+            &HashMap::new(),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(put_stamps(&change), [since.timestamp], "none kept whole");
+        assert_eq!(next.taken_through, Some(0));
+
+        let gone = Deleted::of(&finished(T), T + 1);
+        let (_, layout) = moved(&[], written(1), std::slice::from_ref(&gone), T + 10 * YEAR);
+        assert_eq!(layout.taken_through, Some(T));
+        let (change, _) = imported(
+            &layout,
+            written(2),
+            &[finished(T - 2 * DAY), since.clone()],
+            std::slice::from_ref(&gone),
+            &HashMap::new(),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(put_stamps(&change), [since.timestamp], "all deleted");
+    }
+
+    /// An empty history kept whole that remembers no deletion says nothing
+    /// of what came before the move: the clock as it was made stands for
+    /// the newest session it took, as it did.
+    #[test]
+    fn a_move_of_an_empty_history_kept_whole_takes_through_its_clock() {
+        let (_, layout) = moved(&[], written(1), &[], T + 10 * YEAR);
+        assert_eq!(layout.taken_through, Some(T + 10 * YEAR));
+    }
+
+    /// One session stamped far ahead of the clock as the move was made, by
+    /// a clock set ahead once, holds back no session finished after the
+    /// move: the move took through the newest it took at the clock.
+    #[test]
+    fn a_session_stamped_past_the_clock_at_the_move_holds_back_no_later_one() {
+        let (first, far) = (finished(T), finished(T + 10 * YEAR));
+        let (records, layout) = moved(
+            &[first.clone(), far.clone()],
+            written(1),
+            &[],
+            T + 3_600_000,
+        );
+        let since = finished(T + 2 * 3_600_000);
+        let (change, _) = imported(
+            &layout,
+            written(2),
+            &[first, far, since.clone()],
+            &[],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(put_stamps(&change), [since.timestamp]);
+        assert_eq!(layout.taken_through, Some(T));
+    }
+
+    /// A deletion an older build makes after the move is made here, however
+    /// its stamp falls: here, below one a clock set ahead stamped before the
+    /// move. It was made only where stamped past every deletion taken
+    /// before, so it never was. A deletion is made once: the older build
+    /// writing its deletions again makes none of them again, of a session
+    /// put back here since.
+    #[test]
+    fn a_deletion_an_older_build_makes_after_the_move_is_made_whatever_its_stamp() {
+        let (kept, other) = (finished(T), finished(T + DAY));
+        // Made before the move by a clock ten years ahead.
+        let far = Deleted::of(&finished(T - DAY), T + 10 * YEAR);
+        let (records, layout) = moved(
+            &[kept.clone(), other.clone()],
+            written(1),
+            std::slice::from_ref(&far),
+            T + 2 * DAY,
+        );
+        // The older build deletes the second, by a clock that is right.
+        let gone = Deleted::of(&other, T + 3 * DAY);
+        let deleted = [far, gone.clone()];
+        let live = live_of(&records);
+        let (change, next) = imported(
+            &layout,
+            written(2),
+            std::slice::from_ref(&kept),
+            &deleted,
+            &live,
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(change.forget, [(records[1].id, gone)]);
+        // Written again, with the same deletions: none made again.
+        let (change, _) = imported(
+            &next,
+            written(3),
+            std::slice::from_ref(&kept),
+            &deleted,
+            &live,
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert!(change.forget.is_empty(), "made once: {:?}", change.forget);
+    }
+
+    /// A layout an earlier build wrote says nothing of which deletions were
+    /// taken: those made no later than the latest it took are taken, as it
+    /// took them, and one made after is made. Both are noted as taken.
+    #[test]
+    fn a_layout_an_earlier_build_wrote_takes_deletions_as_it_did_then() {
+        let (first, second) = (finished(T), finished(T + DAY));
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 2 * DAY,
+            "importedKeys": [[first.timestamp, first.date], [second.timestamp, second.date]],
+            "deletedSeen": T + 5,
+        }));
+        let records = record::records_for_blob(&[first.clone(), second.clone()]);
+        let (taken, made) = (Deleted::of(&first, T + 5), Deleted::of(&second, T + 6));
+        let (change, next) = imported(
+            &layout,
+            written(2),
+            &[],
+            &[taken.clone(), made.clone()],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert_eq!(change.forget, [(records[1].id, made.clone())]);
+        let noted = next.deletions_taken.expect("noted");
+        assert_eq!(
+            noted.taken,
+            [DeletionSeen::of(&taken), DeletionSeen::of(&made)].into()
+        );
+        assert_eq!(noted.seen, next.deleted_seen);
+        assert_eq!(next.deleted_seen, T + 6);
+    }
+
+    /// A build that takes deletions up by when they were made alone, as
+    /// builds before this one do, may take some up between two of this
+    /// build's take-ups, and leave the deletions this one noted as it found
+    /// them: each it took, made after what this build had seen and no later
+    /// than the latest it took, as such a build takes them, is taken, and
+    /// none is made again, of a session put back here since.
+    #[test]
+    fn deletions_an_earlier_build_took_up_since_are_not_made_again() {
+        let (first, second) = (finished(T), finished(T + DAY));
+        let records = record::records_for_blob(&[first.clone(), second.clone()]);
+        let noted = Deleted::of(&first, T + 5);
+        let since = Deleted::of(&second, T + 7);
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 2 * DAY,
+            "importedKeys": [[first.timestamp, first.date], [second.timestamp, second.date]],
+            // Moved on by an earlier build, which took the second's deletion.
+            "deletedSeen": T + 9,
+            "deletionsTaken": {"seen": T + 5, "taken": [[first.timestamp, first.date, T + 5]]},
+        }));
+        let (change, next) = imported(
+            &layout,
+            written(2),
+            &[],
+            &[noted, since.clone()],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up");
+        assert!(change.forget.is_empty(), "{:?}", change.forget);
+        let taken = next.deletions_taken.expect("noted").taken;
+        assert!(taken.contains(&DeletionSeen::of(&since)));
+    }
+
+    /// The layout as a build before this one's take-up rules writes it back
+    /// once it has taken up the history kept whole as `fingerprint` by its
+    /// own (0.16.3 to 0.16.9): `legacy` moved on, and `deletedSeen` to the
+    /// latest of `deleted`; what it does not know, this build's notes among
+    /// it, carried as it was read.
+    fn taken_up_by_an_older_build(
+        layout: &Layout,
+        fingerprint: Option<Fingerprint>,
+        deleted: &[Deleted],
+    ) -> Layout {
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&layout.written().expect("written")).expect("JSON");
+        raw["legacy"] = serde_json::to_value(fingerprint).expect("JSON");
+        let seen = layout.deleted_seen.max(latest(deleted));
+        raw["deletedSeen"] = serde_json::json!(seen);
+        earlier(raw)
+    }
+
+    /// A change to the history kept whole that a build before this one's
+    /// take-up rules took up first, by its own, is taken up again here by
+    /// this build's: a session an older build stored after a move made long
+    /// after the sessions it took is taken up, though that build's cut-off,
+    /// a day before the move, left it out; and a deletion an older build
+    /// made with its clock behind, stamped below the latest it took, is
+    /// made, though that build makes only those stamped after it. The
+    /// change used to read as taken up already, its `legacy` that build's
+    /// note of it, and neither was ever taken up here.
+    #[test]
+    fn a_change_a_build_before_this_ones_rules_took_up_first_is_taken_up_again_here() {
+        let older = [finished(T), finished(T + DAY), finished(T + 2 * DAY)];
+        let noted = Deleted::of(&finished(T - DAY), T);
+        let (records, layout) = moved(
+            &older,
+            written(1),
+            std::slice::from_ref(&noted),
+            T + 10 * YEAR,
+        );
+        let since = finished(T + 3 * DAY);
+        let mut whole = older.to_vec();
+        whole.push(since.clone());
+        let looked = taken_up_by_an_older_build(&layout, written(2), std::slice::from_ref(&noted));
+        let (change, next) = imported(
+            &looked,
+            written(2),
+            &whole,
+            std::slice::from_ref(&noted),
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(put_stamps(&change), [since.timestamp]);
+        assert_eq!(next.legacy, written(2));
+        assert!(
+            imported(
+                &next,
+                written(2),
+                &whole,
+                std::slice::from_ref(&noted),
+                &live_of(&records),
+                &HashSet::new(),
+            )
+            .is_none(),
+            "once"
+        );
+
+        // A deletion stamped behind what this build had seen, which the
+        // older build, taking up a later one too, passes over.
+        let behind = Deleted::of(&older[2], T - 5);
+        let later = Deleted::of(&older[1], T + 9);
+        let deleted = [noted, behind.clone(), later.clone()];
+        let looked = taken_up_by_an_older_build(&layout, written(3), &deleted);
+        let mut live = live_of(&records);
+        // The older build made the later deletion here as it took it up.
+        live.remove(&later.key());
+        let (change, next) = imported(
+            &looked,
+            written(3),
+            &older[..1],
+            &deleted,
+            &live,
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(change.forget, [(records[2].id, behind)]);
+        assert_eq!(next.deletions_taken.expect("noted").taken.len(), 3);
+
+        // Noted as none where there was no history kept whole, and read so.
+        let (_, none) = moved(&[], None, &[], T);
+        assert_eq!(none.taken_legacy, Some(None));
+        let raw = none.written().expect("written");
+        assert_eq!(Gate::of(Some(&raw)), Gate::Open(Box::new(none)));
+    }
+
+    /// A change to the history kept whole that a build before this one's
+    /// take-up rules looked at first is taken up here by this build's rules
+    /// where such a build made the move as well, as every build from 0.16.3
+    /// to 0.16.9 did: the layout holds no note of this build's
+    /// (`takenLegacy`), and `legacy` is that build's, moved on as it took
+    /// the change up by its own rules, which left out a session stored
+    /// since that finished long before its move's clock. Gone by `legacy`,
+    /// the change read as taken up, and the session was never taken up.
+    #[test]
+    fn a_change_an_older_build_took_up_first_is_taken_up_here_where_it_made_the_move() {
+        let first = finished(T);
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 10 * YEAR,
+            "legacy": written(1),
+            "importedKeys": [[T, first.date]],
+            "deletedSeen": 0,
+        }));
+        let since = finished(T + DAY);
+        let records = record::records_for_blob(std::slice::from_ref(&first));
+        // The older build's look: nothing taken, `legacy` moved on.
+        let looked = taken_up_by_an_older_build(&layout, written(2), &[]);
+        let (change, _) = imported(
+            &looked,
+            written(2),
+            &[first, since.clone()],
+            &[],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(put_stamps(&change), [since.timestamp]);
+    }
+
+    /// A session deleted by hand before the move by a build before records
+    /// that remembers its deletions (0.16.2), and stored in the history kept
+    /// whole again since by a copy left open of a build that remembers none
+    /// (0.16.0), stays deleted as this build takes up a layout an earlier
+    /// build wrote: it finished after the newest session the move took, less
+    /// a day, but the deletions kept beside that history name it, and every
+    /// build that keeps them takes a session it puts back, by Undo or a
+    /// restore, out of them. Taken up by the cut-off alone, it came back.
+    #[test]
+    fn a_session_deleted_before_the_move_and_stored_again_by_a_copy_left_open_stays_deleted() {
+        let moved = [finished(T), finished(T + DAY)];
+        let gone = finished(T + DAY + DAY / 4);
+        let deletion = Deleted::of(&gone, T + 2 * DAY);
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 3 * DAY,
+            "legacy": written(1),
+            "importedKeys": [[T, moved[0].date], [T + DAY, moved[1].date]],
+            "deletedSeen": deletion.at,
+        }));
+        let records = record::records_for_blob(&moved);
+        // Stored since by the copy left open: one it finished before the
+        // move, and the one deleted, which it still held.
+        let since = finished(T + DAY + DAY / 2);
+        let looked =
+            taken_up_by_an_older_build(&layout, written(2), std::slice::from_ref(&deletion));
+        let (change, _) = imported(
+            &looked,
+            written(2),
+            &[moved[0].clone(), moved[1].clone(), gone, since.clone()],
+            std::slice::from_ref(&deletion),
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(
+            put_stamps(&change),
+            [since.timestamp],
+            "the one deleted stays deleted"
+        );
+    }
+
+    /// A session deleted by hand before the move by a build that remembers
+    /// no deletions (0.16.0), newer than every session the move took, and
+    /// stored back since by a copy of that build left open, is taken up as
+    /// it comes back in that build: nothing kept beside the history names
+    /// it. Not only one that finished in the day before the newest the move
+    /// took comes back so, but every one after that day.
+    #[test]
+    fn a_session_newer_than_the_move_deleted_by_a_build_that_keeps_no_deletions_comes_back() {
+        let moved = [finished(T), finished(T + DAY)];
+        let gone = finished(T + 2 * DAY);
+        let layout = earlier(serde_json::json!({
+            "layout": 1,
+            "compatible": 1,
+            "migratedAt": T + 3 * DAY,
+            "legacy": written(1),
+            "importedKeys": [[T, moved[0].date], [T + DAY, moved[1].date]],
+            "deletedSeen": 0,
+        }));
+        let records = record::records_for_blob(&moved);
+        let (change, _) = imported(
+            &layout,
+            written(2),
+            &[moved[0].clone(), moved[1].clone(), gone.clone()],
+            &[],
+            &live_of(&records),
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(
+            put_stamps(&change),
+            [gone.timestamp],
+            "back, as in that build"
+        );
+    }
+
+    /// Every deletion stamped after what this build had seen and no later
+    /// than what an older build's look moved `deletedSeen` on to is taken
+    /// as one that build took, and is not made here: one a build before
+    /// records made after that look, with its clock behind, among them, its
+    /// session staying here. That is the rule, by choice
+    /// (docs/platforms.md): such a build notes nothing of the deletions it
+    /// took, so nothing tells this one from one it took whose session was
+    /// put back here since, by a restore say, which making the deletion
+    /// again would undo.
+    #[test]
+    fn a_deletion_stamped_behind_an_older_builds_watermark_is_taken_as_one_that_build_took() {
+        let older = [finished(T), finished(T + DAY), finished(T + 2 * DAY)];
+        let noted = Deleted::of(&finished(T - DAY), T);
+        let (records, layout) = moved(
+            &older,
+            written(1),
+            std::slice::from_ref(&noted),
+            T + 3 * DAY,
+        );
+        // An older build takes up a deletion made with the clock right, and
+        // moves deletedSeen on to it.
+        let first = Deleted::of(&older[0], T + 10);
+        let looked =
+            taken_up_by_an_older_build(&layout, written(2), &[noted.clone(), first.clone()]);
+        let mut live = live_of(&records);
+        live.remove(&first.key());
+        // Then one is made with a clock behind: after what this build had
+        // seen, before what the older build moved on to.
+        let behind = Deleted::of(&older[1], T + 5);
+        let deleted = [noted, first, behind.clone()];
+        let (change, next) = imported(
+            &looked,
+            written(3),
+            &older[2..],
+            &deleted,
+            &live,
+            &HashSet::new(),
+        )
+        .expect("taken up here");
+        assert_eq!(change.forget, [], "taken for one that build took");
+        let taken = next.deletions_taken.expect("noted").taken;
+        assert!(taken.contains(&DeletionSeen::of(&behind)), "noted as taken");
+    }
+
+    /// What the take-up took is kept through every write of the layout: by
+    /// this build, which writes it as it read it, and by an older one,
+    /// which carries what it does not know ([`Layout::unread`]). A layout
+    /// without it reads, as one an earlier build wrote.
+    #[test]
+    fn what_the_take_up_took_is_kept_in_the_layout() {
+        let first = finished(T);
+        let gone = Deleted::of(&finished(T - DAY), T + 1);
+        let (_, layout) = moved(
+            std::slice::from_ref(&first),
+            written(1),
+            std::slice::from_ref(&gone),
+            T + 2,
+        );
+        let raw = layout.written().expect("written");
+        let held: serde_json::Value = serde_json::from_slice(&raw).expect("JSON");
+        assert_eq!(held["takenThrough"], serde_json::json!(T));
+        assert_eq!(
+            held["deletionsTaken"],
+            serde_json::json!({"seen": T + 1, "taken": [[gone.timestamp, gone.date, T + 1]]})
+        );
+        assert_eq!(Gate::of(Some(&raw)), Gate::Open(Box::new(layout)));
+        let without = earlier(serde_json::json!({"layout": 1, "compatible": 1, "migratedAt": 5}));
+        assert_eq!(without.taken_through, None);
+        assert_eq!(without.deletions_taken, None);
+        let raw = without.written().expect("written");
+        let held: serde_json::Value = serde_json::from_slice(&raw).expect("JSON");
+        assert!(held.get("takenThrough").is_none() && held.get("deletionsTaken").is_none());
     }
 
     /// A browser's history kept whole, by the record API, on `shelf`.
@@ -1453,6 +2386,29 @@ mod tests {
             serde_json::from_str(&shelf.get("deleted").unwrap().unwrap()).unwrap();
         assert_eq!(remembered, [gone]);
         assert_eq!(whole.forgotten(&[one.id, two.id]), [one.id]);
+        assert_eq!(
+            whole.deletions(&[one.id, two.id]),
+            Some(vec![(one.id, Some(7))]),
+            "when, as remembered"
+        );
+        assert_eq!(
+            whole.deleted_sessions(&[one.id, two.id]),
+            Some(vec![(one.id, SessionKey::of(&first))]),
+            "which session, as remembered"
+        );
+        let keys = [SessionKey::of(&first), SessionKey::of(&second)];
+        assert_eq!(
+            whole.deleted_keys(&keys),
+            Some(vec![keys[0].clone()]),
+            "which sessions, as remembered"
+        );
+        // The deletions cannot be read: no word of them, rather than the
+        // word that there are none.
+        shelf.unreadable.set(true);
+        assert_eq!(whole.deletions(&[one.id, two.id]), None);
+        assert_eq!(whole.deleted_sessions(&[one.id, two.id]), None);
+        assert_eq!(whole.deleted_keys(&keys), None);
+        shelf.unreadable.set(false);
         // Stored again without undoing it: still deleted.
         whole.apply(&HistoryChange {
             put: vec![one.clone()],
@@ -1469,6 +2425,55 @@ mod tests {
         assert_eq!(whole.listing(), Some(vec![one.id, two.id]));
         assert_eq!(shelf.get("deleted").unwrap().as_deref(), Some("[]"));
         assert!(whole.forgotten(&[one.id]).is_empty());
+    }
+
+    /// A session a tab knows by a name the history kept whole no longer
+    /// gives it, as one named just after the one before it, finished with
+    /// the clock set back, is named at its own stamp once another tab has
+    /// deleted that one, is deleted all the same as the tab deletes it by
+    /// the name it knows: found by what it holds. It goes from the history
+    /// kept whole, the deletion is remembered by its key, and no tab shows
+    /// it again.
+    #[test]
+    fn a_session_deleted_by_a_name_the_history_no_longer_gives_it_goes() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let (here, there) = (whole_on(&shelf), whole_on(&shelf));
+        here.load();
+        let (third, second) = (finished(3_000), finished(2_000));
+        let three = next_after(&third, None);
+        // Finished with the clock set back: named just after the newest.
+        let two = next_after(&second, Some(three.id));
+        assert!(two.id.order > three.id.order);
+        here.apply(&HistoryChange {
+            put: vec![three.clone(), two.clone()],
+            ..HistoryChange::default()
+        });
+        // A tab that opens now reads them by the same names.
+        assert_eq!(
+            there
+                .load()
+                .sessions
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            [three.id, two.id]
+        );
+        let gone_three = Deleted::of(&third, 5);
+        here.apply(&HistoryChange {
+            forget: vec![(three.id, gone_three.clone())],
+            ..HistoryChange::default()
+        });
+        // Deleted there by the name it was read by, not looked at since.
+        let gone_two = Deleted::of(&second, 7);
+        let saved = there.apply(&HistoryChange {
+            forget: vec![(two.id, gone_two.clone())],
+            ..HistoryChange::default()
+        });
+        assert!(saved.kept().is_some(), "{saved:?}");
+        assert_eq!(kept_whole(&shelf), Vec::<u64>::new(), "gone");
+        assert_eq!(remembered(&shelf), [gone_three, gone_two]);
+        assert!(whole_on(&shelf).load().sessions.is_empty());
+        assert_eq!(here.listing(), Some(Vec::new()));
     }
 
     /// A change another tab made to the history kept whole is still to
@@ -1569,6 +2574,41 @@ mod tests {
             assert!(!whole.changed(), "its own change, seen: {change:?}");
         }
         assert_eq!(kept_whole(&shelf), [2_000]);
+    }
+
+    /// The history kept whole is read out of the store once to load it,
+    /// and once to list it, and what is noted as seen is hashed from what
+    /// was read, with no copy of it made. It was read whole twice each
+    /// time, as much as the browser's room for the site, and copied again
+    /// to be hashed. A history whose reading set something aside, which may
+    /// write it anew, is looked at once more, as it was left.
+    #[test]
+    fn a_history_kept_whole_is_read_once_to_load_or_to_list() {
+        let shelf = Shelf::with_room(usize::MAX);
+        let whole = whole_on(&shelf);
+        let put = HistoryChange {
+            put: vec![next_after(&finished(1_000), None)],
+            ..HistoryChange::default()
+        };
+        assert!(whole.apply(&put).kept().is_some());
+        shelf.reads_of("history");
+        assert_eq!(whole.load().sessions.len(), 1);
+        assert_eq!(shelf.reads_of("history"), 1, "read once to load");
+        assert!(!whole.changed(), "seen as it was read");
+        shelf.reads_of("history");
+        assert_eq!(whole.listing().map(|ids| ids.len()), Some(1));
+        assert_eq!(shelf.reads_of("history"), 1, "read once to list");
+        assert!(!whole.changed(), "seen as it was read");
+
+        // A history no build reads, set aside and taken out of its key.
+        shelf.set("history", "{not a list");
+        assert!(whole.changed(), "another tab's");
+        shelf.reads_of("history");
+        let read = whole.load();
+        assert_eq!((read.sessions.len(), read.set_aside.len()), (0, 1));
+        assert_eq!(shelf.reads_of("history"), 2, "looked at once more");
+        assert!(!whole.changed(), "seen as it was left");
+        assert_eq!(shelf.get("history"), Ok(None));
     }
 
     /// A session stored where it finished, as a restore stores it, keeps
@@ -1787,5 +2827,84 @@ mod tests {
             shelf.get("history").unwrap().as_deref(),
             Some("{ not a list")
         );
+    }
+
+    /// What a tab of an older build writes back of `session`, which it
+    /// read as this build wrote it: the format last, as a key it does not
+    /// know and carries.
+    fn as_an_older_build_writes_back(session: &SessionResult) -> String {
+        let older = as_an_older_build_wrote(session);
+        let open = older.strip_suffix('}').expect("an object");
+        format!("{open},\"format\":{}}}", cw_core::SESSION_FORMAT)
+    }
+
+    /// Each session of the history kept whole, as the shelf holds it.
+    fn held_as_stored(shelf: &Shelf) -> Vec<String> {
+        let raw = shelf.get("history").unwrap().expect("a history");
+        let held: Vec<&RawValue> = serde_json::from_str(&raw).unwrap();
+        held.iter()
+            .map(|session| session.get().to_string())
+            .collect()
+    }
+
+    /// Every session of the history kept whole that a change leaves as it
+    /// is goes back into it as the history held it, byte for byte, and so
+    /// does every one that reads beside one set aside: a tab of an older
+    /// build sharing the history reads each as it did. Each was written
+    /// again as this build writes a session, saying its format first. An
+    /// older tab (0.16.3 to 0.16.9) then read each under a new name, and
+    /// as another session than the one it held, which it took for lost in
+    /// passing and stored again beside it: the history doubled with every
+    /// write here, until its room let the oldest go.
+    #[test]
+    fn a_history_kept_whole_writes_back_as_it_held_them_the_sessions_a_change_leaves() {
+        let older = vec![
+            as_an_older_build_wrote(&finished(1_000)),
+            as_an_older_build_writes_back(&finished(2_000)),
+        ];
+        let shelf = Shelf::with_room(usize::MAX);
+        shelf.set("history", &format!("[{}]", older.join(", ")));
+        let whole = whole_on(&shelf);
+        let read = whole.load();
+        assert_eq!(read.sessions.len(), 2);
+        let newest = read.sessions.last().map(|(id, _)| *id);
+        let ours = next_after(&finished(3_000), newest);
+        let change = HistoryChange {
+            put: vec![ours.clone()],
+            ..HistoryChange::default()
+        };
+        assert_eq!(whole.apply(&change), HistorySaved::Stored { kept: 1 });
+        assert_eq!(
+            held_as_stored(&shelf),
+            [older[0].clone(), older[1].clone(), ours.json],
+            "an older build's as it wrote them, this build's as it writes it"
+        );
+        assert_eq!(
+            whole.listing().map(|ids| ids.len()),
+            Some(3),
+            "each once, here too"
+        );
+
+        // A session that does not read, in a history with no room to copy
+        // it beside: the history gives up its room, holding the rest as it
+        // held them.
+        let unread = format!(r#"{{"date":"damaged","by":"{}"}}"#, "x".repeat(100));
+        let raw = format!("[{},{unread},{}]", older[0], older[1]);
+        let copy = format!(
+            "[{}]",
+            serde_json::from_str::<serde_json::Value>(&unread).unwrap()
+        );
+        let shelf = Shelf::with_room(raw.len() + copy.len() - 1);
+        shelf.set("history", &raw);
+        let read = whole_on(&shelf).load();
+        assert_eq!(
+            read.set_aside,
+            [SetAside::Sessions {
+                count: 1,
+                kept: None
+            }]
+        );
+        assert_eq!(shelf.aside(), shelved(&[("aside", copy.as_str())]));
+        assert_eq!(held_as_stored(&shelf), older, "the rest, as they were held");
     }
 }

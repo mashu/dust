@@ -33,11 +33,11 @@ impl PlayerState {
     /// The fading is not part of it: it is applied to the Morse, a send at a
     /// time.
     pub fn band_change(&self, settings: &TrainingSettings) -> BandChange {
-        BandKey::of(&settings.band).change_from(self.band.as_ref())
+        BandKey::of(settings).change_from(self.band.as_ref())
     }
 
     pub fn note_band(&mut self, settings: &TrainingSettings) {
-        self.band = Some(BandKey::of(&settings.band));
+        self.band = Some(BandKey::of(settings));
     }
 
     pub fn forget_band(&mut self) {
@@ -528,10 +528,16 @@ mod tests {
         narrower.band.filter_width_hz = 250.0;
         assert_eq!(state.band_change(&narrower), BandChange::Retune);
 
-        // Speed is not a band setting.
+        // Speed is not a band setting, but where it moves how long the
+        // AGC holds the band down across a letter gap, which retunes the
+        // receiver on the air: the top speed does, out of the box, and the
+        // slowest does not.
+        let mut slower = settings.clone();
+        slower.playback.char_wpm_min = 10.0;
+        assert_eq!(state.band_change(&slower), BandChange::None);
         let mut faster = settings.clone();
-        faster.playback.char_wpm_min = 40.0;
-        assert_eq!(state.band_change(&faster), BandChange::None);
+        faster.playback.char_wpm_max = 40.0;
+        assert_eq!(state.band_change(&faster), BandChange::Retune);
 
         // Nor is the fading: it plays on the Morse, a send at a time, and a
         // new band would only be a new draw of stations and static for

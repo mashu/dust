@@ -4,8 +4,16 @@
 //! The unit tests describe behaviour somebody thought of. This describes what
 //! must hold whatever happens, which is where the cases nobody thought of turn
 //! up. It is deterministic — every failure prints the seed that produced it.
+//!
+//! Every property runs on one range of seeds, 2,000 from 0 unless
+//! `DUST_SOAK_FIRST` moves it and `DUST_SOAK_SEEDS` sizes it ([`SoakSeeds`]):
+//! `DUST_SOAK_FIRST=600000000000 cargo test -p cw-core soak::` runs seeds
+//! the floors were not measured on ([`Fewest`]), `DUST_SOAK_SEEDS=20000`
+//! ten times as many, and a failure comes back with the same two.
 
 #![cfg(test)]
+
+use std::ops::Range;
 
 use crate::auto_level::apply_auto_level;
 use crate::band::resolve_pileup;
@@ -31,25 +39,292 @@ use crate::{
     plan_transmission, plan_turn, read_number, resolve_station,
 };
 
-/// Enough seeds to be worth running on every commit, and cheap enough to.
-/// Turn it up when hunting: the failures name the seed they came from, so a
-/// deep run reproduces exactly on a short one.
-const SEEDS: u64 = 2_000;
+/// The seeds the soak runs: `seeds` from `first`. By default 2,000 from 0,
+/// enough to be worth running on every commit and cheap enough to; turn
+/// them up when hunting, and move them to run seeds no run has seen. The
+/// failures name the seed they came from, so a deep run reproduces exactly
+/// on a short one from that seed. A property keys what it draws on the seed
+/// itself, so a seed runs alike in any range that holds it, and the contest
+/// soak takes 4½ times `seeds` (9,000 by default): ranges that far apart
+/// share no seed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SoakSeeds {
+    first: u64,
+    seeds: u64,
+}
 
-/// The contest soak's seeds of single callers, half as many again as
-/// [`SEEDS`]: the runs are shared among the contests, and a Sprint's
-/// exchange, three fields long, is put wrong by a slip or junk more often
-/// than a lone number, so fewer of its QSOs reach the log with a slip in the
-/// call, and the floor of each kind needs more runs to stand on.
-const CONTEST_SEEDS: u64 = SEEDS + SEEDS / 2;
+impl SoakSeeds {
+    /// The variable that moves the range: its first seed.
+    const FIRST: &str = "DUST_SOAK_FIRST";
+    /// The variable that sizes it: how many seeds a property runs at most.
+    const SEEDS: &str = "DUST_SOAK_SEEDS";
+    /// The range every commit runs.
+    const DEFAULT: Self = Self {
+        first: 0,
+        seeds: 2_000,
+    };
+    /// The fewest seeds a range holds, so that a property run on a
+    /// twentieth of them runs on one at least.
+    const FEWEST: u64 = 20;
 
-/// The contest soak's pile-up seeds, twice [`CONTEST_SEEDS`]: a caller
-/// that hears you go to someone else drops out of its QSO, and Enter sends
-/// the caller you go on to your exchange rather than a TU that logs it at
-/// once, so fewer of a pile-up's QSOs reach the log with a slip in the
-/// call; and since POTA joined, the runs are shared among seven, whose
-/// hunters wait out the one signing off before they call, so fewer again.
-const PILEUP_SEEDS: u64 = 2 * CONTEST_SEEDS;
+    /// The range `first` and `seeds` give, as their variables are set:
+    /// either unset or empty, the default's. A whole number may be grouped
+    /// with `_`, as `20_000`; anything else is refused, naming its
+    /// variable, rather than run as the default, and so is a range that
+    /// would run past the last seed there is. Fewer than [`Self::FEWEST`]
+    /// seeds are that many.
+    fn read(first: Option<&str>, seeds: Option<&str>) -> Self {
+        let number = |name: &str, given: Option<&str>| {
+            let given = given.map(str::trim).filter(|given| !given.is_empty())?;
+            let digits = given.replace('_', "");
+            let whole = digits.bytes().all(|digit| digit.is_ascii_digit());
+            Some(
+                digits
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|_| whole)
+                    .unwrap_or_else(|| panic!("{name}={given} is not a whole number")),
+            )
+        };
+        let read = Self {
+            first: number(Self::FIRST, first).unwrap_or(Self::DEFAULT.first),
+            seeds: number(Self::SEEDS, seeds)
+                .map_or(Self::DEFAULT.seeds, |seeds| seeds.max(Self::FEWEST)),
+        };
+        assert!(
+            read.end().is_some(),
+            "{}={} and {}={} run past the last seed there is",
+            Self::FIRST,
+            read.first,
+            Self::SEEDS,
+            read.seeds
+        );
+        read
+    }
+
+    /// The range this run of the tests was given, read once.
+    fn given() -> Self {
+        static GIVEN: std::sync::OnceLock<SoakSeeds> = std::sync::OnceLock::new();
+        *GIVEN.get_or_init(|| {
+            let var = |name: &str| match std::env::var(name) {
+                Ok(value) => Some(value),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(std::env::VarError::NotUnicode(value)) => {
+                    panic!("{name}={value:?} is not a whole number")
+                }
+            };
+            Self::read(var(Self::FIRST).as_deref(), var(Self::SEEDS).as_deref())
+        })
+    }
+
+    /// How many seeds a property runs at most.
+    fn count(self) -> u64 {
+        self.seeds
+    }
+
+    /// The first `count` seeds of the range.
+    fn range(self, count: u64) -> Range<u64> {
+        self.first..self.first + count
+    }
+
+    /// The seeds past [`Self::count`] that the session soak gets to answers
+    /// on, half as many: on the first ones a session mostly counts down and
+    /// ends before any group is answered, so on these a count down of a
+    /// second in a few, none in the rest, the box shut or not, no end for a
+    /// while, and now and then a send, its copy and its news that fit.
+    fn answering(self) -> u64 {
+        self.seeds / 2
+    }
+
+    /// The contest soak's runs of single callers, half as many again as
+    /// [`Self::count`]: the runs are shared among the contests, and a
+    /// Sprint's exchange, three fields long, is put wrong by a slip or junk
+    /// more often than a lone number, so fewer of its QSOs reach the log
+    /// with a slip in the call, and the floor of each kind needs more runs
+    /// to stand on.
+    fn contest(self) -> u64 {
+        self.seeds + self.seeds / 2
+    }
+
+    /// The contest soak's pile-ups, twice [`Self::contest`]: a caller that
+    /// hears you go to someone else drops out of its QSO, and Enter sends
+    /// the caller you go on to your exchange rather than a TU that logs it
+    /// at once, so fewer of a pile-up's QSOs reach the log with a slip in
+    /// the call; and since POTA joined, the runs are shared among seven,
+    /// whose hunters wait out the one signing off before they call, so
+    /// fewer again.
+    fn pileup(self) -> u64 {
+        2 * self.contest()
+    }
+
+    /// The seeds the contest soak runs `style` on: single callers on the
+    /// first [`Self::contest`], pile-ups on the [`Self::pileup`] after them,
+    /// so a failure's seed says which.
+    fn contest_runs(self, style: RunStyle) -> Range<u64> {
+        match style {
+            RunStyle::Single => self.range(self.contest()),
+            RunStyle::Pileup => {
+                let first = self.first + self.contest();
+                first..first + self.pileup()
+            }
+        }
+    }
+
+    /// Where the furthest range of seeds ends, the contest soak's
+    /// pile-ups, if that is a seed there is.
+    fn end(self) -> Option<u64> {
+        let contest = self.seeds.checked_add(self.seeds / 2)?;
+        contest.checked_mul(3)?.checked_add(self.first)
+    }
+}
+
+/// The range is read as its variables are set, and with neither, every
+/// property runs the seeds it always ran: the session soak's answering
+/// seeds after the first 2,000, the contest soak's single callers on 0 to
+/// 2,999 and its pile-ups on 3,000 to 8,999. Moved, each split falls at the
+/// same place in the range. The environment is left alone: a test that set
+/// it would race the others.
+#[test]
+fn soak_seeds_are_read_as_set() {
+    let read = |first, seeds| SoakSeeds::read(first, seeds);
+    assert_eq!(read(None, None), SoakSeeds::DEFAULT);
+    assert_eq!(read(Some(""), Some(" ")), SoakSeeds::DEFAULT);
+    let moved = read(Some("31415926535"), None);
+    assert_eq!((moved.first, moved.count()), (31_415_926_535, 2_000));
+    assert_eq!(read(None, Some("20_000")).count(), 20_000);
+    assert_eq!(read(None, Some("5")).count(), SoakSeeds::FEWEST);
+    let at = SoakSeeds::DEFAULT;
+    assert_eq!(at.range(at.count() + at.answering()), 0..3_000);
+    assert_eq!(at.contest_runs(RunStyle::Single), 0..3_000);
+    assert_eq!(at.contest_runs(RunStyle::Pileup), 3_000..9_000);
+    assert_eq!(
+        moved.contest_runs(RunStyle::Pileup),
+        31_415_929_535..31_415_935_535
+    );
+    let deep = read(Some("1_000_000"), Some("20000"));
+    assert_eq!(deep.range(deep.count() / 4), 1_000_000..1_005_000);
+    let last = read(Some(&(u64::MAX - 9_000).to_string()), None);
+    assert_eq!(last.end(), Some(u64::MAX));
+}
+
+#[test]
+#[should_panic(expected = "DUST_SOAK_SEEDS=2k is not a whole number")]
+fn soak_seeds_that_are_no_number_are_refused() {
+    let _ = SoakSeeds::read(None, Some("2k"));
+}
+
+#[test]
+#[should_panic(expected = "DUST_SOAK_FIRST=-1 is not a whole number")]
+fn a_first_seed_below_zero_is_refused() {
+    let _ = SoakSeeds::read(Some("-1"), None);
+}
+
+#[test]
+#[should_panic(expected = "run past the last seed there is")]
+fn a_range_past_the_last_seed_is_refused() {
+    let _ = SoakSeeds::read(Some(&(u64::MAX - 8_999).to_string()), None);
+}
+
+/// The fewest of a count a soak saw in any range of the default size it was
+/// measured over, held as a rate per seed: a run of the soak must count that
+/// rate over the seeds it runs, less a tolerance, whatever its range and
+/// size ([`Fewest::floor`]). The tolerance is half the fewest at the default
+/// size and grows as the square root of the seeds run, as a count's spread
+/// does: it keeps a floor clear of a range's luck, as the ranges measured
+/// show, and of a short run's, and still fails a count that has all but
+/// gone, where the checks it feeds would pass on nothing. To measure them
+/// again, `DUST_SOAK_TALLY=1 cargo test -p cw-core soak:: -- --nocapture`
+/// prints every count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fewest(u32);
+
+impl Fewest {
+    /// What a run of `seeds` seeds must count, where a range of the
+    /// default size runs `default_seeds`: the fewest seen times `size`, the
+    /// run's size against the default's, less half the fewest times the
+    /// square root of `size`, rounded down. That is half the fewest at the
+    /// default size, three times the fewest at four times it, and none at a
+    /// quarter of it or less.
+    fn floor(self, seeds: u64, default_seeds: u64) -> u64 {
+        let size = seeds as f64 / default_seeds as f64;
+        let floor = f64::from(self.0) * (size - size.sqrt() / 2.0);
+        // Rounded down, none below nothing, and as many as there can be
+        // for a run past counting.
+        floor.max(0.0) as u64
+    }
+}
+
+/// What a soak counted across its seeds, each beside the fewest a range of
+/// the default size saw.
+struct Counted {
+    what: String,
+    count: u64,
+    fewest: Fewest,
+}
+
+impl Counted {
+    fn new(what: impl Into<String>, count: impl Into<u64>, fewest: u32) -> Self {
+        Self {
+            what: what.into(),
+            count: count.into(),
+            fewest: Fewest(fewest),
+        }
+    }
+}
+
+/// Holds every count of `soak` to its floor, counted over `seeds`, where a
+/// range of the default size runs `default_seeds` of them: what keeps the
+/// checks it feeds from going quiet. A count under its floor says how far
+/// under, over which seeds. With `DUST_SOAK_TALLY` set to anything, every
+/// count is printed first, held or not, to measure the rates again (the
+/// test harness shows it with `--nocapture`, or where a test fails).
+fn hold_to_floors(soak: &str, counted: &[Counted], seeds: Range<u64>, default_seeds: u64) {
+    let (first, made) = (seeds.start, seeds.end - seeds.start);
+    if std::env::var_os("DUST_SOAK_TALLY").is_some_and(|tally| !tally.is_empty()) {
+        for Counted {
+            what,
+            count,
+            fewest,
+        } in counted
+        {
+            eprintln!(
+                "tally {soak}: {what}: {count} over {made} seeds from {first} (the fewest seen {})",
+                fewest.0
+            );
+        }
+    }
+    for Counted {
+        what,
+        count,
+        fewest,
+    } in counted
+    {
+        let floor = fewest.floor(made, default_seeds);
+        assert!(
+            *count >= floor,
+            "{soak}: only {count} {what} over {made} seeds from {first}, under the floor of {floor}"
+        );
+    }
+}
+
+/// A floor is the rate seen scaled to the seeds a run makes, less a
+/// tolerance that grows as their square root: half the fewest seen at the
+/// default size, more than the fewest from twice the size up, and none for
+/// a run of a quarter of the default size or less, where luck alone could
+/// leave a rare count short.
+#[test]
+fn a_floor_scales_with_the_seeds_run() {
+    assert_eq!(Fewest(86).floor(3_000, 3_000), 43);
+    assert_eq!(Fewest(87).floor(3_000, 3_000), 43);
+    assert_eq!(Fewest(86).floor(12_000, 3_000), 258);
+    assert_eq!(Fewest(86).floor(30_000, 3_000), 724);
+    assert_eq!(Fewest(86).floor(1_500, 3_000), 12);
+    assert_eq!(Fewest(86).floor(750, 3_000), 0);
+    assert_eq!(Fewest(5_651).floor(30, 3_000), 0);
+    assert_eq!(Fewest(4).floor(3_000, 3_000), 2);
+    assert_eq!(Fewest(0).floor(30_000, 3_000), 0);
+    assert_eq!(Fewest(6_000).floor(u64::MAX, 3_000), u64::MAX);
+}
 
 /// Settings from anywhere, including values no screen would ever produce.
 fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
@@ -231,7 +506,8 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
 
 #[test]
 fn any_settings_clamp_into_something_the_trainer_can_start_from() {
-    for seed in 0..SEEDS {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count()) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(1));
         let settings = wild_settings(&mut rng);
         check_clamped(&settings, seed);
@@ -405,7 +681,8 @@ fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -
 /// allow, whatever has been copied before it and however badly.
 #[test]
 fn adaptive_lengths_never_leave_the_range() {
-    for seed in 0..SEEDS / 4 {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count() / 4) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(3));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.curriculum.adaptive_group_size = true;
@@ -435,21 +712,24 @@ fn adaptive_lengths_never_leave_the_range() {
     }
 }
 
-/// Seeds past [`SEEDS`] get to answers, where the first ones mostly count
-/// down and end before any group is answered: a count down of a second in
-/// a few, none in the rest, the box shut or not, no end for a while, and
-/// now and then a send, its copy and its news that fit.
-const ANSWERING_SEEDS: u64 = SEEDS / 2;
+/// The fewest groups the session soak scored and timed over the 3,000
+/// seeds of a range of the default size, in the nine ranges
+/// [`SINGLE_FEWEST`] was measured over, both in the one from
+/// 9,000,000,000,000: its floors ([`Fewest`]).
+const SESSION_FEWEST: [(&str, u32); 2] = [("groups scored", 5_638), ("groups timed", 25)];
 
 #[test]
 fn no_run_of_events_can_put_a_session_somewhere_impossible() {
-    // Across every seed: groups scored, and groups timed. Neither may be
-    // none, or the checks on them below have nothing to check.
-    let (mut scored, mut timed) = (0usize, 0usize);
-    for seed in 0..SEEDS + ANSWERING_SEEDS {
+    // Across every seed: groups scored, and groups timed. Each is held to
+    // its floor, or the checks on them below would have next to nothing to
+    // check.
+    let (mut scored, mut timed) = (0u64, 0u64);
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count() + seeds.answering()) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x2545_F491).wrapping_add(7));
         let mut settings = wild_settings(&mut rng).clamp();
-        let answering = seed >= SEEDS;
+        // Past the first `count` seeds of the range, by its place in it.
+        let answering = seed - seeds.first >= seeds.count();
         if answering {
             settings.playback.countdown_sec = u32::from(rng.f64() < 0.25);
             settings.playback.lock_input_during_group_playback = rng.f64() < 0.5;
@@ -669,12 +949,22 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 stated_copy_rule(&group.sent, &group.received, times),
                 "seed {seed}: copied {group:?} {times:?}"
             );
-            timed += usize::from(recognised.iter().any(Option::is_some));
+            timed += u64::from(recognised.iter().any(Option::is_some));
         }
-        scored += result.groups.len();
+        scored += result.groups.len() as u64;
     }
-    assert!(scored > 0, "no seed scored a group");
-    assert!(timed > 0, "no seed timed a group");
+    let counted = [scored, timed]
+        .into_iter()
+        .zip(SESSION_FEWEST)
+        .map(|(count, (what, fewest))| Counted::new(what, count, fewest))
+        .collect::<Vec<_>>();
+    let default = SoakSeeds::DEFAULT;
+    hold_to_floors(
+        "the session soak",
+        &counted,
+        seeds.range(seeds.count() + seeds.answering()),
+        default.count() + default.answering(),
+    );
 }
 
 /// `event` made the current group's: a send starting now, its characters
@@ -850,7 +1140,8 @@ fn a_recognition_time_is_only_ever_what_the_rule_says() {
     const SENDABLE: [char; 8] = ['K', 'M', 'U', 'R', 'E', '5', '/', '?'];
     let mut timed = 0usize;
     let mut copy_timed = 0usize;
-    for seed in 0..SEEDS {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count()) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(3));
         // Repeated letters now and then, where a short answer is ambiguous.
         let sent: String = (0..rng.usize_in(1, 8))
@@ -939,11 +1230,11 @@ fn a_recognition_time_is_only_ever_what_the_rule_says() {
     // four seeds is a floor that keeps these checks from going quiet, and
     // one for every eight of the copy-timed.
     assert!(
-        timed > usize::try_from(SEEDS / 4).unwrap_or(0),
+        timed > usize::try_from(seeds.count() / 4).unwrap_or(0),
         "only {timed} timed"
     );
     assert!(
-        copy_timed > usize::try_from(SEEDS / 8).unwrap_or(0),
+        copy_timed > usize::try_from(seeds.count() / 8).unwrap_or(0),
         "only {copy_timed} copy-timed"
     );
 }
@@ -975,7 +1266,8 @@ fn scoring_holds_for_anything_a_listener_can_type() {
     const KEYS: [char; 14] = [
         'K', 'M', 'U', 'R', 'E', '5', '0', 'x', ' ', '\n', 'é', '中', '.', '\u{200b}',
     ];
-    for seed in 0..SEEDS {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count()) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0xA24B_AED4).wrapping_add(3));
         let sent: String = (0..rng.usize_in(0, 12))
             .map(|_| KEYS[rng.usize_in(0, 6)])
@@ -1044,7 +1336,8 @@ fn scoring_holds_for_anything_a_listener_can_type() {
 /// tested.
 #[test]
 fn settings_survive_storage_and_older_saves() {
-    for seed in 0..SEEDS {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count()) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x1D87_2B41).wrapping_add(11));
         let settings = wild_settings(&mut rng).clamp();
 
@@ -1054,6 +1347,12 @@ fn settings_survive_storage_and_older_saves() {
             back, settings,
             "seed {seed}: a round trip changed the settings"
         );
+        // Nothing of what this build wrote is kept as a later build's: its
+        // own saves are written as ever.
+        let saved: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&json).expect("an object");
+        let kept = back.clamp().keeping_values_of(&saved).unread_values;
+        assert!(kept.is_empty(), "seed {seed}: kept as unread: {kept:?}");
 
         // An older save: one section is missing entirely. It has to load, and
         // what it does carry has to come back unchanged.
@@ -1079,6 +1378,14 @@ fn settings_survive_storage_and_older_saves() {
             repaired,
             "seed {seed}: an older save did not settle"
         );
+        // Nor anything an older build wrote, though this build reads some
+        // of it as something else, from what the older save lacks.
+        let older_save = object.as_object().expect("an object");
+        let kept = repaired.clone().keeping_values_of(older_save).unread_values;
+        assert!(
+            kept.is_empty(),
+            "seed {seed}: without {dropped:?}, kept as unread: {kept:?}"
+        );
         assert!(
             !compute_char_pool(&repaired).is_empty(),
             "seed {seed}: a save without {dropped:?} left nothing to practise"
@@ -1091,7 +1398,8 @@ fn settings_survive_storage_and_older_saves() {
 /// it has to stay inside the alphabet you are actually practising.
 #[test]
 fn auto_levelling_never_walks_the_settings_out_of_range() {
-    for seed in 0..SEEDS {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count()) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x6C07_8965).wrapping_add(5));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.auto_level.auto_adjust_level = true;
@@ -1143,7 +1451,8 @@ fn auto_levelling_never_walks_the_settings_out_of_range() {
 /// has to be a callsign a radio could send and the app could score.
 #[test]
 fn every_callsign_the_trainer_can_send_is_a_real_one() {
-    for seed in 0..SEEDS {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count()) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0xB5297A4D).wrapping_add(17));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.curriculum.char_set_mode = CharSetMode::Callsign;
@@ -1188,7 +1497,8 @@ fn every_callsign_the_trainer_can_send_is_a_real_one() {
 /// than a dead stream of zeros.
 #[test]
 fn no_band_setting_makes_an_unlistenable_receiver() {
-    for seed in 0..SEEDS / 20 {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count() / 20) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x27D4_EB2D).wrapping_add(19));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.band.qrn_enabled = true;
@@ -1235,7 +1545,8 @@ fn no_band_setting_makes_an_unlistenable_receiver() {
 /// nothing runs past the send they are laid over.
 #[test]
 fn a_pile_up_is_always_something_you_could_copy() {
-    for seed in 0..SEEDS / 4 {
+    let seeds = SoakSeeds::given();
+    for seed in seeds.range(seeds.count() / 4) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x85EB_CA6B).wrapping_add(29));
         let settings = wild_settings(&mut rng).clamp();
         let mut state = CharSamplingState::default();
@@ -1284,19 +1595,140 @@ fn a_pile_up_is_always_something_you_could_copy() {
     }
 }
 
-/// How often, at least, the contest soak hears what the callers' habits
-/// bring, in each run style, under rough habits; real ones bring the
-/// numbers cut and `ENN` alone ([`HabitsHeard::floors`]). The rarer come
-/// seldom by design: `ENN` in one message in twenty that sends a report
-/// nobody copies, a fumble once from one careless caller in ten, in the two
-/// contests with serials, and an early exchange from one operator in twenty
-/// whose call you sent wrong or asked for with a partial.
-const HABIT_FLOORS: HabitsHeard = HabitsHeard {
-    cut: 200,
-    enn: 15,
-    fumbled: 10,
-    early: 10,
-    qrm: 150,
+/// The fewest of each count the contest soak saw in a range of the default
+/// size of one style, over the ranges it was measured on: its floors, as
+/// rates ([`Fewest`]). They are each kind of QSO, the QSOs logged in each
+/// contest and under each of the callers' habits (the fewest of any), what
+/// real and rough habits bring ([`HabitsHeard::brought`]), and the copies
+/// kept with their sound. The rarer come seldom by design: `ENN` in one
+/// message in twenty that sends a report nobody copies, a fumble once from
+/// one careless caller in ten, in the two contests with serials, and an
+/// early exchange from one operator in twenty whose call you sent wrong or
+/// asked for with a partial.
+#[derive(Clone, Copy, Debug)]
+struct ContestFewest {
+    outcomes: Outcomes,
+    each_contest: u32,
+    each_habits: u32,
+    real: HabitsHeard,
+    rough: HabitsHeard,
+    timed: u32,
+}
+
+impl ContestFewest {
+    /// The fewest seen in runs of `style`.
+    fn of(style: RunStyle) -> Self {
+        match style {
+            RunStyle::Single => SINGLE_FEWEST,
+            RunStyle::Pileup => PILEUP_FEWEST,
+        }
+    }
+
+    /// The fewest heard under `habits` of what they bring.
+    fn heard(self, habits: CallerHabits) -> HabitsHeard {
+        match habits {
+            CallerHabits::Easy => HabitsHeard::default(),
+            CallerHabits::Real => self.real,
+            CallerHabits::Rough => self.rough,
+        }
+    }
+}
+
+/// The fewest seen in 3,000 runs of single callers, over the nine ranges
+/// measured: the default's, from seed 0; the review's seven, from
+/// 5,000,000, 4,294,967,296, 77,777,777,777, 31,415,926,535,
+/// 1,099,511,627,776, 9,000,000,000,000 and 271,828,182,845; and one from
+/// 1,000,000. Beside each, the range that saw it, by its first seed.
+const SINGLE_FEWEST: ContestFewest = ContestFewest {
+    outcomes: Outcomes {
+        // from seed 9_000_000_000_000
+        clean: 774,
+        // from seed 31_415_926_535
+        busted: 86,
+        // from seed 31_415_926_535
+        field: 189,
+        // from seed 5_000_000
+        nil: 327,
+        // from seed 9_000_000_000_000
+        lost: 1329,
+    },
+    // ARRL DX, from seed 9_000_000_000_000
+    each_contest: 129,
+    // real habits, from seed 5_000_000
+    each_habits: 386,
+    real: HabitsHeard {
+        // from seed 5_000_000
+        cut: 332,
+        // from seed 1_000_000
+        enn: 23,
+        // never brought
+        fumbled: 0,
+        // never brought
+        early: 0,
+        // never brought
+        qrm: 0,
+    },
+    rough: HabitsHeard {
+        // from seed 4_294_967_296
+        cut: 458,
+        // from seed 4_294_967_296
+        enn: 26,
+        // from seed 9_000_000_000_000
+        fumbled: 9,
+        // from seed 271_828_182_845
+        early: 4,
+        // from seed 271_828_182_845
+        qrm: 437,
+    },
+    // from seed 9_000_000_000_000
+    timed: 144,
+};
+
+/// The fewest seen in 6,000 pile-ups, those after the single callers of
+/// the same nine ranges, as [`SINGLE_FEWEST`] names them.
+const PILEUP_FEWEST: ContestFewest = ContestFewest {
+    outcomes: Outcomes {
+        // from seed 1_000_000
+        clean: 1389,
+        // from seed 1_099_511_627_776
+        busted: 124,
+        // from seed 1_099_511_627_776
+        field: 428,
+        // from seed 271_828_182_845
+        nil: 389,
+        // from seed 0
+        lost: 4288,
+    },
+    // Simple QSO, from seed 9_000_000_000_000
+    each_contest: 234,
+    // real habits, from seed 31_415_926_535
+    each_habits: 688,
+    real: HabitsHeard {
+        // from seed 1_099_511_627_776
+        cut: 1127,
+        // from seed 77_777_777_777
+        enn: 65,
+        // never brought
+        fumbled: 0,
+        // never brought
+        early: 0,
+        // never brought
+        qrm: 0,
+    },
+    rough: HabitsHeard {
+        // from seed 9_000_000_000_000
+        cut: 1197,
+        // from seed 271_828_182_845
+        enn: 73,
+        // from seed 1_099_511_627_776
+        fumbled: 41,
+        // from seed 0
+        early: 23,
+        // from seed 271_828_182_845
+        qrm: 882,
+    },
+    // from seed 0
+    timed: 70,
 };
 
 /// Settings from anywhere, in Contest mode, of run `style`: any contest, a
@@ -1444,7 +1876,7 @@ fn contest_key(rng: &mut SplitMix64, now: u64, seen: &Seen) -> ContestEvent {
 
 /// What came of every contest run across the seeds, to show the soak
 /// reached every kind of QSO.
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Outcomes {
     clean: u32,
     busted: u32,
@@ -1504,19 +1936,16 @@ impl HabitsHeard {
         self.qrm += other.qrm;
     }
 
-    /// How much of each the soak hears at least under `habits`: nothing
-    /// under easy ones, numbers cut and `ENN` under real ones, and all of
-    /// [`HABIT_FLOORS`] under rough ones.
-    fn floors(habits: CallerHabits) -> Self {
-        match habits {
-            CallerHabits::Easy => Self::default(),
-            CallerHabits::Real => Self {
-                cut: HABIT_FLOORS.cut,
-                enn: HABIT_FLOORS.enn,
-                ..Self::default()
-            },
-            CallerHabits::Rough => HABIT_FLOORS,
-        }
+    /// The counts of what `habits` bring, with what each counts: nothing
+    /// under easy ones, numbers cut and `ENN` under real ones, and all five
+    /// under rough ones.
+    fn brought(self, habits: CallerHabits) -> Vec<(&'static str, u32)> {
+        let brought = match habits {
+            CallerHabits::Easy => 0,
+            CallerHabits::Real => 2,
+            CallerHabits::Rough => 5,
+        };
+        self.counts().into_iter().take(brought).collect()
     }
 
     /// Each count, with what it counts.
@@ -1940,9 +2369,8 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
     }
 }
 
-/// The contest soak, every seed a run of `style`: single callers on the
-/// first [`CONTEST_SEEDS`] seeds, pile-ups on the [`PILEUP_SEEDS`] after
-/// them, so a failure's seed says which.
+/// The contest soak, every seed a run of `style`, on the seeds of its own
+/// ([`SoakSeeds::contest_runs`]).
 fn soak_contest_runs(style: RunStyle) {
     let mut outcomes = Outcomes::default();
     // QSOs logged in each contest, so every one is seen to be soaked, and
@@ -1952,11 +2380,7 @@ fn soak_contest_runs(style: RunStyle) {
     let mut heard_with: std::collections::BTreeMap<&str, HabitsHeard> = Default::default();
     // Copies kept with their sound's timeline, as the rule could time them.
     let mut timed_groups = 0u32;
-    let seeds = match style {
-        RunStyle::Single => 0..CONTEST_SEEDS,
-        RunStyle::Pileup => CONTEST_SEEDS..CONTEST_SEEDS + PILEUP_SEEDS,
-    };
-    for seed in seeds {
+    for seed in SoakSeeds::given().contest_runs(style) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x2F7A_9C35).wrapping_add(37));
         let mut settings = contest_settings(&mut rng, style);
         // Show copy on every third run, set by the seed so that every other
@@ -2192,44 +2616,44 @@ fn soak_contest_runs(style: RunStyle) {
             "seed {seed}: the replay is another run"
         );
     }
-    // Every kind of QSO came up, many times over, and every contest.
-    for (kind, count) in outcomes.counts() {
-        assert!(
-            count >= 100,
-            "{style:?}: only {count} {kind} QSOs across the seeds"
-        );
+    // Every kind of QSO came up, many times over, and every contest. Every
+    // habit of the callers was soaked, and what each brings came up:
+    // numbers cut and `ENN` under real and rough habits, and under rough
+    // ones serials fumbled and put right, exchanges sent early, and QRM.
+    // And some copies were kept with their sound in every style, pile-ups
+    // too, where most calls are heard over another's. Each at its rate.
+    let fewest = ContestFewest::of(style);
+    let mut counted = Vec::new();
+    for ((kind, count), (_, least)) in outcomes.counts().into_iter().zip(fewest.outcomes.counts()) {
+        counted.push(Counted::new(format!("{kind} QSOs"), count, least));
     }
     for kind in ContestKind::ALL {
         let count = logged_in.get(kind.name()).copied().unwrap_or(0);
-        assert!(
-            count >= 100,
-            "{style:?}: only {count} QSOs logged in {} across the seeds",
-            kind.label()
-        );
+        let what = format!("QSOs logged in {}", kind.label());
+        counted.push(Counted::new(what, count, fewest.each_contest));
     }
-    // Every habit of the callers was soaked, and what each brings came up:
-    // numbers cut and `ENN` under real and rough habits, and under rough
-    // ones serials fumbled and put right, exchanges sent early, and QRM.
     for habits in CallerHabits::ALL {
         let name = habits.name();
         let count = logged_with.get(name).copied().unwrap_or(0);
-        assert!(
-            count >= 100,
-            "{style:?}: only {count} QSOs logged under {name} habits"
-        );
+        let what = format!("QSOs logged under {name} habits");
+        counted.push(Counted::new(what, count, fewest.each_habits));
         let heard = heard_with.get(name).copied().unwrap_or_default();
-        let floors = HabitsHeard::floors(habits).counts();
-        for ((what, count), (_, floor)) in heard.counts().into_iter().zip(floors) {
-            assert!(
-                count >= floor,
-                "{style:?}: only {count} {what} under {name} habits"
-            );
+        let least = fewest.heard(habits).brought(habits);
+        for ((what, count), (_, least)) in heard.brought(habits).into_iter().zip(least) {
+            counted.push(Counted::new(
+                format!("{what} under {name} habits"),
+                count,
+                least,
+            ));
         }
     }
-    // Some in every style, pile-ups too, where most calls are heard over
-    // another's: a floor that keeps the checks above from going quiet.
-    assert!(
-        timed_groups >= 25,
-        "{style:?}: only {timed_groups} copies kept with their sound"
+    let what = "copies kept with their sound";
+    counted.push(Counted::new(what, timed_groups, fewest.timed));
+    let default = SoakSeeds::DEFAULT.contest_runs(style);
+    hold_to_floors(
+        &format!("{style:?}"),
+        &counted,
+        SoakSeeds::given().contest_runs(style),
+        default.end - default.start,
     );
 }
