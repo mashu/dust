@@ -1250,8 +1250,8 @@ impl MemoryStore {
     }
 
     /// Move the history kept whole into records, as the files move it:
-    /// what does not read set aside, the rest in its order, and the layout
-    /// noted last. A store that takes no change makes no move, and says
+    /// what does not read set aside, the rest in its order, but what is
+    /// here already ([`legacy::not_moved_yet`]), and the layout noted last. A store that takes no change makes no move, and says
     /// why: the history kept whole is not taken for moved, and the next
     /// read moves it.
     fn migrate(&self, load: &mut HistoryLoad) -> Result<(), String> {
@@ -1286,6 +1286,25 @@ impl MemoryStore {
             &self.legacy_deleted.borrow(),
             crate::time::now_ms(),
         );
+        // A move made over records stored since, as the files make one,
+        // writes no session held already, nor one deleted.
+        let moved = {
+            let (records, tombstones) = (self.records.borrow(), self.tombstones.borrow());
+            let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
+            let gone: BTreeSet<RecordId> = tombstones.keys().copied().collect();
+            let gone_keys: HashSet<SessionKey> = tombstones.values().map(Deleted::key).collect();
+            let elsewhere = records
+                .iter()
+                .filter(|(id, _)| !names.contains(id))
+                .map(|(_, held)| held.json.as_str());
+            legacy::not_moved_yet(
+                moved,
+                |id| records.contains_key(&id),
+                &gone,
+                elsewhere,
+                &gone_keys,
+            )
+        };
         // The layout, written last, needs the room a record does.
         let saved = if moved.is_empty() {
             self.refused().unwrap_or(HistorySaved::Stored { kept: 0 })
@@ -1763,6 +1782,36 @@ mod tests {
             [first.timestamp, damaged.timestamp]
         );
         assert_eq!(store.record(left), Some(mine), "left as it is");
+    }
+
+    /// A move made again over records stored since, as one the store would
+    /// not take waits for the next read while a restore stores, writes no
+    /// session held already, under whatever name, as the files and a
+    /// browser's database write none: one record of it, not two.
+    #[test]
+    fn a_move_made_over_records_writes_no_session_held_already() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let (first, second) = (finished(now_ms - 9 * DAY), finished(now_ms - 8 * DAY));
+        store.keep_whole(&[first.clone(), second.clone()]);
+        store.full.set(true);
+        assert!(!store.load_history().complete, "the move waits");
+        store.full.set(false);
+        let restored =
+            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
+        assert_eq!(
+            now(store.change_history(put(std::slice::from_ref(&restored)))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        let read = store.load_history();
+        assert!(read.complete);
+        let stamps: Vec<u64> = read
+            .sessions
+            .iter()
+            .map(|(_, session)| session.timestamp)
+            .collect();
+        assert_eq!(stamps, [first.timestamp, second.timestamp], "each once");
+        assert!(store.record(restored.id).is_some(), "where it was restored");
     }
 
     /// A store that takes no change, full or failing, makes no move, as the
