@@ -23,9 +23,9 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{send_run_event, start_run};
-use crate::live_run::{self, RunMachine};
+use crate::live_run::{self, Outgoing, RunMachine};
 use crate::persist::SoFar;
-use crate::player::{AudioError, Lease, SendNews};
+use crate::player::{AudioError, Lease, SendNews, Sent};
 use crate::state::live::{GroupsOwn, LiveRun, SEEN_EVERY_MS, Stage};
 use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, settle_level};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
@@ -40,6 +40,8 @@ impl RunMachine for Groups {
     /// How many of its groups are answered.
     type Progress = usize;
     type Own = GroupsOwn;
+    /// The group a send is of.
+    type Tag = usize;
     type Level = (CountersUpdate, Option<AutoLevelChange>);
 
     fn of(live: &Live) -> Option<&LiveSession> {
@@ -184,6 +186,41 @@ impl RunMachine for Groups {
             SessionEffect::AbortToHome => {
                 live_run::let_go::<Self>(ctx, None);
             }
+        }
+    }
+
+    /// The send's timeline, the moment its first sample goes out: what its
+    /// characters are timed from, and the speed it went at, however soon
+    /// the group is answered; whether any of it went unheard, as soon as
+    /// that is found; and whether it was held up on its way, however it
+    /// ended.
+    fn news(index: usize, news: SendNews<'_>) -> SessionEvent {
+        match news {
+            SendNews::Started(start) => SessionEvent::PlaybackStarted {
+                index,
+                start: start.clone(),
+            },
+            SendNews::Missed {
+                from_sec,
+                until_sec,
+            } => SessionEvent::PlaybackMissed {
+                index,
+                from_sec,
+                until_sec,
+            },
+            SendNews::HeldUp => SessionEvent::PlaybackHeldUp { index },
+        }
+    }
+
+    /// Stopped from outside, or failed after every retry: the session
+    /// pauses, if it had not moved on, as a run does for a failure.
+    fn sent(index: usize, sent: Result<Sent, AudioError>) -> SessionEvent {
+        match sent {
+            Ok(sent) => SessionEvent::PlaybackEnded {
+                index,
+                duration_sec: sent.duration_sec,
+            },
+            Err(_) => SessionEvent::PlaybackStopped { index },
         }
     }
 
@@ -463,48 +500,8 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     else {
         return;
     };
-    let lease = lease.clone();
-    spawn_forever(async move {
-        // The send's timeline, the moment its first sample goes out: what
-        // its characters are timed from, and the speed it went at, however
-        // soon the group is answered; whether any of it went unheard, as
-        // soon as that is found; and whether it was held up on its way,
-        // however it ended.
-        let news = |news: SendNews<'_>| {
-            let event = match news {
-                SendNews::Started(start) => SessionEvent::PlaybackStarted {
-                    index,
-                    start: start.clone(),
-                },
-                SendNews::Missed {
-                    from_sec,
-                    until_sec,
-                } => SessionEvent::PlaybackMissed {
-                    index,
-                    from_sec,
-                    until_sec,
-                },
-                SendNews::HeldUp => SessionEvent::PlaybackHeldUp { index },
-            };
-            live_run::dispatch::<Groups>(ctx, &lease, event);
-        };
-        let event = match lease.send(&transmission, &settings, news).await {
-            Ok(sent) => SessionEvent::PlaybackEnded {
-                index,
-                duration_sec: sent.duration_sec,
-            },
-            // Stopped from outside: the session pauses, if it had not moved
-            // on, and there is nothing to say.
-            Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
-            // The sound failed after every retry: the session pauses, as a
-            // run does, and says why.
-            Err(failure) => {
-                ctx.toasts.show(failure.to_string());
-                SessionEvent::PlaybackStopped { index }
-            }
-        };
-        live_run::dispatch::<Groups>(ctx, &lease, event);
-    });
+    let outgoing = Outgoing::Group(transmission);
+    live_run::play::<Groups>(ctx, lease, index, settings, outgoing);
 }
 
 #[cfg(test)]

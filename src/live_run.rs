@@ -7,11 +7,12 @@
 
 use std::borrow::Cow;
 
-use cw_core::{MonoMs, SessionResult};
+use cw_core::{MonoMs, PlannedTransmission, SessionResult, TrainingSettings, Transmission};
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::persist::SoFar;
-use crate::player::Lease;
+use crate::player::{Asked, AudioError, Lease, SendNews, Sent};
 use crate::state::live::{LiveRun, Stage};
 use crate::state::{AppCtx, Finished, Live, Screen, keep_and_show};
 use crate::time::{mono_ms, now_ms};
@@ -36,6 +37,8 @@ pub(crate) trait RunMachine: Sized + 'static {
     type Progress;
     /// What only its kind holds while it is live.
     type Own;
+    /// Which of its sends news is of: a group's index, a turn's id.
+    type Tag: Copy + 'static;
     /// What keeping it does to its level, settled once it is marked kept.
     type Level;
 
@@ -98,6 +101,13 @@ pub(crate) trait RunMachine: Sized + 'static {
 
     /// What its kind does once all its machine said is done.
     fn effects_done(_ctx: AppCtx) {}
+
+    /// What tells it the news of its send `tag`, as the send goes.
+    fn news(tag: Self::Tag, news: SendNews<'_>) -> Self::Event;
+
+    /// What tells it how its send `tag` ended: played to its end, stopped,
+    /// or failed after every retry, which was said already.
+    fn sent(tag: Self::Tag, sent: Result<Sent, AudioError>) -> Self::Event;
 
     /// What its kind does as it is taken out, the audio given back.
     fn ending(_ctx: AppCtx, _live: &mut LiveRun<Self, Self::Own>) {}
@@ -231,6 +241,55 @@ pub(crate) fn run_effects<M: RunMachine>(ctx: AppCtx, lease: &Lease, effects: Ve
 pub(crate) fn start_timer<M: RunMachine>(ctx: AppCtx, lease: &Lease, id: u64, ms: u32) {
     lease.after(ms, move |lease| {
         dispatch::<M>(ctx, lease, M::timer_fired(id))
+    });
+}
+
+/// What a send plays: a session's group, or a run's turn, planned already,
+/// asked for as it went on the air ([`Lease::ask_to_send`]).
+pub(crate) enum Outgoing {
+    Group(Transmission),
+    Turn {
+        asked: Asked,
+        plan: PlannedTransmission,
+        transcript: Transmission,
+        starts_at: Option<MonoMs>,
+    },
+}
+
+/// Play `outgoing`, send `tag` of the machine of kind `M`, from `settings`,
+/// on a task of the app's own, and tell the machine of each attempt at it
+/// as it goes, and how it ended. A failure after every retry is said, once.
+/// A group takes its place among the player's sends as its task first
+/// runs; a turn was asked for as it went on the air.
+pub(crate) fn play<M: RunMachine>(
+    ctx: AppCtx,
+    lease: &Lease,
+    tag: M::Tag,
+    settings: TrainingSettings,
+    outgoing: Outgoing,
+) {
+    let lease = lease.clone();
+    spawn_forever(async move {
+        let news = |news: SendNews<'_>| dispatch::<M>(ctx, &lease, M::news(tag, news));
+        let sent = match &outgoing {
+            Outgoing::Group(transmission) => lease.send(transmission, &settings, news).await,
+            Outgoing::Turn {
+                asked,
+                plan,
+                transcript,
+                starts_at,
+            } => {
+                lease
+                    .send_planned(*asked, plan, transcript, &settings, *starts_at, news)
+                    .await
+            }
+        };
+        if let Err(failure) = &sent
+            && *failure != AudioError::Cancelled
+        {
+            ctx.toasts.show(failure.to_string());
+        }
+        dispatch::<M>(ctx, &lease, M::sent(tag, sent));
     });
 }
 

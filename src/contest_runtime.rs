@@ -15,13 +15,12 @@ use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, EntryField, MonoMs,
     OpKey, PauseWhy, Sampler, SessionResult, TrainingSettings, Turn, plan_turn,
 };
-use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::live_run::{self, RunMachine};
+use crate::live_run::{self, Outgoing, RunMachine};
 use crate::page::{Caret, control_id, focus_by_id_anywhere};
 use crate::persist::SoFar;
-use crate::player::{AudioError, Lease, SendNews};
+use crate::player::{AudioError, Lease, SendNews, Sent};
 use crate::state::live::{LiveRun, RunOwn, Stage};
 use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen};
 use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
@@ -35,6 +34,8 @@ impl RunMachine for Run {
     type View = ContestView;
     type Progress = ();
     type Own = RunOwn;
+    /// The turn a send is.
+    type Tag = u64;
     /// A run moves no level.
     type Level = ();
 
@@ -136,6 +137,40 @@ impl RunMachine for Run {
     /// What it holds for a screen reader is said once the air is silent.
     fn effects_done(ctx: AppCtx) {
         speak_if_silent(ctx);
+    }
+
+    /// Each attempt, retries too: when its sound goes to the output, and
+    /// when it reaches the ear, the player's lead, any wait for its moment
+    /// and latency after it starts; what of it went unheard, as soon as
+    /// that is found, before anything heard after it counts; and whether
+    /// it was held up on its way, however it ended.
+    fn news(id: u64, news: SendNews<'_>) -> ContestEvent {
+        match news {
+            SendNews::Started(start) => ContestEvent::TurnStarted {
+                id,
+                heard_from: start.heard_at(),
+                output_from: start.output_at,
+            },
+            SendNews::Missed {
+                from_sec,
+                until_sec,
+            } => ContestEvent::TurnMissed {
+                id,
+                from_sec,
+                until_sec,
+            },
+            SendNews::HeldUp => ContestEvent::TurnHeldUp { id },
+        }
+    }
+
+    /// Stopped, as by a stop, a newer turn or a pause, the machine has
+    /// moved on; only a failure after every retry pauses it.
+    fn sent(id: u64, sent: Result<Sent, AudioError>) -> ContestEvent {
+        match sent {
+            Ok(_) => ContestEvent::TurnEnded { id },
+            Err(AudioError::Cancelled) => ContestEvent::TurnCancelled { id },
+            Err(_) => ContestEvent::TurnFailed { id },
+        }
     }
 
     /// Its sound has stopped, so what it held for a screen reader is said
@@ -403,46 +438,13 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     // runs: a stop handled before then ends it, and a turn before it still
     // waiting out a retry gives up rather than start over it.
     let asked = lease.ask_to_send();
-    spawn_forever(async move {
-        let heard = lease.clone();
-        // Each attempt, retries too: when its sound goes to the output, and
-        // when it reaches the ear, the player's lead, any wait for its
-        // moment and latency after it starts; what of it went unheard, as
-        // soon as that is found, before anything heard after it counts; and
-        // whether it was held up on its way, however it ended.
-        let news = move |news: SendNews<'_>| {
-            let event = match news {
-                SendNews::Started(start) => ContestEvent::TurnStarted {
-                    id,
-                    heard_from: start.heard_at(),
-                    output_from: start.output_at,
-                },
-                SendNews::Missed {
-                    from_sec,
-                    until_sec,
-                } => ContestEvent::TurnMissed {
-                    id,
-                    from_sec,
-                    until_sec,
-                },
-                SendNews::HeldUp => ContestEvent::TurnHeldUp { id },
-            };
-            live_run::dispatch::<Run>(ctx, &heard, event);
-        };
-        let event = match lease
-            .send_planned(asked, &plan, &transcript, &settings, starts_at, news)
-            .await
-        {
-            Ok(_) => ContestEvent::TurnEnded { id },
-            // A stop, a newer turn, a pause: the machine has moved on.
-            Err(AudioError::Cancelled) => ContestEvent::TurnCancelled { id },
-            Err(failure) => {
-                ctx.toasts.show(failure.to_string());
-                ContestEvent::TurnFailed { id }
-            }
-        };
-        live_run::dispatch::<Run>(ctx, &lease, event);
-    });
+    let outgoing = Outgoing::Turn {
+        asked,
+        plan,
+        transcript,
+        starts_at,
+    };
+    live_run::play::<Run>(ctx, &lease, id, settings, outgoing);
 }
 
 /// A field's id, and what it is called.
