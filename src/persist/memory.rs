@@ -25,7 +25,8 @@ use super::legacy::{
 use super::progress::{HistoryProgress, LoadProgress};
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
-    Unreadable, done, failed_for_now, read_record, records_for_blob, unread_notices, unreadable,
+    Unreadable, done, failed_for_now, key_of, read_record, records_for_blob, unread_notices,
+    unreadable,
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Lock, LockHeld, Locking, MarkId,
@@ -42,6 +43,10 @@ pub struct MemoryStore {
     records: RefCell<BTreeMap<RecordId, Held>>,
     /// The records deleted by hand: their tombstones.
     tombstones: RefCell<BTreeMap<RecordId, Deleted>>,
+    /// The key of each record read or stored so far, as the files and a
+    /// browser's database keep it: the session a record held open for a
+    /// moment holds, as it was last read, which a take-up goes by.
+    keys: RefCell<HashMap<RecordId, SessionKey>>,
     /// A history has been stored, if only an empty one.
     stored: Cell<bool>,
     /// How the history is kept, once it has been moved.
@@ -618,9 +623,10 @@ impl Store for MemoryStore {
         if !moved && let Err(why) = self.migrate(&mut load) {
             load.notices.push(HistoryNotice::MovePending(why));
         }
-        self.import();
+        self.import(true);
         let tombstones = self.tombstones.borrow();
         let held_open = self.held_open.borrow();
+        let mut keys = self.keys.borrow_mut();
         // Each record that holds no session this build reads, with what it
         // says of itself; and each that could not be read at all, as one
         // held open cannot be.
@@ -634,12 +640,16 @@ impl Store for MemoryStore {
                 continue;
             }
             match held.session() {
-                Some(session) => load.sessions.push((*id, session)),
+                Some(session) => {
+                    keys.insert(*id, SessionKey::of(&session));
+                    load.sessions.push((*id, session));
+                }
                 None => {
                     let said = unreadable(&held.json);
                     if said.later
                         && let Some(key) = &said.key
                     {
+                        keys.insert(*id, key.clone());
                         load.later.push((*id, key.clone()));
                     }
                     load.unread.push(*id);
@@ -647,6 +657,7 @@ impl Store for MemoryStore {
                 }
             }
         }
+        drop(keys);
         load.notices.extend(self.tell(&unread, &load.failed));
         // Complete once the move is made: until then, the sessions kept
         // whole are stored, though not here.
@@ -687,7 +698,7 @@ impl Store for MemoryStore {
         if self.unlistable.get() {
             return done(None);
         }
-        self.import();
+        self.import(false);
         self.seen.set(self.looking());
         let tombstones = self.tombstones.borrow();
         let listed: Vec<RecordId> = self
@@ -1245,15 +1256,17 @@ impl MemoryStore {
             // One put back whose record is there still is back as it is
             // stored, as the files and a browser's database keep it: not
             // stored a second time beside itself.
-            if undone.contains(&record.id) && records.contains_key(&record.id) {
-                continue;
-            }
             let mut id = record.id;
-            while records
-                .get(&id)
-                .is_some_and(|held| held.json != record.json)
-            {
-                id = id.bumped();
+            if !(undone.contains(&record.id) && records.contains_key(&record.id)) {
+                while records
+                    .get(&id)
+                    .is_some_and(|held| held.json != record.json)
+                {
+                    id = id.bumped();
+                }
+            }
+            if let Some(key) = key_of(&record.json) {
+                self.keys.borrow_mut().insert(id, key);
             }
             if let Entry::Vacant(place) = records.entry(id) {
                 place.insert(Held {
@@ -1271,6 +1284,7 @@ impl MemoryStore {
                 self.tombstone_writes.set(self.tombstone_writes.get() + 1);
             }
             records.remove(id);
+            self.keys.borrow_mut().remove(id);
         }
         self.stored.set(true);
         self.changed_here();
@@ -1388,8 +1402,10 @@ impl MemoryStore {
     }
 
     /// Take up what an older build stored in, or deleted from, the history
-    /// kept whole since it was last taken up.
-    fn import(&self) {
+    /// kept whole since it was last taken up. `reading` says the history is
+    /// being read whole: nothing is taken up then while a record cannot be
+    /// read, as the files' read takes nothing up while one failed.
+    fn import(&self, reading: bool) {
         let Some(layout) = self.layout.borrow().clone() else {
             return;
         };
@@ -1402,21 +1418,32 @@ impl MemoryStore {
             .unwrap_or_default();
         // Every record here by the session it holds, or a later build's by
         // the one it says it holds, as the files take them: a damaged one
-        // holds none. Nothing is taken up while one cannot be read for now,
-        // as it may hold a session the older build holds too.
+        // holds none. One that cannot be read for now holds the session it
+        // held as it was last read; one never read holds every take-up
+        // back, as it may hold a session the older build holds too, and so
+        // does any, at a read of the history whole.
         let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
         {
             let (tombstones, held_open) = (self.tombstones.borrow(), self.held_open.borrow());
+            let mut keys = self.keys.borrow_mut();
             for (id, held) in self.records.borrow().iter() {
                 if tombstones.contains_key(id) {
                     continue;
                 }
-                if held_open.contains(id) {
-                    return;
-                }
-                let key = match held.session() {
-                    Some(session) => Some(SessionKey::of(&session)),
-                    None => unreadable(&held.json).later_key().cloned(),
+                let key = if held_open.contains(id) {
+                    match keys.get(id) {
+                        Some(key) if !reading => Some(key.clone()),
+                        _ => return,
+                    }
+                } else {
+                    let key = match held.session() {
+                        Some(session) => Some(SessionKey::of(&session)),
+                        None => unreadable(&held.json).later_key().cloned(),
+                    };
+                    if let Some(key) = &key {
+                        keys.insert(*id, key.clone());
+                    }
+                    key
                 };
                 if let Some(key) = key {
                     live.entry(key).or_default().push(*id);
@@ -1959,6 +1986,56 @@ mod tests {
             Some(2)
         );
         assert!(!store.history_changed(), "taken up");
+    }
+
+    /// A record read once holds back no take-up while it cannot be read for
+    /// a moment, as one held open cannot be: its session is known, as the
+    /// files and a browser's database keep the key of each record they
+    /// read, and what an older build stored since is taken up at a
+    /// listing. The test store gave up every take-up while any record was
+    /// held open.
+    #[test]
+    fn a_record_read_once_holds_back_no_take_up_while_it_cannot_be_read_for_a_moment() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let first = finished(now_ms - 9 * DAY);
+        store.keep_whole(std::slice::from_ref(&first));
+        let read = store.load_history();
+        let [(moved, _)] = read.sessions[..] else {
+            panic!("moved: {:?}", read.sessions);
+        };
+        store.held_open.borrow_mut().insert(moved);
+        store.keep_whole(&[first, finished(now_ms + 60_000)]);
+        assert_eq!(
+            now(store.history_listing()).map(|listed| listed.len()),
+            Some(2),
+            "taken up"
+        );
+    }
+
+    /// A read of the history whole takes nothing up from an older build
+    /// while a record here cannot be read, as the files' read takes none:
+    /// it may hold a session the older build holds too. The next look at
+    /// which every record reads takes it up.
+    #[test]
+    fn a_read_takes_nothing_up_while_a_record_cannot_be_read() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let first = finished(now_ms - 9 * DAY);
+        store.keep_whole(std::slice::from_ref(&first));
+        let read = store.load_history();
+        let [(moved, _)] = read.sessions[..] else {
+            panic!("moved: {:?}", read.sessions);
+        };
+        store.held_open.borrow_mut().insert(moved);
+        store.keep_whole(&[first, finished(now_ms + 60_000)]);
+        let writes = store.record_writes.get();
+        let read = store.load_history();
+        assert_eq!(read.failed, [moved]);
+        assert!(read.sessions.is_empty(), "{:?}", read.sessions);
+        assert_eq!(store.record_writes.get(), writes, "nothing taken up");
+        store.held_open.borrow_mut().clear();
+        assert_eq!(store.load_history().sessions.len(), 2, "taken up then");
     }
 
     /// A record here a later build stored, which says which session it
