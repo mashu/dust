@@ -59,6 +59,9 @@ pub struct MemoryStore {
     legacy: RefCell<Option<String>>,
     /// How many times an older build has written it.
     legacy_writes: Cell<u64>,
+    /// How many times it was read whole, as a look reads it where it has
+    /// changed since it was taken up, and the move reads it.
+    pub legacy_reads: Cell<usize>,
     /// The deletions an older build remembers.
     pub legacy_deleted: RefCell<Vec<Deleted>>,
     /// What the move set aside of the history kept whole.
@@ -981,8 +984,13 @@ impl Backend for InMem<'_> {
         self.0.write_note(note, names);
     }
 
-    /// Read whole, as it is: whether it changed is the take-up's to say.
-    async fn legacy_look(&self, _layout: &Layout) -> LegacyLook {
+    /// By how long it is and how often it was written, against how it was
+    /// when `layout` took it up: read whole, as a browser reads it, where
+    /// it changed since.
+    async fn legacy_look(&self, layout: &Layout) -> LegacyLook {
+        if Some(self.0.fingerprint()) == layout.taken_up() {
+            return LegacyLook::Same;
+        }
         LegacyLook::Changed(Some(self.0.kept_whole()))
     }
 
@@ -1462,6 +1470,7 @@ impl MemoryStore {
     /// The history an older build keeps whole, with what tells it from
     /// another state of it ([`Self::fingerprint`]).
     fn kept_whole(&self) -> Legacy {
+        self.legacy_reads.set(self.legacy_reads.get() + 1);
         let raw = self.legacy.borrow().clone()?;
         Some((raw.into_bytes(), self.fingerprint()?))
     }
@@ -1596,6 +1605,26 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("not done"),
         }
+    }
+
+    /// The history an older build keeps whole, as it was when last taken
+    /// up, is no change to take up, and none of it is read, as the files'
+    /// look at when it was written and a browser's at what it holds both
+    /// answer: the record store takes nothing up, and reads nothing for it.
+    /// Read at every look, as since c01c5a9, the test store ran every load
+    /// and listing through the take-up the real stores skip.
+    #[test]
+    fn a_history_kept_whole_as_it_was_taken_up_is_not_read_again() {
+        let store = MemoryStore::default();
+        store.keep_whole(&[finished(DAY), finished(2 * DAY)]);
+        assert_eq!(store.load_history().sessions.len(), 2);
+        let read = store.legacy_reads.get();
+        assert_eq!(now(store.history_listing()).map(|ids| ids.len()), Some(2));
+        assert_eq!(store.load_history().sessions.len(), 2);
+        assert_eq!(store.legacy_reads.get(), read, "none of it read again");
+        store.keep_whole(&[finished(DAY), finished(2 * DAY), finished(3 * DAY)]);
+        assert_eq!(now(store.history_listing()).map(|ids| ids.len()), Some(3));
+        assert!(store.legacy_reads.get() > read, "read, once it changed");
     }
 
     /// A session put back whose record is there still, as one a sync took
