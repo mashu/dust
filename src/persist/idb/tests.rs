@@ -637,6 +637,33 @@ fn a_move_made_again_counts_a_record_left_beside_its_tombstone_as_here() {
     );
 }
 
+/// The same under the move's own name, its record left beside its
+/// tombstone and damaged where it lies since, as the files' test of it has
+/// it: the session stays deleted, in the load as in the database. Since
+/// 54a897a the move counts such a record as here, so only its look at the
+/// tombstones by name first (e401d80) keeps the session deleted; no test in
+/// a browser held that order.
+#[test]
+fn a_move_made_again_over_its_own_record_beside_its_tombstone_keeps_it_deleted() {
+    let session = ago(4);
+    let page = Page::holding(std::slice::from_ref(&session));
+    let fake = Fake::on(&page);
+    let moved = record::records_for_blob(std::slice::from_ref(&session));
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    {
+        let mut shelves = fake.shelves();
+        shelves
+            .sessions
+            .insert(moved[0].id.name(), "{ damaged".into());
+        shelves.deleted.insert(moved[0].id.name(), tombstone);
+        shelves.meta.insert("layout".into(), "{ damaged".into());
+    }
+    let load = opened(&fake).load();
+    assert!(load.complete);
+    assert_eq!(load.sessions, [], "still deleted");
+    assert_eq!(records_holding(&fake, &session), 0, "none written");
+}
+
 /// A deletion another tab makes as this one makes the move over records
 /// stored here already, in a visit that could not read the page storage,
 /// once this one has read them, is not undone: the tombstones are read
