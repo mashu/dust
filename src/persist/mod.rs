@@ -13,6 +13,8 @@ mod acl;
 #[cfg(all(target_os = "android", not(test)))]
 mod android;
 pub mod backup;
+#[cfg(test)]
+mod conformance;
 #[cfg(feature = "native-runtime")]
 mod desktop;
 #[cfg(feature = "native-runtime")]
@@ -29,6 +31,7 @@ mod marks;
 pub mod memory;
 pub mod progress;
 pub mod record;
+mod record_store;
 mod saved;
 mod session;
 mod set_aside;

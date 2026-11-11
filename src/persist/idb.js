@@ -269,8 +269,11 @@ const lastOf = (requests, then) => {
 
 // Store `json` as the record `key`, unless it was deleted by hand and the
 // change does not undo that; where other bytes have that name already, under
-// the next free one. No record is ever written over.
-const place = (stores, key, json, undoing, said) => {
+// the next free one. No record is ever written over. `placed` is called once
+// it is settled, with the name it was asked to be added under or is there
+// under already, or null where it was kept out; not where no name was free,
+// as nothing of the change is made then.
+const place = (stores, key, json, undoing, said, placed) => {
   const store = (name, bumps) => {
     const there = stores.sessions.get(name);
     there.onsuccess = () => {
@@ -281,9 +284,12 @@ const place = (stores, key, json, undoing, said) => {
         // Stored already; or put back where its record was never taken.
       } else if (bumps < BUMPS) {
         store(bumped(name), bumps + 1);
+        return;
       } else {
         said.refuse("failed", `no name was free for the session stored as ${key}`);
+        return;
       }
+      placed(name);
     };
   };
   if (undoing) {
@@ -294,6 +300,8 @@ const place = (stores, key, json, undoing, said) => {
   gone.onsuccess = () => {
     if (gone.result === 0) {
       store(key, 0);
+    } else {
+      placed(null);
     }
   };
 };
@@ -424,6 +432,15 @@ return {
   // otherwise nothing of the change is made, as another tab moved the
   // history first. A layout held that a newer Dust wrote, or that does not
   // read, lets nothing be written, but a layout over it.
+  //
+  // Answers the name each record of `put` went under, in order: its own,
+  // one past it where other bytes held that, or null where it was kept out.
+  //
+  // Each record's place is looked for while every other's is: two records
+  // of one change that would go under one name, as one record twice, or one
+  // that other bytes bump onto the name of the next, are both added there,
+  // and the change is refused whole, where the steps every other store makes
+  // store each once. No change the app makes holds such records.
   apply: (change) => {
     if (readOnly) {
       return Promise.resolve(refusal("newer", "a newer Dust keeps the history here"));
@@ -464,17 +481,36 @@ return {
           for (const key of change.unforget) {
             stores.deleted.delete(key);
           }
-          for (const [key, json] of change.put) {
-            place(stores, key, json, undone.has(key), said);
-          }
-          for (const [key, tombstone] of change.forget) {
-            const there = stores.deleted.count(key);
-            there.onsuccess = () => {
-              if (there.result === 0) {
-                stores.deleted.put(tombstone, key);
+          // The deletions once every record is settled, as each is asked
+          // for only once the answers it waits on came: a record this change
+          // stores and deletes is not left beside its tombstone.
+          const forget = () => {
+            for (const [key, tombstone] of change.forget) {
+              const there = stores.deleted.count(key);
+              there.onsuccess = () => {
+                if (there.result === 0) {
+                  stores.deleted.put(tombstone, key);
+                }
+              };
+              stores.sessions.delete(key);
+            }
+          };
+          // The name each record went under, in order: null for one kept
+          // out, as deleted.
+          const names = change.put.map(() => null);
+          said.answer(names);
+          let unsettled = change.put.length;
+          change.put.forEach(([key, json], at) => {
+            place(stores, key, json, undone.has(key), said, (name) => {
+              names[at] = name;
+              unsettled -= 1;
+              if (unsettled === 0) {
+                forget();
               }
-            };
-            stores.sessions.delete(key);
+            });
+          });
+          if (change.put.length === 0) {
+            forget();
           }
           for (const [key, value] of change.meta) {
             stores.meta.put(value, key);

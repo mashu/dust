@@ -874,7 +874,8 @@ otherwise; a move made again over their records finds each session there
 all the same, by what it holds less its format.
 
 On a computer or a phone the history is the folder `history/`, beside the
-settings (`src/persist/files.rs`):
+settings (`src/persist/files.rs`, which keeps it by the record store's rules,
+`src/persist/record_store.rs`):
 
 - `sessions/<id>.json`: a session, as the build that stored it wrote it.
 - `deleted/<id>.json`: a tombstone. The session of that name was deleted by
@@ -932,10 +933,12 @@ and it is tried again with the next change, as the app comes back into
 sight, and every minute until it is stored.
 
 In a browser the history is the IndexedDB database `dust_history`
-(`src/persist/idb.rs`, `src/persist/idb.js`), whose keys and values are all
+(`src/persist/idb.rs`, `src/persist/idb.js`, by the record store's rules,
+`src/persist/record_store.rs`, as on a computer), whose keys and values are all
 text, so what a build writes comes back byte for byte: the stores `sessions`
 and `deleted`, by record name, as the folders above, and `meta`, which holds
-`layout` and `told`. Each change is one transaction, whole or not at all; a
+`layout` and `told`, the latter kept as `told.json` is: this build only adds
+names to it. Each change is one transaction, whole or not at all; a
 browser that has no room for one keeps none of it, and the app says the
 browser is full. The database is opened, and the history read 2,000 records
 at a time, while the page's boot screen shows, before the app starts; it
@@ -981,8 +984,9 @@ finished no earlier than a day before the newest session the move took
 (`takenThrough` in the layout: the newest no later than the clock said as
 the move was made, so a clock set ahead holds nothing back; where it took
 none, the newest it remembers deleting, and where there was no history kept
-whole at all, none, so nothing is cut off) and is neither here already nor
-deleted here, nor named among the deletions it remembers: one deleted by
+whole at all, or none that read, none, so nothing is cut off) and is
+neither here already nor deleted here, nor named among the deletions it
+remembers: one deleted by
 hand there by a build that keeps them, before the move or after, that a
 copy left open of a build that keeps none stores back, stays deleted, as
 every build that keeps them takes a session it puts back out of them. One
@@ -990,8 +994,8 @@ deleted there by a build that keeps none, which finished after that
 cut-off, a later one than every session the move took among them, comes
 back with such a copy, as it does in that build. It
 makes here each deletion the older build made since, once, by what it is,
-whatever its clock said (`deletionsTaken`,
-beside `deletedSeen`, which builds before them go by). But where a build
+whatever its clock said, and two of one session as one, the later
+(`deletionsTaken`, beside `deletedSeen`, which builds before them go by). But where a build
 before those rules took deletions up first, moving `deletedSeen` on, every
 deletion stamped after what this build had seen and no later than that
 counts as one that build took, and is not made here. That includes one a
@@ -1011,8 +1015,17 @@ holds; a damaged one does not, though it may still say one, and the older
 build's copy is taken up beside it, as a restore brings a backup's back
 beside it, and is left as it is when the older build deletes that session.
 While a record here cannot be read at all for now, or a pack of them opened,
-nothing is taken up: it may be the session, and the take-up waits for the
-next look at which every record reads.
+or a tombstone read, nothing is taken up: it may be the session, or say it
+was deleted, and the take-up waits for the next look at which every record
+and tombstone reads. A take-up held back by a tombstone, or by the history
+kept whole, that cannot be read, or one whose sessions cannot be stored just
+then, leaves the history counted as changed until a look takes it up, so the
+app looks again as a screen that shows the history opens, as it does in a
+browser. A move made again over the records, with sessions to
+move, waits, as one that cannot be made yet does, while a tombstone here, or
+a record the move would look at, cannot be read: such a record may hold a
+session the move would otherwise write a second time. One with nothing to
+move waits for nothing.
 Going back to an older build shows the history as it was at the update,
 plus what it stores, and loses nothing kept since: the records stay for the
 next update. A history kept by a newer Dust in a way this build cannot
