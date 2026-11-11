@@ -14,13 +14,6 @@
 //! say, of which records were deleted by hand, when, and which sessions
 //! they held ([`keys_of_tombstones`], [`deletions_of`],
 //! [`deleted_sessions_of`]).
-#![cfg_attr(
-    not(any(feature = "native-runtime", test)),
-    expect(
-        dead_code,
-        reason = "the browser's store takes the record store up next"
-    )
-)]
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -297,6 +290,7 @@ pub(super) trait Refusal {
 pub(super) enum Order {
     /// The move first, each step of it made durable on its own, and then
     /// the records, what it made among them: the files, the test store.
+    #[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
     MoveThenRead,
     /// The records first, and the move over them, in one change that two
     /// copies making it at once make once: a browser's database.
@@ -375,6 +369,7 @@ impl<'a> Writes<'a> {
     }
 
     /// The tombstones, each with what it holds.
+    #[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
     pub(super) fn tombstones(&self) -> Vec<(RecordId, &str)> {
         self.forget
             .iter()
@@ -464,6 +459,7 @@ pub(super) trait Backend {
     const FALLS_BACK: bool;
     /// It notes the records still unread after the app's tries, so each is
     /// told of once ([`still_unread`]).
+    #[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
     const NOTES_STILL_UNREAD: bool;
 
     /// The key of each record read so far ([`KeyCache`]).
@@ -1227,6 +1223,7 @@ pub(super) async fn deleted_keys<B: Backend>(
 /// each noted as told, where this build may write, so it is told of once
 /// ([`notes::still_unread`]); every one of them, where the store notes
 /// none ([`Backend::NOTES_STILL_UNREAD`]).
+#[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
 pub(super) async fn still_unread<B: Backend>(store: &B, ids: &[RecordId]) -> Vec<HistoryNotice> {
     if !B::NOTES_STILL_UNREAD {
         return unread_notices(ids.iter().map(|_| None));

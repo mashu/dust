@@ -8,6 +8,10 @@
 //! all ([`Glue`]). It opens before the app does, and the whole history is
 //! read then, a page at a time ([`BrowserHistory::open_with`]).
 //!
+//! What is read and written, in what order, and what is made of it, is the
+//! record store's, as for every store ([`record_store`]): this module makes
+//! its reads and its transactions in the database ([`InDb`]).
+//!
 //! A browser kept the history whole before, in its page storage under
 //! `dust_sessions`. That is moved in once, in one transaction, which two
 //! tabs opening at once make only once: the records a computer's move makes
@@ -20,6 +24,8 @@
 //! is kept whole in the page storage for the visit, as it was before, to its
 //! room ([`legacy::BlobHistory`]), and the user is told
 //! ([`HistoryNotice::PageStorage`]).
+//!
+//! [`HistoryNotice::PageStorage`]: super::record::HistoryNotice::PageStorage
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -29,13 +35,12 @@ use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
 use super::progress::LoadProgress;
 use super::record::{
-    self, Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId,
-    Unreadable, key_of, read_record, taken_up, unreadable,
+    self, Deletions, HistoryChange, HistoryLoad, Pending, Record, RecordId, read_record, unreadable,
 };
-use super::record_store::notes::{self, Note};
+use super::record_store::notes::Note;
 use super::record_store::{
-    Reading, Sorted, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of, deleted_sessions_of,
-    deletions_of, keys_of_tombstones, live_of, sort,
+    self, Backend, By, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, NotOpened, Opening,
+    Order, Raw, Refusal, Tombstone, TombstoneRead, TombstonesOf, WholeRead, Writes,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -47,11 +52,6 @@ pub(super) const IDB_JS: &str = include_str!("idb.js");
 
 /// How many records are read at a time, as the history is read whole.
 const PAGE: usize = 2000;
-
-/// How many times the move is tried as the page opens, where another tab
-/// moves the history first each time: once is all it takes, as every tab
-/// moves the same records.
-const MOVE_TRIES: usize = 3;
 
 /// Why the database did not do what was asked, as the page script says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,10 +85,12 @@ impl Refused {
             _ => Self::Failed(message),
         }
     }
+}
 
+impl Refusal for Refused {
     /// Why, in words that follow "the browser's database would not
     /// take it:".
-    pub(super) fn words(&self) -> String {
+    fn words(&self) -> String {
         match self {
             Self::Full => "it has no room left for this site".into(),
             Self::Newer => "a newer Dust keeps the history in it".into(),
@@ -108,6 +110,10 @@ impl Refused {
             Self::Newer => HistorySaved::Newer,
             other => HistorySaved::Failed(other.words()),
         }
+    }
+
+    fn raced(&self) -> bool {
+        *self == Self::Raced
     }
 }
 
@@ -133,7 +139,7 @@ pub(super) struct Listed {
 /// all. Records by name, each with what it holds; tombstones by the name of
 /// the record deleted, each with what it holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Writes {
+pub(super) struct Transaction {
     pub(super) put: Vec<(String, String)>,
     pub(super) forget: Vec<(String, String)>,
     pub(super) unforget: Vec<String>,
@@ -189,7 +195,7 @@ pub(super) trait Glue {
     /// tombstone held already stays as it is. A layout a newer Dust wrote,
     /// or one that does not read, lets nothing be written but a layout over
     /// it. Once made, it is told to every other tab.
-    fn apply(&self, writes: Writes) -> Pending<Result<(), Refused>>;
+    fn apply(&self, writes: Transaction) -> Pending<Result<(), Refused>>;
     /// The stamp the last change any tab made left, which changes with
     /// every change: none where none has.
     fn stamp(&self) -> Option<String>;
@@ -219,12 +225,15 @@ pub(super) struct BrowserHistory<G, S> {
     /// The history as it was read as the page opened, until the app takes
     /// it.
     loaded: RefCell<Option<HistoryLoad>>,
-    /// What the move set aside of the history kept whole, as it could not
-    /// read it, not yet handed over to be told of.
-    aside: RefCell<Vec<SetAside>>,
+    /// How the history is kept, as the text the database held as it was
+    /// opened, where it is to be moved again over that: none, or one that
+    /// does not read.
+    held: RefCell<Option<String>>,
+    /// The records told of, as the database noted them as it was opened.
+    told: RefCell<Option<String>>,
     /// The key of each record read so far: what an older build's deletions
     /// are told apart by.
-    session_keys: RefCell<HashMap<RecordId, SessionKey>>,
+    session_keys: RefCell<KeyCache>,
     /// The stamp of the last change, and how many changes other tabs had
     /// told of, when this copy last looked.
     seen: RefCell<Option<Looked>>,
@@ -235,34 +244,6 @@ pub(super) struct BrowserHistory<G, S> {
 
 /// What a look at the history saw ([`BrowserHistory::changed`]).
 type Looked = (Option<String>, u64);
-
-/// Why the database does not keep the history this visit, and what reading
-/// the page storage set aside meanwhile, as it could not read it.
-#[derive(Debug, PartialEq)]
-pub(super) struct NotOpened {
-    pub(super) why: String,
-    pub(super) set_aside: Vec<SetAside>,
-}
-
-/// Why a move was not made.
-enum Moving {
-    /// Another tab made it first.
-    Raced,
-    /// The database would not take it, for the reason given.
-    Refused(String),
-}
-
-/// The records of the database, read whole.
-#[derive(Default)]
-struct Read {
-    /// Every record but those deleted, told apart, in the order of the
-    /// history: one that holds no text says nothing of itself, as damaged
-    /// ([`unreadable`]).
-    sorted: Sorted,
-    /// What each record holds, as it is stored, where a move is to be made
-    /// over them: one left beside its tombstone among them.
-    raw: BTreeMap<RecordId, String>,
-}
 
 impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// The history in the database `glue` opened, read whole: the history
@@ -299,336 +280,15 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             writable: Cell::new(!read_only),
             layout: RefCell::new(None),
             loaded: RefCell::new(None),
-            aside: RefCell::new(Vec::new()),
-            session_keys: RefCell::new(HashMap::new()),
+            held: RefCell::new(None),
+            told: RefCell::new(None),
+            session_keys: RefCell::new(KeyCache::new()),
             seen: RefCell::new(None),
             progress,
         };
-        let mut tries = 0;
-        let made = loop {
-            tries += 1;
-            match history.read_in().await {
-                Err(Moving::Raced) if tries < MOVE_TRIES => {}
-                Err(Moving::Raced) => break Err(Refused::Raced.words()),
-                Err(Moving::Refused(why)) => break Err(why),
-                Ok(load) => break Ok(load),
-            }
-        };
-        let set_aside = std::mem::take(&mut *history.aside.borrow_mut());
-        match made {
-            Ok(mut load) => {
-                load.set_aside = set_aside;
-                history.loaded.replace(Some(load));
-                Ok(history)
-            }
-            Err(why) => Err(NotOpened { why, set_aside }),
-        }
-    }
-
-    /// Read the history in, making the move first where it was not made.
-    async fn read_in(&self) -> Result<HistoryLoad, Moving> {
-        let mut load = HistoryLoad::default();
-        // As of before it is read: what another tab changes after that is
-        // a change to take up.
-        self.seen.replace(Some(self.looking()));
-        let read_only = !self.writable.get();
-        let refused = |refused: Refused| Moving::Refused(refused.words());
-        let head = match self.glue.head().await {
-            Ok(head) => head,
-            // A newer Dust's database need hold nothing this build knows:
-            // nothing is read of it, and nothing written.
-            Err(_) if read_only => {
-                load.notices.push(HistoryNotice::Newer);
-                return Ok(load);
-            }
-            Err(refusal) => return Err(refused(refusal)),
-        };
-        self.progress.reading(head.count);
-        let gate = if read_only {
-            Gate::Newer
-        } else {
-            Gate::of(head.layout.as_deref().map(str::as_bytes))
-        };
-        let layout = match gate {
-            Gate::Open(layout) => head.layout.clone().map(|raw| (*layout, raw)),
-            Gate::Newer => {
-                self.writable.set(false);
-                load.notices.push(HistoryNotice::Newer);
-                None
-            }
-            Gate::Unmoved | Gate::Unread => None,
-        };
-        let writable = self.writable.get();
-        let moving = writable && layout.is_none();
-        let tombstones = match self.glue.tombstones().await {
-            Ok(tombstones) => tombstones_in(tombstones),
-            Err(_) if !writable => Vec::new(),
-            Err(refusal) => return Err(refused(refusal)),
-        };
-        let gone: BTreeSet<RecordId> = tombstones
-            .iter()
-            .filter_map(|tombstone| tombstone.id)
-            .collect();
-        let mut read = match self.read_all(&gone, moving).await {
-            Ok(read) => read,
-            Err(_) if !writable => Read::default(),
-            Err(refusal) => return Err(refused(refusal)),
-        };
-        let layout = if moving {
-            // Read again after the records: a session another tab deleted
-            // meanwhile, under a name the move does not give it, is no
-            // session to move in. Nor is one it put back meanwhile, by Undo
-            // or a restore, there under such a name: the tombstones read
-            // before the records name it by its key. By name the later read
-            // alone says what is deleted: a record put back before the pages
-            // were read is here, read with them.
-            let after = tombstones_in(self.glue.tombstones().await.map_err(refused)?);
-            let gone: BTreeSet<RecordId> =
-                after.iter().filter_map(|tombstone| tombstone.id).collect();
-            let mut gone_keys = strict_keys(&tombstones).map_err(Moving::Refused)?;
-            gone_keys.extend(strict_keys(&after).map_err(Moving::Refused)?);
-            let moved = self
-                .move_in(head.layout.as_deref(), &read, &gone, &gone_keys, &mut load)
-                .await?;
-            moved.map(|(layout, written, records)| {
-                let change = HistoryChange {
-                    put: records,
-                    ..HistoryChange::default()
-                };
-                taken_up(&mut read.sorted.sessions, &change);
-                (layout, written)
-            })
-        } else {
-            layout
-        };
-        load.notices
-            .extend(self.tell(&read.sorted.unread, head.told.as_deref()).await);
-        load.complete = layout.is_some();
-        self.layout.replace(layout);
-        let mut sorted = read.sorted;
-        if load.complete
-            && let Ok(before) = strict_keys(&tombstones)
-        {
-            // A record a later build stored holds the session it says it
-            // holds all the same: an older build's copy of that session is
-            // no session to take up beside it. A damaged one holds none
-            // ([`record::held_key`]).
-            let live = live_of(&sorted.sessions, &sorted.later);
-            if let Some(change) = self.import(Some((live, before))).await {
-                taken_up(&mut sorted.sessions, &change);
-            }
-        }
-        load.sessions = sorted.sessions;
-        load.later = sorted.later;
-        load.unread = sorted.unread.into_iter().map(|(id, _)| id).collect();
-        Ok(load)
-    }
-
-    /// Every record in the database, read a page at a time, in order, but
-    /// those deleted, `gone`, which read as deleted. `keep` keeps what each
-    /// holds as it is stored, for a move made over them, a record left
-    /// beside its tombstone among them, as the files count one: its session
-    /// is here all the same, for the move, though the tombstone names none.
-    /// A name that names no record is left alone. Each page read is counted
-    /// ([`Self::progress`]).
-    async fn read_all(&self, gone: &BTreeSet<RecordId>, keep: bool) -> Result<Read, Refused> {
-        let mut records = Vec::new();
-        let mut raw = BTreeMap::new();
-        let mut after = None;
-        let mut so_far = 0;
-        loop {
-            let page = self.glue.page(after.clone(), PAGE).await?;
-            let more = page.len() == PAGE;
-            so_far += page.len() as u64;
-            for (name, held) in page {
-                let id = RecordId::parse(&name);
-                after = Some(name);
-                let Some(id) = id else {
-                    continue;
-                };
-                if !gone.contains(&id) {
-                    let session = held.as_deref().and_then(read_record);
-                    let said = || held.as_deref().map(unreadable).unwrap_or_default();
-                    records.push((id, Some(session.ok_or_else(said))));
-                }
-                if keep && let Some(held) = held {
-                    raw.insert(id, held);
-                }
-            }
-            self.progress.so_far(so_far);
-            if !more {
-                break;
-            }
-        }
-        let sorted = sort(records, &mut self.session_keys.borrow_mut());
-        Ok(Read { sorted, raw })
-    }
-
-    /// Move the history kept whole in the page storage into the database,
-    /// over `held`, the layout there, if any, which does not read; `read`
-    /// is what the database holds already, and `gone` and `gone_keys` its
-    /// tombstones, by name and by key.
-    ///
-    /// Every session that reads becomes a record, written with how the
-    /// history is kept in one transaction: a move cut short is no move, and
-    /// two tabs making it at once make it once. What does not read is set
-    /// aside first, copied beside it: the history kept whole is never
-    /// written, as older builds keep theirs in it, and holds what does not
-    /// read all the same where there is no room for a copy.
-    ///
-    /// How the history is kept, as written, and the records written; none
-    /// where the page storage cannot be read now, which the next launch
-    /// tries again.
-    async fn move_in(
-        &self,
-        held: Option<&str>,
-        read: &Read,
-        gone: &BTreeSet<RecordId>,
-        gone_keys: &HashSet<SessionKey>,
-        load: &mut HistoryLoad,
-    ) -> Result<Option<(Layout, String, Vec<Record>)>, Moving> {
-        let Ok(raw) = self.shelf.get(self.keys.history) else {
-            load.notices.push(HistoryNotice::MovePending(
-                "this browser's page storage could not be read".into(),
-            ));
-            return Ok(None);
-        };
-        // Made whole in one change, and not to be counted as it goes.
-        self.progress.moving(None);
-        let fingerprint = raw.as_deref().map(fingerprint_of);
-        let whole = raw.as_deref().map(legacy::read_history);
-        let kept_whole = matches!(whole, Some(Some(_)));
-        let sessions = match whole {
-            None => Vec::new(),
-            Some(None) => {
-                self.set_aside(
-                    raw.as_deref().unwrap_or_default(),
-                    SetAside::History { kept: None },
-                );
-                Vec::new()
-            }
-            Some(Some(whole)) => {
-                if let Some(unread) = whole.unread_json() {
-                    let count = whole.unread.len();
-                    self.set_aside(&unread, SetAside::Sessions { count, kept: None });
-                }
-                whole.sessions
-            }
-        };
-        let now = crate::time::now_ms();
-        let (records, layout) = legacy::moved(
-            &sessions,
-            fingerprint,
-            kept_whole,
-            &self.legacy_deleted(),
-            now,
-        );
-        let records = not_moved_yet(records, read, gone, gone_keys);
-        let Some(written) = layout_text(&layout) else {
-            return Err(Moving::Refused(
-                "how the history is kept could not be written down".into(),
-            ));
-        };
-        let mut meta = Vec::new();
-        if let Some(held) = held {
-            meta.push((format!("layout.unreadable-{now}"), held.to_string()));
-        }
-        let writes = Writes {
-            put: named(&records),
-            layout: Some(LayoutWrite::Over {
-                expect: held.map(str::to_string),
-                write: written.clone(),
-            }),
-            meta,
-            ..Writes::default()
-        };
-        match self.write(writes).await {
-            Ok(()) => Ok(Some((layout, written, records))),
-            Err(Refused::Raced) => Err(Moving::Raced),
-            Err(refused) => Err(Moving::Refused(refused.words())),
-        }
-    }
-
-    /// Copy `unread`, what the history kept whole holds that does not
-    /// read, aside, and note `what` to tell of, unless it was set aside
-    /// before: kept or not, it stays where it is too.
-    fn set_aside(&self, unread: &str, what: SetAside) {
-        if keep_aside(&self.shelf, self.keys.aside, unread) != Kept::Already {
-            self.aside.borrow_mut().push(what);
-        }
-    }
-
-    /// Take up what an older build stored in, or deleted from, the history
-    /// kept whole since it was last taken up ([`legacy::imported`]), `known`
-    /// being every record here by its session's key, beside the sessions
-    /// the tombstones named as they were read before those records were,
-    /// where both are known already; and hand back the change made of it.
-    /// Nothing, where nothing changed there, or what changed cannot be read
-    /// or made now: it is tried again the next time.
-    ///
-    /// What was taken up is noted in how the history is kept, written in
-    /// the same transaction, and only over the layout it was worked out
-    /// from: two tabs taking it up at once take it up once.
-    async fn import(
-        &self,
-        known: Option<(LiveKeys, HashSet<SessionKey>)>,
-    ) -> Option<HistoryChange> {
-        if !self.writable.get() {
-            return None;
-        }
-        let (layout, held) = self.layout.borrow().clone()?;
-        let raw = self.shelf.get(self.keys.history).ok()?;
-        let fingerprint = raw.as_deref().map(fingerprint_of);
-        if Some(fingerprint) == layout.taken_up() {
-            return None;
-        }
-        let sessions = raw
-            .as_deref()
-            .and_then(legacy::read_history)
-            .map(|whole| whole.sessions)
-            .unwrap_or_default();
-        let deleted = self.legacy_deleted();
-        // The tombstones before the records and after: a session another
-        // tab deletes in between is either still here or deleted after, and
-        // one it puts back in between, by Undo or a restore, is either
-        // deleted before or here.
-        let (live, before) = match known {
-            Some(known) => known,
-            None => {
-                let before = tombstones_in(self.glue.tombstones().await.ok()?);
-                let before = strict_keys(&before).ok()?;
-                (self.live_keys().await?, before)
-            }
-        };
-        let after = tombstones_in(self.glue.tombstones().await.ok()?);
-        let mut gone = strict_keys(&after).ok()?;
-        gone.extend(before);
-        let (change, next) =
-            legacy::imported(&layout, fingerprint, &sessions, &deleted, &live, &gone)?;
-        let written = layout_text(&next)?;
-        let writes = Writes {
-            layout: Some(LayoutWrite::Over {
-                expect: Some(held),
-                write: written.clone(),
-            }),
-            ..writes_of(&change)
-        };
-        match self.write(writes).await {
-            Ok(()) => {
-                self.note(&change);
-                self.layout.replace(Some((next, written)));
-                Some(change)
-            }
-            Err(Refused::Raced) => {
-                self.read_layout().await;
-                None
-            }
-            Err(Refused::Newer) => {
-                self.writable.set(false);
-                None
-            }
-            Err(_) => None,
-        }
+        let load = record_store::load(&InDb(&history)).await?;
+        history.loaded.replace(Some(load));
+        Ok(history)
     }
 
     /// Read how the history is kept again, as another tab changed it.
@@ -643,76 +303,6 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             Gate::Newer => self.writable.set(false),
             Gate::Unmoved | Gate::Unread => {}
         }
-    }
-
-    /// Every record there is by its session's key: those read before as
-    /// they were read, the rest read now for their keys alone. One that is
-    /// damaged has none, though it may say one: only one that reads, or that
-    /// a later build stored, holds its session ([`record::held_key`]).
-    async fn live_keys(&self) -> Option<LiveKeys> {
-        let ids = live_ids(&self.glue.list().await.ok()?);
-        let unknown: Vec<RecordId> = {
-            let keys = self.session_keys.borrow();
-            ids.iter()
-                .filter(|id| !keys.contains_key(id))
-                .copied()
-                .collect()
-        };
-        if !unknown.is_empty() {
-            let names = unknown.iter().map(|id| id.name()).collect();
-            let held = self.glue.read(names).await.ok()?;
-            let mut keys = self.session_keys.borrow_mut();
-            for (id, raw) in unknown.into_iter().zip(held) {
-                if let Some(key) = raw.as_deref().and_then(record::held_key) {
-                    keys.insert(id, key);
-                }
-            }
-        }
-        let keys = self.session_keys.borrow();
-        let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
-        for id in ids {
-            if let Some(key) = keys.get(&id) {
-                live.entry(key.clone()).or_default().push(id);
-            }
-        }
-        Some(live)
-    }
-
-    /// What to tell of `unread`, the records this build cannot read, each
-    /// with what it says of itself, `told` being those told of before:
-    /// nothing, once each has been ([`notes::at_open`]). They are noted as
-    /// told, where this build may write, beside what the note held: this
-    /// build only adds names to it, as to told.json on a computer, so what a
-    /// build before formats noted there, a record it cannot read that this
-    /// one reads among them, stays, and such a build does not tell of it
-    /// again. The database keeps no other note: it notes no failure, as a
-    /// refused read fails the whole read, and a record that reads in it is
-    /// never damaged later, as text is all it holds.
-    async fn tell(
-        &self,
-        unread: &[(RecordId, Unreadable)],
-        told: Option<&str>,
-    ) -> Vec<HistoryNotice> {
-        let held = notes::Held {
-            told: told.map(str::as_bytes),
-            ..notes::Held::default()
-        };
-        let told = notes::at_open(unread, &[], held);
-        for (note, names) in &told.noted {
-            if *note == Note::Told
-                && let Some(names) = names
-                && self.writable.get()
-                && let Ok(raw) = serde_json::to_string(names)
-            {
-                let noted = Writes {
-                    meta: vec![("told".into(), raw)],
-                    ..Writes::default()
-                };
-                // Not noted, it is told of again: no more.
-                let _ = self.write(noted).await;
-            }
-        }
-        told.notices
     }
 
     /// The history as it was read as the page opened. Asked again, as no
@@ -730,63 +320,25 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// history is kept rides along, to be written again should the browser
     /// have cleared the database meanwhile.
     pub(super) async fn apply(&self, change: HistoryChange) -> HistorySaved {
-        if !self.writable.get() {
-            return HistorySaved::Newer;
-        }
-        let layout = self
-            .layout
-            .borrow()
-            .as_ref()
-            .map(|(_, raw)| LayoutWrite::Missing(raw.clone()));
-        let writes = Writes {
-            layout,
-            ..writes_of(&change)
-        };
-        match self.write(writes).await {
-            Ok(()) => {
-                self.note(&change);
-                HistorySaved::Stored {
-                    kept: change.put.len(),
-                }
-            }
-            Err(refused) => {
-                if refused == Refused::Newer {
-                    self.writable.set(false);
-                }
-                refused.saved()
-            }
-        }
+        record_store::apply(&InDb(self), &change).await
     }
 
     /// Every record there is, deleted ones left out, once whatever an
     /// older build stored since has been taken up. None where the database
     /// cannot be listed.
     pub(super) async fn listing(&self) -> Option<Vec<RecordId>> {
-        self.import(None).await;
-        let looked = self.looking();
-        let listed = self.glue.list().await.ok()?;
-        self.seen.replace(Some(looked));
-        Some(live_ids(&listed))
+        record_store::listing(&InDb(self)).await
     }
 
     /// The records `ids`, as they are stored: one that is not there, or
     /// cannot be read, comes back as its id. Their keys are not noted for
-    /// the take-up ([`Self::live_keys`]): whether one holds the session it
-    /// says it does takes reading it whole, which a backup of every record
-    /// need not.
+    /// the take-up: whether one holds the session it says it does takes
+    /// reading it whole, which a backup of every record need not.
     pub(super) async fn read(&self, ids: Vec<RecordId>) -> Vec<Result<Record, RecordId>> {
-        let names = ids.iter().map(|id| id.name()).collect();
-        let Ok(held) = self.glue.read(names).await else {
-            return ids.into_iter().map(Err).collect();
-        };
-        ids.into_iter()
-            .zip(held.into_iter().chain(std::iter::repeat(None)))
-            .map(|(id, json)| {
-                Ok(Record {
-                    id,
-                    json: json.ok_or(id)?,
-                })
-            })
+        let read = record_store::read(&InDb(self), &ids).await;
+        read.into_iter()
+            .zip(ids)
+            .map(|(read, id)| read.map_err(|_| id))
             .collect()
     }
 
@@ -796,7 +348,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// word that a record was not deleted. One with no tombstone was not:
     /// missing is never deleted.
     pub(super) async fn deletions(&self, ids: Vec<RecordId>) -> Option<Deletions> {
-        self.tombstones_of(&ids).await.map(deletions_of)
+        record_store::deletions(&InDb(self), &ids).await
     }
 
     /// Which of `ids` were deleted by hand, each beside the session its
@@ -806,29 +358,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         &self,
         ids: Vec<RecordId>,
     ) -> Option<Vec<(RecordId, SessionKey)>> {
-        self.tombstones_of(&ids).await.map(deleted_sessions_of)
-    }
-
-    /// The tombstone of each of `ids` that has one, and what it holds: none
-    /// where it holds no text. None where the tombstones cannot be looked
-    /// at.
-    async fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
-        let names = ids.iter().map(|id| id.name()).collect();
-        let held: HashMap<String, Option<String>> = self
-            .glue
-            .tombstones_of(names)
-            .await
-            .ok()?
-            .into_iter()
-            .collect();
-        Some(
-            ids.iter()
-                .filter_map(|id| {
-                    let raw = held.get(&id.name())?.clone();
-                    Some((*id, raw.map(String::into_bytes)))
-                })
-                .collect(),
-        )
+        record_store::deleted_sessions(&InDb(self), &ids).await
     }
 
     /// Which of the sessions `keys` a tombstone remembers, whatever record
@@ -836,9 +366,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// no text, or names no session, is left out. None where the tombstones
     /// cannot be looked at.
     pub(super) async fn deleted_keys(&self, keys: Vec<SessionKey>) -> Option<Vec<SessionKey>> {
-        let tombstones = tombstones_in(self.glue.tombstones().await.ok()?);
-        let gone = keys_of_tombstones(&tombstones, Reading::Lenient).ok()?;
-        Some(deleted_keys_of(&gone, keys))
+        record_store::deleted_keys(&InDb(self), keys).await
     }
 
     /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
@@ -902,7 +430,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// Make `writes`, and note the stamp they leave as seen, where no other
     /// tab left one since this copy last looked: a change of its own is no
     /// change for it to take up.
-    async fn write(&self, writes: Writes) -> Result<(), Refused> {
+    async fn write(&self, writes: Transaction) -> Result<(), Refused> {
         let before = self.glue.stamp();
         self.glue.apply(writes).await?;
         if let Some((stamp, _)) = self.seen.borrow_mut().as_mut()
@@ -915,7 +443,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
 
     /// Whether the history kept whole is no longer the length it was when
     /// last taken up. One written to the same length shows up at the next
-    /// listing, which reads it ([`Self::import`]).
+    /// listing, which reads it ([`InDb::legacy_look`]).
     fn legacy_changed(&self) -> bool {
         let layout = self.layout.borrow();
         let Some((layout, _)) = layout.as_ref() else {
@@ -935,17 +463,10 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         legacy::deleted_of(raw.as_deref().map(str::as_bytes))
     }
 
-    /// Note the keys of what `change`, made, stored and deleted.
-    fn note(&self, change: &HistoryChange) {
-        let mut keys = self.session_keys.borrow_mut();
-        for record in &change.put {
-            if let Some(key) = key_of(&record.json) {
-                keys.insert(record.id, key);
-            }
-        }
-        for (id, _) in &change.forget {
-            keys.remove(id);
-        }
+    /// Copy `unread`, what the history kept whole holds that does not
+    /// read, aside: `what` to tell of, unless it was set aside before.
+    fn set_aside(&self, unread: &str, what: SetAside) -> Option<SetAside> {
+        (keep_aside(&self.shelf, self.keys.aside, unread) != Kept::Already).then_some(what)
     }
 }
 
@@ -979,16 +500,6 @@ fn tombstones_in(stored: Stored) -> Vec<Tombstone> {
         .collect()
 }
 
-/// The key of every session `tombstones` name, as what waits on the
-/// sessions deleted here reads them ([`Reading::Strict`]): none of them
-/// fails to read in a database, which reads them all, or none.
-fn strict_keys(tombstones: &[Tombstone]) -> Result<HashSet<SessionKey>, String> {
-    keys_of_tombstones(tombstones, Reading::Strict)
-}
-
-/// Every record here by its session's key.
-type LiveKeys = HashMap<SessionKey, Vec<RecordId>>;
-
 /// Every record listed, but those deleted.
 fn live_ids(listed: &Listed) -> Vec<RecordId> {
     let gone: HashSet<&String> = listed.deleted.iter().collect();
@@ -1008,55 +519,393 @@ fn named(records: &[Record]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `change` as the database makes it.
-fn writes_of(change: &HistoryChange) -> Writes {
-    Writes {
-        put: named(&change.put),
-        forget: change
-            .forget
+/// The database as the record store reads and writes it ([`record_store`]):
+/// each read and each change a request to the page script, awaited on the
+/// page, the records read before the move, which is made over them in one
+/// transaction, and the database left for the page storage where it will
+/// not open or take the move ([`Backend::FALLS_BACK`]). It keeps one note
+/// of what was told, `told`, read with how the history is kept; no other
+/// ([`Backend::note`]).
+struct InDb<'a, G, S>(&'a BrowserHistory<G, S>);
+
+impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
+    type Refused = Refused;
+    type Look = Looked;
+    type Listed = ();
+    const ORDER: Order = Order::ReadThenMove;
+    const FALLS_BACK: bool = true;
+    /// A record still unread after the app's tries is told of each time:
+    /// the database notes no failure, as a refused read fails the whole
+    /// read.
+    const NOTES_STILL_UNREAD: bool = false;
+
+    fn keys(&self) -> &RefCell<KeyCache> {
+        &self.0.session_keys
+    }
+
+    /// By how the history is kept, as the database holds it beside the
+    /// records told of, and how many records there are, counted for the
+    /// boot screen: one a newer Dust keeps, as the page opened it at a
+    /// version past this build's, is only read, and one whose head cannot
+    /// be read at all is not read. One that does not read is moved again,
+    /// over it ([`InDb::write_move`]).
+    async fn open_gate(&self) -> Result<Opening, Refused> {
+        let history = self.0;
+        let read_only = !history.writable.get();
+        let head = match history.glue.head().await {
+            Ok(head) => head,
+            // A newer Dust's database need hold nothing this build knows.
+            Err(_) if read_only => return Ok(Opening::NewerUnread),
+            Err(refusal) => return Err(refusal),
+        };
+        history.progress.reading(head.count);
+        history.told.replace(head.told);
+        let gate = if read_only {
+            Gate::Newer
+        } else {
+            Gate::of(head.layout.as_deref().map(str::as_bytes))
+        };
+        history.layout.replace(None);
+        history.held.replace(None);
+        Ok(Opening::Gate(match gate {
+            Gate::Open(layout) => {
+                history
+                    .layout
+                    .replace(head.layout.map(|raw| ((*layout).clone(), raw)));
+                Gate::Open(layout)
+            }
+            Gate::Newer => {
+                history.writable.set(false);
+                Gate::Newer
+            }
+            Gate::Unmoved | Gate::Unread => {
+                history.held.replace(head.layout);
+                Gate::Unmoved
+            }
+        }))
+    }
+
+    /// As the database was opened, or last written: one a newer Dust keeps
+    /// is only read.
+    async fn gate(&self) -> Result<Gate, Refused> {
+        let history = self.0;
+        if !history.writable.get() {
+            return Ok(Gate::Newer);
+        }
+        Ok(match history.layout.borrow().as_ref() {
+            Some((layout, _)) => Gate::Open(Box::new(layout.clone())),
+            None => Gate::Unmoved,
+        })
+    }
+
+    async fn list(&self) -> Result<Listing<()>, Refused> {
+        let listed = self.0.glue.list().await?;
+        let ids = |names: &[String]| {
+            names
+                .iter()
+                .filter_map(|name| RecordId::parse(name))
+                .collect()
+        };
+        Ok(Listing {
+            records: ids(&listed.sessions),
+            gone: ids(&listed.deleted),
+            skipped: false,
+            listed: (),
+        })
+    }
+
+    /// The tombstones first, then every record, a page at a time, in
+    /// order, each page counted ([`BrowserHistory::progress`]): those the
+    /// tombstones delete read as deleted, and a name that names no record
+    /// left alone. With `keep`, what each holds as it is stored, for a move
+    /// made over them, a record left beside its tombstone among them, as
+    /// the files count one: its session is here all the same, for the
+    /// move, though the tombstone names none. A database only read reads
+    /// what it can: no tombstones, where they cannot be read.
+    async fn read_whole(&self, keep: bool) -> Result<WholeRead<()>, Refused> {
+        let history = self.0;
+        let tombstones = match history.glue.tombstones().await {
+            Ok(tombstones) => tombstones_in(tombstones),
+            Err(_) if !history.writable.get() => Vec::new(),
+            Err(refusal) => return Err(refusal),
+        };
+        let gone: BTreeSet<RecordId> = tombstones
             .iter()
-            .map(|(id, gone)| {
-                let tombstone = serde_json::to_string(gone).unwrap_or_else(|_| "{}".into());
-                (id.name(), tombstone)
-            })
-            .collect(),
-        unforget: change.unforget.iter().map(|id| id.name()).collect(),
-        ..Writes::default()
+            .filter_map(|tombstone| tombstone.id)
+            .collect();
+        let mut records = BTreeSet::new();
+        let mut read = Vec::new();
+        let mut kept = BTreeMap::new();
+        let mut after = None;
+        let mut so_far = 0;
+        loop {
+            let page = history.glue.page(after.clone(), PAGE).await?;
+            let more = page.len() == PAGE;
+            so_far += page.len() as u64;
+            for (name, held) in page {
+                let id = RecordId::parse(&name);
+                after = Some(name);
+                let Some(id) = id else {
+                    continue;
+                };
+                records.insert(id);
+                if !gone.contains(&id) {
+                    let session = held.as_deref().and_then(read_record);
+                    let said = || held.as_deref().map(unreadable).unwrap_or_default();
+                    read.push((id, Some(session.ok_or_else(said))));
+                }
+                if keep && let Some(held) = held {
+                    kept.insert(id, held);
+                }
+            }
+            history.progress.so_far(so_far);
+            if !more {
+                break;
+            }
+        }
+        Ok(WholeRead {
+            listing: Listing {
+                records,
+                gone,
+                skipped: false,
+                listed: (),
+            },
+            read,
+            kept,
+            tombstones,
+        })
+    }
+
+    /// What each record named holds, as text; none where it is not there.
+    /// One the database will not read reads as one that could not be read
+    /// just then, each of them.
+    async fn read(&self, ids: &[RecordId], _listed: Option<&()>) -> Vec<Raw> {
+        let names = ids.iter().map(|id| id.name()).collect();
+        let Ok(held) = self.0.glue.read(names).await else {
+            return ids.iter().map(|_| Raw::Failed).collect();
+        };
+        held.into_iter()
+            .chain(std::iter::repeat(None))
+            .take(ids.len())
+            .map(|held| held.map_or(Raw::Missing, Raw::Text))
+            .collect()
+    }
+
+    async fn tombstones(&self) -> Result<Vec<Tombstone>, Refused> {
+        Ok(tombstones_in(self.0.glue.tombstones().await?))
+    }
+
+    async fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
+        let names = ids.iter().map(|id| id.name()).collect();
+        let held: HashMap<String, Option<String>> = self
+            .0
+            .glue
+            .tombstones_of(names)
+            .await
+            .ok()?
+            .into_iter()
+            .collect();
+        Some(
+            ids.iter()
+                .filter_map(|id| {
+                    let raw = held.get(&id.name())?.clone();
+                    Some((*id, raw.map(String::into_bytes)))
+                })
+                .collect(),
+        )
+    }
+
+    /// The records told of, as read as the database was opened: the
+    /// database keeps no other note. It notes no failure, as a refused read
+    /// fails the whole read, and a record that reads in it is never damaged
+    /// later, as text is all it holds.
+    async fn note(&self, note: Note) -> Option<Vec<u8>> {
+        match note {
+            Note::Told => self.0.told.borrow().clone().map(String::into_bytes),
+            Note::Failing | Note::UnreadTold | Note::DamagedTold => None,
+        }
+    }
+
+    /// The records told of, noted beside what the note held: this build
+    /// only adds names to it, as to told.json on a computer, so what a build
+    /// before formats noted there, a record it cannot read that this one
+    /// reads among them, stays, and such a build does not tell of it again.
+    async fn write_note(&self, note: Note, names: Option<&BTreeSet<String>>) {
+        let history = self.0;
+        if note == Note::Told
+            && let Some(names) = names
+            && history.writable.get()
+            && let Ok(raw) = serde_json::to_string(names)
+        {
+            let noted = Transaction {
+                meta: vec![("told".into(), raw)],
+                ..Transaction::default()
+            };
+            // Not noted, it is told of again: no more.
+            let _ = history.write(noted).await;
+        }
+    }
+
+    /// By the history kept whole, read whole, against how it was when last
+    /// taken up: none of it, where the page storage cannot be read.
+    async fn legacy_look(&self, layout: &Layout) -> LegacyLook {
+        let Ok(raw) = self.0.shelf.get(self.0.keys.history) else {
+            return LegacyLook::Same;
+        };
+        let fingerprint = raw.as_deref().map(fingerprint_of);
+        if Some(fingerprint) == layout.taken_up() {
+            return LegacyLook::Same;
+        }
+        LegacyLook::Changed(Some(kept_whole(raw)))
+    }
+
+    async fn legacy(&self) -> Result<Legacy, String> {
+        let raw = self.0.shelf.get(self.0.keys.history);
+        raw.map(kept_whole)
+            .map_err(|()| "this browser's page storage could not be read".into())
+    }
+
+    async fn legacy_deleted(&self) -> Vec<Deleted> {
+        self.0.legacy_deleted()
+    }
+
+    /// Copied aside, unless it was before: kept or not, it stays where it
+    /// is too.
+    async fn set_aside_history(&self, raw: &[u8]) -> (Option<SetAside>, bool) {
+        let unread = std::str::from_utf8(raw).unwrap_or_default();
+        let aside = self.0.set_aside(unread, SetAside::History { kept: None });
+        (aside, false)
+    }
+
+    async fn set_aside_sessions(
+        &self,
+        unread: &str,
+        count: usize,
+    ) -> Result<Option<SetAside>, String> {
+        Ok(self
+            .0
+            .set_aside(unread, SetAside::Sessions { count, kept: None }))
+    }
+
+    /// Made whole in one change, and not to be counted as it goes.
+    fn moving(&self) {
+        self.0.progress.moving(None);
+    }
+
+    /// In one transaction, how the history is kept with it, written only
+    /// over the layout the database held as this copy last read or wrote
+    /// it, where the change takes something up: two tabs taking it up at
+    /// once take it up once ([`Refused::Raced`]). Any other change writes
+    /// the layout again only should the browser have cleared the database
+    /// meanwhile. Each record goes under the name asked, as far as this
+    /// copy knows.
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, _by: By) -> Made<Refused> {
+        let history = self.0;
+        let change = writes.change;
+        let held = history.layout.borrow().as_ref().map(|(_, raw)| raw.clone());
+        let (layout, next) = match laid {
+            Laid::AsItIs => (held.map(LayoutWrite::Missing), None),
+            Laid::Over(next) => {
+                let Some(written) = layout_text(next) else {
+                    return Made {
+                        placed: Vec::new(),
+                        saved: Err(Refused::Failed(UNWRITTEN.into())),
+                    };
+                };
+                let layout = LayoutWrite::Over {
+                    expect: held,
+                    write: written.clone(),
+                };
+                (Some(layout), Some((next.clone(), written)))
+            }
+        };
+        let transaction = Transaction {
+            put: named(&change.put),
+            forget: writes
+                .forget
+                .iter()
+                .map(|(id, held)| (id.name(), held.clone()))
+                .collect(),
+            unforget: change.unforget.iter().map(|id| id.name()).collect(),
+            layout,
+            meta: Vec::new(),
+        };
+        match history.write(transaction).await {
+            Ok(()) => {
+                if let Some(next) = next {
+                    history.layout.replace(Some(next));
+                }
+                Made {
+                    placed: change.put.iter().map(|record| Some(record.id)).collect(),
+                    saved: Ok(HistorySaved::Stored {
+                        kept: change.put.len(),
+                    }),
+                }
+            }
+            Err(refused) => {
+                if refused == Refused::Newer {
+                    history.writable.set(false);
+                }
+                Made {
+                    placed: Vec::new(),
+                    saved: Err(refused),
+                }
+            }
+        }
+    }
+
+    /// In one transaction, with how the history is kept, written over the
+    /// layout the database held as it was opened, which is set aside beside
+    /// it where there was one: a move cut short is no move, and two tabs
+    /// making it at once make it once.
+    async fn write_move(&self, records: &[Record], layout: &Layout) -> Result<(), Refused> {
+        let history = self.0;
+        let Some(written) = layout_text(layout) else {
+            return Err(Refused::Failed(UNWRITTEN.into()));
+        };
+        let held = history.held.borrow().clone();
+        let mut meta = Vec::new();
+        if let Some(held) = &held {
+            let aside = format!("layout.unreadable-{}", layout.migrated_at);
+            meta.push((aside, held.clone()));
+        }
+        let transaction = Transaction {
+            put: named(records),
+            layout: Some(LayoutWrite::Over {
+                expect: held,
+                write: written.clone(),
+            }),
+            meta,
+            ..Transaction::default()
+        };
+        history.write(transaction).await?;
+        history.layout.replace(Some((layout.clone(), written)));
+        Ok(())
+    }
+
+    async fn raced(&self) {
+        self.0.read_layout().await;
+    }
+
+    fn look(&self) -> Looked {
+        self.0.looking()
+    }
+
+    fn saw(&self, look: Looked) {
+        self.0.seen.replace(Some(look));
     }
 }
 
-/// Of `moved`, the records a move makes, those to write: all of them, into
-/// a database that holds nothing. A move made over records there already,
-/// `read` — one cut off in a visit that could not read the page storage, or
-/// made again over a layout that no longer reads — writes no session twice:
-/// one deleted since, by name or by key, stays deleted, and one taken up
-/// from an older build since, under the name it was taken up by, is not
-/// written a second time under another; nor is one whose key a tombstone
-/// gone since named, put back meanwhile under its name.
-fn not_moved_yet(
-    moved: Vec<Record>,
-    read: &Read,
-    gone: &BTreeSet<RecordId>,
-    gone_keys: &HashSet<SessionKey>,
-) -> Vec<Record> {
-    if read.raw.is_empty() && gone.is_empty() && gone_keys.is_empty() {
-        return moved;
-    }
-    let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
-    // What each record here under a name the move does not give holds: a
-    // session that needs no record of the move's.
-    let elsewhere = read
-        .raw
-        .iter()
-        .filter(|(id, _)| !names.contains(id))
-        .map(|(_, json)| json);
-    legacy::not_moved_yet(
-        moved,
-        |id| read.raw.contains_key(&id),
-        gone,
-        elsewhere,
-        gone_keys,
-    )
+/// Why a change that would note how the history is kept was not made.
+const UNWRITTEN: &str = "how the history is kept could not be written down";
+
+/// The history kept whole in the page storage, `raw`, as the record store
+/// takes it, with what tells it from another state of it.
+fn kept_whole(raw: Option<String>) -> Legacy {
+    raw.map(|raw| {
+        let fingerprint = fingerprint_of(&raw);
+        (raw.into_bytes(), fingerprint)
+    })
 }
 
 #[cfg(feature = "web")]
@@ -1070,7 +919,9 @@ mod script {
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
 
-    use super::{Glue, Head, IDB_JS, LayoutWrite, Listed, Pending, Refused, Stored, Writes};
+    use super::{
+        Glue, Head, IDB_JS, LayoutWrite, Listed, Pending, Refusal, Refused, Stored, Transaction,
+    };
 
     /// What the page script hands back: what the history does with the
     /// database ([`IDB_JS`]).
@@ -1197,7 +1048,7 @@ mod script {
     }
 
     /// `writes` as the script takes them.
-    fn change(writes: &Writes) -> JsValue {
+    fn change(writes: &Transaction) -> JsValue {
         let change = js_sys::Object::new();
         set(&change, "put", &list_of(&writes.put));
         set(&change, "forget", &list_of(&writes.forget));
@@ -1281,7 +1132,7 @@ mod script {
             })
         }
 
-        fn apply(&self, writes: Writes) -> Pending<Result<(), Refused>> {
+        fn apply(&self, writes: Transaction) -> Pending<Result<(), Refused>> {
             let glue = self.0.clone();
             Box::pin(async move {
                 asked(glue, "apply", vec![change(&writes)]).await?;

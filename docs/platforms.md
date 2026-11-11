@@ -933,7 +933,8 @@ and it is tried again with the next change, as the app comes back into
 sight, and every minute until it is stored.
 
 In a browser the history is the IndexedDB database `dust_history`
-(`src/persist/idb.rs`, `src/persist/idb.js`), whose keys and values are all
+(`src/persist/idb.rs`, `src/persist/idb.js`, by the record store's rules,
+`src/persist/record_store.rs`, as on a computer), whose keys and values are all
 text, so what a build writes comes back byte for byte: the stores `sessions`
 and `deleted`, by record name, as the folders above, and `meta`, which holds
 `layout` and `told`, the latter kept as `told.json` is: this build only adds

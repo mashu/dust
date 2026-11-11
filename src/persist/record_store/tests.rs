@@ -1023,3 +1023,74 @@ fn reads_and_asks_go_by_the_notes_and_the_tombstones_in_order() {
     );
     assert_eq!(script.calls(), calls(&["gate", "commit(App, as it is)"]));
 }
+
+/// A session finished on day `day`, scored as it reads back.
+fn on_day(day: u64) -> SessionResult {
+    crate::persist::record::scored(finished(day * 86_400_000))
+}
+
+/// A session an older build stored, as it writes one, with no format, is
+/// there under another name for a move made again, wherever the format
+/// would be written: none, or one carried at the end, as an older build
+/// writes back this build's. This build writes the format in every session
+/// ([`cw_core::SESSION_FORMAT`]), so its bytes were never an older
+/// build's, and the move stored the session a second time.
+#[test]
+fn a_move_made_again_writes_no_session_an_older_build_stored_twice() {
+    use crate::persist::tests::as_an_older_build_wrote;
+    let held = [on_day(1), on_day(2), on_day(3)];
+    let moved = crate::persist::record::records_for_blob(&held);
+    let older = as_an_older_build_wrote(&held[1]);
+    let carried = format!(
+        "{},\"format\":{}}}",
+        as_an_older_build_wrote(&held[2])
+            .strip_suffix('}')
+            .expect("an object"),
+        cw_core::SESSION_FORMAT
+    );
+    let texts: BTreeMap<RecordId, String> = [&older, &carried]
+        .into_iter()
+        .zip([&held[1], &held[2]])
+        .map(|(json, session)| (RecordId::placed(session.timestamp, json), json.clone()))
+        .collect();
+    let here = Here {
+        records: texts.keys().copied().collect(),
+        texts,
+        ..Here::default()
+    };
+    assert_eq!(here.not_moved_yet(moved.clone()), [moved[0].clone()]);
+}
+
+/// A move is made over nothing but what is not there already: a record
+/// there by its own name is written again, which writes nothing; one
+/// deleted by name or by key, or there under another name, is not.
+#[test]
+fn a_move_made_again_writes_no_session_twice() {
+    let held = [on_day(1), on_day(2), on_day(3), on_day(4)];
+    let moved = crate::persist::record::records_for_blob(&held);
+    let elsewhere =
+        Record::of(&held[2], |json| RecordId::placed(held[2].timestamp, json)).expect("a record");
+    let texts: BTreeMap<RecordId, String> = [
+        (moved[0].id, moved[0].json.clone()),
+        (elsewhere.id, elsewhere.json),
+    ]
+    .into_iter()
+    .collect();
+    let gone_keys: HashSet<SessionKey> = [SessionKey::of(&held[3])].into_iter().collect();
+    let here = Here {
+        records: texts.keys().copied().collect(),
+        gone: [moved[1].id].into_iter().collect(),
+        texts,
+        gone_keys: gone_keys.clone(),
+    };
+    assert_eq!(here.not_moved_yet(moved.clone()), [moved[0].clone()]);
+    // Into a store that holds nothing, all of it; but for a session a
+    // tombstone named as the records were read, gone since, as an Undo
+    // takes one away.
+    assert_eq!(Here::default().not_moved_yet(moved.clone()), moved);
+    let named = Here {
+        gone_keys,
+        ..Here::default()
+    };
+    assert_eq!(named.not_moved_yet(moved.clone()), moved[..3]);
+}

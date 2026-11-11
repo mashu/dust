@@ -10,6 +10,7 @@ use std::task::{Context, Poll, Waker};
 use cw_core::SessionResult;
 
 use super::*;
+use crate::persist::record::{HistoryNotice, key_of};
 use crate::persist::record_store::steps::{Steps, There, make_steps};
 use crate::persist::tests::session;
 
@@ -174,7 +175,7 @@ impl Fake {
 
     /// Make `writes` on `shelves`, as the page script makes them; what is
     /// made of a change refused is put back by the caller.
-    fn make(shelves: &mut Shelves, writes: Writes) -> Result<(), Refused> {
+    fn make(shelves: &mut Shelves, writes: Transaction) -> Result<(), Refused> {
         let held = shelves.meta.get("layout").cloned();
         let over = matches!(writes.layout, Some(LayoutWrite::Over { .. }));
         if let Some(LayoutWrite::Over { expect, .. }) = &writes.layout
@@ -382,7 +383,7 @@ impl Glue for Fake {
         }))
     }
 
-    fn apply(&self, writes: Writes) -> Pending<Result<(), Refused>> {
+    fn apply(&self, writes: Transaction) -> Pending<Result<(), Refused>> {
         let mut shelves = self.shelves();
         if let Some(first) = shelves.first.take() {
             first(&mut shelves);
@@ -1541,81 +1542,6 @@ fn a_database_cleared_under_the_page_has_how_it_is_kept_written_back() {
     }));
     assert_eq!(fake.layout(), layout, "written back");
     assert_eq!(fake.records().into_keys().collect::<Vec<_>>(), [now.id]);
-}
-
-/// A session an older build stored, as it writes one, with no format, is
-/// there under another name for a move made again, wherever the format
-/// would be written: none, or one carried at the end, as an older build
-/// writes back this build's. This build writes the format in every session
-/// ([`cw_core::SESSION_FORMAT`]), so its bytes were never an older
-/// build's, and the move stored the session a second time.
-#[test]
-fn a_move_made_again_writes_no_session_an_older_build_stored_twice() {
-    let held = [ago(9), ago(8), ago(7)];
-    let moved = record::records_for_blob(&held);
-    let older = crate::persist::tests::as_an_older_build_wrote(&held[1]);
-    let carried = format!(
-        "{},\"format\":{}}}",
-        crate::persist::tests::as_an_older_build_wrote(&held[2])
-            .strip_suffix('}')
-            .expect("an object"),
-        cw_core::SESSION_FORMAT
-    );
-    let read = Read {
-        raw: [&older, &carried]
-            .into_iter()
-            .zip([&held[1], &held[2]])
-            .map(|(json, session)| (RecordId::placed(session.timestamp, json), json.clone()))
-            .collect(),
-        ..Read::default()
-    };
-    let left = not_moved_yet(moved.clone(), &read, &BTreeSet::new(), &HashSet::new());
-    assert_eq!(left, [moved[0].clone()]);
-}
-
-/// A move is made over nothing but what is not there already: a record
-/// there by its own name is written again, which writes nothing; one
-/// deleted by name or by key, or there under another name, is not.
-#[test]
-fn a_move_made_again_writes_no_session_twice() {
-    let held = [ago(9), ago(8), ago(7), ago(6)];
-    let moved = record::records_for_blob(&held);
-    let elsewhere =
-        Record::of(&held[2], |json| RecordId::placed(held[2].timestamp, json)).expect("a record");
-    let read = Read {
-        raw: [
-            (moved[0].id, moved[0].json.clone()),
-            (elsewhere.id, elsewhere.json),
-        ]
-        .into_iter()
-        .collect(),
-        ..Read::default()
-    };
-    let gone: BTreeSet<RecordId> = [moved[1].id].into_iter().collect();
-    let gone_keys: HashSet<SessionKey> = [SessionKey::of(&held[3])].into_iter().collect();
-    let left = not_moved_yet(moved.clone(), &read, &gone, &gone_keys);
-    assert_eq!(left, [moved[0].clone()]);
-    // Into a database that holds nothing, all of it; but for a session a
-    // tombstone named as the records were read, gone since, as an Undo
-    // takes one away.
-    assert_eq!(
-        not_moved_yet(
-            moved.clone(),
-            &Read::default(),
-            &BTreeSet::new(),
-            &HashSet::new()
-        ),
-        moved
-    );
-    assert_eq!(
-        not_moved_yet(
-            moved.clone(),
-            &Read::default(),
-            &BTreeSet::new(),
-            &gone_keys
-        ),
-        moved[..3]
-    );
 }
 
 /// Two deletions of one session an older build remembers, as two of its
