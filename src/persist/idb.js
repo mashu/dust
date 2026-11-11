@@ -435,6 +435,12 @@ return {
   //
   // Answers the name each record of `put` went under, in order: its own,
   // one past it where other bytes held that, or null where it was kept out.
+  //
+  // Each record's place is looked for while every other's is: two records
+  // of one change that would go under one name, as one record twice, or one
+  // that other bytes bump onto the name of the next, are both added there,
+  // and the change is refused whole, where the steps every other store makes
+  // store each once. No change the app makes holds such records.
   apply: (change) => {
     if (readOnly) {
       return Promise.resolve(refusal("newer", "a newer Dust keeps the history here"));

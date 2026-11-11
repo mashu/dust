@@ -5,7 +5,11 @@
 //! never loses a session, though it may leave one deleted that was being
 //! put back, or one beside what was filling it in. A browser's database
 //! makes the same steps in one transaction, in its page script, which a
-//! test holds to these.
+//! test holds to these for every change whose records each have a place of
+//! their own, as every change the app makes has: two records of one change
+//! that would go under one name, as one record twice, or one bumped onto
+//! the name of the next, the page script refuses whole, where these store
+//! each once.
 
 use std::collections::HashSet;
 

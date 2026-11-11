@@ -524,7 +524,9 @@ struct Case {
 }
 
 /// The records a case is made of: each in a place of its own, so that the
-/// names one is tried under never reach another's.
+/// names one is tried under never reach another's. Where they would, the
+/// page script refuses the change whole, where those steps store each
+/// record once ([`two_records_of_one_change_under_one_name_are_refused_whole`]).
 fn records() -> Vec<Record> {
     [(10, 1), (20, 1_000), (30, 2_000)]
         .into_iter()
@@ -655,7 +657,8 @@ type Stores = (BTreeMap<String, String>, BTreeMap<String, String>);
 /// by other bytes under as many names as a record is tried under and one
 /// more, deleted or not, what the database holds after each, or that it
 /// refused it, is what those steps make of it, and so is where it says
-/// each record went.
+/// each record went: for every change whose records each have a place of
+/// their own, as every change the app makes has ([`records`]).
 #[test]
 fn the_page_script_makes_a_change_as_every_other_store_makes_it() {
     const CASES: u64 = 2_000;
@@ -729,5 +732,56 @@ for (const asked of cases) {{
         refused > 0 && refused < cases.len(),
         "{refused} of {} refused",
         cases.len()
+    );
+}
+
+/// Two records of one change that would go under one name, as one record
+/// twice, or one that other bytes bump onto the name of the next, are
+/// refused whole by the page script, which looks for each record's place
+/// while it looks for every other's: both are added under that name, and
+/// the database will not hold two. The steps every other store makes
+/// ([`make_steps`]) place one record after the other, and store each once.
+/// No change the app makes holds such records: each is named by its time
+/// and the hash of what it holds, and each change holds a record once.
+#[test]
+fn two_records_of_one_change_under_one_name_are_refused_whole() {
+    let Some(sent) = on_page(
+        r#"const tab = glue();
+await tab.open();
+fakeIdb.plant("dust_history", "sessions", name(5, 1), "other");
+dioxus.send(await tab.apply(change({ put: [[name(5, 1), "a"], [name(5, 2), "b"]] })));
+dioxus.send(await tab.apply(change({ put: [[name(6), "c"], [name(6), "c"]] })));
+dioxus.send(fakeIdb.contents("dust_history", "sessions"));"#,
+    ) else {
+        return;
+    };
+    for refused in &sent[..2] {
+        assert_eq!(refused["why"], json!("failed"), "{refused}");
+        assert_eq!(refused["name"], json!("ConstraintError"), "{refused}");
+    }
+    let id = |order, nonce| RecordId { order, nonce };
+    let other = BTreeMap::from([(id(5, 1).name(), "other".to_string())]);
+    let held: BTreeMap<String, String> =
+        serde_json::from_value(sent[2].clone()).expect("the records");
+    assert_eq!(held, other, "nothing of either change");
+    // Step by step, each is stored once.
+    let record = |at: RecordId, json: &str| Record {
+        id: at,
+        json: json.into(),
+    };
+    let mut shelves = Shelves::default();
+    shelves.sessions = other;
+    let put = [record(id(5, 1), "a"), record(id(5, 2), "b")];
+    let (placed, made) = make_steps(&Making(RefCell::new(&mut shelves)), &put, &[], &[]);
+    assert!(made.is_ok());
+    assert_eq!(placed, [Some(id(5, 2)), Some(id(5, 3))]);
+    let twice = [record(id(6, 1), "c"), record(id(6, 1), "c")];
+    let (placed, made) = make_steps(&Making(RefCell::new(&mut shelves)), &twice, &[], &[]);
+    assert!(made.is_ok());
+    assert_eq!(placed, [Some(id(6, 1)), Some(id(6, 1))]);
+    assert_eq!(
+        shelves.sessions.len(),
+        4,
+        "each once, beside the other bytes"
     );
 }
