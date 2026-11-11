@@ -266,7 +266,7 @@ fn a_record_read_or_gone_is_taken_out_of_this_builds_notes() {
 /// Records still unread after the app's tries are told of once, and noted
 /// as told of, where a note gains a name by them.
 #[test]
-fn records_still_unread_are_told_of_once() {
+fn records_still_unread_are_told_of_once_by_the_notes() {
     use notes::{noted_unread, still_unread};
     let told = noted(&[id(1)]);
     assert_eq!(still_unread(&[id(1)], Some(&told)), (Vec::new(), None));

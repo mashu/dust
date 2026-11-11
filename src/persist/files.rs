@@ -4112,50 +4112,6 @@ mod tests {
         assert_eq!(stamps(&read), [old.timestamp, second.timestamp]);
     }
 
-    /// A session an older build deletes after the move is deleted here too;
-    /// a deletion it made before is not made again, of a session restored
-    /// here since.
-    #[test]
-    fn a_deletion_an_older_build_made_after_the_move_is_honoured() {
-        let dir = TempDir::new("older-deleted");
-        let now = crate::time::now_ms();
-        let (first, second) = (finished(now - 10 * DAY), finished(now - 9 * DAY));
-        keep_whole(&dir, &[first.clone(), second.clone()]);
-        // Deleted before the move, and since restored: kept.
-        let before = Deleted::of(&first, now - 20 * DAY);
-        fs::write(
-            dir.0.join(DELETED),
-            serde_json::to_vec(std::slice::from_ref(&before)).unwrap(),
-        )
-        .unwrap();
-        let read = Files::at(&dir.0).load();
-        let second_id = read.sessions[1].0;
-        // The older build deletes the second.
-        let after = Deleted::of(&second, now);
-        keep_whole(&dir, std::slice::from_ref(&first));
-        fs::write(
-            dir.0.join(DELETED),
-            serde_json::to_vec(&[before, after.clone()]).unwrap(),
-        )
-        .unwrap();
-        let files = Files::at(&dir.0);
-        let read = files.load();
-        assert_eq!(stamps(&read), [first.timestamp]);
-        assert_eq!(files.forgotten(&[second_id]), [second_id]);
-        let held: Deleted = serde_json::from_slice(
-            &fs::read(
-                dir.0
-                    .join(HISTORY)
-                    .join(TOMBSTONES)
-                    .join(file_name(second_id)),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(held, after);
-        assert_eq!(stamps(&Files::at(&dir.0).load()), [first.timestamp]);
-    }
-
     /// Two deletions of one session an older build remembers, as two of its
     /// copies each deleted it, are made here as one, its tombstone stamped
     /// with the later, as in a browser: the first was kept here, the last
@@ -4971,7 +4927,6 @@ mod tests {
         #[cfg(unix)]
         a_history_kept_whole_that_cannot_be_looked_at_is_taken_as_unchanged,
         an_undo_another_copy_makes_as_this_one_takes_up_leaves_one_record,
-        a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
         #[cfg(unix)]

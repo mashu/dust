@@ -1013,7 +1013,7 @@ fn a_layout_that_does_not_read_is_set_aside_and_the_move_made_again() {
 /// deleted here; and a deletion it made since is made here too. Two tabs
 /// taking them up at once take them up once.
 #[test]
-fn what_an_older_build_stores_after_the_move_is_taken_up_once() {
+fn what_an_older_build_stores_and_deletes_is_taken_up_once_whatever_the_tab() {
     let before = [ago(10), ago(9)];
     let page = Page::holding(&before);
     let fake = Fake::on(&page);

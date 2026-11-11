@@ -198,17 +198,23 @@ pub(crate) fn what_an_older_build_stores_after_the_move_is_taken_up_once<H: Harn
     assert_eq!(store.listing().map(|listed| listed.len()), Some(3));
 }
 
-/// A deletion an older build makes after the move is made here too.
+/// A deletion an older build makes after the move is made here too; one
+/// it made before the move is not made again, of a session it holds whole
+/// since, as one restored there.
 pub(crate) fn a_deletion_an_older_build_made_after_the_move_is_honoured<H: Harness>() {
     let whole = [ago(30), ago(20)];
     let mut store = H::holding(&whole);
+    let before = Deleted::of(&whole[0], crate::time::now_ms() - 40 * DAY);
+    store.keep_deleted(std::slice::from_ref(&before));
     let load = store.load();
+    assert_eq!(sessions(&load), whole, "restored since: moved");
     let gone = load.sessions[1].0;
     store.keep_whole(std::slice::from_ref(&whole[0]));
     let at = crate::time::now_ms();
-    store.keep_deleted(&[Deleted::of(&whole[1], at)]);
+    store.keep_deleted(&[before, Deleted::of(&whole[1], at)]);
     assert_eq!(sessions(&store.load()), [whole[0].clone()]);
     assert_eq!(store.deletions(vec![gone]), Some(vec![(gone, Some(at))]));
+    assert_eq!(sessions(&store.load()), [whole[0].clone()], "once");
 }
 
 /// A record this build cannot read is left where it is, and told of once:
