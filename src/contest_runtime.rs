@@ -3,6 +3,11 @@
 //! run screen hands it keys, with the fields as typed, and says when the
 //! page has gone out of sight.
 //!
+//! Its life — going live, each step, pausing and resuming, ending kept or
+//! let go — is [`crate::live_run`]'s, as a session of groups' is; what is
+//! here is what only a run does: its turns, its keys and fields, its gap
+//! check at each tick, what it says to a screen reader.
+//!
 //! As for a session of groups ([`crate::session_runtime`]), its tasks are
 //! spawned on the root scope, and the lease, not a component, decides how
 //! long they live. A pause gives the audio back altogether, so the band

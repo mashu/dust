@@ -490,3 +490,324 @@ pub(crate) fn let_go<M: RunMachine>(ctx: AppCtx, finished: Option<Finished>) -> 
     }
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    use cw_core::{ContestEvent, Group, OpKey, PauseWhy, RowStatus, SessionEvent};
+
+    use super::*;
+    use crate::contest_runtime::Run;
+    use crate::persist::Store;
+    use crate::session_runtime::{Groups, finish_run};
+    use crate::testing::{
+        Harness, Ui, contest_settings, copy_what_was_heard, press, quiet, run, test_settings,
+    };
+    use crate::time::POLL_MS;
+
+    /// What a test does to what is live of one kind, as its screen does.
+    trait Driven: RunMachine {
+        /// The kind, for what a test says when it fails.
+        const NAME: &'static str;
+
+        /// The settings it starts from.
+        fn settings() -> TrainingSettings;
+
+        /// What its Pause sends.
+        fn pause() -> Self::Event;
+
+        /// Get it as far as one thing it keeps: a group answered, a QSO
+        /// logged.
+        async fn earn(h: &mut Harness);
+    }
+
+    impl Driven for Groups {
+        const NAME: &'static str = "a session";
+
+        fn settings() -> TrainingSettings {
+            test_settings()
+        }
+
+        fn pause() -> SessionEvent {
+            SessionEvent::Pause
+        }
+
+        async fn earn(h: &mut Harness) {
+            assert!(
+                h.run_until(10_000, |h| h.awaiting_answer() == Some(0))
+                    .await
+            );
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            let answered = |h: &Harness| {
+                let runtime = h.ctx.runtime.peek();
+                let first = runtime.as_ref().and_then(|session| session.group(0));
+                first.is_some_and(Group::confirmed)
+            };
+            assert!(h.run_until(10_000, answered).await, "the group is answered");
+        }
+    }
+
+    impl Driven for Run {
+        const NAME: &'static str = "a run";
+
+        fn settings() -> TrainingSettings {
+            contest_settings()
+        }
+
+        fn pause() -> ContestEvent {
+            let at = MonoMs(mono_ms());
+            ContestEvent::Pause {
+                why: PauseWhy::You,
+                at,
+            }
+        }
+
+        /// Its check shown too, so that nothing of it is left for a pause
+        /// to settle.
+        async fn earn(h: &mut Harness) {
+            let logged = |h: &Harness| {
+                h.ctx.contest.peek().as_ref().is_some_and(|run| {
+                    run.qsos > 0
+                        && run
+                            .log
+                            .iter()
+                            .all(|row| !matches!(row.status, RowStatus::Pending))
+                })
+            };
+            let mut waited = 0;
+            while !logged(h) && waited < 60_000 {
+                if quiet(h) {
+                    copy_what_was_heard(h);
+                    press(h, OpKey::Esm);
+                }
+                h.advance(u64::from(POLL_MS)).await;
+                waited += u64::from(POLL_MS);
+            }
+            assert!(logged(h), "a QSO is logged");
+        }
+    }
+
+    /// Where what is live of kind `M` is in its life, if it is live.
+    fn stage<M: RunMachine>(h: &Harness) -> Option<Stage> {
+        let slot = h.app.session.borrow();
+        slot.as_ref().and_then(M::of).map(|live| live.stage)
+    }
+
+    /// Whether what comes under `lease` reaches what is live of kind `M`.
+    fn reaches<M: RunMachine>(h: &Harness, lease: &Lease) -> bool {
+        let slot = h.app.session.borrow();
+        slot.as_ref()
+            .and_then(M::of)
+            .is_some_and(|live| hears(live, lease))
+    }
+
+    /// `result` as it is stored, but for when it ended.
+    fn but_when(result: &SessionResult) -> serde_json::Value {
+        let mut stored = serde_json::to_value(result).expect("a session writes");
+        if let Some(stored) = stored.as_object_mut() {
+            stored.remove("date");
+            stored.remove("timestamp");
+        }
+        stored
+    }
+
+    /// Whether the mark holds what End would keep of what is live of kind
+    /// `M`, were it pressed now.
+    fn marked_as_end_keeps<M: RunMachine>(h: &Harness) -> bool {
+        let end_now = {
+            let slot = h.app.session.borrow();
+            let live = slot.as_ref().and_then(M::of).expect("live");
+            M::so_far(live, MonoMs(mono_ms()), 0)
+        };
+        let marked = h.store.open().and_then(|open| open.so_far);
+        marked.map(|so_far| but_when(&so_far.result))
+            == end_now.map(|so_far| but_when(&so_far.result))
+    }
+
+    /// What is live of kind `M` lives one life. Refused the audio, it never
+    /// goes live, and says why; it goes live Running, and hears what comes
+    /// under its own lease. Its sound failing after every retry pauses it:
+    /// Paused, the audio given back, its mark holding what End would keep,
+    /// it still hears what comes under the lease it gave back. Resume
+    /// refused the audio says why and leaves it Paused; Resume with the
+    /// audio has it Running under a new lease, which alone it hears. Its
+    /// Pause gives the audio back again, and End takes it out, once.
+    async fn life<M: Driven>() {
+        let name = M::NAME;
+        let mut h = Harness::with_settings(M::settings());
+        let ctx = h.ctx;
+        h.recorder.build_error.set(true);
+        h.start_training();
+        assert_eq!(stage::<M>(&h), None, "{name}: gone live without the audio");
+        assert_eq!(h.toast().as_deref(), Some("No audio output device found"));
+
+        h.recorder.build_error.set(false);
+        h.recorder.fail_next(3);
+        h.start_training();
+        assert_eq!(stage::<M>(&h), Some(Stage::Running), "{name}: started");
+        let first = h.lease();
+        assert!(reaches::<M>(&h, &first), "{name}: deaf to its own lease");
+        let failed = |h: &Harness| stage::<M>(h) == Some(Stage::Paused);
+        assert!(
+            h.run_until(30_000, failed).await,
+            "{name}: its sound failed"
+        );
+        assert!(!first.is_current(), "{name}: kept the audio, paused");
+        assert!(
+            reaches::<M>(&h, &first),
+            "{name}: deaf, paused, to its own lease"
+        );
+        assert!(
+            marked_as_end_keeps::<M>(&h),
+            "{name}: marked otherwise than End keeps"
+        );
+
+        h.recorder.build_error.set(true);
+        h.in_app(|| resume::<M>(ctx));
+        assert_eq!(
+            stage::<M>(&h),
+            Some(Stage::Paused),
+            "{name}: resumed without the audio"
+        );
+        assert_eq!(h.toast().as_deref(), Some("No audio output device found"));
+        h.recorder.build_error.set(false);
+        h.in_app(|| resume::<M>(ctx));
+        assert_eq!(stage::<M>(&h), Some(Stage::Running), "{name}: not resumed");
+        let second = h.lease();
+        assert!(
+            second.is_current() && !second.is(&first),
+            "{name}: resumed on its old lease"
+        );
+        assert!(reaches::<M>(&h, &second), "{name}: deaf to its new lease");
+        assert!(
+            !reaches::<M>(&h, &first),
+            "{name}: still hears the lease it gave back"
+        );
+
+        h.in_app(|| send::<M>(ctx, M::pause()));
+        assert_eq!(stage::<M>(&h), Some(Stage::Paused), "{name}: not paused");
+        assert!(!second.is_current(), "{name}: kept the audio, paused");
+        assert!(
+            marked_as_end_keeps::<M>(&h),
+            "{name}: marked otherwise than End keeps"
+        );
+
+        h.in_app(|| finish_run(ctx));
+        assert_eq!(stage::<M>(&h), None, "{name}: not ended");
+        assert!(!h.in_app(|| keep::<M>(ctx)), "{name}: kept twice");
+        assert!(
+            !h.in_app(|| let_go::<M>(ctx, None)),
+            "{name}: let go once ended"
+        );
+    }
+
+    #[test]
+    fn either_kind_lives_one_life() {
+        run(|| async {
+            life::<Groups>().await;
+            life::<Run>().await;
+        });
+    }
+
+    /// What is live of kind `M` publishes what it shows only when that
+    /// changes, and marks what it would keep only once it gets further or
+    /// pauses: a timer it has forgotten changes neither; what it earns goes
+    /// with its mark; its Pause is shown once and marked once, as End
+    /// would keep it then; and Resume marks nothing.
+    async fn shows_and_marks<M: Driven>() {
+        let name = M::NAME;
+        let mut h = Harness::with_settings(M::settings());
+        let ctx = h.ctx;
+        h.start_training();
+        let lease = h.lease();
+        let shown = h.count_writes(M::shown(ctx));
+        let marks = h.store.mark_log.borrow().len();
+        let counts = |h: &Harness| {
+            let marked = h.store.mark_log.borrow().len() - marks;
+            (shown.load(Relaxed), marked)
+        };
+
+        h.in_app(|| dispatch::<M>(ctx, &lease, M::timer_fired(u64::MAX)));
+        assert_eq!(
+            counts(&h),
+            (0, 0),
+            "{name}: a forgotten timer shown or marked"
+        );
+
+        M::earn(&mut h).await;
+        let (shown_at, marked_at) = counts(&h);
+        assert!(marked_at > 0, "{name}: what it earned left unmarked");
+        let open = h.store.open().expect("marked");
+        assert!(
+            open.so_far.is_some(),
+            "{name}: the mark holds nothing earned"
+        );
+
+        h.in_app(|| send::<M>(ctx, M::pause()));
+        let paused = (shown_at + 1, marked_at + 1);
+        assert_eq!(
+            counts(&h),
+            paused,
+            "{name}: its pause shown or marked otherwise"
+        );
+        assert!(
+            marked_as_end_keeps::<M>(&h),
+            "{name}: marked otherwise than End keeps"
+        );
+        h.in_app(|| resume::<M>(ctx));
+        assert_eq!(counts(&h).1, marked_at + 1, "{name}: Resume marked");
+    }
+
+    #[test]
+    fn either_kind_shows_and_marks_only_what_changed() {
+        run(|| async {
+            shows_and_marks::<Groups>().await;
+            shows_and_marks::<Run>().await;
+        });
+    }
+
+    /// What is live of kind `M`, ended, goes with its mark as it is to be
+    /// stored before the store has it, and is kept once: by the store, and
+    /// not again by the next launch, as the app stopping after that would
+    /// leave it.
+    async fn kept_once<M: Driven>() {
+        let name = M::NAME;
+        let mut h = Harness::with_settings(M::settings());
+        h.store.mark_tutorial_done();
+        h.store.deferred.set(true);
+        let ctx = h.ctx;
+        h.start_training();
+        M::earn(&mut h).await;
+        h.in_app(|| finish_run(ctx));
+        assert_eq!(stage::<M>(&h), None, "{name}: not ended");
+        let open = h.store.open().expect("marked");
+        assert!(open.over, "{name}: marked kept");
+        let kept = h.ctx.result.peek().clone().and_then(Finished::kept);
+        let kept = kept.expect("shown kept");
+        let marked = open.so_far.expect("held with its mark").result;
+        assert_eq!(
+            but_when(&marked),
+            but_when(&kept),
+            "{name}: marked otherwise than kept"
+        );
+        assert!(h.store.load_sessions().is_empty(), "{name}: stored at once");
+
+        h.store.settle();
+        h.advance(1).await;
+        assert_eq!(h.store.load_sessions().len(), 1, "{name}: not stored once");
+        let (mut ui, _recorder) = Ui::launch(h.store.clone());
+        ui.advance(20).await;
+        h.store.settle();
+        assert_eq!(h.store.load_sessions().len(), 1, "{name}: kept again");
+    }
+
+    #[test]
+    fn either_kind_is_marked_as_kept_and_kept_once() {
+        run(|| async {
+            kept_once::<Groups>().await;
+            kept_once::<Run>().await;
+        });
+    }
+}

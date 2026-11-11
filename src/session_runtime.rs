@@ -2,6 +2,11 @@
 //! it decides — sends, timers, the results screen — under the session's
 //! lease on the audio. The UI only hands it events.
 //!
+//! Its life — going live, each step, pausing and resuming, ending kept or
+//! let go — is [`crate::live_run`]'s, as a contest run's is; what is here
+//! is what only a session of groups does: its groups and the stations that
+//! send them, its heartbeat, its answer box.
+//!
 //! Its tasks belong to the app rather than to whichever screen started the
 //! session, which is gone the moment the session's own screen comes up: they
 //! are spawned on the root scope, and the lease, not a component, decides

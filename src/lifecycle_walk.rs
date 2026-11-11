@@ -15,16 +15,13 @@
 //!   then, so that the app stopping keeps that;
 //! - the history only grows, and a session stored stays as it was stored.
 //!
-//! Each walk's lines are hashed, and the suite's walks are held to the
-//! hashes kept in `src/testdata/lifecycle_groups.txt` and
-//! `lifecycle_contest.txt`, one `seed hash` line each: a change meant to
-//! change nothing the app does leaves every one as it was, and a change
-//! meant to change something changes the lines it means to, every value
-//! stored or marked among them.
+//! The walks held what the lifecycle did, line for line, while it was
+//! made one for both kinds ([`crate::live_run`]); what they hold now is
+//! what must always hold, whatever the lifecycle is made to do next. A
+//! change meant to change nothing can still be checked line for line, its
+//! build's walks against those of the build before:
 //!
-//! - `DUST_LIFECYCLE=bless` writes the hashes of the walks run anew.
-//! - `DUST_LIFECYCLE=<dir>` writes each walk's lines to `<dir>`, so that two
-//!   builds' walks can be compared line by line.
+//! - `DUST_LIFECYCLE=<dir>` writes each walk's lines to `<dir>`.
 //! - `DUST_LIFECYCLE_SEEDS=<n>` has the ignored walks take seeds 1 to `n` of
 //!   each kind, by hand: `cargo test lifecycle_walk -- --ignored`.
 //!
@@ -36,9 +33,7 @@
 //! when it ended (`date`, `timestamp`), which the wall clock decides: its
 //! score, each group's sends, times and characters' times, and a run's log.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use cw_core::{
@@ -90,14 +85,6 @@ impl Kind {
         }
     }
 
-    /// The file its walks' hashes are kept in, under `src/testdata`.
-    fn file(self) -> &'static str {
-        match self {
-            Self::Groups => "lifecycle_groups.txt",
-            Self::Contest => "lifecycle_contest.txt",
-        }
-    }
-
     /// Seeds past the first [`SUITE_SEEDS`] that the suite walks too, as
     /// they reach what those never do: contest 1940 a pause cutting short
     /// the turn a copy was heard in, and 1582 a turn told of as held up
@@ -106,14 +93,6 @@ impl Kind {
         match self {
             Self::Groups => &[],
             Self::Contest => &[1582, 1940],
-        }
-    }
-
-    /// Its walks' hashes as kept.
-    fn kept(self) -> &'static str {
-        match self {
-            Self::Groups => include_str!("testdata/lifecycle_groups.txt"),
-            Self::Contest => include_str!("testdata/lifecycle_contest.txt"),
         }
     }
 }
@@ -995,73 +974,19 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-/// `seed hash` lines, read.
-fn hashes(text: &str) -> BTreeMap<u64, u64> {
-    text.lines()
-        .filter_map(|line| {
-            let (seed, hash) = line.trim().split_once(' ')?;
-            Some((seed.parse().ok()?, u64::from_str_radix(hash, 16).ok()?))
-        })
-        .collect()
-}
-
-/// Only one test writes the kept hashes at a time.
-static BLESSING: Mutex<()> = Mutex::new(());
-
-/// Keep `walked`'s hashes for `kind`, in place of those kept for the same
-/// seeds.
-fn bless(kind: Kind, walked: &BTreeMap<u64, u64>) {
-    let _one = BLESSING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/testdata")
-        .join(kind.file());
-    let mut kept = hashes(&std::fs::read_to_string(&path).unwrap_or_default());
-    kept.extend(walked);
-    let text: String = kept
-        .iter()
-        .map(|(seed, hash)| format!("{seed} {hash:016x}\n"))
-        .collect();
-    std::fs::write(&path, text).expect("the hashes are written");
-}
-
-/// Walk `seeds` of `kind`: with `DUST_LIFECYCLE=bless`, keep their hashes;
-/// with `DUST_LIFECYCLE=<dir>`, write their lines there; and, if `held`, hold
-/// each to the hash kept for it.
-fn walks(kind: Kind, seeds: impl Iterator<Item = u64>, held: bool) {
-    let mode = std::env::var("DUST_LIFECYCLE").unwrap_or_default();
-    let mut hashed = BTreeMap::new();
+/// Walk `seeds` of `kind`, every one of them checked after every step; with
+/// `DUST_LIFECYCLE=<dir>`, write their lines there.
+fn walks(kind: Kind, seeds: impl Iterator<Item = u64>) {
+    let dir = std::env::var("DUST_LIFECYCLE").unwrap_or_default();
     for seed in seeds {
         let lines = walked(kind, seed);
-        if !mode.is_empty() && mode != "bless" {
-            let dir = std::path::Path::new(&mode);
+        if !dir.is_empty() {
+            let dir = std::path::Path::new(&dir);
             std::fs::create_dir_all(dir).expect("the walks' folder");
             let file = dir.join(format!("{}-{seed:04}.txt", kind.name()));
             std::fs::write(file, &lines).expect("a walk's lines are written");
         }
-        hashed.insert(seed, fnv1a(lines.as_bytes()));
     }
-    if mode == "bless" {
-        bless(kind, &hashed);
-        return;
-    }
-    if !held {
-        return;
-    }
-    let kept = hashes(kind.kept());
-    let otherwise: Vec<u64> = hashed
-        .iter()
-        .filter(|(seed, hash)| kept.get(seed) != Some(hash))
-        .map(|(seed, _)| *seed)
-        .collect();
-    assert!(
-        otherwise.is_empty(),
-        "the {} walks of seeds {otherwise:?} went otherwise than kept: \
-         DUST_LIFECYCLE=<dir> writes their lines there, to compare with a \
-         build's before, and DUST_LIFECYCLE=bless keeps them as they go now",
-        kind.name()
-    );
 }
 
 /// Part `part` of the suite's walks of `kind`.
@@ -1071,7 +996,6 @@ fn suite(kind: Kind, part: u64) {
         (1..=SUITE_SEEDS)
             .chain(kind.further().iter().copied())
             .filter(|seed| seed % PARTS == part),
-        true,
     );
 }
 
@@ -1085,7 +1009,6 @@ fn by_hand(kind: Kind, part: u64) {
     walks(
         kind,
         (1..=seeds).filter(|seed| seed % BY_HAND_PARTS == part),
-        false,
     );
 }
 
