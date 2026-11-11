@@ -1016,7 +1016,9 @@ While a record here cannot be read at all for now, or a pack of them opened,
 or a tombstone read, nothing is taken up: it may be the session, or say it
 was deleted, and the take-up waits for the next look at which every record
 and tombstone reads. A move made again over the records waits, as one that
-cannot be made yet does, while a tombstone here cannot be read.
+cannot be made yet does, while a tombstone here, or a record the move would
+look at, cannot be read: such a record may hold a session the move would
+otherwise write a second time.
 Going back to an older build shows the history as it was at the update,
 plus what it stores, and loses nothing kept since: the records stay for the
 next update. A history kept by a newer Dust in a way this build cannot

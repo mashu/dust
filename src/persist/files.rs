@@ -1151,8 +1151,9 @@ impl HistoryFiles {
     /// reads is, finds records already here: a session deleted since stays
     /// deleted, and one taken up from an older build since, under the name
     /// it was taken up by, is not written a second time under another. An
-    /// error where what is here cannot be looked at, a tombstone that
-    /// cannot be read now among it: the move waits.
+    /// error where what is here cannot be looked at, a tombstone, or a
+    /// record under a name the move does not give, that cannot be read now
+    /// among it: the move waits.
     fn not_moved_yet(&self, moved: Vec<Record>) -> io::Result<Vec<Record>> {
         let (here, gone) = (ids_in(&self.records())?, ids_in(&self.tombstones())?);
         if here.is_empty() && gone.is_empty() {
@@ -1161,11 +1162,18 @@ impl HistoryFiles {
         let gone_keys = self.tombstoned_keys()?;
         let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
         // What each record here under a name the move does not give holds:
-        // a session that needs no record of the move's.
-        let elsewhere: Vec<String> = here
-            .difference(&names)
-            .filter_map(|id| fs::read_to_string(self.records().join(file_name(*id))).ok())
-            .collect();
+        // a session that needs no record of the move's. One that cannot be
+        // read now, as a file held open cannot, may hold one; one whose
+        // bytes are no text holds none, nor does one gone since it was
+        // listed.
+        let mut elsewhere = Vec::new();
+        for id in here.difference(&names) {
+            match fs::read(self.records().join(file_name(*id))) {
+                Ok(bytes) => elsewhere.extend(String::from_utf8(bytes).ok()),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
         Ok(legacy::not_moved_yet(
             moved,
             |id| here.contains(&id),
@@ -4648,6 +4656,69 @@ mod tests {
         assert_eq!(Files::at(&dir.0).listing(), Some(Vec::new()));
     }
 
+    /// A move made over records stored while it waited, as a restore stores
+    /// one while the history kept whole cannot be read, waits again while a
+    /// record here under a name the move does not give cannot be read, as a
+    /// folder in its place cannot, or a file held open: it may hold a session
+    /// the move would write a second time. Once it reads, the move is made,
+    /// each session once. Passed over, it was taken to hold nothing, the move
+    /// wrote its session again under the move's own name, and once it read,
+    /// the session was there twice.
+    #[cfg(unix)]
+    #[test]
+    fn a_move_made_over_a_record_that_cannot_be_read_now_waits_for_it() {
+        let dir = TempDir::new("move-over-unread");
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
+        keep_whole(&dir, &[first.clone(), second.clone()]);
+        let sessions = dir.0.join(SESSIONS);
+        let whole = fs::read(&sessions).unwrap();
+        fs::remove_file(&sessions).unwrap();
+        fs::create_dir(&sessions).unwrap();
+        let files = Files::at(&dir.0);
+        assert!(!files.load().complete, "the move waits");
+        // Restored meanwhile, under the name a restore gives it.
+        let restored =
+            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
+        assert_eq!(
+            files.apply(&put(std::slice::from_ref(&restored))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        fs::remove_dir(&sessions).unwrap();
+        fs::write(&sessions, whole).unwrap();
+        // It cannot be read just as the move is made.
+        let path = dir
+            .0
+            .join(HISTORY)
+            .join(RECORDS)
+            .join(file_name(restored.id));
+        let held = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let waited = Files::at(&dir.0).load();
+        assert!(
+            matches!(&waited.notices[..], [HistoryNotice::MovePending(_)]),
+            "{:?}",
+            waited.notices
+        );
+        assert!(!waited.complete);
+        assert_eq!(waited.failed, [restored.id]);
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, held).unwrap();
+        let read = Files::at(&dir.0).load();
+        assert!(
+            read.complete && read.notices.is_empty(),
+            "{:?}",
+            read.notices
+        );
+        assert_eq!(
+            stamps(&read),
+            [first.timestamp, second.timestamp],
+            "each once"
+        );
+        assert_eq!(names(&dir.0.join(HISTORY).join(RECORDS)).len(), 2);
+    }
+
     /// Write a pack of `records` in the history in `root`, as a later
     /// build packs them, with `extra` lines after them.
     fn pack(root: &Path, name: &str, records: &[&Record], extra: &[&str]) -> PathBuf {
@@ -5014,6 +5085,8 @@ mod tests {
         a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
+        #[cfg(unix)]
+        a_move_made_over_a_record_that_cannot_be_read_now_waits_for_it,
         a_pack_and_a_loose_copy_of_one_record_read_as_one,
         a_record_packed_while_the_history_is_listed_is_listed_all_the_same,
         a_record_packed_while_the_history_is_read_is_read_all_the_same,
