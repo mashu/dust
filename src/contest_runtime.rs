@@ -12,8 +12,8 @@
 use std::borrow::Cow;
 
 use cw_core::{
-    ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, EntryField, MonoMs,
-    OpKey, PauseWhy, Sampler, SessionResult, TrainingSettings, Turn, plan_turn,
+    ContestEffect, ContestEvent, ContestMachine, ContestView, EntryField, MonoMs, OpKey, PauseWhy,
+    Sampler, SessionResult, TrainingSettings, Turn, plan_turn,
 };
 use dioxus::prelude::*;
 
@@ -36,6 +36,7 @@ impl RunMachine for Run {
     type Own = RunOwn;
     /// The turn a send is.
     type Tag = u64;
+    const RESUME: ContestEvent = ContestEvent::Resume;
     /// A run moves no level.
     type Level = ();
 
@@ -70,6 +71,21 @@ impl RunMachine for Run {
 
     fn timer_fired(id: u64) -> ContestEvent {
         ContestEvent::TimerFired { id }
+    }
+
+    /// The run's own settings, fading off ([`RunOwn::sound`]): every claim
+    /// and every turn of it has the one band.
+    fn sound(live: &LiveContest) -> &TrainingSettings {
+        &live.own.sound
+    }
+
+    /// The paused page is shorter, so a phone scrolled down to Pause is
+    /// left part way down it, the run bar and the fields above the
+    /// screen's top: the run carries on from its top, as every screen
+    /// opens. Pausing scrolls nothing, so nothing moves under the finger
+    /// that paused.
+    fn resumed(_ctx: AppCtx) {
+        crate::page::scroll_to_top();
     }
 
     /// Before a run hears anything, a gap since its screen last ticked,
@@ -201,7 +217,6 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
         contest: mut view,
         mut announced,
         mut preview,
-        toasts,
         entry,
         ..
     } = ctx;
@@ -213,11 +228,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     // that had it has stopped.
     preview.set(Preview::Idle);
     let app = ctx.app();
-    let Ok(lease) = app
-        .player
-        .claim(&sound)
-        .inspect_err(|err| toasts.show(err.to_string()))
-    else {
+    let Some(lease) = live_run::claim(ctx, &sound) else {
         return;
     };
     // The callers' calls lean on what the history says is hard, and on what
@@ -258,13 +269,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
 /// that has ended, one before it — is dropped. A timer never comes to a
 /// paused run: the lease it was armed under drops it ([`Lease::after`]).
 pub fn send_run_event(ctx: AppCtx, event: ContestEvent) {
-    if event == ContestEvent::Resume {
-        resume_run(ctx);
-        return;
-    }
-    if let Some(lease) = live_run::lease::<Run>(ctx) {
-        live_run::dispatch::<Run>(ctx, &lease, event);
-    }
+    live_run::send::<Run>(ctx, event);
 }
 
 /// A key or a message button: whatever paddle letter is keyed in full goes
@@ -308,40 +313,11 @@ pub fn pause_run(ctx: AppCtx, why: PauseWhy) {
     send_run_event(ctx, ContestEvent::Pause { why, at });
 }
 
-/// Carry on after a pause. The audio is claimed afresh here, inside the tap
-/// on Resume, so the player opens — or, after the sound failed, is built
-/// anew — where a browser lets it start. A run that is not paused is left
-/// alone: a claim would cut the turn on the air from under it.
+/// Carry on after a pause: the audio claimed afresh inside the tap, and the
+/// run on under the new claim from the top of its page
+/// ([`live_run::resume`]).
 pub fn resume_run(ctx: AppCtx) {
-    let app = ctx.app();
-    let paused = match app.session.borrow().as_ref().and_then(Run::of) {
-        Some(live) if matches!(live.machine.phase(), ContestPhase::Paused { .. }) => {
-            Some(live.own.sound.clone())
-        }
-        _ => None,
-    };
-    let Some(sound) = paused else {
-        return;
-    };
-    let Ok(lease) = app
-        .player
-        .claim(&sound)
-        .inspect_err(|err| ctx.toasts.show(err.to_string()))
-    else {
-        return;
-    };
-    if let Some(live) = app.session.borrow_mut().as_mut().and_then(Run::of_mut)
-        && let Some(running) = live.stage.claimed()
-    {
-        live.lease = lease.clone();
-        live.stage = running;
-    }
-    live_run::dispatch::<Run>(ctx, &lease, ContestEvent::Resume);
-    // The paused page is shorter, so a phone scrolled down to Pause is left
-    // part way down it, the run bar and the fields above the screen's top:
-    // the run carries on from its top, as every screen opens. Pausing
-    // scrolls nothing, so nothing moves under the finger that paused.
-    crate::page::scroll_to_top();
+    live_run::resume::<Run>(ctx);
 }
 
 /// The run screen's clock ticked: the run is seen running now. A tick long
@@ -485,7 +461,7 @@ mod tests {
     };
     use crate::time::POLL_MS;
     use cw_core::band::BandKey;
-    use cw_core::{CharSetMode, ContestView, MONITOR_LEVEL, plan_morse_playback_for};
+    use cw_core::{CharSetMode, ContestPhase, ContestView, MONITOR_LEVEL, plan_morse_playback_for};
 
     /// Hand the run `event`, come under `lease`.
     fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {

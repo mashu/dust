@@ -16,7 +16,7 @@ use std::borrow::Cow;
 use cw_core::{
     AnswerClose, AutoLevelChange, CharSamplingState, CharSetMode, ContestEvent, CountersKey,
     CountersUpdate, Group, GroupSession, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId,
-    SessionMachine, SessionResult, SplitMix64, Transmission, complete_session,
+    SessionMachine, SessionResult, SplitMix64, TrainingSettings, Transmission, complete_session,
     generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
@@ -42,6 +42,7 @@ impl RunMachine for Groups {
     type Own = GroupsOwn;
     /// The group a send is of.
     type Tag = usize;
+    const RESUME: SessionEvent = SessionEvent::Resume;
     type Level = (CountersUpdate, Option<AutoLevelChange>);
 
     fn of(live: &Live) -> Option<&LiveSession> {
@@ -75,6 +76,16 @@ impl RunMachine for Groups {
 
     fn timer_fired(id: u64) -> SessionEvent {
         SessionEvent::TimerFired { id }
+    }
+
+    /// The settings it started with.
+    fn sound(live: &LiveSession) -> &TrainingSettings {
+        live.machine.session().settings()
+    }
+
+    /// Its heartbeat, under each claim ([`beat`]).
+    fn watch(ctx: AppCtx, lease: &Lease) {
+        beat(ctx, lease.clone());
     }
 
     /// News that waited out a gap the app was not running in finds the
@@ -295,7 +306,6 @@ pub fn start_session(ctx: AppCtx) {
         mut screen,
         mut runtime,
         mut settings,
-        toasts,
         mut preview,
         ..
     } = ctx;
@@ -317,11 +327,7 @@ pub fn start_session(ctx: AppCtx) {
     // preview that had it has stopped.
     preview.set(Preview::Idle);
     let app = ctx.app();
-    let Ok(lease) = app
-        .player
-        .claim(&fitted)
-        .inspect_err(|err| toasts.show(err.to_string()))
-    else {
+    let Some(lease) = live_run::claim(ctx, &fitted) else {
         return;
     };
     // Each session draws from a sampler of its own, seeded afresh.
@@ -389,31 +395,11 @@ fn pause_if_away(ctx: AppCtx, lease: &Lease) {
     });
 }
 
-/// Carry on after a pause. The audio a pause gave back is claimed afresh
-/// here, inside the tap on Resume, so the player opens where a browser lets
-/// it start; the session goes on under the new claim. A session that is not
-/// paused is left alone: a claim would cut its send from under it.
+/// Carry on after a pause: the audio claimed afresh inside the tap, and the
+/// session on under the new claim, its heartbeat with it
+/// ([`live_run::resume`]).
 pub fn resume_session(ctx: AppCtx) {
-    let app = ctx.app();
-    let settings = match app.session.borrow().as_ref().and_then(Groups::of) {
-        Some(live) if live.machine.session().paused() => live.machine.session().settings().clone(),
-        _ => return,
-    };
-    let Ok(lease) = app
-        .player
-        .claim(&settings)
-        .inspect_err(|err| ctx.toasts.show(err.to_string()))
-    else {
-        return;
-    };
-    if let Some(live) = app.session.borrow_mut().as_mut().and_then(Groups::of_mut)
-        && let Some(running) = live.stage.claimed()
-    {
-        live.lease = lease.clone();
-        live.stage = running;
-    }
-    live_run::dispatch::<Groups>(ctx, &lease, SessionEvent::Resume);
-    beat(ctx, lease);
+    live_run::resume::<Groups>(ctx);
 }
 
 /// Hand the running session something the user did. Nothing happens when
@@ -426,13 +412,7 @@ pub fn resume_session(ctx: AppCtx) {
 /// session has given its audio back, and still hears what is done to it
 /// ([`live_run::hears`]).
 pub fn send_event(ctx: AppCtx, event: SessionEvent) {
-    if event == SessionEvent::Resume {
-        resume_session(ctx);
-        return;
-    }
-    if let Some(lease) = live_run::lease::<Groups>(ctx) {
-        live_run::dispatch::<Groups>(ctx, &lease, event);
-    }
+    live_run::send::<Groups>(ctx, event);
 }
 
 /// Whether what is live is a contest run.

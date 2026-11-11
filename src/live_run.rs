@@ -28,7 +28,7 @@ use crate::time::{mono_ms, now_ms};
 /// others are called with nothing borrowed.
 pub(crate) trait RunMachine: Sized + 'static {
     /// What it hears: what the user did, or news from its own tasks.
-    type Event;
+    type Event: PartialEq;
     /// What it says to do.
     type Effect;
     /// What the training screen shows of it.
@@ -39,6 +39,9 @@ pub(crate) trait RunMachine: Sized + 'static {
     type Own;
     /// Which of its sends news is of: a group's index, a turn's id.
     type Tag: Copy + 'static;
+    /// What tells it to carry on after a pause, once the audio is claimed
+    /// again ([`resume`]).
+    const RESUME: Self::Event;
     /// What keeping it does to its level, settled once it is marked kept.
     type Level;
 
@@ -60,6 +63,16 @@ pub(crate) trait RunMachine: Sized + 'static {
 
     /// What tells it timer `id` has run out.
     fn timer_fired(id: u64) -> Self::Event;
+
+    /// What a claim of the audio for it plays from.
+    fn sound(live: &LiveRun<Self, Self::Own>) -> &TrainingSettings;
+
+    /// What its kind does with each claim of the audio it runs under, as
+    /// it starts and as it resumes.
+    fn watch(_ctx: AppCtx, _lease: &Lease) {}
+
+    /// What its kind does once it has resumed.
+    fn resumed(_ctx: AppCtx) {}
 
     /// What its kind does with `event`, come under `lease`, before the
     /// machine hears it: `event` to hear now, or none to hear nothing now.
@@ -122,6 +135,15 @@ pub(crate) trait RunMachine: Sized + 'static {
     }
 }
 
+/// The audio, claimed to play `sound`; or, if it cannot be had, a toast
+/// that says why, and none.
+pub(crate) fn claim(ctx: AppCtx, sound: &TrainingSettings) -> Option<Lease> {
+    let claimed = ctx.app().player.claim(sound);
+    claimed
+        .inspect_err(|err| ctx.toasts.show(err.to_string()))
+        .ok()
+}
+
 /// Whether what comes under `lease` reaches `live`, as its stage says
 /// ([`Stage::hears`]).
 pub(crate) fn hears<M: RunMachine>(live: &LiveRun<M, M::Own>, lease: &Lease) -> bool {
@@ -143,6 +165,43 @@ pub(crate) fn lease<M: RunMachine>(ctx: AppCtx) -> Option<Lease> {
         "what is live runs without the audio"
     );
     Some(live.lease.clone())
+}
+
+/// Hand what is live of kind `M` something the user did, under its lease.
+/// Nothing happens when nothing of that kind is live. Resume claims the
+/// audio first ([`resume`]).
+pub(crate) fn send<M: RunMachine>(ctx: AppCtx, event: M::Event) {
+    if event == M::RESUME {
+        resume::<M>(ctx);
+    } else if let Some(lease) = lease::<M>(ctx) {
+        dispatch::<M>(ctx, &lease, event);
+    }
+}
+
+/// Carry on after a pause. The audio a pause gave back is claimed afresh
+/// here, inside the tap on Resume, so the player opens — or, after the
+/// sound failed, is built anew — where a browser lets it start; what is
+/// live of kind `M` is Running again under the new claim, and its machine
+/// hears Resume. A claim that fails says why, and it stays Paused. What is
+/// not paused is left alone: a claim would cut its send from under it.
+pub(crate) fn resume<M: RunMachine>(ctx: AppCtx) {
+    let app = ctx.app();
+    let sound = match app.session.borrow().as_ref().and_then(M::of) {
+        Some(live) if live.stage == Stage::Paused => M::sound(live).clone(),
+        _ => return,
+    };
+    let Some(lease) = claim(ctx, &sound) else {
+        return;
+    };
+    if let Some(live) = app.session.borrow_mut().as_mut().and_then(M::of_mut)
+        && let Some(running) = live.stage.claimed()
+    {
+        live.lease = lease.clone();
+        live.stage = running;
+    }
+    dispatch::<M>(ctx, &lease, M::RESUME);
+    M::watch(ctx, &lease);
+    M::resumed(ctx);
 }
 
 /// Hand what is live of kind `M` `event`, come under `lease`: whatever its
