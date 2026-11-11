@@ -1742,4 +1742,28 @@ mod tests {
             }
         });
     }
+
+    /// A run whose turns were held up on their way, as a native stream
+    /// fallen behind the wall clock finds them, keeps its copies untimed,
+    /// each saying so, as a session's group says it.
+    #[test]
+    fn a_run_whose_turn_was_held_up_stores_its_copies_saying_so() {
+        run(|| async {
+            crate::time::pin_seeds(Some(7));
+            let mut h = Harness::with_settings(contest_settings());
+            h.set_behaviour(Behaviour::Late);
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            end(&mut h);
+            let (kept, log) = stored_last(&h);
+            assert_eq!(log.qsos.len(), 1);
+            assert_eq!(kept.groups.len(), 2, "the call and its number");
+            for timing in &kept.group_timings {
+                assert_eq!(
+                    (timing.char_times.clone(), timing.untimed),
+                    (None, Some(cw_core::Untimed::HeldUp))
+                );
+            }
+        });
+    }
 }

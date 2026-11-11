@@ -56,7 +56,9 @@ use crate::rulebook::rules::{
 };
 use crate::rulebook::{CallerHabits, MS_PER_MINUTE, RunStyle};
 use crate::score::MIN_RESPONSE_MS_PER_CHAR;
-use crate::session::{Answered, GroupResult, MonoMs, PauseWhy, SessionResult, SessionTiming};
+use crate::session::{
+    Answered, GroupResult, MonoMs, PauseWhy, SessionResult, SessionTiming, Untimed,
+};
 use crate::settings::{STATIONS_MAX, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
 use crate::timing::CharSpan;
 use crate::timing::{SEND_RELEASE_SEC, StationVoice};
@@ -588,7 +590,8 @@ struct Timed {
 }
 
 /// A group a QSO keeps, and the turn its timing comes from, if it is timed:
-/// a turn found late or retried takes that back ([`Kept::stored`]).
+/// a turn found late, skipped in part or retried takes that back, and says
+/// why ([`Kept::stored`]).
 #[derive(Clone, Debug, PartialEq)]
 struct Kept {
     group: GroupResult,
@@ -597,11 +600,16 @@ struct Kept {
 }
 
 impl Kept {
-    /// As the run keeps it: untimed where its sound's turn is `untrusted`.
-    fn stored(&self, untrusted: &[u64]) -> (GroupResult, SessionTiming) {
+    /// As the run keeps it: untimed where its sound's turn is `untrusted`,
+    /// saying why, as a session's group says it.
+    fn stored(&self, untrusted: &[(u64, Untimed)]) -> (GroupResult, SessionTiming) {
         let mut timing = self.timing.clone();
-        if self.heard_in.is_some_and(|turn| untrusted.contains(&turn)) {
+        let why = self
+            .heard_in
+            .and_then(|turn| untrusted.iter().find(|(id, _)| *id == turn));
+        if let Some((_, why)) = why {
             timing.char_times = None;
+            timing.untimed = Some(*why);
         }
         (self.group.clone(), timing)
     }
@@ -1271,9 +1279,10 @@ pub struct ContestMachine<S> {
     /// With Show copy on, what the stations sent in the turn last on the
     /// air, kept once it ends naturally, till the next turn or a pause.
     shown_last: Vec<ShownText>,
-    /// The turns whose sound nothing can be timed from: tried again, or
-    /// played late.
-    untrusted: Vec<u64>,
+    /// The turns whose sound nothing can be timed from, each with why:
+    /// tried again, or played late or skipped in part. The first reason
+    /// found is the one kept, as a session's group keeps it.
+    untrusted: Vec<(u64, Untimed)>,
     /// The hint has said this run that a station still sending never heard
     /// you ([`QsoState::unheard_by`]): it says so once.
     told_unheard: bool,
@@ -1495,7 +1504,7 @@ impl<S: CallSource> ContestMachine<S> {
                     air.output_from = output_from;
                     air.first_start.get_or_insert(heard_from);
                     if retried {
-                        self.untrust(id);
+                        self.untrust(id, Untimed::SentAgain);
                     }
                 }
                 return Vec::new();
@@ -1508,7 +1517,7 @@ impl<S: CallSource> ContestMachine<S> {
             // On the air or not, its QSOs logged or not: the run's groups
             // are read once it is kept.
             ContestEvent::TurnHeldUp { id } => {
-                self.untrust(id);
+                self.untrust(id, Untimed::HeldUp);
                 return Vec::new();
             }
             ContestEvent::TurnMissed {
@@ -1516,7 +1525,8 @@ impl<S: CallSource> ContestMachine<S> {
                 from_sec,
                 until_sec,
             } => {
-                self.untrust(id);
+                // A skip is held up, as a session hears one.
+                self.untrust(id, Untimed::HeldUp);
                 if self.on_air(id) {
                     self.missed(from_sec, until_sec);
                 }
@@ -1810,11 +1820,12 @@ impl<S: CallSource> ContestMachine<S> {
         self.air.as_ref().and_then(|air| air.retrying_until(now))
     }
 
-    /// Turn `id`'s sound went out otherwise than planned: nothing heard in
-    /// it is timed.
-    fn untrust(&mut self, id: u64) {
-        if !self.untrusted.contains(&id) {
-            self.untrusted.push(id);
+    /// Turn `id`'s sound went out otherwise than planned, as `why` says:
+    /// nothing heard in it is timed, and its copies say why. The first
+    /// reason found is the one kept.
+    fn untrust(&mut self, id: u64, why: Untimed) {
+        if !self.untrusted.iter().any(|(turn, _)| *turn == id) {
+            self.untrusted.push((id, why));
         }
     }
 
@@ -3565,10 +3576,12 @@ impl<S: CallSource> ContestMachine<S> {
         let heard_from = air.heard_from;
         let show_copy = self.settings.contest.contest_show_copy;
         let qsk = self.settings.contest.contest_qsk;
-        // What Show copy shows is read off the screen, and a turn tried
-        // again or played late went out otherwise than planned: neither
-        // times a copy.
-        let timeable = !show_copy && !self.untrusted.contains(&air.turn.id);
+        // What Show copy shows is read off the screen: it times no copy. A
+        // turn tried again, played late or skipped in part, which may be
+        // found so only after it is counted, times none either, but that
+        // is weighed as the run is kept, so its copies say why
+        // ([`Kept::stored`]).
+        let timeable = !show_copy;
         if upto.is_none_or(|upto| heard_run + whole_ms(air.checks_at_sec) <= upto) {
             let pending = std::mem::take(&mut air.pending);
             self.resolve(&pending, effects);
@@ -14277,7 +14290,9 @@ mod tests {
     }
 
     /// A turn whose sound was tried again, or played late, went out
-    /// otherwise than planned: nothing heard in it is timed.
+    /// otherwise than planned: nothing heard in it is timed, and its copies
+    /// say why, as a session's groups do, whenever in the turn that is
+    /// found: here played late is found as the turn ends.
     #[test]
     fn nothing_heard_in_a_turn_tried_again_or_played_late_is_timed() {
         // Tried again as it plays.
@@ -14289,9 +14304,16 @@ mod tests {
             heard_from: MonoMs(retried.now),
             output_from: MonoMs(retried.now),
         });
-        let (result, _) = worked_keying_along(&mut retried, 300);
-        assert_eq!(result.group_timings[0].char_times, None, "the call");
-        assert!(result.group_timings[1].char_times.is_some(), "the exchange");
+        let (worked, _) = worked_keying_along(&mut retried, 300);
+        let call = &worked.group_timings[0];
+        assert_eq!(
+            (call.char_times.clone(), call.untimed),
+            (None, Some(Untimed::SentAgain)),
+            "the call"
+        );
+        let exchange = &worked.group_timings[1];
+        assert!(exchange.char_times.is_some(), "the exchange");
+        assert_eq!(exchange.untimed, None, "the exchange");
 
         // Played late.
         let mut late = runtime(&["K5XYZ"]);
@@ -14301,12 +14323,30 @@ mod tests {
         late.now = end;
         late.apply(ContestEvent::TurnHeldUp { id: cq.id });
         late.apply(ContestEvent::TurnEnded { id: cq.id });
-        assert!(late.machine.untrusted.contains(&cq.id));
-        assert_eq!(late.machine.stations[0].heard.call_sounded, None);
+        assert_eq!(late.machine.untrusted, [(cq.id, Untimed::HeldUp)]);
+        // Its call typed once heard, and sent.
+        late.now += 300;
+        late.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(typed(&[(EntryField::Call, "K5XYZ", late.now)])),
+        });
+        let nr = serial(replies(late.last_turn())[0]);
+        late.finish_turn();
+        late.key(OpKey::Esm, "K5XYZ", &nr);
+        late.finish_turn();
+        late.now += 1_000;
+        late.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&late);
+        let call = &result.group_timings[0];
+        assert_eq!(
+            (call.char_times.clone(), call.untimed),
+            (None, Some(Untimed::HeldUp)),
+            "the call"
+        );
     }
 
     /// A group timed from a turn found late after it was logged is kept
-    /// untimed.
+    /// untimed, saying why: the first reason found for the turn.
     #[test]
     fn a_group_kept_from_a_turn_found_late_is_untimed() {
         let voice = your_voice(&run_settings(25.0), 25.0);
@@ -14329,7 +14369,13 @@ mod tests {
             }),
         );
         assert_eq!(kept.stored(&[]).1.char_times, Some(times));
-        assert_eq!(kept.stored(&[3, 7]).1.char_times, None);
+        assert_eq!(kept.stored(&[]).1.untimed, None);
+        let found = [(3, Untimed::HeldUp), (7, Untimed::SentAgain)];
+        let (_, timing) = kept.stored(&found);
+        assert_eq!(
+            (timing.char_times, timing.untimed),
+            (None, Some(Untimed::SentAgain))
+        );
     }
 
     /// What of a turn a browser fallen behind its clock skipped never
@@ -14361,7 +14407,13 @@ mod tests {
                     until_sec,
                 });
                 runtime.finish_turn();
-                assert!(runtime.machine.untrusted.contains(&cq.id), "{case}");
+                assert!(
+                    runtime
+                        .machine
+                        .untrusted
+                        .contains(&(cq.id, Untimed::HeldUp)),
+                    "{case}"
+                );
                 let heard = &runtime.machine.stations[0].heard;
                 assert_eq!(heard.call_begun, !skipped, "{case}");
                 assert_eq!(heard.call_ends.is_empty(), skipped, "{case}");
