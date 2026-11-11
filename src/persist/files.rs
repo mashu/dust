@@ -56,8 +56,11 @@ use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::progress::LoadProgress;
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unopened, Unreadable,
-    held_key, key_of, keyed, names_noted, not_told, read_record, taken_up, tombstone_at,
-    tombstone_key, unreadable,
+    held_key, key_of, names_noted, not_told, read_record, taken_up, unreadable,
+};
+use super::record_store::{
+    Raw, Reading, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of, deleted_sessions_of,
+    deletions_of, keys_of_tombstones, live_of, sort,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -432,35 +435,20 @@ impl HistoryFiles {
         }
         let size = read.iter().flatten().map(|(_, bytes)| *bytes).sum();
         self.size.store(size, Ordering::Relaxed);
-        let mut keys = self.keys.borrow_mut();
-        load.sessions.reserve(live.len());
-        // Each record that holds no session this build reads, with what it
-        // says of itself.
-        let mut unread = Vec::new();
-        for (id, read) in live.into_iter().zip(read) {
-            match read {
-                Some((Ok(session), _)) => {
-                    keys.insert(id, SessionKey::of(&session));
-                    load.sessions.push((id, session));
-                }
-                Some((Err(said), _)) => {
-                    // A later build's is there all the same: what an older
-                    // build stores of the session it says it holds is no
-                    // session to take up beside it. A damaged one holds
-                    // none ([`held_key`]).
-                    if let Some(key) = said.later_key() {
-                        keys.insert(id, key.clone());
-                        load.later.push((id, key.clone()));
-                    }
-                    load.unread.push(id);
-                    unread.push((id, said));
-                }
-                None => load.failed.push(id),
-            }
-        }
-        drop(keys);
+        // A later build's is there all the same: what an older build stores
+        // of the session it says it holds is no session to take up beside
+        // it. A damaged one holds none ([`held_key`]).
+        let read = live
+            .into_iter()
+            .zip(read)
+            .map(|(id, read)| (id, read.map(|(read, _)| read)));
+        let sorted = sort(read, &mut self.keys.borrow_mut());
         load.notices
-            .extend(self.tell(&unread, &load.failed, writable));
+            .extend(self.tell(&sorted.unread, &sorted.failed, writable));
+        load.sessions = sorted.sessions;
+        load.unread = sorted.unread.into_iter().map(|(id, _)| id).collect();
+        load.later = sorted.later;
+        load.failed = sorted.failed;
         // Nothing is taken up from an older build while a record here
         // cannot be read for now, nor a pack of them opened: it may hold a
         // session the older build holds too. A later look takes it up, once
@@ -469,10 +457,7 @@ impl HistoryFiles {
             && load.failed.is_empty()
             && !listing.skipped
         {
-            let mut live = keyed(load.sessions.iter().map(|(id, session)| (*id, session)));
-            for (id, key) in &load.later {
-                live.entry(key.clone()).or_default().push(*id);
-            }
+            let live = live_of(&load.sessions, &load.later);
             let taken = match &deleted_before {
                 Some(Ok(before)) => self.import(layout, &live, before),
                 Some(Err(err)) => {
@@ -841,20 +826,7 @@ impl HistoryFiles {
     /// One with no tombstone was not: missing is never deleted.
     pub(super) fn deletions(&self, ids: &[RecordId]) -> Option<Deletions> {
         self.on_its_thread();
-        let tombstones = self.tombstones();
-        let mut found = Vec::new();
-        for &id in ids {
-            let tombstone = tombstones.join(file_name(id));
-            match fs::symlink_metadata(&tombstone) {
-                Ok(_) => {
-                    let at = fs::read(&tombstone).ok().and_then(|raw| tombstone_at(&raw));
-                    found.push((id, at));
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(_) => return None,
-            }
-        }
-        Some(found)
+        self.tombstones_of(ids).map(deletions_of)
     }
 
     /// Which of `ids` were deleted by hand, each beside the session its
@@ -864,17 +836,19 @@ impl HistoryFiles {
     /// that would not read gave no word at all, of any of `ids`.
     pub(super) fn deleted_sessions(&self, ids: &[RecordId]) -> Option<Vec<(RecordId, SessionKey)>> {
         self.on_its_thread();
+        self.tombstones_of(ids).map(deleted_sessions_of)
+    }
+
+    /// The tombstone of each of `ids` that has one, and what it holds: none
+    /// where it is there but does not read. None where a tombstone could
+    /// not be looked for, as where their folder will not open.
+    fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
         let tombstones = self.tombstones();
         let mut found = Vec::new();
         for &id in ids {
             let tombstone = tombstones.join(file_name(id));
             match fs::symlink_metadata(&tombstone) {
-                Ok(_) => {
-                    let key = fs::read(&tombstone)
-                        .ok()
-                        .and_then(|raw| tombstone_key(&raw));
-                    found.extend(key.map(|key| (id, key)));
-                }
+                Ok(_) => found.push((id, fs::read(&tombstone).ok())),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(_) => return None,
             }
@@ -888,18 +862,9 @@ impl HistoryFiles {
     /// cannot be listed.
     pub(super) fn deleted_keys(&self, keys: &[SessionKey]) -> Option<Vec<SessionKey>> {
         self.on_its_thread();
-        let tombstones = self.tombstones();
-        let gone: HashSet<SessionKey> = ids_in(&tombstones)
-            .ok()?
-            .into_iter()
-            .filter_map(|id| tombstone_key(&fs::read(tombstones.join(file_name(id))).ok()?))
-            .collect();
-        Some(
-            keys.iter()
-                .filter(|key| gone.contains(key))
-                .cloned()
-                .collect(),
-        )
+        let tombstones = self.read_tombstones().ok()?;
+        let gone = keys_of_tombstones(&tombstones, Reading::Lenient).ok()?;
+        Some(deleted_keys_of(&gone, keys.iter().cloned()))
     }
 
     /// The gate `layout.json` sets. One that does not read is set aside
@@ -1213,7 +1178,7 @@ impl HistoryFiles {
         if here.is_empty() && gone.is_empty() {
             return Ok(moved);
         }
-        let gone_keys = self.tombstoned_keys()?;
+        let gone_keys = self.tombstoned_keys().map_err(io::Error::other)?;
         let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
         // What each record here under a name the move does not give holds:
         // a session that needs no record of the move's. One that cannot be
@@ -1237,23 +1202,32 @@ impl HistoryFiles {
         ))
     }
 
-    /// The key of every session deleted here that its tombstone names: an
-    /// error where the tombstones cannot be listed, or one of them is there
+    /// The key of every session deleted here that its tombstone names: why
+    /// not, where the tombstones cannot be listed, or one of them is there
     /// but cannot be read, as a folder in its place cannot, or one held
     /// open, as it may name a session to keep deleted. One that reads but
     /// names none, as an empty one, names none, and so does one gone since
     /// the tombstones were listed, as a put-back elsewhere takes one away.
-    fn tombstoned_keys(&self) -> io::Result<HashSet<SessionKey>> {
-        let mut keys = HashSet::new();
-        for id in ids_in(&self.tombstones())? {
-            let raw = match fs::read(self.tombstones().join(file_name(id))) {
-                Ok(raw) => raw,
+    fn tombstoned_keys(&self) -> Result<HashSet<SessionKey>, String> {
+        let tombstones = self.read_tombstones().map_err(|err| err.to_string())?;
+        keys_of_tombstones(&tombstones, Reading::Strict)
+    }
+
+    /// Every tombstone there is, and what it holds, or why it could not be
+    /// read just then ([`TombstoneRead::Failed`]): one gone since they were
+    /// listed is left out. An error where they cannot be listed.
+    fn read_tombstones(&self) -> io::Result<Vec<Tombstone>> {
+        let tombstones = self.tombstones();
+        let mut found = Vec::new();
+        for id in ids_in(&tombstones)? {
+            let read = match fs::read(tombstones.join(file_name(id))) {
+                Ok(raw) => TombstoneRead::Bytes(raw),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
+                Err(err) => TombstoneRead::Failed(err.to_string()),
             };
-            keys.extend(tombstone_key(&raw));
+            found.push(Tombstone { id: Some(id), read });
         }
-        Ok(keys)
+        Ok(found)
     }
 
     /// What to tell of `unread`, the records this build cannot read, each
@@ -1632,42 +1606,6 @@ impl Watch {
             packs: modified(&self.dir.join(PACKS)),
             tombstones: modified(&self.dir.join(TOMBSTONES)),
             legacy: fingerprint_of(&self.root.join(SESSIONS)).ok().flatten(),
-        }
-    }
-}
-
-/// What is stored of a record ([`raw_at`]).
-enum Raw {
-    /// Its text.
-    Text(String),
-    /// So many bytes that are no text, as damage to a disk leaves them: no
-    /// build reads them, now or later.
-    NoText(u64),
-    /// Nothing, for now: it could not be read just then.
-    Failed,
-}
-
-impl Raw {
-    /// What is stored, where it is text.
-    fn text(self) -> Option<String> {
-        match self {
-            Self::Text(raw) => Some(raw),
-            Self::NoText(_) | Self::Failed => None,
-        }
-    }
-
-    fn is_text(&self) -> bool {
-        matches!(self, Self::Text(_))
-    }
-
-    /// What a read of record `id` hands back of what is stored
-    /// ([`HistoryFiles::read`]): bytes that are no text are a damaged
-    /// record's, as the history read whole takes them ([`read_one`]).
-    fn record(self, id: RecordId) -> Result<Record, Unopened> {
-        match self {
-            Self::Text(json) => Ok(Record { id, json }),
-            Self::NoText(_) => Err(Unopened::Damaged(id)),
-            Self::Failed => Err(Unopened::Failed(id)),
         }
     }
 }
@@ -3416,10 +3354,7 @@ mod tests {
         // Listed, and gone as it is read: a link to nothing.
         let id = record(&finished(1_000)).id;
         std::os::unix::fs::symlink(dir.0.join("nothing"), tombstones.join(file_name(id))).unwrap();
-        assert_eq!(
-            files.tombstoned_keys().map_err(|err| err.kind()),
-            Ok(HashSet::new())
-        );
+        assert_eq!(files.tombstoned_keys(), Ok(HashSet::new()));
         let now = crate::time::now_ms();
         let old = finished(now - 10 * DAY);
         keep_whole(&dir, std::slice::from_ref(&old));

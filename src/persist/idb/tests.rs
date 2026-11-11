@@ -7,6 +7,8 @@ use std::ops::Bound;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
+use cw_core::SessionResult;
+
 use super::*;
 use crate::persist::tests::session;
 

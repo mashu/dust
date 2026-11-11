@@ -25,15 +25,16 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use cw_core::SessionResult;
-
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep_aside};
 use super::progress::LoadProgress;
 use super::record::{
     self, Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId,
-    Unreadable, key_of, keyed, names_noted, not_told, read_record, taken_up, tombstone_at,
-    tombstone_key, unreadable,
+    Unreadable, key_of, names_noted, not_told, read_record, taken_up, unreadable,
+};
+use super::record_store::{
+    Reading, Sorted, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of, deleted_sessions_of,
+    deletions_of, keys_of_tombstones, live_of, sort,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -253,12 +254,10 @@ enum Moving {
 /// The records of the database, read whole.
 #[derive(Default)]
 struct Read {
-    /// Every session that reads, by its record, in the order of the
-    /// history.
-    sessions: Vec<(RecordId, SessionResult)>,
-    /// Every record that does not, with what it says of itself: one that
-    /// holds no text says nothing, as damaged ([`unreadable`]).
-    unread: Vec<(RecordId, Unreadable)>,
+    /// Every record but those deleted, told apart, in the order of the
+    /// history: one that holds no text says nothing of itself, as damaged
+    /// ([`unreadable`]).
+    sorted: Sorted,
     /// What each record holds, as it is stored, where a move is to be made
     /// over them: one left beside its tombstone among them.
     raw: BTreeMap<RecordId, String>,
@@ -361,13 +360,13 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         let writable = self.writable.get();
         let moving = writable && layout.is_none();
         let tombstones = match self.glue.tombstones().await {
-            Ok(tombstones) => tombstones,
+            Ok(tombstones) => tombstones_in(tombstones),
             Err(_) if !writable => Vec::new(),
             Err(refusal) => return Err(refused(refusal)),
         };
         let gone: BTreeSet<RecordId> = tombstones
             .iter()
-            .filter_map(|(name, _)| RecordId::parse(name))
+            .filter_map(|tombstone| tombstone.id)
             .collect();
         let mut read = match self.read_all(&gone, moving).await {
             Ok(read) => read,
@@ -382,13 +381,11 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             // before the records name it by its key. By name the later read
             // alone says what is deleted: a record put back before the pages
             // were read is here, read with them.
-            let after = self.glue.tombstones().await.map_err(refused)?;
-            let gone: BTreeSet<RecordId> = after
-                .iter()
-                .filter_map(|(name, _)| RecordId::parse(name))
-                .collect();
-            let mut gone_keys = tombstoned_keys(&tombstones);
-            gone_keys.extend(tombstoned_keys(&after));
+            let after = tombstones_in(self.glue.tombstones().await.map_err(refused)?);
+            let gone: BTreeSet<RecordId> =
+                after.iter().filter_map(|tombstone| tombstone.id).collect();
+            let mut gone_keys = strict_keys(&tombstones).map_err(Moving::Refused)?;
+            gone_keys.extend(strict_keys(&after).map_err(Moving::Refused)?);
             let moved = self
                 .move_in(head.layout.as_deref(), &read, &gone, &gone_keys, &mut load)
                 .await?;
@@ -397,13 +394,14 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
                     put: records,
                     ..HistoryChange::default()
                 };
-                taken_up(&mut read.sessions, &change);
+                taken_up(&mut read.sorted.sessions, &change);
                 (layout, written)
             })
         } else {
             layout
         };
         let unread: Vec<(RecordId, Option<Unreadable>)> = read
+            .sorted
             .unread
             .iter()
             .map(|(id, said)| (*id, Some(said.clone())))
@@ -412,33 +410,22 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             .extend(self.tell(&unread, head.told.as_deref()).await);
         load.complete = layout.is_some();
         self.layout.replace(layout);
-        if load.complete {
+        let mut sorted = read.sorted;
+        if load.complete
+            && let Ok(before) = strict_keys(&tombstones)
+        {
             // A record a later build stored holds the session it says it
             // holds all the same: an older build's copy of that session is
             // no session to take up beside it. A damaged one holds none
             // ([`record::held_key`]).
-            let mut live = keyed(read.sessions.iter().map(|(id, session)| (*id, session)));
-            for (id, said) in &read.unread {
-                if let Some(key) = said.later_key() {
-                    live.entry(key.clone()).or_default().push(*id);
-                }
-            }
-            if let Some(change) = self
-                .import(Some((live, tombstoned_keys(&tombstones))))
-                .await
-            {
-                taken_up(&mut read.sessions, &change);
+            let live = live_of(&sorted.sessions, &sorted.later);
+            if let Some(change) = self.import(Some((live, before))).await {
+                taken_up(&mut sorted.sessions, &change);
             }
         }
-        load.sessions = read.sessions;
-        for (id, said) in read.unread {
-            if said.later
-                && let Some(key) = said.key
-            {
-                load.later.push((id, key));
-            }
-            load.unread.push(id);
-        }
+        load.sessions = sorted.sessions;
+        load.later = sorted.later;
+        load.unread = sorted.unread.into_iter().map(|(id, _)| id).collect();
         Ok(load)
     }
 
@@ -450,52 +437,36 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// A name that names no record is left alone. Each page read is counted
     /// ([`Self::progress`]).
     async fn read_all(&self, gone: &BTreeSet<RecordId>, keep: bool) -> Result<Read, Refused> {
-        let mut read = Read::default();
+        let mut records = Vec::new();
+        let mut raw = BTreeMap::new();
         let mut after = None;
         let mut so_far = 0;
         loop {
             let page = self.glue.page(after.clone(), PAGE).await?;
             let more = page.len() == PAGE;
             so_far += page.len() as u64;
-            {
-                let mut keys = self.session_keys.borrow_mut();
-                for (name, raw) in page {
-                    let id = RecordId::parse(&name);
-                    after = Some(name);
-                    let Some(id) = id else {
-                        continue;
-                    };
-                    if gone.contains(&id) {
-                        if keep && let Some(raw) = raw {
-                            read.raw.insert(id, raw);
-                        }
-                        continue;
-                    }
-                    match raw.as_deref().and_then(read_record) {
-                        Some(session) => {
-                            keys.insert(id, SessionKey::of(&session));
-                            read.sessions.push((id, session));
-                        }
-                        None => {
-                            let said = raw.as_deref().map(unreadable).unwrap_or_default();
-                            // A later build's is there all the same, as the
-                            // session it says it holds.
-                            if let Some(key) = said.later_key() {
-                                keys.insert(id, key.clone());
-                            }
-                            read.unread.push((id, said));
-                        }
-                    }
-                    if keep && let Some(raw) = raw {
-                        read.raw.insert(id, raw);
-                    }
+            for (name, held) in page {
+                let id = RecordId::parse(&name);
+                after = Some(name);
+                let Some(id) = id else {
+                    continue;
+                };
+                if !gone.contains(&id) {
+                    let session = held.as_deref().and_then(read_record);
+                    let said = || held.as_deref().map(unreadable).unwrap_or_default();
+                    records.push((id, Some(session.ok_or_else(said))));
+                }
+                if keep && let Some(held) = held {
+                    raw.insert(id, held);
                 }
             }
             self.progress.so_far(so_far);
             if !more {
-                return Ok(read);
+                break;
             }
         }
+        let sorted = sort(records, &mut self.session_keys.borrow_mut());
+        Ok(Read { sorted, raw })
     }
 
     /// Move the history kept whole in the page storage into the database,
@@ -629,11 +600,13 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         let (live, before) = match known {
             Some(known) => known,
             None => {
-                let before = tombstoned_keys(&self.glue.tombstones().await.ok()?);
+                let before = tombstones_in(self.glue.tombstones().await.ok()?);
+                let before = strict_keys(&before).ok()?;
                 (self.live_keys().await?, before)
             }
         };
-        let mut gone = tombstoned_keys(&self.glue.tombstones().await.ok()?);
+        let after = tombstones_in(self.glue.tombstones().await.ok()?);
+        let mut gone = strict_keys(&after).ok()?;
         gone.extend(before);
         let (change, next) =
             legacy::imported(&layout, fingerprint, &sessions, &deleted, &live, &gone)?;
@@ -825,25 +798,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// word that a record was not deleted. One with no tombstone was not:
     /// missing is never deleted.
     pub(super) async fn deletions(&self, ids: Vec<RecordId>) -> Option<Deletions> {
-        let names = ids.iter().map(|id| id.name()).collect();
-        let held: HashMap<String, Option<String>> = self
-            .glue
-            .tombstones_of(names)
-            .await
-            .ok()?
-            .into_iter()
-            .collect();
-        Some(
-            ids.into_iter()
-                .filter_map(|id| {
-                    let tombstone = held.get(&id.name())?;
-                    let at = tombstone
-                        .as_deref()
-                        .and_then(|raw| tombstone_at(raw.as_bytes()));
-                    Some((id, at))
-                })
-                .collect(),
-        )
+        self.tombstones_of(&ids).await.map(deletions_of)
     }
 
     /// Which of `ids` were deleted by hand, each beside the session its
@@ -853,6 +808,13 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         &self,
         ids: Vec<RecordId>,
     ) -> Option<Vec<(RecordId, SessionKey)>> {
+        self.tombstones_of(&ids).await.map(deleted_sessions_of)
+    }
+
+    /// The tombstone of each of `ids` that has one, and what it holds: none
+    /// where it holds no text. None where the tombstones cannot be looked
+    /// at.
+    async fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
         let names = ids.iter().map(|id| id.name()).collect();
         let held: HashMap<String, Option<String>> = self
             .glue
@@ -862,10 +824,10 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             .into_iter()
             .collect();
         Some(
-            ids.into_iter()
+            ids.iter()
                 .filter_map(|id| {
-                    let raw = held.get(&id.name())?.as_deref()?;
-                    Some((id, tombstone_key(raw.as_bytes())?))
+                    let raw = held.get(&id.name())?.clone();
+                    Some((*id, raw.map(String::into_bytes)))
                 })
                 .collect(),
         )
@@ -876,8 +838,9 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// no text, or names no session, is left out. None where the tombstones
     /// cannot be looked at.
     pub(super) async fn deleted_keys(&self, keys: Vec<SessionKey>) -> Option<Vec<SessionKey>> {
-        let gone = tombstoned_keys(&self.glue.tombstones().await.ok()?);
-        Some(keys.into_iter().filter(|key| gone.contains(key)).collect())
+        let tombstones = tombstones_in(self.glue.tombstones().await.ok()?);
+        let gone = keys_of_tombstones(&tombstones, Reading::Lenient).ok()?;
+        Some(deleted_keys_of(&gone, keys))
     }
 
     /// Which of `ids` were deleted by hand ([`Self::deletions`]): none,
@@ -1004,12 +967,25 @@ fn layout_text(layout: &Layout) -> Option<String> {
     String::from_utf8(layout.written().ok()?).ok()
 }
 
-/// The key of every session the tombstones name.
-fn tombstoned_keys(tombstones: &[(String, Option<String>)]) -> HashSet<SessionKey> {
-    tombstones
-        .iter()
-        .filter_map(|(_, raw)| tombstone_key(raw.as_deref()?.as_bytes()))
+/// The tombstones as the database holds them, each by the record its name
+/// names, if it names one: a value that is no text names no session.
+fn tombstones_in(stored: Stored) -> Vec<Tombstone> {
+    stored
+        .into_iter()
+        .map(|(name, raw)| Tombstone {
+            id: RecordId::parse(&name),
+            read: raw.map_or(TombstoneRead::NoText, |raw| {
+                TombstoneRead::Bytes(raw.into_bytes())
+            }),
+        })
         .collect()
+}
+
+/// The key of every session `tombstones` name, as what waits on the
+/// sessions deleted here reads them ([`Reading::Strict`]): none of them
+/// fails to read in a database, which reads them all, or none.
+fn strict_keys(tombstones: &[Tombstone]) -> Result<HashSet<SessionKey>, String> {
+    keys_of_tombstones(tombstones, Reading::Strict)
 }
 
 /// Every record here by its session's key.

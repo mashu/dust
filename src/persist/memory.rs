@@ -28,6 +28,10 @@ use super::record::{
     Unreadable, done, failed_for_now, key_of, read_record, records_for_blob, unread_notices,
     unreadable,
 };
+use super::record_store::{
+    Reading, RecordRead, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of,
+    deleted_sessions_of, deletions_of, keys_of_tombstones, sort,
+};
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Lock, LockHeld, Locking, MarkId,
     OpenSession, SessionKey, SetAside, Store, TakenMark, saved_as, saved_now,
@@ -628,41 +632,29 @@ impl Store for MemoryStore {
             load.notices.push(HistoryNotice::MovePending(why));
         }
         self.import(true);
-        let tombstones = self.tombstones.borrow();
-        let held_open = self.held_open.borrow();
-        let mut keys = self.keys.borrow_mut();
         // Each record that holds no session this build reads, with what it
         // says of itself; and each that could not be read at all, as one
         // held open cannot be.
-        let mut unread = Vec::new();
-        for (id, held) in self.records.borrow().iter() {
-            if tombstones.contains_key(id) {
-                continue;
-            }
-            if held_open.contains(id) {
-                load.failed.push(*id);
-                continue;
-            }
-            match held.session() {
-                Some(session) => {
-                    keys.insert(*id, SessionKey::of(&session));
-                    load.sessions.push((*id, session));
-                }
-                None => {
-                    let said = unreadable(&held.json);
-                    if said.later
-                        && let Some(key) = &said.key
-                    {
-                        keys.insert(*id, key.clone());
-                        load.later.push((*id, key.clone()));
-                    }
-                    load.unread.push(*id);
-                    unread.push((*id, said));
-                }
-            }
-        }
-        drop(keys);
-        load.notices.extend(self.tell(&unread, &load.failed));
+        let read: Vec<(RecordId, RecordRead)> = {
+            let (tombstones, held_open) = (self.tombstones.borrow(), self.held_open.borrow());
+            self.records
+                .borrow()
+                .iter()
+                .filter(|(id, _)| !tombstones.contains_key(id))
+                .map(|(id, held)| {
+                    let read = (!held_open.contains(id))
+                        .then(|| held.session().ok_or_else(|| unreadable(&held.json)));
+                    (*id, read)
+                })
+                .collect()
+        };
+        let sorted = sort(read, &mut self.keys.borrow_mut());
+        load.notices
+            .extend(self.tell(&sorted.unread, &sorted.failed));
+        load.sessions = sorted.sessions;
+        load.unread = sorted.unread.into_iter().map(|(id, _)| id).collect();
+        load.later = sorted.later;
+        load.failed = sorted.failed;
         // Complete once the move is made: until then, the sessions kept
         // whole are stored, though not here.
         load.complete = self.layout.borrow().is_some();
@@ -756,12 +748,7 @@ impl Store for MemoryStore {
         if self.deletions_unknown.get() {
             return done(None);
         }
-        let tombstones = self.tombstones.borrow();
-        done(Some(
-            ids.into_iter()
-                .filter_map(|id| Some((id, tombstones.get(&id)?.key())))
-                .collect(),
-        ))
+        done(Some(deleted_sessions_of(self.tombstones_of(&ids))))
     }
 
     fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>> {
@@ -771,15 +758,8 @@ impl Store for MemoryStore {
         if self.deletions_unknown.get() {
             return done(None);
         }
-        let gone: HashSet<SessionKey> = self
-            .tombstones
-            .borrow()
-            .values()
-            .map(Deleted::key)
-            .collect();
-        done(Some(
-            keys.into_iter().filter(|key| gone.contains(key)).collect(),
-        ))
+        let gone = keys_of_tombstones(&self.tombstones_read(), Reading::Lenient);
+        done(gone.ok().map(|gone| deleted_keys_of(&gone, keys)))
     }
 
     fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
@@ -882,6 +862,11 @@ impl Store for MemoryStore {
     fn sync_news(&self) -> Option<Pending<()>> {
         self.hears_news.get().then(|| next_news(&self.sync_news))
     }
+}
+
+/// What a tombstone holds, as it is written.
+fn written(deleted: &Deleted) -> Vec<u8> {
+    serde_json::to_vec(deleted).expect("a tombstone writes")
 }
 
 /// A wait that ends at the next word of `news` told after it began.
@@ -1031,12 +1016,29 @@ impl MemoryStore {
         if self.deletions_unknown.get() {
             return None;
         }
+        Some(deletions_of(self.tombstones_of(&ids)))
+    }
+
+    /// Of `ids`, those deleted by hand, each beside what its tombstone
+    /// holds, as a store reads it: what was written for it.
+    fn tombstones_of(&self, ids: &[RecordId]) -> TombstonesOf {
         let tombstones = self.tombstones.borrow();
-        Some(
-            ids.into_iter()
-                .filter_map(|id| Some((id, Some(tombstones.get(&id)?.at))))
-                .collect(),
-        )
+        ids.iter()
+            .filter_map(|id| Some((*id, Some(written(tombstones.get(id)?)))))
+            .collect()
+    }
+
+    /// Every tombstone, as a store reads them: each holds what was written
+    /// for it.
+    fn tombstones_read(&self) -> Vec<Tombstone> {
+        self.tombstones
+            .borrow()
+            .iter()
+            .map(|(id, deleted)| Tombstone {
+                id: Some(*id),
+                read: TombstoneRead::Bytes(written(deleted)),
+            })
+            .collect()
     }
 
     /// The records `ids`, as they are stored now: one that cannot be read
@@ -1382,7 +1384,7 @@ impl MemoryStore {
             }
             let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
             let gone: BTreeSet<RecordId> = tombstones.keys().copied().collect();
-            let gone_keys: HashSet<SessionKey> = tombstones.values().map(Deleted::key).collect();
+            let gone_keys = keys_of_tombstones(&self.tombstones_read(), Reading::Strict)?;
             let elsewhere = records
                 .iter()
                 .filter(|(id, _)| !names.contains(id))
@@ -1465,12 +1467,9 @@ impl MemoryStore {
                 }
             }
         }
-        let gone: HashSet<SessionKey> = self
-            .tombstones
-            .borrow()
-            .values()
-            .map(Deleted::key)
-            .collect();
+        let Ok(gone) = keys_of_tombstones(&self.tombstones_read(), Reading::Strict) else {
+            return;
+        };
         let Some((change, next)) = legacy::imported(
             &layout,
             self.fingerprint(),

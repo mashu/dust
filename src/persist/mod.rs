@@ -29,6 +29,7 @@ mod marks;
 pub mod memory;
 pub mod progress;
 pub mod record;
+mod record_store;
 mod saved;
 mod session;
 mod set_aside;
