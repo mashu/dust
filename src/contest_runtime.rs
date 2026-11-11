@@ -522,12 +522,12 @@ mod tests {
     use crate::audio::fake::{Behaviour, Call};
     use crate::persist::Store;
     use crate::persist::backup::{read_backup, write_backup};
-    use crate::testing::{Harness, contest_settings, run};
+    use crate::testing::{
+        Harness, contest_settings, copy_what_was_heard, press, quiet, run, type_into,
+    };
     use crate::time::POLL_MS;
     use cw_core::band::BandKey;
-    use cw_core::{
-        CharSetMode, ContestView, MONITOR_LEVEL, parse_callsign, plan_morse_playback_for,
-    };
+    use cw_core::{CharSetMode, ContestView, MONITOR_LEVEL, plan_morse_playback_for};
 
     impl LiveContest {
         /// The run's hold on the audio, for a test to end or to stop.
@@ -542,58 +542,6 @@ mod tests {
 
     fn phase(h: &Harness) -> Option<ContestPhase> {
         view(h).map(|view| view.phase)
-    }
-
-    /// Whether the run is on and nothing is on the air: the moment to key.
-    fn quiet(h: &Harness) -> bool {
-        view(h).is_some_and(|view| view.phase == ContestPhase::Running && view.air.is_none())
-    }
-
-    /// Press `key` the way the run screen's keys and buttons do.
-    fn press(h: &mut Harness, key: OpKey) {
-        let ctx = h.ctx;
-        h.in_app(|| press_key(ctx, key));
-        h.pump();
-    }
-
-    fn type_into(h: &mut Harness, field: EntryField, text: &str) {
-        let entry = h.ctx.entry;
-        h.in_app(|| entry.edit(field, text.to_string(), Some(MonoMs(mono_ms()))));
-    }
-
-    /// What the callers sent in the last turn, as the player was told it.
-    fn last_replies(h: &Harness) -> Vec<String> {
-        h.recorder
-            .starts()
-            .last()
-            .map(|start| {
-                start
-                    .transcript
-                    .others
-                    .iter()
-                    .map(|other| other.text.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Copy what the last turn's callers sent into the fields, as an
-    /// operator who hears every character would: a call, a call put right,
-    /// or an exchange's serial.
-    fn copy_what_was_heard(h: &mut Harness) {
-        for text in last_replies(h) {
-            let words: Vec<&str> = text.split_whitespace().collect();
-            match words.as_slice() {
-                ["DE", call] => type_into(h, EntryField::Call, call),
-                [one, two] if one == two => type_into(h, EntryField::Call, one),
-                [call] if parse_callsign(call).is_some() => type_into(h, EntryField::Call, call),
-                _ if words.contains(&"5NN") => {
-                    let serial = words.last().copied().unwrap_or_default();
-                    type_into(h, EntryField::Exchange, serial);
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Work the run as a perfect operator until it is over or `budget_ms`
@@ -1489,6 +1437,309 @@ mod tests {
             h.in_app(|| pause_run(ctx, PauseWhy::You));
             let again = h.ctx.announced.peek().clone().map(|said| said.serial);
             assert_ne!(first, again, "the same words, said again");
+        });
+    }
+
+    /// The run the store holds last, and its log.
+    fn stored_last(h: &Harness) -> (cw_core::SessionResult, cw_core::ContestRun) {
+        let kept = h.store.load_sessions().pop().expect("a run stored");
+        let log = kept
+            .contest
+            .as_ref()
+            .and_then(|log| log.run(kept.groups.len()))
+            .expect("its log");
+        (kept, log)
+    }
+
+    /// End the run as End run does.
+    fn end(h: &mut Harness) {
+        let ctx = h.ctx;
+        h.in_app(|| crate::session_runtime::finish_run(ctx));
+        h.pump();
+    }
+
+    /// Work the run on from one QSO logged until the next station has
+    /// taken the call sent to it, its exchange come: a second QSO open.
+    async fn open_a_second_qso(h: &mut Harness) {
+        let first = view(h)
+            .and_then(|view| view.log.first().map(|row| row.call.clone()))
+            .expect("a QSO logged");
+        let open = |h: &Harness| {
+            view(h).is_some_and(|view| {
+                view.qsos == 1 && view.qso.call_taken && view.qso.call_sent != first
+            })
+        };
+        let mut waited = 0;
+        while !open(h) {
+            assert!(waited < 30_000, "no second station took its call");
+            if quiet(h) {
+                copy_what_was_heard(h);
+                press(h, OpKey::Esm);
+            }
+            h.advance(u64::from(POLL_MS)).await;
+            waited += u64::from(POLL_MS);
+        }
+    }
+
+    /// A paused run's ticks change nothing: a gap between two of them is
+    /// found, but the run is paused already, as you paused it, and nothing
+    /// is said of it.
+    #[test]
+    fn a_paused_runs_ticks_change_nothing() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let ctx = h.ctx;
+            h.advance(500).await;
+            h.in_app(|| tick(ctx));
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            let said = h.ctx.announced.peek().clone();
+            assert_eq!(said.as_ref().map(|said| said.text.as_str()), Some("Paused"));
+            h.advance(5_000).await;
+            h.in_app(|| tick(ctx));
+            h.pump();
+            assert_eq!(phase(&h), Some(ContestPhase::Paused { why: PauseWhy::You }));
+            assert_eq!(*h.ctx.announced.peek(), said, "something was said");
+        });
+    }
+
+    /// A run held back before its screen first ticks, a phone frozen as it
+    /// started, runs on, the gap counted as run time: its gap check waits
+    /// for the first tick, where a session's is armed as it starts.
+    #[test]
+    fn a_run_held_back_before_its_first_tick_runs_on() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            let started = mono_ms();
+            h.start_training();
+            tokio::time::advance(std::time::Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+            h.pump();
+            let ctx = h.ctx;
+            h.in_app(|| tick(ctx));
+            let shown = view(&h).expect("a run");
+            assert_eq!(shown.phase, ContestPhase::Running);
+            let now = MonoMs(mono_ms());
+            let clock = shown.clock.expect("running");
+            assert_eq!(clock.peek_ms(now), now.0 - started, "the gap is run time");
+            assert_eq!(clock.paused_ms(now), 0);
+        });
+    }
+
+    /// Keys pressed while every task is held back do not keep a run seen,
+    /// as a session's news keeps it: only its screen's ticks do, so a gap
+    /// between two ticks pauses it from the first, keys or not.
+    #[test]
+    fn keys_do_not_keep_a_run_seen_between_ticks() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let ctx = h.ctx;
+            h.advance(500).await;
+            h.in_app(|| tick(ctx));
+            let ticked = mono_ms();
+            for _ in 0..2 {
+                tokio::time::advance(std::time::Duration::from_millis(1_500)).await;
+                tokio::task::yield_now().await;
+                h.in_app(|| change_speed(ctx, 2));
+            }
+            let shown = view(&h).expect("a run");
+            assert_eq!(
+                shown.phase,
+                ContestPhase::Paused {
+                    why: PauseWhy::Hidden
+                }
+            );
+            let now = MonoMs(mono_ms());
+            let clock = shown.clock.expect("running");
+            assert_eq!(clock.paused_ms(now), now.0 - ticked, "paused from the tick");
+        });
+    }
+
+    /// End run while paused keeps the run, as it would running.
+    #[test]
+    fn ending_a_paused_run_keeps_it() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            assert!(!h.lease().is_current());
+            end(&mut h);
+            assert_eq!(h.screen(), Screen::Results);
+            assert!(
+                h.ctx
+                    .result
+                    .peek()
+                    .clone()
+                    .and_then(Finished::kept)
+                    .is_some()
+            );
+            let (_, log) = stored_last(&h);
+            assert_eq!(log.qsos.len(), 1);
+            assert_eq!(h.store.load_sessions().len(), 1);
+        });
+    }
+
+    /// News under an earlier run's lease never reaches a paused run, nor
+    /// the copies it keeps: told that every turn of the run before was held
+    /// up, the run keeps its copies timed.
+    #[test]
+    fn news_of_an_earlier_run_never_reaches_a_paused_run() {
+        run(|| async {
+            crate::time::pin_seeds(Some(7));
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let older = h.lease();
+            let ctx = h.ctx;
+            h.in_app(|| crate::session_runtime::abort_run(ctx));
+            h.pump();
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            let writes = h.count_writes(h.ctx.contest);
+            h.in_app(|| {
+                for id in 1..=200 {
+                    dispatch(ctx, &older, ContestEvent::TurnHeldUp { id });
+                }
+            });
+            h.pump();
+            assert_eq!(
+                writes.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "an earlier run's news was published"
+            );
+            h.in_app(|| resume_run(ctx));
+            h.pump();
+            end(&mut h);
+            let (kept, _) = stored_last(&h);
+            assert!(
+                kept.group_timings
+                    .iter()
+                    .all(|timing| timing.char_times.is_some() && timing.untimed.is_none()),
+                "{:?}",
+                kept.group_timings
+            );
+        });
+    }
+
+    /// The owner's first rule: a QSO worked with no pause, every turn of it
+    /// played out as planned, keeps its copies' times, and says of none
+    /// why it has none.
+    #[test]
+    fn a_qso_logged_with_no_pause_is_stored_timed() {
+        run(|| async {
+            crate::time::pin_seeds(Some(7));
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            end(&mut h);
+            let (kept, log) = stored_last(&h);
+            assert_eq!(log.qsos.len(), 1);
+            assert_eq!(kept.groups.len(), 2, "the call and its number");
+            assert!(
+                kept.group_timings
+                    .iter()
+                    .all(|timing| timing.char_times.is_some() && timing.untimed.is_none()),
+                "{:?}",
+                kept.group_timings
+            );
+        });
+    }
+
+    /// The owner's third rule, at End: a run ended while paused with a QSO
+    /// open keeps that QSO, as lost, beside the one logged.
+    #[test]
+    fn ending_a_run_paused_mid_qso_keeps_that_qso_as_lost() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            open_a_second_qso(&mut h).await;
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            end(&mut h);
+            let (_, log) = stored_last(&h);
+            let kinds: Vec<&str> = log.qsos.iter().map(|qso| qso.k.as_str()).collect();
+            assert_eq!(kinds, ["", "lost"]);
+        });
+    }
+
+    /// The owner's fourth rule: a pause and Resume change no QSO logged
+    /// before the pause, its record or its groups, field for field and
+    /// time for time, against what the mark held of it before the pause:
+    /// paused by Back, by the page going out of sight, or by a gap the app
+    /// was not running in.
+    #[test]
+    fn resuming_a_run_changes_no_qso_logged_before_its_pause() {
+        run(|| async {
+            for way in ["Back", "the page hidden", "a gap away"] {
+                let mut h = Harness::with_settings(contest_settings());
+                h.start_training();
+                work(&mut h, 60_000, Some(1)).await;
+                let checked = |h: &Harness| {
+                    view(h).is_some_and(|view| {
+                        view.log
+                            .first()
+                            .is_some_and(|row| matches!(row.status, cw_core::RowStatus::Checked(_)))
+                    })
+                };
+                assert!(h.run_until(15_000, checked).await, "{way}");
+                let before = h
+                    .store
+                    .open()
+                    .and_then(|open| open.so_far)
+                    .expect("the QSO with the mark")
+                    .result;
+                let before_log = before
+                    .contest
+                    .as_ref()
+                    .and_then(|log| log.run(before.groups.len()))
+                    .expect("its log");
+                let owned = before_log.qsos[0].g as usize;
+                let ctx = h.ctx;
+                match way {
+                    "Back" => assert!(h.in_app(|| crate::session_runtime::hold_run(ctx)), "{way}"),
+                    "the page hidden" => {
+                        h.set_page_hidden(true);
+                        h.advance(u64::from(POLL_MS)).await;
+                        h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
+                    }
+                    _ => {
+                        h.in_app(|| tick(ctx));
+                        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+                        tokio::task::yield_now().await;
+                        h.pump();
+                        h.in_app(|| tick(ctx));
+                    }
+                }
+                h.pump();
+                assert!(
+                    matches!(phase(&h), Some(ContestPhase::Paused { .. })),
+                    "{way}: {:?}",
+                    phase(&h)
+                );
+                h.advance(5_000).await;
+                h.set_page_hidden(false);
+                h.in_app(|| resume_run(ctx));
+                h.pump();
+                work(&mut h, 60_000, Some(2)).await;
+                end(&mut h);
+                let (kept, log) = stored_last(&h);
+                assert!(log.qsos.len() >= 2, "{way}: {:?}", log.qsos);
+                assert_eq!(log.qsos[0], before_log.qsos[0], "{way}");
+                assert_eq!(kept.groups[..owned], before.groups[..owned], "{way}");
+                assert_eq!(
+                    kept.group_timings[..owned],
+                    before.group_timings[..owned],
+                    "{way}"
+                );
+            }
         });
     }
 }

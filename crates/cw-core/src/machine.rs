@@ -1167,7 +1167,7 @@ mod tests {
     /// A pause in the answer window is no time spent answering: the group is
     /// timed from its end as if the pause had not been, and its characters,
     /// keyed either side of the pause, are not timed against when they
-    /// ended.
+    /// ended. The group says the pause is why.
     #[test]
     fn a_pause_in_the_answer_window_is_not_answering_time() {
         let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
@@ -1195,6 +1195,7 @@ mod tests {
             timing.time_to_complete_ms
         );
         assert_eq!(timing.char_times, None, "timed across the pause");
+        assert_eq!(timing.untimed, Some(Untimed::Paused), "and says so");
     }
 
     /// `KMR` sent from 0 and heard in full by 800, as the pause tests hear it.
@@ -1215,7 +1216,8 @@ mod tests {
 
     /// End session while paused in the answer window takes the pause off the
     /// answer's time, as Resume does: the group was timed at the whole
-    /// pause, ten minutes here, and scored as answered that slowly.
+    /// pause, ten minutes here, and scored as answered that slowly. Its
+    /// characters are not timed, and it says the pause is why.
     #[test]
     fn ending_a_session_paused_in_the_answer_window_is_not_answering_time() {
         let mut m = heard_kmr();
@@ -1231,6 +1233,7 @@ mod tests {
             timing.time_to_complete_ms
         );
         assert_eq!(timing.char_times, None, "timed across the pause");
+        assert_eq!(timing.untimed, Some(Untimed::Paused), "and says so");
     }
 
     /// An answer complete when paused and corrected after it is timed from

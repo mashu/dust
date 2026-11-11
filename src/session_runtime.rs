@@ -2738,4 +2738,288 @@ mod tests {
             assert_eq!(h.ctx.sessions.peek().len(), 41);
         });
     }
+
+    /// The session the store holds last.
+    fn stored_last(h: &Harness) -> cw_core::SessionResult {
+        h.store.load_sessions().pop().expect("a session stored")
+    }
+
+    /// Group `index` answered with what was sent, keyed now, and Enter.
+    fn answer_keyed(h: &mut Harness, index: usize) {
+        let sent = h.sent(index);
+        h.ctx.answer.hold(index, sent, Some(MonoMs(mono_ms())));
+        h.send(SessionEvent::Confirm);
+    }
+
+    /// A session held back from its start, before its heartbeat first
+    /// beats, a phone frozen as the session started, is paused from its
+    /// start: its gap check is armed as it starts, where a run's waits for
+    /// its screen's first tick.
+    #[test]
+    fn a_session_held_back_before_its_first_beat_pauses_from_its_start() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.countdown_sec = 3;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert_eq!(h.phase(), Some(SessionPhase::Countdown { remaining: 3 }));
+            tokio::time::advance(std::time::Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+            h.pump();
+            assert_eq!(
+                h.phase(),
+                Some(SessionPhase::Paused {
+                    index: 0,
+                    why: cw_core::PauseWhy::Hidden
+                })
+            );
+            assert!(h.texts().is_empty(), "sent: {:?}", h.texts());
+        });
+    }
+
+    /// What a session hears keeps it seen, as its heartbeat does: taps a
+    /// webview takes while every task is held back, each within the gap of
+    /// the one before, leave it running however long its heartbeat waits.
+    #[test]
+    fn news_keeps_a_session_seen_between_beats() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let ctx = h.ctx;
+            for typed in ["K", "KM"] {
+                tokio::time::advance(std::time::Duration::from_millis(1_500)).await;
+                tokio::task::yield_now().await;
+                let input = SessionEvent::Input {
+                    index: 0,
+                    text: typed.into(),
+                    keys: Default::default(),
+                };
+                h.in_app(|| send_event(ctx, input));
+            }
+            h.pump();
+            assert!(
+                !matches!(h.phase(), Some(SessionPhase::Paused { .. })),
+                "{:?}",
+                h.phase()
+            );
+        });
+    }
+
+    /// A paused session still hears what comes under the lease its pause
+    /// gave back: the news that the send the pause cut short was held up
+    /// on its way untimes its group for that, the first reason found, where
+    /// without it the group says only that it was paused.
+    #[test]
+    fn a_paused_session_hears_the_news_of_its_own_sends() {
+        run(|| async {
+            for told in [false, true] {
+                let mut settings = test_settings();
+                settings.curriculum.num_groups = 1;
+                let mut h = Harness::with_settings(settings);
+                h.start_training();
+                h.advance(100).await;
+                let cut = h.lease();
+                h.send(SessionEvent::Pause);
+                assert!(!cut.is_current(), "{told}");
+                if told {
+                    let ctx = h.ctx;
+                    h.in_app(|| dispatch(ctx, &cut, SessionEvent::PlaybackHeldUp { index: 0 }));
+                    h.pump();
+                }
+                h.send(SessionEvent::Resume);
+                assert!(
+                    h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await,
+                    "{told}"
+                );
+                answer_keyed(&mut h, 0);
+                assert!(h.run_until(1_000, |h| h.screen() == Screen::Results).await);
+                let timing = stored_last(&h).group_timings[0].clone();
+                let said = if told {
+                    cw_core::Untimed::HeldUp
+                } else {
+                    cw_core::Untimed::Paused
+                };
+                assert_eq!((timing.char_times, timing.untimed), (None, Some(said)));
+            }
+        });
+    }
+
+    /// The owner's first rule: a group answered with no pause between its
+    /// first send starting and its answer, its sound gone out as planned,
+    /// is stored with its characters' times, and with no reason it has
+    /// none.
+    #[test]
+    fn a_group_answered_with_no_pause_is_stored_timed() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.min_group_size = 1;
+            settings.curriculum.max_group_size = 1;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            for index in 0..2 {
+                assert!(
+                    h.run_until(4_000, |h| h.awaiting_answer() == Some(index))
+                        .await
+                );
+                h.advance(300).await;
+                answer_keyed(&mut h, index);
+            }
+            assert!(h.run_until(1_000, |h| h.screen() == Screen::Results).await);
+            let stored = stored_last(&h);
+            assert_eq!(stored.groups.len(), 2);
+            for timing in &stored.group_timings {
+                assert!(
+                    timing.char_times.is_some() && timing.untimed.is_none(),
+                    "{timing:?}"
+                );
+            }
+        });
+    }
+
+    /// The owner's second rule, after Resume: a group whose send the page
+    /// going out of sight cut short, typed along it, is stored with no
+    /// times and says it was paused, its answer timed with the pause left
+    /// out.
+    #[test]
+    fn a_session_hidden_mid_group_and_resumed_stores_the_group_as_paused() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            settings.playback.lock_input_during_group_playback = false;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(
+                h.run_until(4_000, |h| !h.recorder.starts().is_empty())
+                    .await
+            );
+            let started = h.recorder.starts()[0].clone();
+            let span = &started.plan.wanted.chars[0];
+            let first_end = started.at.0 + (span.end_sec * 1_000.0).round() as u64;
+            h.advance(first_end + 50 - mono_ms()).await;
+            let sent = h.sent(0);
+            let first: String = sent.chars().take(1).collect();
+            h.ctx.answer.hold(0, first.clone(), Some(MonoMs(mono_ms())));
+            h.send(SessionEvent::Pause);
+            assert_eq!(
+                h.phase(),
+                Some(SessionPhase::Paused {
+                    index: 0,
+                    why: cw_core::PauseWhy::Hidden
+                })
+            );
+            assert_eq!(input_of(&h, 0), Some(first), "what was typed is kept");
+            h.advance(10_000).await;
+            h.send(SessionEvent::Resume);
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            answer_keyed(&mut h, 0);
+            assert!(h.run_until(1_000, |h| h.screen() == Screen::Results).await);
+            let timing = stored_last(&h).group_timings[0].clone();
+            assert_eq!(
+                (timing.char_times, timing.untimed),
+                (None, Some(cw_core::Untimed::Paused))
+            );
+            assert!(
+                timing.time_to_complete_ms < 2_000.0,
+                "the pause counted as answering: {} ms",
+                timing.time_to_complete_ms
+            );
+        });
+    }
+
+    /// The owner's third rule, at End: a session ended while paused with
+    /// its group's answer begun keeps that group as it stood, untimed and
+    /// said to be paused; a group nobody began is not kept.
+    #[test]
+    fn ending_a_session_paused_mid_group_keeps_the_group_begun() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(1)).await);
+            let begun: String = h.sent(1).chars().take(1).collect();
+            h.type_answer(1, &begun);
+            h.send(SessionEvent::Pause);
+            h.send(SessionEvent::FinishNow);
+            assert_eq!(h.screen(), Screen::Results);
+            let stored = stored_last(&h);
+            assert_eq!(stored.groups.len(), 2, "{:?}", stored.groups);
+            assert_eq!(stored.groups[1].received, begun);
+            let timing = &stored.group_timings[1];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(cw_core::Untimed::Paused))
+            );
+        });
+    }
+
+    /// The owner's fourth rule: a pause and Resume change no group answered
+    /// before the pause, field for field and time for time, against what
+    /// the mark held of it before the pause: paused by Back, by the page
+    /// going out of sight, or by a gap the app was not running in.
+    #[test]
+    fn resuming_a_session_changes_no_group_answered_before_its_pause() {
+        run(|| async {
+            for way in ["Back", "the page hidden", "a gap away"] {
+                let mut settings = test_settings();
+                settings.curriculum.num_groups = 3;
+                settings.curriculum.min_group_size = 1;
+                settings.curriculum.max_group_size = 1;
+                let mut h = Harness::with_settings(settings);
+                h.start_training();
+                assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+                h.advance(300).await;
+                answer_keyed(&mut h, 0);
+                let before = h
+                    .store
+                    .open()
+                    .and_then(|open| open.so_far)
+                    .expect("group 0 with the mark")
+                    .result;
+                assert_eq!(before.groups.len(), 1, "{way}");
+                assert!(
+                    before.group_timings[0].char_times.is_some(),
+                    "{way}: {:?}",
+                    before.group_timings
+                );
+                assert!(
+                    h.run_until(4_000, |h| h.phase()
+                        == Some(SessionPhase::Playing { index: 1 }))
+                        .await,
+                    "{way}"
+                );
+                h.advance(20).await;
+                let ctx = h.ctx;
+                match way {
+                    "Back" => {
+                        assert!(h.in_app(|| hold_run(ctx)), "{way}");
+                        h.pump();
+                    }
+                    "the page hidden" => h.send(SessionEvent::Pause),
+                    _ => {
+                        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+                        tokio::task::yield_now().await;
+                        h.pump();
+                    }
+                }
+                assert!(
+                    matches!(h.phase(), Some(SessionPhase::Paused { index: 1, .. })),
+                    "{way}: {:?}",
+                    h.phase()
+                );
+                h.advance(5_000).await;
+                h.send(SessionEvent::Resume);
+                h.play_through(60_000).await;
+                assert_eq!(h.screen(), Screen::Results, "{way}");
+                let kept = stored_last(&h);
+                assert_eq!(kept.groups.len(), 3, "{way}");
+                assert_eq!(kept.groups[..1], before.groups[..], "{way}");
+                assert_eq!(kept.group_timings[..1], before.group_timings[..], "{way}");
+            }
+        });
+    }
 }
