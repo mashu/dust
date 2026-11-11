@@ -59,6 +59,7 @@ use super::record::{
     held_key, key_of, read_record, taken_up, unreadable,
 };
 use super::record_store::notes::{self, Note};
+use super::record_store::steps::{Steps, There, make_steps, place};
 use super::record_store::{
     Raw, Reading, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of, deleted_sessions_of,
     deletions_of, keys_of_tombstones, live_of, sort,
@@ -130,10 +131,6 @@ const JOURNAL_PREFIX: &str = "restoring-";
 /// How old a temporary file a write left behind has to be to be cleared:
 /// far older than any write takes, so none still being written goes.
 const OLD_TEMPORARY: Duration = Duration::from_secs(60 * 60);
-
-/// How many names past its own a record is tried under, where other bytes
-/// have its name already ([`RecordId::bumped`]).
-const BUMPS: u64 = 64;
 
 /// How many records it takes for the history to be read on more than one
 /// thread as it loads ([`read_each`]): fewer are read as fast on one.
@@ -520,98 +517,34 @@ impl HistoryFiles {
     }
 
     fn make(&self, change: &HistoryChange) -> io::Result<()> {
-        let (records, tombstones) = (self.records(), self.tombstones());
-        for &id in &change.unforget {
-            remove_if_there(&tombstones.join(file_name(id)))?;
-        }
-        if !change.unforget.is_empty() {
-            sync_if_there(&tombstones)?;
-        }
-        let undone: HashSet<RecordId> = change.unforget.iter().copied().collect();
-        for record in &change.put {
-            let undoing = undone.contains(&record.id);
-            // One deleted already stays deleted, unless this change undoes
-            // that.
-            if !undoing && tombstones.join(file_name(record.id)).exists() {
-                continue;
-            }
-            // One put back whose record was never taken away, as a deletion
-            // whose record would not go leaves it (below), is back as it
-            // was stored, by its own name: not stored a second time beside
-            // itself, where this build writes it otherwise.
-            let id = if undoing && records.join(file_name(record.id)).exists() {
-                record.id
-            } else {
-                self.place_record(record)?
-            };
-            if let Some(key) = key_of(&record.json) {
-                self.keys.borrow_mut().insert(id, key);
+        let forget = tombstones_of_change(change)?;
+        let forget: Vec<(RecordId, &str)> = forget
+            .iter()
+            .map(|(id, held)| (*id, held.as_str()))
+            .collect();
+        let (placed, made) = make_steps(&self.folders(), &change.put, &forget, &change.unforget);
+        let mut keys = self.keys.borrow_mut();
+        for (record, id) in change.put.iter().zip(placed) {
+            if let Some(id) = id
+                && let Some(key) = key_of(&record.json)
+            {
+                keys.insert(id, key);
             }
         }
-        if !change.put.is_empty() {
-            sync_if_there(&records)?;
-        }
-        if change.forget.is_empty() {
-            return Ok(());
-        }
-        // The tombstones are the deletion: none of them stays unless all
-        // of them do.
-        let mut placed = Vec::new();
-        let marked = (|| {
-            for (id, deleted) in &change.forget {
-                let name = file_name(*id);
-                // One there already may hold what a later build added to
-                // it.
-                if !tombstones.join(&name).exists() {
-                    place_whole(&tombstones, &name, &serde_json::to_vec(deleted)?)?;
-                    placed.push(name);
-                }
-            }
-            sync_dir(&tombstones)
-        })();
-        if let Err(err) = marked {
-            for name in placed {
-                let _ = fs::remove_file(tombstones.join(name));
-            }
-            let _ = sync_if_there(&tombstones);
-            return Err(err);
-        }
-        // Made, from here: a record beside its tombstone reads as deleted,
-        // and the next read takes it away ([`Self::load`]). So a record
-        // that will not go now, as one held open elsewhere will not on
-        // Windows, leaves the change made, and says so; were it told of as
-        // failed, the app would show the session as kept, with nothing to
-        // undo, until the next read took it away.
+        made?;
         for (id, _) in &change.forget {
-            let path = records.join(file_name(*id));
-            let held = fs::metadata(&path).map_or(0, |meta| meta.len());
-            match remove_if_there(&path) {
-                Ok(()) => self.shrunk(held),
-                Err(err) => {
-                    eprintln!("a deleted session's record stays until the next read: {err}");
-                }
-            }
-            self.keys.borrow_mut().remove(id);
-        }
-        if let Err(err) = sync_if_there(&records) {
-            eprintln!("could not make the deleted sessions' going durable: {err}");
+            keys.remove(id);
         }
         Ok(())
     }
 
-    /// Store `record` under its name, or, where other bytes have that name
-    /// already, the next free one: no record is ever written over. The
-    /// name it is stored under.
-    fn place_record(&self, record: &Record) -> io::Result<RecordId> {
-        place(&self.records(), record, &self.size)
-    }
-
-    /// `bytes` fewer stored, as a record goes: never fewer than none.
-    fn shrunk(&self, bytes: u64) {
-        self.size
-            .update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-                held.saturating_sub(bytes)
-            });
+    /// The history's folders, as a change is made in them, step by step.
+    fn folders(&self) -> Folders<'_> {
+        Folders {
+            records: self.records(),
+            tombstones: self.tombstones(),
+            size: &self.size,
+        }
     }
 
     /// Every record there is, deleted ones left out, once whatever an older
@@ -1062,8 +995,7 @@ impl HistoryFiles {
         );
         let moving = self.not_moved_yet(records).map_err(|err| err.to_string())?;
         self.progress.moving(Some(moving.len() as u64));
-        place_each(&self.records(), &moving, &self.size, &self.progress)
-            .map_err(|err| err.to_string())?;
+        place_each(&self.folders(), &moving, &self.progress).map_err(|err| err.to_string())?;
         sync_if_there(&self.records()).map_err(|err| err.to_string())?;
         layout
             .written()
@@ -1550,35 +1482,122 @@ fn read_each(
     })
 }
 
-/// Store `record` in `records` under its name, or, where other bytes have
-/// that name already, the next free one of the [`BUMPS`] past it: no record
-/// is ever written over.
-/// The name it is stored under, and its bytes counted in `size` where they
-/// were written.
-fn place(records: &Path, record: &Record, size: &AtomicU64) -> io::Result<RecordId> {
-    let mut id = record.id;
-    // Its own name, and each of the BUMPS past it, as the page script tries
-    // them.
-    for _ in 0..=BUMPS {
-        let name = file_name(id);
-        match fs::read(records.join(&name)) {
-            Ok(held) if held == record.json.as_bytes() => return Ok(id),
-            Ok(_) => id = id.bumped(),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                place_whole(records, &name, record.json.as_bytes())?;
-                size.fetch_add(record.json.len() as u64, Ordering::Relaxed);
-                return Ok(id);
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(io::Error::other(format!(
-        "no name was free for the session stored as {}",
-        record.id
-    )))
+/// The history's folders, as a change is made in them step by step
+/// ([`make_steps`]), and as the move stores its records, on as many threads
+/// at once as it takes ([`place_each`]), `size` counting what they hold.
+struct Folders<'a> {
+    records: PathBuf,
+    tombstones: PathBuf,
+    size: &'a AtomicU64,
 }
 
-/// Store each of `records` in `dir` ([`place`]), each counted in `progress`
+impl Steps for Folders<'_> {
+    type Error = io::Error;
+
+    fn tombstoned(&self, id: RecordId) -> bool {
+        self.tombstones.join(file_name(id)).exists()
+    }
+
+    fn holds(&self, id: RecordId) -> bool {
+        self.records.join(file_name(id)).exists()
+    }
+
+    fn there(&self, id: RecordId, json: &str) -> io::Result<There> {
+        match fs::read(self.records.join(file_name(id))) {
+            Ok(held) if held == json.as_bytes() => Ok(There::Same),
+            Ok(_) => Ok(There::Other),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(There::Free),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Stored whole, and counted in what the history holds.
+    fn add(&self, id: RecordId, json: &str) -> io::Result<()> {
+        place_whole(&self.records, &file_name(id), json.as_bytes())?;
+        self.size.fetch_add(json.len() as u64, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn no_name_free(&self, id: RecordId) -> io::Error {
+        io::Error::other(format!("no name was free for the session stored as {id}"))
+    }
+
+    fn unforget(&self, ids: &[RecordId]) -> io::Result<()> {
+        for &id in ids {
+            remove_if_there(&self.tombstones.join(file_name(id)))?;
+        }
+        if !ids.is_empty() {
+            sync_if_there(&self.tombstones)?;
+        }
+        Ok(())
+    }
+
+    fn records_durable(&self) -> io::Result<()> {
+        sync_if_there(&self.records)
+    }
+
+    fn tombstone(&self, new: &[(RecordId, &str)]) -> io::Result<()> {
+        let mut placed = Vec::new();
+        let marked = (|| {
+            for (id, held) in new {
+                let name = file_name(*id);
+                place_whole(&self.tombstones, &name, held.as_bytes())?;
+                placed.push(name);
+            }
+            sync_dir(&self.tombstones)
+        })();
+        if let Err(err) = marked {
+            for name in placed {
+                let _ = fs::remove_file(self.tombstones.join(name));
+            }
+            let _ = sync_if_there(&self.tombstones);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// A record beside its tombstone reads as deleted, and the next read
+    /// takes it away ([`HistoryFiles::load`]). So a record that will not go
+    /// now, as one held open elsewhere will not on Windows, leaves the
+    /// change made; were it told of as failed, the app would show the
+    /// session as kept, with nothing to undo, until the next read took it
+    /// away.
+    fn unlink(&self, ids: &[RecordId]) {
+        for &id in ids {
+            let path = self.records.join(file_name(id));
+            let held = fs::metadata(&path).map_or(0, |meta| meta.len());
+            match remove_if_there(&path) {
+                Ok(()) => {
+                    // Never fewer than none.
+                    self.size
+                        .update(Ordering::Relaxed, Ordering::Relaxed, |was| {
+                            was.saturating_sub(held)
+                        });
+                }
+                Err(err) => {
+                    eprintln!("a deleted session's record stays until the next read: {err}");
+                }
+            }
+        }
+        if let Err(err) = sync_if_there(&self.records) {
+            eprintln!("could not make the deleted sessions' going durable: {err}");
+        }
+    }
+}
+
+/// What the tombstones `change` makes hold, as they are written
+/// ([`super::Deleted`]): a tombstone that cannot be written down fails the
+/// change.
+fn tombstones_of_change(change: &HistoryChange) -> io::Result<Vec<(RecordId, String)>> {
+    change
+        .forget
+        .iter()
+        .map(|(id, deleted)| Ok((*id, serde_json::to_string(deleted)?)))
+        .collect::<serde_json::Result<_>>()
+        .map_err(io::Error::other)
+}
+
+/// Store each of `records` in `folders` ([`place`]), each counted in `progress`
 /// once stored, on as many as [`WRITERS`] threads at once, a part each, as
 /// the move to records stores a whole history while the app waits on it,
 /// its boot screen up: one after another, each waiting for its own flush of
@@ -1590,13 +1609,8 @@ fn place(records: &Path, record: &Record, size: &AtomicU64) -> io::Result<Record
 /// order they were stored, and is made again to the same records before
 /// its layout is written. Each record has a place of its own, so no two
 /// parts ever reach for the same name.
-fn place_each(
-    dir: &Path,
-    records: &[Record],
-    size: &AtomicU64,
-    progress: &LoadProgress,
-) -> io::Result<()> {
-    let one = |record: &Record| place(dir, record, size).map(|_| progress.step());
+fn place_each(folders: &Folders, records: &[Record], progress: &LoadProgress) -> io::Result<()> {
+    let one = |record: &Record| place(folders, record).map(|_| progress.step());
     if records.len() < 2 {
         return records.iter().try_for_each(one);
     }
@@ -1776,6 +1790,7 @@ mod tests {
     use super::*;
     use crate::persist::desktop::tests::TempDir;
     use crate::persist::record::{names_noted, records_for_blob, scored};
+    use crate::persist::record_store::steps::BUMPS;
     use crate::persist::tests::{as_an_older_build_wrote, session};
     use crate::persist::worker::{HistoryJobs, wait};
     use std::cell::Cell;
@@ -3708,7 +3723,7 @@ mod tests {
         files.load();
         let restored: Vec<Record> = (1..=3).map(|n| record(&finished(n * 1_000))).collect();
         let journal = files.begin_journal(&restore(&restored)).expect("a journal");
-        files.place_record(&restored[0]).unwrap();
+        place(&files.folders(), &restored[0]).unwrap();
         // Another copy reads the history while this one stores.
         let other = HistoryFiles::at(&dir.0).load();
         assert!(other.notices.is_empty(), "still running");

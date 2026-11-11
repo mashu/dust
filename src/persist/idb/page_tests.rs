@@ -2,9 +2,16 @@
 //! browser's database made up in memory (`src/fake_idb.mjs`): what the
 //! browser's own database makes of each thing the history asks of it.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
+use cw_core::{Rng, SplitMix64};
 use serde_json::{Value, json};
 
 use super::IDB_JS;
+use super::tests::{Making, Shelves};
+use crate::persist::record::{Record, RecordId};
+use crate::persist::record_store::steps::{BUMPS, make_steps};
 use crate::testing::{PageStep, on_fake_page};
 
 /// What `script` sends the app, run to its end on a page where
@@ -481,4 +488,203 @@ dioxus.send(tab.legacyLength("dust_sessions"));"#,
     };
     assert_eq!(sent[0], json!(-1));
     assert_eq!(sent[1], json!(r#"[{"date":"é"}]"#.encode_utf16().count()));
+}
+
+/// One change, and the database it is made on, for the page script and for
+/// the steps every other store makes it in ([`make_steps`]).
+struct Case {
+    sessions: BTreeMap<String, String>,
+    deleted: BTreeMap<String, String>,
+    put: Vec<Record>,
+    forget: Vec<(RecordId, String)>,
+    unforget: Vec<RecordId>,
+}
+
+/// The records a case is made of: each in a place of its own, so that the
+/// names one is tried under never reach another's.
+fn records() -> Vec<Record> {
+    [(10, 1), (20, 1_000), (30, 2_000)]
+        .into_iter()
+        .map(|(order, nonce)| Record {
+            id: RecordId { order, nonce },
+            json: format!(r#"{{"timestamp":{order},"date":"day {order}"}}"#),
+        })
+        .collect()
+}
+
+/// Case `seed`: each record stored already, or its name held by other
+/// bytes, and some names past it, up to as many as a record is tried under
+/// and one more, it after them or not, or not there; deleted or not; and a
+/// change that stores, deletes and puts back some of them, each deleted
+/// once, as a store is handed a change.
+fn case(seed: u64) -> Case {
+    let mut rng = SplitMix64::new(seed);
+    let some = |rng: &mut SplitMix64| -> Vec<Record> {
+        let density = [0.0, 0.3, 0.6, 1.0][rng.usize_in(0, 3)];
+        records()
+            .into_iter()
+            .filter(|_| rng.f64() < density)
+            .collect()
+    };
+    let (mut sessions, mut deleted) = (BTreeMap::new(), BTreeMap::new());
+    for record in records() {
+        match rng.usize_in(0, 5) {
+            0 | 1 => {
+                sessions.insert(record.id.name(), record.json.clone());
+            }
+            2 | 3 => {
+                let held = match rng.usize_in(0, 9) {
+                    0 => BUMPS,
+                    1 => BUMPS + 1,
+                    _ => rng.usize_in(1, 3) as u64,
+                };
+                let mut id = record.id;
+                for n in 0..held {
+                    sessions.insert(id.name(), format!("other {n}"));
+                    id = id.bumped();
+                }
+                if rng.f64() < 0.3 {
+                    sessions.insert(id.name(), record.json.clone());
+                }
+            }
+            _ => {}
+        }
+        match rng.usize_in(0, 4) {
+            0 => {
+                deleted.insert(
+                    record.id.name(),
+                    r#"{"timestamp":1,"date":"d","at":5}"#.into(),
+                );
+            }
+            1 => {
+                deleted.insert(record.id.name(), "{}".into());
+            }
+            _ => {}
+        }
+    }
+    let put = some(&mut rng);
+    let forget = some(&mut rng)
+        .into_iter()
+        .map(|record| {
+            (
+                record.id,
+                format!(
+                    r#"{{"timestamp":1,"date":"d","at":{}}}"#,
+                    rng.usize_in(6, 9)
+                ),
+            )
+        })
+        .collect();
+    let unforget = some(&mut rng).into_iter().map(|record| record.id).collect();
+    Case {
+        sessions,
+        deleted,
+        put,
+        forget,
+        unforget,
+    }
+}
+
+/// What a store that makes the change step by step holds after it: none
+/// where it refuses it, and so keeps nothing of it, as the database keeps
+/// nothing of a change it refuses.
+fn made_steps(case: &Case) -> Option<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+    let mut shelves = Shelves::default();
+    shelves.sessions = case.sessions.clone();
+    shelves.deleted = case.deleted.clone();
+    let forget: Vec<(RecordId, &str)> = case
+        .forget
+        .iter()
+        .map(|(id, held)| (*id, held.as_str()))
+        .collect();
+    let (_, made) = make_steps(
+        &Making(RefCell::new(&mut shelves)),
+        &case.put,
+        &forget,
+        &case.unforget,
+    );
+    made.ok().map(|()| (shelves.sessions, shelves.deleted))
+}
+
+/// The page script makes a change as every other store makes it, step by
+/// step ([`make_steps`]): deletions undone, then the records, each left out
+/// where it is deleted and not put back, kept where it is put back and its
+/// record stayed, stored where the same bytes are not there already under
+/// its name or one of the names past it, then the deletions, a tombstone
+/// held already kept as it is. On seeded changes over records stored, held
+/// by other bytes under as many names as a record is tried under and one
+/// more, deleted or not, what the database holds after each, or that it
+/// refused it, is what those steps make of it.
+#[test]
+fn the_page_script_makes_a_change_as_every_other_store_makes_it() {
+    const CASES: u64 = 2_000;
+    let cases: Vec<Case> = (0..CASES).map(case).collect();
+    let pairs = |held: &BTreeMap<String, String>| -> Value {
+        held.iter()
+            .map(|(name, json)| json!([name, json]))
+            .collect()
+    };
+    let asked: Vec<Value> = cases
+        .iter()
+        .map(|case| {
+            json!({
+                "sessions": pairs(&case.sessions),
+                "deleted": pairs(&case.deleted),
+                "put": case.put.iter().map(|record| json!([record.id.name(), record.json])).collect::<Vec<_>>(),
+                "forget": case.forget.iter().map(|(id, held)| json!([id.name(), held])).collect::<Vec<_>>(),
+                "unforget": case.unforget.iter().map(|id| id.name()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let Some(sent) = on_page(&format!(
+        r#"const cases = {};
+for (const asked of cases) {{
+  fakeIdb.evict("dust_history");
+  const tab = glue();
+  await tab.open();
+  for (const [name, json] of asked.sessions) fakeIdb.plant("dust_history", "sessions", name, json);
+  for (const [name, held] of asked.deleted) fakeIdb.plant("dust_history", "deleted", name, held);
+  const answer = await tab.apply(change({{ put: asked.put, forget: asked.forget, unforget: asked.unforget }}));
+  dioxus.send({{
+    made: answer.why === undefined,
+    sessions: fakeIdb.contents("dust_history", "sessions"),
+    deleted: fakeIdb.contents("dust_history", "deleted"),
+  }});
+}}"#,
+        Value::Array(asked)
+    )) else {
+        return;
+    };
+    assert_eq!(sent.len(), cases.len(), "an answer to each");
+    let held = |of: &Value| -> BTreeMap<String, String> {
+        of.as_object()
+            .expect("a store's contents")
+            .iter()
+            .map(|(name, json)| (name.clone(), json.as_str().expect("text").to_string()))
+            .collect()
+    };
+    let mut refused = 0;
+    for (seed, (case, sent)) in cases.iter().zip(&sent).enumerate() {
+        let after = (held(&sent["sessions"]), held(&sent["deleted"]));
+        match made_steps(case) {
+            Some(made) => {
+                assert_eq!(sent["made"], json!(true), "case {seed}: {sent}");
+                assert_eq!(after, made, "case {seed}");
+            }
+            None => {
+                refused += 1;
+                assert_eq!(sent["made"], json!(false), "case {seed}: {sent}");
+                assert_eq!(
+                    after,
+                    (case.sessions.clone(), case.deleted.clone()),
+                    "case {seed}: kept nothing"
+                );
+            }
+        }
+    }
+    assert!(
+        refused > 0 && refused < cases.len(),
+        "{refused} of {} refused",
+        cases.len()
+    );
 }

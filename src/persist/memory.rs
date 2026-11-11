@@ -11,7 +11,6 @@
 //! open ([`MemoryStore::in_page`]).
 
 use std::cell::{Cell, RefCell};
-use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
@@ -28,6 +27,7 @@ use super::record::{
     Unreadable, done, failed_for_now, key_of, read_record, records_for_blob, unreadable,
 };
 use super::record_store::notes::{self, Note};
+use super::record_store::steps::{Steps, There, make_steps};
 use super::record_store::{
     Reading, RecordRead, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of,
     deleted_sessions_of, deletions_of, keys_of_tombstones, sort,
@@ -875,6 +875,76 @@ impl Store for MemoryStore {
     }
 }
 
+/// The test store, as a change is made in it step by step, as the files
+/// make one ([`make_steps`]): every step is durable as it is made.
+struct InMemory<'a>(&'a MemoryStore);
+
+impl Steps for InMemory<'_> {
+    type Error = HistorySaved;
+
+    fn tombstoned(&self, id: RecordId) -> bool {
+        self.0.tombstones.borrow().contains_key(&id)
+    }
+
+    fn holds(&self, id: RecordId) -> bool {
+        self.0.records.borrow().contains_key(&id)
+    }
+
+    fn there(&self, id: RecordId, json: &str) -> Result<There, HistorySaved> {
+        Ok(match self.0.records.borrow().get(&id) {
+            None => There::Free,
+            Some(held) if held.json == json => There::Same,
+            Some(_) => There::Other,
+        })
+    }
+
+    fn add(&self, id: RecordId, json: &str) -> Result<(), HistorySaved> {
+        let held = Held {
+            json: json.to_string(),
+            // As it was written, not scored again, as the files would read
+            // it: a test compares what went in.
+            whole: serde_json::from_str(json).ok(),
+        };
+        self.0.records.borrow_mut().insert(id, held);
+        self.0.record_writes.set(self.0.record_writes.get() + 1);
+        Ok(())
+    }
+
+    fn no_name_free(&self, id: RecordId) -> HistorySaved {
+        HistorySaved::Failed(format!("no name was free for the session stored as {id}"))
+    }
+
+    fn unforget(&self, ids: &[RecordId]) -> Result<(), HistorySaved> {
+        let mut tombstones = self.0.tombstones.borrow_mut();
+        for id in ids {
+            tombstones.remove(id);
+        }
+        Ok(())
+    }
+
+    fn records_durable(&self) -> Result<(), HistorySaved> {
+        Ok(())
+    }
+
+    fn tombstone(&self, new: &[(RecordId, &str)]) -> Result<(), HistorySaved> {
+        let mut tombstones = self.0.tombstones.borrow_mut();
+        for (id, held) in new {
+            tombstones.insert(*id, serde_json::from_str(held).expect("a tombstone reads"));
+            self.0
+                .tombstone_writes
+                .set(self.0.tombstone_writes.get() + 1);
+        }
+        Ok(())
+    }
+
+    fn unlink(&self, ids: &[RecordId]) {
+        let mut records = self.0.records.borrow_mut();
+        for id in ids {
+            records.remove(id);
+        }
+    }
+}
+
 /// What a tombstone holds, as it is written.
 fn written(deleted: &Deleted) -> Vec<u8> {
     serde_json::to_vec(deleted).expect("a tombstone writes")
@@ -1272,54 +1342,46 @@ impl MemoryStore {
         (self.changes.get(), self.fingerprint())
     }
 
-    /// Make `change`, as the files make it.
+    /// Make `change`, as the files make it ([`make_steps`]).
     fn make(&self, change: &HistoryChange) -> HistorySaved {
         if let Some(refused) = self.refused() {
             return refused;
         }
-        let mut tombstones = self.tombstones.borrow_mut();
-        let mut records = self.records.borrow_mut();
-        for id in &change.unforget {
-            tombstones.remove(id);
-        }
-        let undone: HashSet<RecordId> = change.unforget.iter().copied().collect();
-        for record in &change.put {
-            if tombstones.contains_key(&record.id) && !undone.contains(&record.id) {
-                continue;
-            }
-            // One put back whose record is there still is back as it is
-            // stored, as the files and a browser's database keep it: not
-            // stored a second time beside itself.
-            let mut id = record.id;
-            if !(undone.contains(&record.id) && records.contains_key(&record.id)) {
-                while records
-                    .get(&id)
-                    .is_some_and(|held| held.json != record.json)
+        let written: Vec<(RecordId, String)> = change
+            .forget
+            .iter()
+            .map(|(id, deleted)| {
+                (
+                    *id,
+                    serde_json::to_string(deleted).expect("a tombstone writes"),
+                )
+            })
+            .collect();
+        let forget: Vec<(RecordId, &str)> = written
+            .iter()
+            .map(|(id, held)| (*id, held.as_str()))
+            .collect();
+        let (placed, made) = make_steps(&InMemory(self), &change.put, &forget, &change.unforget);
+        {
+            let mut keys = self.keys.borrow_mut();
+            for (record, id) in change.put.iter().zip(placed) {
+                if let Some(id) = id
+                    && let Some(key) = key_of(&record.json)
                 {
-                    id = id.bumped();
+                    keys.insert(id, key);
                 }
             }
-            if let Some(key) = key_of(&record.json) {
-                self.keys.borrow_mut().insert(id, key);
-            }
-            if let Entry::Vacant(place) = records.entry(id) {
-                place.insert(Held {
-                    json: record.json.clone(),
-                    // As it was written, not scored again, as the files
-                    // would read it: a test compares what went in.
-                    whole: serde_json::from_str(&record.json).ok(),
-                });
-                self.record_writes.set(self.record_writes.get() + 1);
+            if made.is_ok() {
+                for (id, _) in &change.forget {
+                    keys.remove(id);
+                }
             }
         }
-        for (id, deleted) in &change.forget {
-            if !tombstones.contains_key(id) {
-                tombstones.insert(*id, deleted.clone());
-                self.tombstone_writes.set(self.tombstone_writes.get() + 1);
-            }
-            records.remove(id);
-            self.keys.borrow_mut().remove(id);
+        if let Err(saved) = made {
+            self.changed_here();
+            return saved;
         }
+        let (tombstones, mut records) = (self.tombstones.borrow(), self.records.borrow_mut());
         self.stored.set(true);
         self.changed_here();
         // Short of room, as a browser's page storage is: the oldest go, and

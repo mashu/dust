@@ -10,6 +10,7 @@ use std::task::{Context, Poll, Waker};
 use cw_core::SessionResult;
 
 use super::*;
+use crate::persist::record_store::steps::{Steps, There, make_steps};
 use crate::persist::tests::session;
 
 /// What a future made of answers given at once comes to.
@@ -93,9 +94,9 @@ impl Aside for Page {
 /// A browser's database, as far as the history goes: what every tab
 /// shares.
 #[derive(Default)]
-struct Shelves {
-    sessions: BTreeMap<String, String>,
-    deleted: BTreeMap<String, String>,
+pub(super) struct Shelves {
+    pub(super) sessions: BTreeMap<String, String>,
+    pub(super) deleted: BTreeMap<String, String>,
     meta: BTreeMap<String, String>,
     /// How many changes were made, and how many other tabs told of.
     changes: u64,
@@ -193,34 +194,28 @@ impl Fake {
             || !writes.forget.is_empty()
             || !writes.unforget.is_empty()
             || over;
-        let undone: HashSet<&String> = writes.unforget.iter().collect();
-        for name in &writes.unforget {
-            shelves.deleted.remove(name);
-        }
-        for (name, json) in &writes.put {
-            let undoing = undone.contains(name);
-            if !undoing && shelves.deleted.contains_key(name) {
-                continue;
-            }
-            let mut id = RecordId::parse(name).expect("a name");
-            loop {
-                match shelves.sessions.get(&id.name()) {
-                    None => {
-                        shelves.sessions.insert(id.name(), json.clone());
-                        break;
-                    }
-                    Some(there) if there == json || (undoing && id.name() == *name) => break,
-                    Some(_) => id = id.bumped(),
-                }
-            }
-        }
-        for (name, tombstone) in &writes.forget {
-            shelves
-                .deleted
-                .entry(name.clone())
-                .or_insert_with(|| tombstone.clone());
-            shelves.sessions.remove(name);
-        }
+        let id = |name: &String| RecordId::parse(name).expect("a name");
+        let put: Vec<Record> = writes
+            .put
+            .iter()
+            .map(|(name, json)| Record {
+                id: id(name),
+                json: json.clone(),
+            })
+            .collect();
+        let forget: Vec<(RecordId, &str)> = writes
+            .forget
+            .iter()
+            .map(|(name, held)| (id(name), held.as_str()))
+            .collect();
+        let unforget: Vec<RecordId> = writes.unforget.iter().map(id).collect();
+        let (_, made) = make_steps(
+            &Making(RefCell::new(&mut *shelves)),
+            &put,
+            &forget,
+            &unforget,
+        );
+        made?;
         for (key, value) in &writes.meta {
             shelves.meta.insert(key.clone(), value.clone());
         }
@@ -237,6 +232,66 @@ impl Fake {
             shelves.changes += 1;
         }
         Ok(())
+    }
+}
+
+/// A browser's database, as a change is made in it step by step, as the
+/// page script makes it in one transaction ([`make_steps`]).
+pub(super) struct Making<'a>(pub(super) RefCell<&'a mut Shelves>);
+
+impl Steps for Making<'_> {
+    type Error = Refused;
+
+    fn tombstoned(&self, id: RecordId) -> bool {
+        self.0.borrow().deleted.contains_key(&id.name())
+    }
+
+    fn holds(&self, id: RecordId) -> bool {
+        self.0.borrow().sessions.contains_key(&id.name())
+    }
+
+    fn there(&self, id: RecordId, json: &str) -> Result<There, Refused> {
+        Ok(match self.0.borrow().sessions.get(&id.name()) {
+            None => There::Free,
+            Some(there) if there == json => There::Same,
+            Some(_) => There::Other,
+        })
+    }
+
+    fn add(&self, id: RecordId, json: &str) -> Result<(), Refused> {
+        self.0.borrow_mut().sessions.insert(id.name(), json.into());
+        Ok(())
+    }
+
+    fn no_name_free(&self, id: RecordId) -> Refused {
+        Refused::Failed(format!("no name was free for the session stored as {id}"))
+    }
+
+    fn unforget(&self, ids: &[RecordId]) -> Result<(), Refused> {
+        let mut shelves = self.0.borrow_mut();
+        for id in ids {
+            shelves.deleted.remove(&id.name());
+        }
+        Ok(())
+    }
+
+    fn records_durable(&self) -> Result<(), Refused> {
+        Ok(())
+    }
+
+    fn tombstone(&self, new: &[(RecordId, &str)]) -> Result<(), Refused> {
+        let mut shelves = self.0.borrow_mut();
+        for (id, held) in new {
+            shelves.deleted.insert(id.name(), (*held).into());
+        }
+        Ok(())
+    }
+
+    fn unlink(&self, ids: &[RecordId]) {
+        let mut shelves = self.0.borrow_mut();
+        for id in ids {
+            shelves.sessions.remove(&id.name());
+        }
     }
 }
 
