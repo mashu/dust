@@ -3022,4 +3022,44 @@ mod tests {
             }
         });
     }
+
+    /// The owner's second rule, at End: a group whose send the page going
+    /// out of sight cut short, typed along it, and kept by End session
+    /// while paused, is stored as it stood at the pause, with no times, and
+    /// says it was paused.
+    #[test]
+    fn a_session_hidden_mid_send_and_ended_stores_the_group_as_paused() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            settings.playback.lock_input_during_group_playback = false;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(
+                h.run_until(4_000, |h| !h.recorder.starts().is_empty())
+                    .await
+            );
+            let started = h.recorder.starts()[0].clone();
+            let span = &started.plan.wanted.chars[0];
+            let first_end = started.at.0 + (span.end_sec * 1_000.0).round() as u64;
+            h.advance(first_end + 50 - mono_ms()).await;
+            let first: String = h.sent(0).chars().take(1).collect();
+            h.ctx.answer.hold(0, first.clone(), Some(MonoMs(mono_ms())));
+            h.send(SessionEvent::Pause);
+            assert!(matches!(
+                h.phase(),
+                Some(SessionPhase::Paused { index: 0, .. })
+            ));
+            h.advance(10_000).await;
+            h.send(SessionEvent::FinishNow);
+            assert_eq!(h.screen(), Screen::Results);
+            let stored = stored_last(&h);
+            assert_eq!(stored.groups[0].received, first);
+            let timing = &stored.group_timings[0];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(cw_core::Untimed::Paused))
+            );
+        });
+    }
 }

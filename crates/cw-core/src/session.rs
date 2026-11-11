@@ -93,8 +93,8 @@ struct Sounding {
     char_ends_ms: Vec<u32>,
     latency_ms: u32,
     /// Why it cannot be timed from, if it cannot: it was held up, tried
-    /// again, or paused with its answer open. None while it played on time
-    /// and once.
+    /// again, or paused with its answer open or part way through it. None
+    /// while it played on time and once.
     untimed: Option<Untimed>,
     /// When a later send of the group began to go out: a key from then on
     /// came after hearing it twice.
@@ -121,9 +121,10 @@ pub enum Untimed {
     /// It went out again from the start, heard in part already: as when
     /// some of it went unheard, or the attempt failed.
     SentAgain,
-    /// The session was paused with its answer open: keys either side of a
-    /// pause cannot be timed against one send. A run's copy says so when a
-    /// pause cut short the turn it was heard in.
+    /// The session was paused with its answer open, or part way through
+    /// its send and then resumed or ended: keys either side of a pause, or
+    /// along a send it cut, cannot be timed against one send. A run's copy
+    /// says so when a pause cut short the turn it was heard in.
     Paused,
 }
 
