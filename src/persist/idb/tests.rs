@@ -455,7 +455,8 @@ fn two_tabs_moving_at_once_move_once() {
     let theirs = held.clone();
     let fingerprint = page.held(KEYS.history).as_deref().map(fingerprint_of);
     fake.shelves().first = Some(Box::new(move |shelves: &mut Shelves| {
-        let (records, layout) = legacy::moved(&theirs, fingerprint, &[], crate::time::now_ms());
+        let (records, layout) =
+            legacy::moved(&theirs, fingerprint, true, &[], crate::time::now_ms());
         for record in records {
             shelves.sessions.insert(record.id.name(), record.json);
         }
@@ -508,6 +509,36 @@ fn what_does_not_read_is_set_aside_and_not_moved() {
     // Told of once: what is set aside already is not again.
     let second = Fake::on(&page);
     assert_eq!(opened(&second).load().set_aside, []);
+}
+
+/// A history kept whole that does not read as a list, moved in, cuts
+/// nothing off what an older build's tab, open since before it was
+/// damaged, stores there after the move: the move took no session of it,
+/// so one written back is a session the history here never held, and is
+/// taken up, as on a computer, where such a history is set aside. It stays
+/// where it was in the page storage, beside its copy, and the move cut what
+/// was found there after it off at its clock, as if it had read.
+#[test]
+fn a_history_kept_whole_that_does_not_read_cuts_nothing_off_what_an_older_build_stores_after() {
+    let page = Page::default();
+    page.set(KEYS.history, "not a list");
+    let fake = Fake::on(&page);
+    let tab = opened(&fake);
+    assert_eq!(tab.load().set_aside, [SetAside::History { kept: None }]);
+    assert_eq!(
+        fake.layout().and_then(|layout| layout.taken_through),
+        Some(0),
+        "nothing cut off"
+    );
+    // An older build's tab, open since before, writes its history back.
+    page.keep(&[ago(2)]);
+    assert!(tab.changed());
+    assert_eq!(
+        done(tab.listing()).map(|listed| listed.len()),
+        Some(1),
+        "taken up"
+    );
+    assert_eq!(sessions_of(&opened(&fake).load()), [ago(2)]);
 }
 
 /// A page storage that cannot be read now leaves the move for the next

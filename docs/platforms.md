@@ -981,8 +981,9 @@ finished no earlier than a day before the newest session the move took
 (`takenThrough` in the layout: the newest no later than the clock said as
 the move was made, so a clock set ahead holds nothing back; where it took
 none, the newest it remembers deleting, and where there was no history kept
-whole at all, none, so nothing is cut off) and is neither here already nor
-deleted here, nor named among the deletions it remembers: one deleted by
+whole at all, or none that read, none, so nothing is cut off) and is
+neither here already nor deleted here, nor named among the deletions it
+remembers: one deleted by
 hand there by a build that keeps them, before the move or after, that a
 copy left open of a build that keeps none stores back, stays deleted, as
 every build that keeps them takes a session it puts back out of them. One

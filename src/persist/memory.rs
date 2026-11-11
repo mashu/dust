@@ -1248,7 +1248,9 @@ impl MemoryStore {
     /// read moves it.
     fn migrate(&self, load: &mut HistoryLoad) -> Result<(), String> {
         let raw = self.legacy.borrow().clone();
-        let sessions = match raw.as_deref().map(read_history) {
+        let read = raw.as_deref().map(read_history);
+        let kept_whole = matches!(read, Some(Some(_)));
+        let sessions = match read {
             None => Vec::new(),
             Some(None) => {
                 self.legacy_aside
@@ -1272,6 +1274,7 @@ impl MemoryStore {
         let (moved, layout) = legacy::moved(
             &sessions,
             self.fingerprint(),
+            kept_whole,
             &self.legacy_deleted.borrow(),
             crate::time::now_ms(),
         );

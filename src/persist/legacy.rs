@@ -585,8 +585,9 @@ pub(super) fn deleted_of(raw: Option<&[u8]>) -> Vec<Deleted> {
 /// The move from a history kept whole: each of `sessions`, oldest first,
 /// as a record ([`record::records_for_blob`]), and the layout to write once
 /// every record is, `now`. `fingerprint` is the history kept whole as it
-/// was read, and `deleted` the deletions it remembers, already done to it,
-/// and so taken. What a later take-up looks at is cut off at the newest
+/// was read, where it is still there, `kept_whole` whether it read as a
+/// list, and `deleted` the deletions it remembers, already done to it, and
+/// so taken. What a later take-up looks at is cut off at the newest
 /// session moved that finished no later than `now`, or what stands for it
 /// where it moves none ([`taken_through`]): a clock ahead of the time, or a
 /// session stamped ahead of the clock, holds back no session an older build
@@ -594,6 +595,7 @@ pub(super) fn deleted_of(raw: Option<&[u8]>) -> Vec<Deleted> {
 pub(super) fn moved(
     sessions: &[SessionResult],
     fingerprint: Option<Fingerprint>,
+    kept_whole: bool,
     deleted: &[Deleted],
     now: u64,
 ) -> (Vec<record::Record>, Layout) {
@@ -611,7 +613,7 @@ pub(super) fn moved(
         legacy: fingerprint,
         imported_keys: keys,
         deleted_seen: latest(deleted),
-        taken_through: Some(taken_through(sessions, fingerprint.is_some(), deleted, now)),
+        taken_through: Some(taken_through(sessions, kept_whole, deleted, now)),
         deletions_taken: Some(DeletionsTaken {
             seen: latest(deleted),
             taken: deleted.iter().map(DeletionSeen::of).collect(),
@@ -630,8 +632,9 @@ pub(super) fn moved(
 /// deleted, `deleted`, at the clock or before it, stands for it: what an
 /// older copy left open brings back from before that stays out. Where it
 /// says it deleted none either, and the move found no history kept whole
-/// (`kept_whole` false: none was there, or what was there did not read and
-/// was set aside), no session it took can come back, and an older build's
+/// (`kept_whole` false: none was there, or what was there did not read as a
+/// list, and was set aside, whether or not it stays where it was too, as
+/// in a browser), no session it took can come back, and an older build's
 /// found there after it is one the history here never held: nothing is cut
 /// off. Else the clock: an empty history says nothing of what came before
 /// it.
@@ -1810,7 +1813,13 @@ mod tests {
     #[test]
     fn a_session_an_older_build_stores_after_a_move_made_with_the_clock_ahead_is_taken_up() {
         let first = finished(T);
-        let (records, layout) = moved(std::slice::from_ref(&first), written(1), &[], T + 10 * YEAR);
+        let (records, layout) = moved(
+            std::slice::from_ref(&first),
+            written(1),
+            true,
+            &[],
+            T + 10 * YEAR,
+        );
         let since = finished(T + DAY);
         let (change, next) = imported(
             &layout,
@@ -1869,7 +1878,7 @@ mod tests {
     fn a_session_an_older_build_stores_after_a_move_of_no_session_made_with_the_clock_ahead_is_taken_up()
      {
         let since = finished(T + DAY);
-        let (_, layout) = moved(&[], None, &[], T + 10 * YEAR);
+        let (_, layout) = moved(&[], None, false, &[], T + 10 * YEAR);
         let (change, next) = imported(
             &layout,
             written(2),
@@ -1883,7 +1892,13 @@ mod tests {
         assert_eq!(next.taken_through, Some(0));
 
         let gone = Deleted::of(&finished(T), T + 1);
-        let (_, layout) = moved(&[], written(1), std::slice::from_ref(&gone), T + 10 * YEAR);
+        let (_, layout) = moved(
+            &[],
+            written(1),
+            true,
+            std::slice::from_ref(&gone),
+            T + 10 * YEAR,
+        );
         assert_eq!(layout.taken_through, Some(T));
         let (change, _) = imported(
             &layout,
@@ -1902,8 +1917,20 @@ mod tests {
     /// the newest session it took, as it did.
     #[test]
     fn a_move_of_an_empty_history_kept_whole_takes_through_its_clock() {
-        let (_, layout) = moved(&[], written(1), &[], T + 10 * YEAR);
+        let (_, layout) = moved(&[], written(1), true, &[], T + 10 * YEAR);
         assert_eq!(layout.taken_through, Some(T + 10 * YEAR));
+    }
+
+    /// A move from a history kept whole that does not read as a list takes
+    /// no session of it, wherever it is left: set aside, as on a computer,
+    /// or in its place beside a copy of it, as in a browser, where it still
+    /// has a fingerprint. Nothing it took can come back, so nothing is cut
+    /// off, as where there was none.
+    #[test]
+    fn a_move_from_a_history_kept_whole_that_does_not_read_cuts_nothing_off() {
+        let (_, layout) = moved(&[], written(1), false, &[], T + 10 * YEAR);
+        assert_eq!(layout.taken_through, Some(0));
+        assert_eq!(layout.legacy, written(1), "where it is, as it is");
     }
 
     /// One session stamped far ahead of the clock as the move was made, by
@@ -1915,6 +1942,7 @@ mod tests {
         let (records, layout) = moved(
             &[first.clone(), far.clone()],
             written(1),
+            true,
             &[],
             T + 3_600_000,
         );
@@ -1946,6 +1974,7 @@ mod tests {
         let (records, layout) = moved(
             &[kept.clone(), other.clone()],
             written(1),
+            true,
             std::slice::from_ref(&far),
             T + 2 * DAY,
         );
@@ -2079,6 +2108,7 @@ mod tests {
         let (records, layout) = moved(
             &older,
             written(1),
+            true,
             std::slice::from_ref(&noted),
             T + 10 * YEAR,
         );
@@ -2132,7 +2162,7 @@ mod tests {
         assert_eq!(next.deletions_taken.expect("noted").taken.len(), 3);
 
         // Noted as none where there was no history kept whole, and read so.
-        let (_, none) = moved(&[], None, &[], T);
+        let (_, none) = moved(&[], None, false, &[], T);
         assert_eq!(none.taken_legacy, Some(None));
         let raw = none.written().expect("written");
         assert_eq!(Gate::of(Some(&raw)), Gate::Open(Box::new(none)));
@@ -2267,6 +2297,7 @@ mod tests {
         let (records, layout) = moved(
             &older,
             written(1),
+            true,
             std::slice::from_ref(&noted),
             T + 3 * DAY,
         );
@@ -2306,6 +2337,7 @@ mod tests {
         let (_, layout) = moved(
             std::slice::from_ref(&first),
             written(1),
+            true,
             std::slice::from_ref(&gone),
             T + 2,
         );

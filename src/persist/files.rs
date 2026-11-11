@@ -1034,6 +1034,7 @@ impl HistoryFiles {
         let read = raw
             .as_deref()
             .map(|raw| std::str::from_utf8(raw).ok().and_then(read_history));
+        let kept_whole = matches!(read, Some(Some(_)));
         let sessions = match read {
             None => Vec::new(),
             Some(None) => {
@@ -1062,8 +1063,13 @@ impl HistoryFiles {
             }
         };
         let deleted = legacy_deleted(&self.root);
-        let (records, layout) =
-            legacy::moved(&sessions, fingerprint, &deleted, crate::time::now_ms());
+        let (records, layout) = legacy::moved(
+            &sessions,
+            fingerprint,
+            kept_whole,
+            &deleted,
+            crate::time::now_ms(),
+        );
         let moving = self.not_moved_yet(records).map_err(|err| err.to_string())?;
         self.progress.moving(Some(moving.len() as u64));
         place_each(&self.records(), &moving, &self.size, &self.progress)

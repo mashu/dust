@@ -505,7 +505,9 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         // Made whole in one change, and not to be counted as it goes.
         self.progress.moving(None);
         let fingerprint = raw.as_deref().map(fingerprint_of);
-        let sessions = match raw.as_deref().map(legacy::read_history) {
+        let whole = raw.as_deref().map(legacy::read_history);
+        let kept_whole = matches!(whole, Some(Some(_)));
+        let sessions = match whole {
             None => Vec::new(),
             Some(None) => {
                 self.set_aside(
@@ -523,7 +525,13 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             }
         };
         let now = crate::time::now_ms();
-        let (records, layout) = legacy::moved(&sessions, fingerprint, &self.legacy_deleted(), now);
+        let (records, layout) = legacy::moved(
+            &sessions,
+            fingerprint,
+            kept_whole,
+            &self.legacy_deleted(),
+            now,
+        );
         let records = not_moved_yet(records, read, gone, gone_keys);
         let Some(written) = layout_text(&layout) else {
             return Err(Moving::Refused(
