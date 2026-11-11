@@ -25,9 +25,9 @@ use super::legacy::{
 use super::progress::{HistoryProgress, LoadProgress};
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
-    Unreadable, done, failed_for_now, key_of, read_record, records_for_blob, unread_notices,
-    unreadable,
+    Unreadable, done, failed_for_now, key_of, read_record, records_for_blob, unreadable,
 };
+use super::record_store::notes::{self, Note};
 use super::record_store::{
     Reading, RecordRead, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of,
     deleted_sessions_of, deletions_of, keys_of_tombstones, sort,
@@ -66,21 +66,24 @@ pub struct MemoryStore {
     pub legacy_aside: RefCell<Vec<String>>,
     /// The records this build told of as damaged, or as a newer Dust's,
     /// until each reads, or is gone, as the files note them in
-    /// `damaged-told.json`: one damaged again after is told of again.
-    damaged_told: RefCell<BTreeSet<RecordId>>,
+    /// `damaged-told.json` ([`Note::DamagedTold`]): one damaged again after
+    /// is told of again. As it is written, by name: none until it is.
+    damaged_told: RefCell<Option<Vec<u8>>>,
     /// The records this build told of as ones that could not be read, a
     /// failure that outlasted the app's tries, until each reads, or is
-    /// gone, as the files note them in `unread-told.json`: one that fails
-    /// again after is told of again.
-    unread_told: RefCell<BTreeSet<RecordId>>,
+    /// gone, as the files note them in `unread-told.json`
+    /// ([`Note::UnreadTold`]): one that fails again after is told of again.
+    unread_told: RefCell<Option<Vec<u8>>>,
     /// How many times the store was asked to tell of records still unread
     /// after every try ([`Store::still_unread`]).
     pub still_unread_asks: Cell<usize>,
     /// The records that could not be read at all as the history was last
     /// read, or at the app's last try, and have not read since, nor gone,
-    /// as the files note them in `failing.json`: one that still cannot be
-    /// read at the next read is told of then.
-    failed_last: RefCell<BTreeSet<RecordId>>,
+    /// as the files note them in `failing.json` ([`Note::Failing`]): one
+    /// that still cannot be read at the next read is told of then. It keeps
+    /// no note of what was told as builds before formats read it, as no
+    /// such build reads this store.
+    failing_noted: RefCell<Option<Vec<u8>>>,
     counters: RefCell<BTreeMap<CountersKey, AutoLevelCounters>>,
     /// How many times the settings were written, for a test that cares how
     /// often that happens.
@@ -704,12 +707,18 @@ impl Store for MemoryStore {
             .filter(|id| !tombstones.contains_key(id))
             .copied()
             .collect();
+        drop(tombstones);
         // Those no longer listed are gone, and told of no more, as the files
         // note them: should one come back and fail, that is a failure of its
         // own, told of in turn.
-        let there: HashSet<RecordId> = listed.iter().copied().collect();
-        for note in [&self.damaged_told, &self.unread_told, &self.failed_last] {
-            note.borrow_mut().retain(|id| there.contains(id));
+        let there: HashSet<String> = listed.iter().map(|id| id.name()).collect();
+        for note in notes::LISTED {
+            if let Some(raw) = self.note(note) {
+                let gone = notes::gone_from(&raw, &there);
+                if !gone.is_empty() {
+                    self.no_more(note, &gone);
+                }
+            }
         }
         done(Some(listed))
     }
@@ -791,11 +800,13 @@ impl Store for MemoryStore {
     /// noted as failing too, as this build's failures.
     fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
         self.still_unread_asks.set(self.still_unread_asks.get() + 1);
-        let mut told = self.unread_told.borrow_mut();
-        let notices = unread_notices(ids.iter().filter(|id| !told.contains(id)).map(|_| None));
-        if !notices.is_empty() {
-            told.extend(ids.iter().copied());
-            self.failed_last.borrow_mut().extend(ids.iter().copied());
+        let (notices, unread_told) =
+            notes::still_unread(&ids, self.note(Note::UnreadTold).as_deref());
+        if let Some(names) = unread_told {
+            self.write_note(Note::UnreadTold, Some(&names));
+            if let Some(failing) = notes::noted_unread(&ids, self.note(Note::Failing).as_deref()) {
+                self.write_note(Note::Failing, Some(&failing));
+            }
         }
         done(notices)
     }
@@ -1058,12 +1069,43 @@ impl MemoryStore {
                 _ => Err(Unopened::Failed(id)),
             })
             .collect();
-        for record in read.iter().flatten() {
-            for note in [&self.damaged_told, &self.unread_told, &self.failed_last] {
-                note.borrow_mut().remove(&record.id);
-            }
+        drop((records, held_open));
+        for (note, gone) in notes::after_read(&read) {
+            self.no_more(note, &gone);
         }
         read
+    }
+
+    /// What `note` holds, as it is written: none where it is not there, as
+    /// the note of what builds before formats were told is not here.
+    fn note(&self, note: Note) -> Option<Vec<u8>> {
+        match note {
+            Note::Told => None,
+            Note::Failing => self.failing_noted.borrow().clone(),
+            Note::UnreadTold => self.unread_told.borrow().clone(),
+            Note::DamagedTold => self.damaged_told.borrow().clone(),
+        }
+    }
+
+    /// Have `note` hold `names`, or, given none, take it away.
+    fn write_note(&self, note: Note, names: Option<&BTreeSet<String>>) {
+        let held = match note {
+            Note::Told => return,
+            Note::Failing => &self.failing_noted,
+            Note::UnreadTold => &self.unread_told,
+            Note::DamagedTold => &self.damaged_told,
+        };
+        *held.borrow_mut() = names.map(|names| serde_json::to_vec(names).expect("a note writes"));
+    }
+
+    /// Take `gone`, records by name, out of `note`, as the files take them
+    /// out ([`notes::no_more`]).
+    fn no_more(&self, note: Note, gone: &HashSet<String>) {
+        if let Some(raw) = self.note(note)
+            && let Some(left) = notes::no_more(note, &raw, gone)
+        {
+            self.write_note(note, left.as_ref());
+        }
     }
 
     /// What to tell of `unread`, the records this build cannot read, each
@@ -1075,34 +1117,19 @@ impl MemoryStore {
     /// failure told of while it still fails, a record that cannot be read
     /// while it cannot be read, or fails, and what failed now.
     fn tell(&self, unread: &[(RecordId, Unreadable)], failed: &[RecordId]) -> Vec<HistoryNotice> {
-        let (mut damaged_told, mut unread_told) = (
-            self.damaged_told.borrow_mut(),
-            self.unread_told.borrow_mut(),
-        );
-        let failing_now: BTreeSet<RecordId> = failed.iter().copied().collect();
-        let failed_before = self.failed_last.replace(failing_now.clone());
-        let failed_again: Vec<RecordId> = failed
-            .iter()
-            .filter(|id| failed_before.contains(id))
-            .copied()
-            .collect();
-        let notices = unread_notices(
-            unread
-                .iter()
-                .filter(|(id, _)| !damaged_told.contains(id))
-                .map(|(_, said)| Some(said))
-                .chain(
-                    failed_again
-                        .iter()
-                        .filter(|id| !unread_told.contains(id))
-                        .map(|_| None),
-                ),
-        );
-        unread_told.retain(|id| failing_now.contains(id));
-        unread_told.extend(failed_again);
-        damaged_told.retain(|id| failing_now.contains(id));
-        damaged_told.extend(unread.iter().map(|(id, _)| *id));
-        notices
+        let (failing, unread_told) = (self.note(Note::Failing), self.note(Note::UnreadTold));
+        let damaged_told = self.note(Note::DamagedTold);
+        let held = notes::Held {
+            told: None,
+            failing: failing.as_deref(),
+            unread_told: unread_told.as_deref(),
+            damaged_told: damaged_told.as_deref(),
+        };
+        let told = notes::at_open(unread, failed, held);
+        for (note, names) in &told.noted {
+            self.write_note(*note, names.as_ref());
+        }
+        told.notices
     }
 
     /// Answer every read asked for ([`Self::reads_later`]), as the store

@@ -38,6 +38,7 @@ pub(crate) enum Note {
 /// The notes a look that lists the history keeps up, in the order it keeps
 /// them: each loses the records the listing no longer holds
 /// ([`gone_from`]).
+#[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
 pub(crate) const LISTED: [Note; 3] = [Note::Failing, Note::UnreadTold, Note::DamagedTold];
 
 /// What each note holds, as it was read: none, where it is not there, or
@@ -177,6 +178,7 @@ pub(crate) fn at_open(
 /// moment again as the history is next read whole is not told of then, and
 /// one told of that fails again after, a failure of its own, is told of in
 /// turn ([`no_more`]).
+#[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
 pub(crate) fn after_read(read: &[Result<Record, Unopened>]) -> [(Note, HashSet<String>); 3] {
     let read_now: HashSet<String> = read
         .iter()
@@ -198,6 +200,7 @@ pub(crate) fn after_read(read: &[Result<Record, Unopened>]) -> [(Note, HashSet<S
 /// `listed` being every record it found, no longer holds: they are gone,
 /// and should one come back and fail, that is a failure of its own, told
 /// of in turn ([`LISTED`], [`no_more`]).
+#[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
 pub(crate) fn gone_from(raw: &[u8], listed: &HashSet<String>) -> HashSet<String> {
     names_noted(Some(raw))
         .into_iter()
@@ -213,6 +216,7 @@ pub(crate) fn gone_from(raw: &[u8], listed: &HashSet<String>) -> HashSet<String>
 /// names: what a build before this one noted in [`Note::Told`], the records
 /// it cannot read, is no failure this build noted, and stays as it is, as
 /// that build would tell of it again as it next opens.
+#[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
 pub(crate) fn no_more(
     note: Note,
     raw: &[u8],
@@ -242,6 +246,7 @@ pub(crate) fn no_more(
 /// [`Note::Told`] holds back nothing: such a build notes there every record
 /// it could not open, a moment's failure among them, and one that has read
 /// since fails now on its own.
+#[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
 pub(crate) fn still_unread(
     ids: &[RecordId],
     unread_told: Option<&[u8]>,
@@ -259,6 +264,7 @@ pub(crate) fn still_unread(
 /// A note, `raw`, with `ids` added, where it gains a name by it: none,
 /// where it names them all already, and is left as it is
 /// ([`still_unread`]).
+#[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
 pub(crate) fn noted_unread(ids: &[RecordId], raw: Option<&[u8]>) -> Option<BTreeSet<String>> {
     let mut names: BTreeSet<String> = names_noted(raw).into_iter().collect();
     let held = names.len();

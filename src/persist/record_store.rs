@@ -15,7 +15,6 @@ use super::record::{
 };
 use super::session::SessionKey;
 
-#[cfg(any(feature = "native-runtime", test))]
 pub(super) mod notes;
 
 /// What is stored of a record, as a store reads it.

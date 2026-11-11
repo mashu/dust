@@ -30,8 +30,9 @@ use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep
 use super::progress::LoadProgress;
 use super::record::{
     self, Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId,
-    Unreadable, key_of, names_noted, not_told, read_record, taken_up, unreadable,
+    Unreadable, key_of, read_record, taken_up, unreadable,
 };
+use super::record_store::notes::{self, Note};
 use super::record_store::{
     Reading, Sorted, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of, deleted_sessions_of,
     deletions_of, keys_of_tombstones, live_of, sort,
@@ -400,14 +401,8 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         } else {
             layout
         };
-        let unread: Vec<(RecordId, Option<Unreadable>)> = read
-            .sorted
-            .unread
-            .iter()
-            .map(|(id, said)| (*id, Some(said.clone())))
-            .collect();
         load.notices
-            .extend(self.tell(&unread, head.told.as_deref()).await);
+            .extend(self.tell(&read.sorted.unread, head.told.as_deref()).await);
         load.complete = layout.is_some();
         self.layout.replace(layout);
         let mut sorted = read.sorted;
@@ -684,37 +679,40 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     }
 
     /// What to tell of `unread`, the records this build cannot read, each
-    /// with what it says of itself ([`not_told`]), `told` being those told
-    /// of before: nothing, once each has been. They are noted as told,
-    /// where this build may write, beside what the note held: this build
-    /// only adds names to it, as to told.json on a computer, so what a
+    /// with what it says of itself, `told` being those told of before:
+    /// nothing, once each has been ([`notes::at_open`]). They are noted as
+    /// told, where this build may write, beside what the note held: this
+    /// build only adds names to it, as to told.json on a computer, so what a
     /// build before formats noted there, a record it cannot read that this
     /// one reads among them, stays, and such a build does not tell of it
-    /// again.
+    /// again. The database keeps no other note: it notes no failure, as a
+    /// refused read fails the whole read, and a record that reads in it is
+    /// never damaged later, as text is all it holds.
     async fn tell(
         &self,
-        unread: &[(RecordId, Option<Unreadable>)],
+        unread: &[(RecordId, Unreadable)],
         told: Option<&str>,
     ) -> Vec<HistoryNotice> {
-        let notices = not_told(unread, told.map(str::as_bytes));
-        if notices.is_empty() {
-            return notices;
+        let held = notes::Held {
+            told: told.map(str::as_bytes),
+            ..notes::Held::default()
+        };
+        let told = notes::at_open(unread, &[], held);
+        for (note, names) in &told.noted {
+            if *note == Note::Told
+                && let Some(names) = names
+                && self.writable.get()
+                && let Ok(raw) = serde_json::to_string(names)
+            {
+                let noted = Writes {
+                    meta: vec![("told".into(), raw)],
+                    ..Writes::default()
+                };
+                // Not noted, it is told of again: no more.
+                let _ = self.write(noted).await;
+            }
         }
-        let names: BTreeSet<String> = names_noted(told.map(str::as_bytes))
-            .into_iter()
-            .chain(unread.iter().map(|(id, _)| id.name()))
-            .collect();
-        if self.writable.get()
-            && let Ok(raw) = serde_json::to_string(&names)
-        {
-            let noted = Writes {
-                meta: vec![("told".into(), raw)],
-                ..Writes::default()
-            };
-            // Not noted, it is told of again: no more.
-            let _ = self.write(noted).await;
-        }
-        notices
+        told.notices
     }
 
     /// The history as it was read as the page opened. Asked again, as no
