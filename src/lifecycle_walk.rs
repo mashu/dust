@@ -616,7 +616,7 @@ impl Walk {
                 }
             }
             assert_eq!(
-                self.h.ctx.session_running(),
+                self.h.screen() == Screen::Training,
                 slot.is_some(),
                 "{at}: the training screen and what is live disagree"
             );
