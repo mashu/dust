@@ -16,7 +16,8 @@
 //! hashes kept in `src/testdata/lifecycle_groups.txt` and
 //! `lifecycle_contest.txt`, one `seed hash` line each: a change meant to
 //! change nothing the app does leaves every one as it was, and a change
-//! meant to change something changes the lines it means to.
+//! meant to change something changes the lines it means to, every value
+//! stored or marked among them.
 //!
 //! - `DUST_LIFECYCLE=bless` writes the hashes of the walks run anew.
 //! - `DUST_LIFECYCLE=<dir>` writes each walk's lines to `<dir>`, so that two
@@ -27,7 +28,10 @@
 //! A group, stored or in a mark, is written as what was sent, what was
 //! taken, and how it is timed: `t` where it holds its characters' times,
 //! `p`, `h` or `s` where it says why it holds none (paused, held up, sent
-//! again), and `-` where it does neither.
+//! again), and `-` where it does neither. After a session's groups comes a
+//! hash of the whole of it as it is stored, `#` and 16 hex digits, all but
+//! when it ended (`date`, `timestamp`), which the wall clock decides: its
+//! score, each group's sends, times and characters' times, and a run's log.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -56,7 +60,8 @@ use crate::time::{POLL_MS, mono_ms};
 /// running it, as the screen's own loop does.
 const TICK_MS: u64 = 250;
 
-/// The seeds the suite walks of each kind: 1 to this many.
+/// The seeds the suite walks of each kind: 1 to this many, and the kind's
+/// [`Kind::further`].
 const SUITE_SEEDS: u64 = 100;
 
 /// The suite's walks of each kind are split into this many tests, to run
@@ -86,6 +91,17 @@ impl Kind {
         match self {
             Self::Groups => "lifecycle_groups.txt",
             Self::Contest => "lifecycle_contest.txt",
+        }
+    }
+
+    /// Seeds past the first [`SUITE_SEEDS`] that the suite walks too, as
+    /// they reach what those never do: contest 1940 a pause cutting short
+    /// the turn a copy was heard in, and 1582 a turn told of as held up
+    /// only after the pause.
+    fn further(self) -> &'static [u64] {
+        match self {
+            Self::Groups => &[],
+            Self::Contest => &[1582, 1940],
         }
     }
 
@@ -806,7 +822,9 @@ fn hand_over(ctx: crate::state::AppCtx) {
     }
 }
 
-/// A session as a line tells of it: its accuracy, and each group.
+/// A session as a line tells of it: its accuracy, each group, and a hash
+/// of the whole of it as it is stored, but for when it ended, which the
+/// wall clock decides.
 fn session(result: &SessionResult) -> String {
     let groups: Vec<String> = result
         .groups
@@ -814,7 +832,17 @@ fn session(result: &SessionResult) -> String {
         .zip(&result.group_timings)
         .map(|(group, timing)| format!("{}>{}:{}", group.sent, group.received, timed(timing)))
         .collect();
-    format!("{:.3} [{}]", result.accuracy, groups.join(" "))
+    let mut stored = serde_json::to_value(result).expect("a session writes");
+    if let Some(stored) = stored.as_object_mut() {
+        stored.remove("date");
+        stored.remove("timestamp");
+    }
+    format!(
+        "{:.3} [{}] #{:016x}",
+        result.accuracy,
+        groups.join(" "),
+        fnv1a(stored.to_string().as_bytes())
+    )
 }
 
 /// How a group is timed: `t` with its characters' times, then why it holds
@@ -951,7 +979,9 @@ fn walks(kind: Kind, seeds: impl Iterator<Item = u64>, held: bool) {
 fn suite(kind: Kind, part: u64) {
     walks(
         kind,
-        (1..=SUITE_SEEDS).filter(|seed| seed % PARTS == part),
+        (1..=SUITE_SEEDS)
+            .chain(kind.further().iter().copied())
+            .filter(|seed| seed % PARTS == part),
         true,
     );
 }
