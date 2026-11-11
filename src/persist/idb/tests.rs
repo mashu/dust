@@ -104,6 +104,12 @@ struct Shelves {
     failing: Option<String>,
     /// What another tab does just before the next change is made here.
     first: Option<Before>,
+    /// What another tab does just before the records and tombstones are
+    /// next listed here.
+    before_list: Option<Before>,
+    /// What another tab does just after the last page of records is next
+    /// read here.
+    after_pages: Option<Before>,
 }
 
 /// What another tab does to the database before this one's next change.
@@ -242,16 +248,22 @@ impl Glue for Fake {
     }
 
     fn page(&self, after: Option<String>, count: usize) -> Pending<Result<Stored, Refused>> {
-        let shelves = self.db.borrow();
+        let mut shelves = self.shelves();
         let from = after.map_or(Bound::Unbounded, Bound::Excluded);
-        answer(self.failing().map(|()| {
+        let page: Result<Stored, Refused> = self.failing_now(&shelves).map(|()| {
             shelves
                 .sessions
                 .range((from, Bound::Unbounded))
                 .take(count)
                 .map(|(name, json)| (name.clone(), Some(json.clone())))
                 .collect()
-        }))
+        });
+        if page.as_ref().is_ok_and(|page| page.len() < count)
+            && let Some(then) = shelves.after_pages.take()
+        {
+            then(&mut shelves);
+        }
+        answer(page)
     }
 
     fn tombstones(&self) -> Pending<Result<Stored, Refused>> {
@@ -266,8 +278,11 @@ impl Glue for Fake {
     }
 
     fn list(&self) -> Pending<Result<Listed, Refused>> {
-        let shelves = self.db.borrow();
-        answer(self.failing().map(|()| Listed {
+        let mut shelves = self.shelves();
+        if let Some(first) = shelves.before_list.take() {
+            first(&mut shelves);
+        }
+        answer(self.failing_now(&shelves).map(|()| Listed {
             sessions: shelves.sessions.keys().cloned().collect(),
             deleted: shelves.deleted.keys().cloned().collect(),
         }))
@@ -577,6 +592,73 @@ fn a_history_kept_whole_that_cannot_be_read_now_is_moved_later() {
     assert_eq!(sessions_of(&load), all);
     assert_eq!(fake.records().len(), 3, "none twice");
     assert!(fake.layout().is_some());
+}
+
+/// A deletion another tab makes as this one makes the move over records
+/// stored here already, in a visit that could not read the page storage,
+/// once this one has read them, is not undone: the tombstones are read
+/// again after the records, so a session the other tab deleted, under a
+/// name the move does not give it, is not moved in. Read only before the
+/// records, they held no word of it, and the move wrote it again.
+#[test]
+fn a_deletion_another_tab_makes_as_this_one_moves_is_not_undone() {
+    let session = ago(3);
+    let page = Page::holding(std::slice::from_ref(&session));
+    let fake = Fake::on(&page);
+    let stored = record_of(&ago(5));
+    fake.shelves()
+        .sessions
+        .insert(stored.id.name(), stored.json.clone());
+    // The other tab takes the session up, under the name a take-up gives
+    // it, and it is deleted there.
+    let json = serde_json::to_string(&session).expect("writes");
+    let placed = RecordId::placed(session.timestamp, &json);
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    fake.shelves().after_pages = Some(Box::new(move |shelves: &mut Shelves| {
+        shelves.deleted.insert(placed.name(), tombstone);
+    }));
+    let load = opened(&fake).load();
+    assert!(load.complete);
+    assert_eq!(sessions_of(&load), [ago(5)], "not moved in");
+    assert_eq!(fake.records().into_keys().collect::<Vec<_>>(), [stored.id]);
+}
+
+/// A deletion another tab makes as this one takes up what an older build
+/// stored, between this one's look at the tombstones and at the records,
+/// is not undone: the tombstones are read after the records, as on a
+/// computer, so a session the other tab deleted, under a name the take-up
+/// does not give it, is not stored again. Read before, they held no word
+/// of it, the record was gone by the time the records were listed, and
+/// the session came back.
+#[test]
+fn a_deletion_another_tab_makes_as_this_one_takes_up_is_not_undone() {
+    let old = ago(10);
+    let page = Page::holding(std::slice::from_ref(&old));
+    let fake = Fake::on(&page);
+    let tab = opened(&fake);
+    let load = tab.load();
+    let [(moved, _)] = load.sessions[..] else {
+        panic!("moved: {:?}", load.sessions);
+    };
+    // A session filled in beside the one moved, as a restore fills one in.
+    let session = ago(1);
+    let json = serde_json::to_string(&session).expect("writes");
+    let filled = RecordId::beside(moved, &json);
+    let change = HistoryChange {
+        put: vec![Record { id: filled, json }],
+        ..HistoryChange::default()
+    };
+    assert_eq!(done(tab.apply(change)), HistorySaved::Stored { kept: 1 });
+    // An older build's tab, still open, stores it, as one it holds as new;
+    // and another tab deletes it as this one goes to list the records.
+    page.keep(&[old, session.clone()]);
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    fake.shelves().before_list = Some(Box::new(move |shelves: &mut Shelves| {
+        shelves.sessions.remove(&filled.name());
+        shelves.deleted.insert(filled.name(), tombstone);
+    }));
+    assert_eq!(done(tab.listing()), Some(vec![moved]), "not taken up");
+    assert_eq!(fake.records().into_keys().collect::<Vec<_>>(), [moved]);
 }
 
 /// A database that will not take the move leaves the history to the page

@@ -375,6 +375,14 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             Err(refusal) => return Err(refused(refusal)),
         };
         let layout = if moving {
+            // Read again after the records: a session another tab deleted
+            // meanwhile, under a name the move does not give it, is no
+            // session to move in.
+            let tombstones = self.glue.tombstones().await.map_err(refused)?;
+            let gone: BTreeSet<RecordId> = tombstones
+                .iter()
+                .filter_map(|(name, _)| RecordId::parse(name))
+                .collect();
             let gone_keys = tombstoned_keys(&tombstones);
             let moved = self
                 .move_in(head.layout.as_deref(), &read, &gone, &gone_keys, &mut load)
@@ -596,11 +604,13 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             .map(|whole| whole.sessions)
             .unwrap_or_default();
         let deleted = self.legacy_deleted();
-        let gone = tombstoned_keys(&self.glue.tombstones().await.ok()?);
+        // The tombstones after the records, as on a computer: a session
+        // another tab deletes in between is either still here or deleted.
         let live = match live {
             Some(live) => live,
             None => self.live_keys().await?,
         };
+        let gone = tombstoned_keys(&self.glue.tombstones().await.ok()?);
         let (change, next) =
             legacy::imported(&layout, fingerprint, &sessions, &deleted, &live, &gone)?;
         let written = layout_text(&next)?;
