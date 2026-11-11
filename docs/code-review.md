@@ -18,7 +18,7 @@
   The weak points are a few god objects (`ContestMachine`, `AppCtx`, the `Store` trait), stringly typed errors at subsystem boundaries, booleans standing in for states, and some layering inversions (§2).
 - **Well written?** Mostly. Doc comments are dense and say what holds rather than what the code does, tests read as sentences and run on a virtual clock, and the history of each fix is in its commit message. Against it: a private vocabulary ("taken up", "told of", "put back") that a newcomer must learn, and functions that branch on platform × feature × test, which hides the path that ships (§2.4).
 - **Monolithic?** Not at the function level: 39 of about 2,900 production functions exceed 100 lines, about half of them UI markup. A handful of files and types have absorbed too much and should be split (§2.2).
-- **Redundant?** Textual duplication is low. Structural duplication remains in a few places, the largest being the record-store algorithm written twice (desktop files and IndexedDB) and the two near-identical run runtimes (§2.3).
+- **Redundant?** Textual duplication is low. Structural duplication remains in a few places, the largest being the record-store algorithm written twice (desktop files and IndexedDB) and the two near-identical run runtimes (§2.3). The record store has since been made one core (§7.7).
 - **Bugs, lock-ups, races.** The code base was well defended, but not free of them. This review found and fixed (§3, §4):
   - **7 crashes**: 3 reachable in release builds (the contest simulator in a browser, from Esc after the page fell behind; the closing, on Linux, of an audio stream whose ALSA worker had died of its own panic; a narrow sync race) and 4 latent or debug-only panics;
   - **5 fixes for a large or crafted file picked to restore**: in four of them the app could be stopped for want of memory (eight ways in all); in the fifth a browser page grew by up to a gigabyte it never gave back;
@@ -578,7 +578,7 @@ At the end of these moves (`95975ef`), cw-core's 395 exported names and its publ
 
 | §2.3 row | Now | Left, and why |
 |---|---|---|
-| Record-store algorithm | `KeyOnly`/`key_of`/`keyed`/`taken_up` once, in `persist::record`, also for `state.rs`'s third copy (`94a72ea`, `87e9c93`); the move's four-rule filter, the tombstone, deletions and told-of reads shared, each store passing its own inputs (`6c2ca6a`) | A generic core over a backend trait: the two stores' protocols differ. `files` makes each step durable before the next, on a worker thread; IndexedDB does one transaction per change with a compare-and-swap on the layout, in async code that is not `Send`. Their "already here" inputs also differ (files counts a record left beside its tombstone, IndexedDB does not). Merging them would change one outcome, a record beside an empty or unreadable tombstone, so only the filter is shared |
+| Record-store algorithm | `KeyOnly`/`key_of`/`keyed`/`taken_up` once, in `persist::record`, also for `state.rs`'s third copy (`94a72ea`, `87e9c93`); the move's four-rule filter, the tombstone, deletions and told-of reads shared, each store passing its own inputs (`6c2ca6a`). Since then one core, `persist::record_store`, over a `Backend` trait with `async fn`s and no `Send` bound, each store a private view of itself answering it with its own reads and writes: the files (`Disk`, every future done as first polled on the worker), a browser's database (`InDb`, awaited on the page) and the test store (`InMem`). The core reads the history whole, moves it in, takes up what an older build changed, makes changes, lists, reads, answers the three asks of deletions and tells of what does not read; the notes of what was told are one set of rules (`record_store::notes`) and a change one set of steps (`record_store::steps`), which idb.js's transaction is held to by a page differential. After the divergences were fixed in the copy that differed (`e401d80` to `a56788e`), each store was switched in a commit of its own (`95e0361`, `4834961`, `c01c5a9`), each proved against its old code, pasted beside it, on seeded sequences of 40 steps, compared bit for bit and then deleted: the files on 2,000, the browser on 2,000, the test store on 4,000. `9e39026` then fixed one bug the copies shared (a record stored under the next name was read, and by a browser noted, under the name asked). What every store must do is tested once on all three (`persist::conformance`) | The protocols stay each store's own, behind the trait: durable steps and journals on the files, one transaction with a compare-and-swap on the layout in a browser. Production code is longer, not shorter: the core and its two rule modules are 1,712 lines, about half of them doc comments, against 618 taken out of `files.rs` and `idb.rs` (§7.7) |
 | Run lifecycle | one `AWAY_GAP_MS`, and `Lease::after` for the three timer spawns; the four claim-or-toast blocks were rewritten in one shorter let-else form, though each is still written out at its site (`cf2a5e6`) | `RunMachine` plus `LiveRun<M>`: it needs about ten hook methods, so it moves the code behind a trait rather than removing it. Unifying liveness changes behaviour: a run's time away would be judged by a root heartbeat instead of its screen's ticks, so it would pause at other moments: on a gap while its screen is unmounted, and up to a tick earlier or later |
 | Band sync and continuation timing | — | Band sync: sharing it needs a new trait for about zero lines saved, and adds a module edge. Continuation timing: the two backends use different clocks and round the fade origin differently |
 | Grid-belief replay | — | The shared part is boilerplate, about 45 lines of code in each type, of which a trait would save about 20; both types are crate-private |
@@ -630,13 +630,38 @@ All were bit-identical.
 
 - **Item 7:** the cycles were removed without splitting `AppCtx`. The split remains worth doing for its own sake.
 - **Item 8:** only the small consolidations above. A `RunMachine` trait would not make the code shorter, and one heartbeat for both runtimes would change when a run pauses.
-- **Item 9:** the helpers are shared. A single record-store core needs the two stores' protocols redesigned first.
+- **Item 9:** the core is done: one record-store core, the stores' protocols kept behind a trait rather than redesigned (§7.4, §7.7). `Store` is not split.
 - **Item 12:** closer. `sync` depends only on `persist`, `time` and, for Android's sign-in, the leaf `jvm`. `persist`'s core depends only on cw-core and the clock.
 - **Item 13:** both kept, as two policies, until `7227bc6` made the queue the one path (§8.2).
 - **Item 15:** done, with these exceptions:
   - `Lender<T>`: each call site would stay about as long;
   - the `GridModel` trait: it would save only about 20 lines of boilerplate in two crate-private types;
   - the percent helpers that differ from `format::percent` on purpose; those that took a tie away from zero with `.round()` go to the even percent since `84c94b8` (§8.2).
+
+### 7.7 The record store as one core
+
+The plan judged two designs, a coroutine core answered by each store and a generic core over a typed backend trait, and took the second, with the first's stateless core, its exactness notes and its order tests (scripted backends that log every call). Each divergence between the copies was first fixed, test first, in the copy that differed; then the shared reads, the notes' rules and the change's steps were moved out one at a time (`caa07a9`, `e5a52e0`, `8bcf3d0`, `54420dc`), the core written beside them and used by its tests alone (`2590056`), and each store switched onto it (`95e0361`, `4834961`, `c01c5a9`), under a differential that ran the old code beside the new:
+
+| Store | Sequences of 40 steps | Of them |
+|---|---|---|
+| Files | 2,000 | 11,929 loads, 16,063 changes, 8,018 listings, 4,062 reads, 3,923 + 4,044 + 4,061 asks of deletions, 4,039 of records still unread, 23,861 steps by another copy, an older build, other programs and a damaged disk |
+| Browser | 2,000 | 9,662 opens, 20,050 changes, 4,026 changes by another tab, 6,434 listings, 4,013 reads, 3,282 + 3,161 + 3,196 asks of deletions, 1,591 backups, 19,757 steps outside |
+| Test store | 4,000 | 19,166 loads, 40,014 changes, 14,355 listings, 7,945 reads, 6,405 + 6,379 + 6,407 asks of deletions, 6,392 of records still unread, 48,085 steps outside |
+
+Each was also seen to fail on a mutation of the new code before its pasted copy was deleted. What they declared, and why it cannot be reached or is a test store's own: the files' `still_unread` reads the note of damage where it took it as there by its file (`95e0361`); a tombstone that cannot be written down fails a change, where a browser wrote `{}` (`4834961`); the test store writes its note of damage, empty, the first time it notes a record still unread, and, short of room, lets a take-up's oldest records go after the read that tells of them (`c01c5a9`).
+
+Production lines (outside `#[cfg(test)]`) of the files the work touched, before it (`1c6f0db`) and after:
+
+| File | Before | After |
+|---|---|---|
+| `files.rs` | 1,859 | 1,410 |
+| `idb.rs` | 1,334 | 1,165 |
+| `idb.js` | 542 | 551 |
+| `record_store.rs` | — | 1,297 |
+| `record_store/notes.rs` | — | 273 |
+| `record_store/steps.rs` | — | 142 |
+
+`legacy.rs`, `record.rs`, `worker.rs`, `desktop.rs` and `web.rs` did not change. Production code grew by 1,103 lines, 648 of them code: every decision is now written once, and each store's half of it is its own I/O, but the trait, its documented hooks and the core's shared types cost more than the two copies they replaced. The test store (all of it test code) went from 1,492 lines to 1,555 before its tests.
 
 ## 8. Follow-up: the deferred defects fixed
 
