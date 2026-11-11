@@ -61,7 +61,8 @@ impl LiveSession {
     /// judges it by: none while it would keep nothing. A group just
     /// answered leaves nothing typed in the next, so then it is the groups
     /// answered; paused, it is the group the pause cut too, as it stood.
-    fn so_far(&self, now: MonoMs) -> Option<SoFar> {
+    /// `finished_at` is the wall time it says it ended at.
+    fn so_far(&self, now: MonoMs, finished_at: u64) -> Option<SoFar> {
         let mut ended = self.machine.clone();
         let effects = ended.apply(SessionEvent::FinishNow, now);
         effects
@@ -69,7 +70,7 @@ impl LiveSession {
             .then(|| {
                 let session = ended.session();
                 SoFar {
-                    result: session.result(now_ms(), self.started_on.clone()),
+                    result: session.result(finished_at, self.started_on.clone()),
                     settings: Some(session.settings().clone()),
                 }
             })
@@ -401,7 +402,12 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
             return;
         };
         let now = MonoMs(mono_ms());
+        let finished_at = now_ms();
         let answered = live.answered();
+        // Paused, having given the audio back, what it would keep before it
+        // hears this: a send it hears of now as held up takes the times of
+        // the group it was a send of.
+        let paused = (!lease.is_current()).then(|| live.so_far(now, finished_at));
         // Typing still waiting out the box's pause came before this event,
         // so the machine hears it first.
         let mut effects = ctx
@@ -409,11 +415,20 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
             .take()
             .map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), now));
         effects.extend(live.machine.apply(event, now));
-        // A group answered, and the session going on: what it would keep
-        // now goes with its mark, should the app stop under it.
-        let so_far = (live.answered() > answered && !live.machine.is_terminal())
-            .then(|| live.so_far(now).map(|so_far| (live.mark.clone(), so_far)))
-            .flatten();
+        // A group answered, or what it would keep changed by what it heard
+        // while paused, and the session going on: what it would keep now
+        // goes with its mark, should the app stop under it.
+        let so_far = if live.machine.is_terminal() {
+            None
+        } else if live.answered() > answered {
+            live.so_far(now, finished_at)
+        } else {
+            paused.and_then(|before| {
+                live.so_far(now, finished_at)
+                    .filter(|after| before.as_ref() != Some(after))
+            })
+        }
+        .map(|so_far| (live.mark.clone(), so_far));
         // Much of what arrives changes nothing — a key while the box is
         // locked, a timer the machine has forgotten — and publishing it
         // anyway would copy the whole session and redraw the screen for it.
@@ -458,7 +473,8 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
 
 /// The session under `lease` has paused: what End session would keep
 /// now goes with its mark, the group the pause cut as it stood, should the
-/// app stop while it is paused.
+/// app stop while it is paused. What it hears while paused that changes
+/// that puts it there anew ([`dispatch`]).
 fn mark_paused(ctx: AppCtx, lease: &Lease) {
     let so_far = ctx
         .app()
@@ -468,7 +484,7 @@ fn mark_paused(ctx: AppCtx, lease: &Lease) {
         .and_then(Live::groups)
         .filter(|live| live.lease.is(lease))
         .and_then(|live| {
-            let so_far = live.so_far(MonoMs(mono_ms()))?;
+            let so_far = live.so_far(MonoMs(mono_ms()), now_ms())?;
             Some((live.mark.clone(), so_far))
         });
     if let Some((mark, so_far)) = so_far {
@@ -3138,6 +3154,54 @@ mod tests {
                 (timing.char_times.clone(), timing.untimed),
                 (None, Some(cw_core::Untimed::Paused))
             );
+        });
+    }
+
+    /// What a paused session hears goes in its mark, as it would go in
+    /// what End keeps: told while paused that the send of a group answered
+    /// along it was held up, the session the app stops under then is kept
+    /// at the next launch as End would keep it, that group untimed and
+    /// saying so, not timed from a send it knew was held up.
+    #[test]
+    fn news_a_paused_session_hears_goes_in_its_mark() {
+        run(|| async {
+            for stop in [false, true] {
+                let mut settings = test_settings();
+                settings.curriculum.num_groups = 3;
+                settings.playback.lock_input_during_group_playback = false;
+                let mut h = Harness::with_settings(settings);
+                h.store.mark_tutorial_done();
+                h.start_training();
+                assert!(
+                    h.run_until(4_000, |h| !h.recorder.starts().is_empty())
+                        .await
+                );
+                let started = h.recorder.starts()[0].clone();
+                let span = &started.plan.wanted.chars[0];
+                let first_end = started.at.0 + (span.end_sec * 1_000.0).round() as u64;
+                h.advance(first_end + 50 - mono_ms()).await;
+                assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
+                answer_keyed(&mut h, 0);
+                let cut = h.lease();
+                h.send(SessionEvent::Pause);
+                assert!(!cut.is_current(), "{stop}");
+                let ctx = h.ctx;
+                h.in_app(|| dispatch(ctx, &cut, SessionEvent::PlaybackHeldUp { index: 0 }));
+                h.pump();
+                if stop {
+                    let (mut ui, _recorder) = crate::testing::Ui::launch(h.store.clone());
+                    ui.advance(20).await;
+                } else {
+                    h.send(SessionEvent::FinishNow);
+                }
+                let kept = stored_last(&h);
+                let timing = &kept.group_timings[0];
+                assert_eq!(
+                    (timing.char_times.clone(), timing.untimed),
+                    (None, Some(cw_core::Untimed::HeldUp)),
+                    "stopped {stop}"
+                );
+            }
         });
     }
 }

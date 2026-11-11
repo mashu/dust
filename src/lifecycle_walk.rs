@@ -10,6 +10,8 @@
 //! - nothing is left borrowing what is live;
 //! - what is live is what is published, and has the training screen;
 //! - what is live holds the audio unless it is paused;
+//! - while it is paused, its mark holds what End would keep were it pressed
+//!   then, so that the app stopping keeps that;
 //! - the history only grows, and a session stored stays as it was stored.
 //!
 //! Each walk's lines are hashed, and the suite's walks are held to the
@@ -39,9 +41,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use cw_core::{
-    ContestPhase, CountersKey, EntryField, MonoMs, OpKey, PauseWhy, Rng, RowStatus, RunStyle,
-    SessionEvent, SessionResult, SessionTiming, SplitMix64, TrainingSettings, Untimed,
-    answer_length_matches,
+    ContestEffect, ContestEvent, ContestPhase, CountersKey, EntryField, MonoMs, OpKey, PauseWhy,
+    Rng, RowStatus, RunStyle, SessionEffect, SessionEvent, SessionResult, SessionTiming,
+    SplitMix64, TrainingSettings, Untimed, answer_length_matches,
 };
 
 use dioxus::prelude::*;
@@ -662,6 +664,7 @@ impl Walk {
                 "{at}: the training screen and what is live disagree"
             );
         }
+        self.check_mark(&at);
         let stored: Vec<String> = self
             .h
             .store
@@ -677,6 +680,51 @@ impl Walk {
             left.remove(at_now);
         }
         self.stored = stored;
+    }
+
+    /// While what is live is paused, its mark holds what End would keep
+    /// were it pressed now, worked out on a copy of its machine: what the
+    /// app stopping then keeps. Nothing to keep, nothing marked.
+    fn check_mark(&self, at: &str) {
+        let now = MonoMs(mono_ms());
+        let end_now = match self.h.app.session.borrow().as_ref() {
+            Some(Live::Groups(live)) if live.machine.session().paused() => {
+                let mut ended = live.machine.clone();
+                let effects = ended.apply(SessionEvent::FinishNow, now);
+                Some(
+                    effects
+                        .contains(&SessionEffect::PersistAndShowResults)
+                        .then(|| ended.session().result(0, String::new())),
+                )
+            }
+            Some(Live::Contest(live))
+                if matches!(live.machine.phase(), ContestPhase::Paused { .. }) =>
+            {
+                let mut ended = live.machine.clone();
+                let effects = ended.apply(ContestEvent::FinishNow, now);
+                Some(
+                    effects
+                        .contains(&ContestEffect::PersistAndShowResults)
+                        .then(|| ended.result(0, String::new())),
+                )
+            }
+            _ => None,
+        };
+        let Some(end_now) = end_now else {
+            return;
+        };
+        let marked = self
+            .h
+            .store
+            .open()
+            .and_then(|open| open.so_far)
+            .map(|so_far| so_far.result);
+        assert!(
+            marked.as_ref().map(as_kept) == end_now.as_ref().map(as_kept),
+            "{at}: paused, the mark holds {} where End would keep {}",
+            marked.as_ref().map_or("nothing".into(), session),
+            end_now.as_ref().map_or("nothing".into(), session),
+        );
     }
 
     /// Write down what the app shows, plays, says, marks and stores after
@@ -832,17 +880,37 @@ fn session(result: &SessionResult) -> String {
         .zip(&result.group_timings)
         .map(|(group, timing)| format!("{}>{}:{}", group.sent, group.received, timed(timing)))
         .collect();
+    format!(
+        "{:.3} [{}] #{:016x}",
+        result.accuracy,
+        groups.join(" "),
+        fnv1a(stored(result).to_string().as_bytes())
+    )
+}
+
+/// `result` as it is stored, but for when it ended: its `date` and
+/// `timestamp`.
+fn stored(result: &SessionResult) -> serde_json::Value {
     let mut stored = serde_json::to_value(result).expect("a session writes");
     if let Some(stored) = stored.as_object_mut() {
         stored.remove("date");
         stored.remove("timestamp");
     }
-    format!(
-        "{:.3} [{}] #{:016x}",
-        result.accuracy,
-        groups.join(" "),
-        fnv1a(stored.to_string().as_bytes())
-    )
+    stored
+}
+
+/// `result` as End would keep it at any moment of a pause: as it is
+/// stored, but for when it ended and, for a run, how long it has been
+/// paused, which grows while it is.
+fn as_kept(result: &SessionResult) -> serde_json::Value {
+    let mut kept = stored(result);
+    if let Some(log) = kept
+        .get_mut("contest")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        log.remove("pausedMs");
+    }
+    kept
 }
 
 /// How a group is timed: `t` with its characters' times, then why it holds
