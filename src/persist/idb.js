@@ -269,8 +269,10 @@ const lastOf = (requests, then) => {
 
 // Store `json` as the record `key`, unless it was deleted by hand and the
 // change does not undo that; where other bytes have that name already, under
-// the next free one. No record is ever written over.
-const place = (stores, key, json, undoing, said) => {
+// the next free one. No record is ever written over. `placed` is called once
+// it is settled, asked to be added, there already, or kept out; not where
+// no name was free, as nothing of the change is made then.
+const place = (stores, key, json, undoing, said, placed) => {
   const store = (name, bumps) => {
     const there = stores.sessions.get(name);
     there.onsuccess = () => {
@@ -281,9 +283,12 @@ const place = (stores, key, json, undoing, said) => {
         // Stored already; or put back where its record was never taken.
       } else if (bumps < BUMPS) {
         store(bumped(name), bumps + 1);
+        return;
       } else {
         said.refuse("failed", `no name was free for the session stored as ${key}`);
+        return;
       }
+      placed();
     };
   };
   if (undoing) {
@@ -294,6 +299,8 @@ const place = (stores, key, json, undoing, said) => {
   gone.onsuccess = () => {
     if (gone.result === 0) {
       store(key, 0);
+    } else {
+      placed();
     }
   };
 };
@@ -464,17 +471,31 @@ return {
           for (const key of change.unforget) {
             stores.deleted.delete(key);
           }
+          // The deletions once every record is settled, as each is asked
+          // for only once the answers it waits on came: a record this change
+          // stores and deletes is not left beside its tombstone.
+          const forget = () => {
+            for (const [key, tombstone] of change.forget) {
+              const there = stores.deleted.count(key);
+              there.onsuccess = () => {
+                if (there.result === 0) {
+                  stores.deleted.put(tombstone, key);
+                }
+              };
+              stores.sessions.delete(key);
+            }
+          };
+          let unsettled = change.put.length;
           for (const [key, json] of change.put) {
-            place(stores, key, json, undone.has(key), said);
-          }
-          for (const [key, tombstone] of change.forget) {
-            const there = stores.deleted.count(key);
-            there.onsuccess = () => {
-              if (there.result === 0) {
-                stores.deleted.put(tombstone, key);
+            place(stores, key, json, undone.has(key), said, () => {
+              unsettled -= 1;
+              if (unsettled === 0) {
+                forget();
               }
-            };
-            stores.sessions.delete(key);
+            });
+          }
+          if (change.put.length === 0) {
+            forget();
           }
           for (const [key, value] of change.meta) {
             stores.meta.put(value, key);

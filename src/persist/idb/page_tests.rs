@@ -310,6 +310,59 @@ dioxus.send(fakeIdb.contents("dust_history", "deleted"));"#,
     assert_eq!(sent[4], json!({}));
 }
 
+/// A change's deletions are made after its records, as the files make
+/// them, however each record went: added, there already, kept out as one
+/// deleted, or moved to the next name. A change that stores a record and
+/// deletes it leaves no record of it, and its tombstone. The deletion was
+/// asked for at once, and the record, added once the answers it waited on
+/// came, stayed beside its tombstone.
+#[test]
+fn a_change_deletes_after_it_stores() {
+    let Some(sent) = on_page(
+        r#"const tab = glue();
+await tab.open();
+fakeIdb.plant("dust_history", "sessions", name(3), "c");
+fakeIdb.plant("dust_history", "sessions", name(4), "other");
+fakeIdb.plant("dust_history", "deleted", name(5), "old");
+dioxus.send(await tab.apply(change({
+  put: [[name(1), "a"], [name(3), "c"], [name(4), "d"], [name(5), "e"]],
+  forget: [[name(1), "gone"]],
+})));
+dioxus.send(fakeIdb.contents("dust_history", "sessions"));
+dioxus.send(fakeIdb.contents("dust_history", "deleted"));
+// With no record to store, the deletion is made at once.
+dioxus.send(await tab.apply(change({ forget: [[name(3), "gone too"]] })));
+dioxus.send(fakeIdb.contents("dust_history", "sessions"));"#,
+    ) else {
+        return;
+    };
+    assert_eq!(sent[0], json!({ "ok": null }));
+    assert_eq!(
+        sent[1],
+        json!({
+            "00000000000000000003-0000000000000001": "c",
+            "00000000000000000004-0000000000000001": "other",
+            "00000000000000000004-0000000000000002": "d",
+        }),
+        "no record of the one deleted"
+    );
+    assert_eq!(
+        sent[2],
+        json!({
+            "00000000000000000001-0000000000000001": "gone",
+            "00000000000000000005-0000000000000001": "old",
+        })
+    );
+    assert_eq!(sent[3], json!({ "ok": null }));
+    assert_eq!(
+        sent[4],
+        json!({
+            "00000000000000000004-0000000000000001": "other",
+            "00000000000000000004-0000000000000002": "d",
+        })
+    );
+}
+
 /// Every other tab hears of a change once it is made: on the channel at
 /// once, and from the stamp it leaves, which a tab asleep reads as it
 /// wakes. What only notes what was told is no change to the history.
