@@ -2027,7 +2027,10 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   is timed, and its copies say they were paused. A send
   the pause cut after it began to reach you is owed on its caller's
   timeout, as one heard whole, so a pause is no free `?`; one cut before
-  it began goes again a moment after Resume (4.2).
+  it began goes again a moment after Resume (4.2). The news of its own
+  sends still reaches the paused run, as it reaches a paused session
+  (`dispatch`, `src/contest_runtime.rs`), so a turn told of as held up only
+  after the pause leaves its copies untimed all the same; no timer does.
 - **Resume** claims a new lease inside the tap, as Start does
   (`resume_run`, `src/contest_runtime.rs`), so the player opens, or after a
   sound failure

@@ -214,15 +214,20 @@ fn run_lease(ctx: AppCtx) -> Option<Lease> {
     }
 }
 
-/// Hand the run news from its own tasks: a timer, a send. News from a lease
-/// the run no longer holds — a run that has ended, a send a pause let go of
-/// — is dropped.
+/// Hand the run news from its own tasks: a timer, a send. What comes under
+/// the run's own lease is its to hear while it holds the audio, and while it
+/// is paused, having given the audio back, as a paused session hears it:
+/// the news of the send its pause cut short. News under another lease — a
+/// run that has ended, one before it — is dropped. A timer never comes to a
+/// paused run: the lease it was armed under drops it ([`Lease::after`]).
 fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
-    let current = matches!(
+    let hears = matches!(
         ctx.app().session.borrow().as_ref(),
-        Some(Live::Contest(live)) if live.lease.is(lease) && lease.is_current()
+        Some(Live::Contest(live)) if live.lease.is(lease)
+            && (lease.is_current()
+                || matches!(live.machine.phase(), ContestPhase::Paused { .. }))
     );
-    if current {
+    if hears {
         apply(ctx, Some(event));
     }
 }
@@ -1854,6 +1859,54 @@ mod tests {
             let (_, log) = stored_last(&h);
             let kinds: Vec<&str> = log.qsos.iter().map(|qso| qso.k.as_str()).collect();
             assert_eq!(kinds, ["", "lost"]);
+        });
+    }
+
+    /// A paused run still hears what comes under the lease its pause gave
+    /// back, as a paused session does: told that the turns of its QSO were
+    /// held up, it keeps the QSO's copies untimed, each saying so, where a
+    /// run told nothing keeps them timed.
+    #[test]
+    fn a_paused_run_hears_the_news_of_its_own_sends() {
+        run(|| async {
+            for told in [false, true] {
+                crate::time::pin_seeds(Some(7));
+                let mut h = Harness::with_settings(contest_settings());
+                h.start_training();
+                work(&mut h, 60_000, Some(1)).await;
+                let cut = h.lease();
+                let ctx = h.ctx;
+                h.in_app(|| pause_run(ctx, PauseWhy::You));
+                h.pump();
+                assert!(!cut.is_current(), "{told}");
+                if told {
+                    h.in_app(|| {
+                        for id in 1..=200 {
+                            dispatch(ctx, &cut, ContestEvent::TurnHeldUp { id });
+                        }
+                    });
+                    h.pump();
+                }
+                h.in_app(|| resume_run(ctx));
+                h.pump();
+                end(&mut h);
+                let (kept, log) = stored_last(&h);
+                assert!(!log.qsos.is_empty(), "{told}");
+                for timing in &kept.group_timings {
+                    if told {
+                        assert_eq!(
+                            (timing.char_times.clone(), timing.untimed),
+                            (None, Some(cw_core::Untimed::HeldUp)),
+                            "{told}"
+                        );
+                    } else {
+                        assert!(
+                            timing.char_times.is_some() && timing.untimed.is_none(),
+                            "{told}: {timing:?}"
+                        );
+                    }
+                }
+            }
         });
     }
 }
