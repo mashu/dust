@@ -615,7 +615,11 @@ fn case(seed: u64) -> Case {
 fn made_steps(case: &Case) -> Option<(Stores, Vec<Option<String>>)> {
     let mut shelves = Shelves::default();
     shelves.sessions = case.sessions.clone();
-    shelves.deleted = case.deleted.clone();
+    shelves.deleted = case
+        .deleted
+        .iter()
+        .map(|(name, held)| (name.clone(), Some(held.clone())))
+        .collect();
     let forget: Vec<(RecordId, &str)> = case
         .forget
         .iter()
@@ -631,8 +635,12 @@ fn made_steps(case: &Case) -> Option<(Stores, Vec<Option<String>>)> {
         .into_iter()
         .map(|id| id.map(RecordId::name))
         .collect();
-    made.ok()
-        .map(|()| ((shelves.sessions, shelves.deleted), names))
+    let deleted = shelves
+        .deleted
+        .into_iter()
+        .map(|(name, held)| (name, held.expect("text")))
+        .collect();
+    made.ok().map(|()| ((shelves.sessions, deleted), names))
 }
 
 /// What the records and the tombstones of a database hold, by name.

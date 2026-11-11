@@ -98,7 +98,9 @@ impl Aside for Page {
 #[derive(Default)]
 pub(super) struct Shelves {
     pub(super) sessions: BTreeMap<String, String>,
-    pub(super) deleted: BTreeMap<String, String>,
+    /// Each tombstone, and what it holds: none where it holds no text, as a
+    /// later build may store, and as the page script answers then.
+    pub(super) deleted: BTreeMap<String, Option<String>>,
     meta: BTreeMap<String, String>,
     /// How many changes were made, and how many other tabs told of.
     changes: u64,
@@ -288,7 +290,7 @@ impl Steps for Making<'_> {
     fn tombstone(&self, new: &[(RecordId, &str)]) -> Result<(), Refused> {
         let mut shelves = self.0.borrow_mut();
         for (id, held) in new {
-            shelves.deleted.insert(id.name(), (*held).into());
+            shelves.deleted.insert(id.name(), Some((*held).into()));
         }
         Ok(())
     }
@@ -345,7 +347,7 @@ impl Glue for Fake {
             shelves
                 .deleted
                 .iter()
-                .map(|(name, held)| (name.clone(), Some(held.clone())))
+                .map(|(name, held)| (name.clone(), held.clone()))
                 .collect()
         }))
     }
@@ -382,7 +384,7 @@ impl Glue for Fake {
                 .into_iter()
                 .filter_map(|name| {
                     let tombstone = shelves.deleted.get(&name)?.clone();
-                    Some((name, Some(tombstone)))
+                    Some((name, tombstone))
                 })
                 .collect()
         }))
@@ -687,7 +689,7 @@ fn a_move_made_again_counts_a_record_left_beside_its_tombstone_as_here() {
     {
         let mut shelves = fake.shelves();
         shelves.sessions.insert(placed.name(), json);
-        shelves.deleted.insert(placed.name(), "{}".into());
+        shelves.deleted.insert(placed.name(), Some("{}".into()));
         shelves.meta.insert("layout".into(), "{ damaged".into());
     }
     let load = opened(&fake).load();
@@ -718,7 +720,7 @@ fn a_move_made_again_over_its_own_record_beside_its_tombstone_keeps_it_deleted()
         shelves
             .sessions
             .insert(moved[0].id.name(), "{ damaged".into());
-        shelves.deleted.insert(moved[0].id.name(), tombstone);
+        shelves.deleted.insert(moved[0].id.name(), Some(tombstone));
         shelves.meta.insert("layout".into(), "{ damaged".into());
     }
     let load = opened(&fake).load();
@@ -748,7 +750,7 @@ fn a_deletion_another_tab_makes_as_this_one_moves_is_not_undone() {
     let placed = RecordId::placed(session.timestamp, &json);
     let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
     fake.shelves().after_pages = Some(Box::new(move |shelves: &mut Shelves| {
-        shelves.deleted.insert(placed.name(), tombstone);
+        shelves.deleted.insert(placed.name(), Some(tombstone));
     }));
     let load = opened(&fake).load();
     assert!(load.complete);
@@ -788,7 +790,7 @@ fn a_deletion_another_tab_makes_as_this_one_takes_up_is_not_undone() {
     let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
     fake.shelves().before_list = Some(Box::new(move |shelves: &mut Shelves| {
         shelves.sessions.remove(&filled.name());
-        shelves.deleted.insert(filled.name(), tombstone);
+        shelves.deleted.insert(filled.name(), Some(tombstone));
     }));
     assert_eq!(done(tab.listing()), Some(vec![moved]), "not taken up");
     assert_eq!(fake.records().into_keys().collect::<Vec<_>>(), [moved]);
@@ -824,7 +826,7 @@ fn an_undo_another_tab_makes_as_this_one_takes_up_leaves_one_record() {
     let json = serde_json::to_string(&held).expect("writes");
     let here = RecordId::placed(session.timestamp, &json);
     let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
-    fake.shelves().deleted.insert(here.name(), tombstone);
+    fake.shelves().deleted.insert(here.name(), Some(tombstone));
     // An older build's tab, holding it as new, writes its history back;
     // and another tab undoes the deletion once this one lists the records.
     page.keep(&[old, session.clone()]);
@@ -850,7 +852,7 @@ fn an_undo_another_tab_makes_as_this_one_moves_leaves_one_record() {
     let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
     {
         let mut shelves = fake.shelves();
-        shelves.deleted.insert(here.name(), tombstone);
+        shelves.deleted.insert(here.name(), Some(tombstone));
         shelves.meta.insert("layout".into(), "{ damaged".into());
     }
     fake.shelves().after_pages = Some(Box::new(move |shelves: &mut Shelves| {
@@ -877,7 +879,7 @@ fn an_undo_another_tab_makes_before_the_pages_under_the_moves_name_is_in_the_loa
     let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
     {
         let mut shelves = fake.shelves();
-        shelves.deleted.insert(name.clone(), tombstone);
+        shelves.deleted.insert(name.clone(), Some(tombstone));
         shelves.meta.insert("layout".into(), "{ damaged".into());
     }
     fake.shelves().before_pages = Some(Box::new(move |shelves: &mut Shelves| {
@@ -1903,6 +1905,11 @@ impl Harness for InBrowser {
     fn plant(&self, id: RecordId, json: &str) {
         self.fake.shelves().sessions.insert(id.name(), json.into());
     }
+
+    fn plant_tombstone(&self, id: RecordId, held: Option<&str>) {
+        let held = held.map(str::to_string);
+        self.fake.shelves().deleted.insert(id.name(), held);
+    }
 }
 
 /// What every store must do with the history ([`crate::persist::conformance`]).
@@ -1920,5 +1927,6 @@ mod conformance {
         a_record_this_build_cannot_read_is_told_of_once,
         a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went,
         a_session_stored_under_a_name_other_bytes_have_is_known_by_where_it_went,
+        a_tombstone_that_names_no_session_still_deletes_its_record,
     );
 }

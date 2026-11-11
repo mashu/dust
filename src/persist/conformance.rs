@@ -37,6 +37,11 @@ pub(crate) trait Harness {
     /// `json` stored as the record `id`, as another build, or damage,
     /// leaves one.
     fn plant(&self, id: RecordId, json: &str);
+    /// A tombstone for the record `id`, as another build, or damage,
+    /// leaves one: holding `held`, or, given none, what is no text, as a
+    /// later build may store in a browser's database, or damage leaves of
+    /// a file.
+    fn plant_tombstone(&self, id: RecordId, held: Option<&str>);
 }
 
 /// The cases this suite holds, each a test of the store `$harness`, named
@@ -305,4 +310,39 @@ pub(crate) fn a_session_stored_under_a_name_other_bytes_have_is_known_by_where_i
         .map(|(id, _)| id)
         .collect();
     assert_eq!(gone, [went]);
+}
+
+/// A tombstone that names no session, as one that is empty, one that does
+/// not read, or one that is no text, deletes its record all the same: the
+/// load and the listing leave the record out, and the deletions name it,
+/// though not when. It deletes no session by name: the sessions deleted
+/// leave it out, and what an older build stores after is taken up, nothing
+/// held back by it.
+pub(crate) fn a_tombstone_that_names_no_session_still_deletes_its_record<H: Harness>() {
+    let whole = [ago(40), ago(30), ago(20), ago(10)];
+    let mut store = H::holding(&whole);
+    let ids: Vec<RecordId> = store.load().sessions.iter().map(|(id, _)| *id).collect();
+    store.plant_tombstone(ids[0], Some(""));
+    store.plant_tombstone(ids[1], Some("{ not a tombstone"));
+    store.plant_tombstone(ids[2], None);
+    assert_eq!(sessions(&store.load()), [whole[3].clone()]);
+    assert_eq!(store.listing(), Some(vec![ids[3]]));
+    assert_eq!(
+        store.deletions(ids.clone()),
+        Some(vec![(ids[0], None), (ids[1], None), (ids[2], None)])
+    );
+    assert_eq!(store.deleted_sessions(ids), Some(Vec::new()));
+    let keys: Vec<SessionKey> = whole.iter().map(SessionKey::of).collect();
+    assert_eq!(store.deleted_keys(keys), Some(Vec::new()));
+    // An older build stores another.
+    let since = ago(5);
+    let mut kept = whole.to_vec();
+    kept.push(since.clone());
+    store.keep_whole(&kept);
+    assert_eq!(
+        store.listing().map(|listed| listed.len()),
+        Some(2),
+        "taken up"
+    );
+    assert_eq!(sessions(&store.load()), [whole[3].clone(), since]);
 }

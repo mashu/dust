@@ -2483,9 +2483,17 @@ mod tests {
         fn plant(&self, id: RecordId, json: &str) {
             self.0.plant_unreadable_as(id, json);
         }
+
+        /// None: each tombstone the test store holds is a [`Deleted`], and
+        /// names its session, so the cases that plant one leave it out.
+        fn plant_tombstone(&self, _id: RecordId, _held: Option<&str>) {
+            unreachable!("the test store's tombstones each name their session");
+        }
     }
 
     /// What every store must do with the history ([`crate::persist::conformance`]).
+    /// Left out: a tombstone that names no session, which the test store
+    /// cannot hold, as each of its tombstones is a [`Deleted`] (D17).
     mod conformance {
         use super::InTestStore;
 
