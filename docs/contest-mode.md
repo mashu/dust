@@ -296,8 +296,8 @@ no settings saves mid-run. Four things change:
   paused page is shorter, so a phone scrolled down to Pause was left part
   way down it, and the run carried on with its header, clock and run bar
   above the screen's top. Pausing scrolls nothing, so nothing moves under
-  the finger that paused (`scroll_to_top`, `src/page.rs`, from
-  `resume_run`).
+  the finger that paused (`scroll_to_top`, `src/page.rs`, from the run's
+  `resumed`, `src/contest_runtime.rs`).
 
 ## 3. Contest catalogue
 
@@ -757,8 +757,8 @@ pub enum OpKey { Esm, Cq, Exchange, Tu, MyCall, HisCall, HisCallAndExchange,
 
 The machine needs the fields only at a key press. The runtime maps
 `Err(AudioError::Cancelled)` to `TurnCancelled` and any other error to
-`TurnFailed` (`play_turn`, `src/contest_runtime.rs`), as a group session's
-`play` tells the two apart (`src/session_runtime.rs`). The effects are
+`TurnFailed` (the run's `sent`, `src/contest_runtime.rs`), where a group
+session's hears either as its send stopped (`src/session_runtime.rs`). The effects are
 `PlayTurn(Turn)`, `StopAudio`, `ReleaseAudio`, `StartTimer{id, ms}`,
 `ClearFields`, `Focus(EntryField)`, `Announce(text)`, `PersistAndShowResults`,
 `ShowNothingKept` and `AbortToHome`. Every apply that emits `StopAudio` or
@@ -2033,10 +2033,10 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   timeout, as one heard whole, so a pause is no free `?`; one cut before
   it began goes again a moment after Resume (4.2). The news of its own
   sends still reaches the paused run, as it reaches a paused session
-  (`dispatch`, `src/contest_runtime.rs`), so a turn told of as held up only
+  (`Stage::hears`, `src/state/live.rs`), so a turn told of as held up only
   after the pause leaves its copies untimed all the same; no timer does.
 - **Resume** claims a new lease inside the tap, as Start does
-  (`resume_run`, `src/contest_runtime.rs`), so the player opens, or after a
+  (`resume`, `src/live_run.rs`), so the player opens, or after a
   sound failure
   is rebuilt, within the browser's gesture: a player that failed every
   attempt is thrown away, so that claim opens a fresh one. Every contest
@@ -2050,8 +2050,9 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   - on desktop, where wry never hides a minimised window, a
     `use_wry_event_handler` (`listen_minimised`) checking
     `window.is_minimized()` on Resized and Focused;
-  - a heartbeat: the run bar's ticker stamps `last_tick`; before any event,
-    a gap over 2 s first dispatches `Pause{Hidden, at: last_tick}`, so a
+  - a heartbeat: the run bar's ticker stamps when the run was last seen
+    (`LiveRun::away`, `src/state/live.rs`); before any event, a gap over
+    2 s first dispatches `Pause{Hidden, at}` from then, so a
     process frozen before any message arrived is still credited. The check
     starts with the ticker's first tick, so nothing is read into the moment
     before the run screen is up.
@@ -3750,14 +3751,15 @@ Effects carry `Turn`, which derives `PartialEq` (as `StationVoice` does,
 do (the tests of `crates/cw-core/src/machine.rs`). The runtime calls
 `plan_turn(&turn, &settings)`,
 then `lease.send_planned(asked, &plan, &transcript, &settings, turn.starts_at,
-news)` (`play_turn`, `src/contest_runtime.rs`), with `news` told each
+news)` (`play_turn`, `src/contest_runtime.rs`, through the send task
+`play`, `src/live_run.rs`), with `news` told each
 `SendNews` (5.2): every attempt's start, its lead plus latency and a
 continuation's wait for its moment among it (as built, 5a), what of it went
 unheard, and whether it was held up; and `asked` from `lease.ask_to_send()`
 as the turn goes on the air (5.2). The
 view holds no caller truth until a row's check resolves, but for what Show
 copy shows, each text with the moment it may show, and is published only
-when it changes (`apply`, `src/contest_runtime.rs`).
+when it changes (`step`, `src/live_run.rs`).
 
 `ContestEntry`, in `AppCtx` beside `answer: AnswerOutbox`, holds `call`
 and `exch` with their edit stamps (one `CopyValue<Fields>`, stamped by
@@ -3832,7 +3834,9 @@ assisted runs, contest speed evidence, `whole_evidence`);
 space keys, 5b); `soak.rs`, `lib.rs` (the contest soak; exports).
 
 **New in the app:** `src/contest_runtime.rs` (`LiveContest`'s methods, start,
-dispatch, effects, `play_turn`, finish, the heartbeat check);
+dispatch, effects, `play_turn`, finish, the heartbeat check; its start,
+steps, effects, send task, pause, Resume and end since made one with a
+session's, in `src/live_run.rs`);
 `src/ui/contest.rs` (run bar, hint, air line, fields, key bar, log, paused
 panel, the pause on a hidden page, whose visibility listener and minimise
 handler are in `src/page_hidden.rs` as built); `src/ui/contest_keys.rs`; `src/ui/contest_results.rs`;
@@ -3843,7 +3847,7 @@ Hear a QSO, 2c); `src/ui/scores/runs.rs` (the Runs card, as built 4b);
 
 **Changed in the app:** `src/session_runtime.rs` (`start_session` routing,
 `finish_run`, `abort_run`); `src/state/live.rs` (`Live::{Groups, Contest}`,
-`LiveSession` and `LiveContest`, whose methods stay in the runtimes);
+`LiveSession` and `LiveContest`, since each a `LiveRun` of its machine);
 `src/state.rs` (`contest: Signal<Option<ContestView>>`, `entry: ContestEntry`,
 `session_running`, the restore message); `src/routes.rs` (Training and
 Results branches); `src/app.rs`, `src/ui/tour.rs` (Exit and Discard,
