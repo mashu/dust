@@ -12,7 +12,7 @@
 //! whichever is live.
 
 use cw_core::{
-    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, Group, MonoMs,
+    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, Group, MonoMs, Sampler,
     SessionEffect, SessionEvent, SessionId, SessionMachine, SplitMix64, Transmission,
     complete_session, generate_training_group, resolve_station,
 };
@@ -20,26 +20,56 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{send_run_event, start_run};
+use crate::live_run::{self, RunMachine};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::live::{GroupsOwn, LiveRun, SEEN_EVERY_MS};
+use crate::state::live::{GroupsOwn, LiveRun, SEEN_EVERY_MS, Stage};
 use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, keep_and_show, settle_level};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
-impl Live {
-    /// The session of groups, if that is what is live.
-    fn groups(&self) -> Option<&LiveSession> {
-        match self {
-            Self::Groups(live) => Some(live.as_ref()),
-            Self::Contest(_) => None,
+/// A session of groups, as its life knows it ([`live_run`]).
+pub(crate) type Groups = SessionMachine<Sampler>;
+
+impl RunMachine for Groups {
+    type Own = GroupsOwn;
+
+    fn of(live: &Live) -> Option<&LiveSession> {
+        match live {
+            Live::Groups(live) => Some(live),
+            Live::Contest(_) => None,
         }
     }
 
-    fn groups_mut(&mut self) -> Option<&mut LiveSession> {
-        match self {
-            Self::Groups(live) => Some(live.as_mut()),
-            Self::Contest(_) => None,
+    fn of_mut(live: &mut Live) -> Option<&mut LiveSession> {
+        match live {
+            Live::Groups(live) => Some(live),
+            Live::Contest(_) => None,
         }
+    }
+
+    fn unboxed(live: Live) -> Option<LiveSession> {
+        match live {
+            Live::Groups(live) => Some(*live),
+            Live::Contest(_) => None,
+        }
+    }
+
+    /// What End session would keep, with the settings auto level judges it
+    /// by. A group just answered leaves nothing typed in the next, so then
+    /// it is the groups answered; paused, it is the group the pause cut
+    /// too, as it stood.
+    fn so_far(live: &LiveSession, now: MonoMs, finished_at: u64) -> Option<SoFar> {
+        let mut ended = live.machine.clone();
+        let effects = ended.apply(SessionEvent::FinishNow, now);
+        effects
+            .contains(&SessionEffect::PersistAndShowResults)
+            .then(|| {
+                let session = ended.session();
+                SoFar {
+                    result: session.result(finished_at, live.started_on.clone()),
+                    settings: Some(session.settings().clone()),
+                }
+            })
     }
 }
 
@@ -50,33 +80,6 @@ impl LiveSession {
         (0..session.group_count())
             .filter(|&index| session.group(index).is_some_and(Group::confirmed))
             .count()
-    }
-
-    /// What the session would keep were it ended at `now`, as End session
-    /// keeps it, worked out on a copy of it, and the settings auto level
-    /// judges it by: none while it would keep nothing. A group just
-    /// answered leaves nothing typed in the next, so then it is the groups
-    /// answered; paused, it is the group the pause cut too, as it stood.
-    /// `finished_at` is the wall time it says it ended at.
-    fn so_far(&self, now: MonoMs, finished_at: u64) -> Option<SoFar> {
-        let mut ended = self.machine.clone();
-        let effects = ended.apply(SessionEvent::FinishNow, now);
-        effects
-            .contains(&SessionEffect::PersistAndShowResults)
-            .then(|| {
-                let session = ended.session();
-                SoFar {
-                    result: session.result(finished_at, self.started_on.clone()),
-                    settings: Some(session.settings().clone()),
-                }
-            })
-    }
-
-    /// Whether what comes under `lease` is this session's to hear: its own
-    /// claim, while it holds the audio, or while it is paused, having given
-    /// the audio back.
-    fn hears(&self, lease: &Lease) -> bool {
-        self.lease.is(lease) && (lease.is_current() || self.machine.session().paused())
     }
 
     /// What the receiver hears for group `index`: the station being copied,
@@ -184,6 +187,7 @@ pub fn start_session(ctx: AppCtx) {
     *app.session.borrow_mut() = Some(Live::Groups(Box::new(LiveRun {
         machine,
         lease: lease.clone(),
+        stage: Stage::Running,
         seen: Some(now),
         started_on: local_date_string(),
         mark,
@@ -228,8 +232,8 @@ fn pause_if_away(ctx: AppCtx, lease: &Lease) {
         let mut slot = app.session.borrow_mut();
         let Some(live) = slot
             .as_mut()
-            .and_then(Live::groups_mut)
-            .filter(|live| live.hears(lease))
+            .and_then(Groups::of_mut)
+            .filter(|live| live_run::hears(live, lease))
         else {
             return;
         };
@@ -259,7 +263,7 @@ fn pause_if_away(ctx: AppCtx, lease: &Lease) {
 /// paused is left alone: a claim would cut its send from under it.
 pub fn resume_session(ctx: AppCtx) {
     let app = ctx.app();
-    let settings = match app.session.borrow().as_ref().and_then(Live::groups) {
+    let settings = match app.session.borrow().as_ref().and_then(Groups::of) {
         Some(live) if live.machine.session().paused() => live.machine.session().settings().clone(),
         _ => return,
     };
@@ -270,8 +274,11 @@ pub fn resume_session(ctx: AppCtx) {
     else {
         return;
     };
-    if let Some(live) = app.session.borrow_mut().as_mut().and_then(Live::groups_mut) {
+    if let Some(live) = app.session.borrow_mut().as_mut().and_then(Groups::of_mut)
+        && let Some(running) = live.stage.claimed()
+    {
         live.lease = lease.clone();
+        live.stage = running;
     }
     dispatch(ctx, &lease, SessionEvent::Resume);
     beat(ctx, lease);
@@ -285,14 +292,7 @@ pub fn send_event(ctx: AppCtx, event: SessionEvent) {
         resume_session(ctx);
         return;
     }
-    let lease = ctx
-        .app()
-        .session
-        .borrow()
-        .as_ref()
-        .and_then(Live::groups)
-        .map(|live| live.lease.clone());
-    if let Some(lease) = lease {
+    if let Some(lease) = live_run::lease::<Groups>(ctx) {
         dispatch(ctx, &lease, event);
     }
 }
@@ -319,12 +319,8 @@ pub fn finish_run(ctx: AppCtx) {
 #[cfg(any(test, feature = "web", target_os = "android"))]
 pub fn hold_run(ctx: AppCtx) -> bool {
     let held = |ctx: AppCtx| match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(_)) => ctx
-            .contest
-            .peek()
-            .as_ref()
-            .is_some_and(|run| matches!(run.phase, cw_core::ContestPhase::Paused { .. })),
-        Some(Live::Groups(live)) => live.machine.session().paused(),
+        Some(Live::Contest(live)) => live.stage == Stage::Paused,
+        Some(Live::Groups(live)) => live.stage == Stage::Paused,
         None => false,
     };
     if held(ctx) {
@@ -365,9 +361,9 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         .session
         .borrow()
         .as_ref()
-        .and_then(Live::groups)
+        .and_then(Groups::of)
         .and_then(|live| {
-            live.hears(lease)
+            live_run::hears(live, lease)
                 .then(|| live.machine.closes_answer(&event))
                 .flatten()
         });
@@ -395,8 +391,8 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         let mut slot = app.session.borrow_mut();
         let Some(live) = slot
             .as_mut()
-            .and_then(Live::groups_mut)
-            .filter(|live| live.hears(lease))
+            .and_then(Groups::of_mut)
+            .filter(|live| live_run::hears(live, lease))
         else {
             return;
         };
@@ -406,7 +402,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         // Paused, having given the audio back, what it would keep before it
         // hears this: a send it hears of now as held up takes the times of
         // the group it was a send of.
-        let paused = (!lease.is_current()).then(|| live.so_far(now, finished_at));
+        let paused = (!lease.is_current()).then(|| Groups::so_far(live, now, finished_at));
         // Typing still waiting out the box's pause came before this event,
         // so the machine hears it first.
         let mut effects = ctx
@@ -420,10 +416,10 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         let so_far = if live.machine.is_terminal() {
             None
         } else if live.answered() > answered {
-            live.so_far(now, finished_at)
+            Groups::so_far(live, now, finished_at)
         } else {
             paused.and_then(|before| {
-                live.so_far(now, finished_at)
+                Groups::so_far(live, now, finished_at)
                     .filter(|after| before.as_ref() != Some(after))
             })
         }
@@ -448,10 +444,7 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
     for effect in effects {
         match effect {
             SessionEffect::StopAudio => lease.stop_sending(),
-            SessionEffect::ReleaseAudio => {
-                lease.release();
-                mark_paused(ctx, lease);
-            }
+            SessionEffect::ReleaseAudio => live_run::give_back::<Groups>(ctx, lease),
             SessionEffect::Play { index, text } => play(ctx, lease, index, text),
             SessionEffect::StartTimer { id, ms } => {
                 // One wait for the whole of it. A timer the machine has since
@@ -470,27 +463,6 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
     }
 }
 
-/// The session under `lease` has paused: what End session would keep
-/// now goes with its mark, the group the pause cut as it stood, should the
-/// app stop while it is paused. What it hears while paused that changes
-/// that puts it there anew ([`dispatch`]).
-fn mark_paused(ctx: AppCtx, lease: &Lease) {
-    let so_far = ctx
-        .app()
-        .session
-        .borrow()
-        .as_ref()
-        .and_then(Live::groups)
-        .filter(|live| live.lease.is(lease))
-        .and_then(|live| {
-            let so_far = live.so_far(MonoMs(mono_ms()), now_ms())?;
-            Some((live.mark.clone(), so_far))
-        });
-    if let Some((mark, so_far)) = so_far {
-        ctx.mark_so_far(&mark, so_far);
-    }
-}
-
 /// Send group `index`, and tell the machine how it went.
 fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     // Every group is built from the settings the session started with, not
@@ -501,7 +473,7 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
         .session
         .borrow()
         .as_ref()
-        .and_then(Live::groups)
+        .and_then(Groups::of)
         .map(|live| {
             let settings = live.machine.session().settings().clone();
             (settings, live.transmission(index, text))
@@ -553,21 +525,6 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     });
 }
 
-/// The session, taken out of the app, with the audio given back. It is
-/// marked over once it is stored or let go.
-fn end_session(ctx: AppCtx) -> Option<LiveSession> {
-    let taken = ctx
-        .app()
-        .session
-        .borrow_mut()
-        .take_if(|live| matches!(live, Live::Groups(_)));
-    let Some(Live::Groups(live)) = taken else {
-        return None;
-    };
-    live.lease.release();
-    Some(*live)
-}
-
 /// End the session without keeping it. Whether there was one.
 fn abandon_session(ctx: AppCtx) -> bool {
     let AppCtx {
@@ -575,7 +532,7 @@ fn abandon_session(ctx: AppCtx) -> bool {
         mut runtime,
         ..
     } = ctx;
-    if end_session(ctx).is_none() {
+    if live_run::end::<Groups>(ctx).is_none() {
         return false;
     }
     ctx.mark_ended();
@@ -592,7 +549,7 @@ fn finish_session(ctx: AppCtx) -> bool {
         mut auto_message,
         ..
     } = ctx;
-    let Some(live) = end_session(ctx) else {
+    let Some(live) = live_run::end::<Groups>(ctx) else {
         return false;
     };
     let store = ctx.app().store;
@@ -1427,7 +1384,7 @@ mod tests {
                     .session
                     .borrow()
                     .as_ref()
-                    .and_then(Live::groups)
+                    .and_then(Groups::of)
                     .map(|live| live.machine.session().session_id().raw()),
                 Some(second.turn())
             );

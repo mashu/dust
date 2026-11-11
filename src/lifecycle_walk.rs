@@ -9,7 +9,8 @@
 //!
 //! - nothing is left borrowing what is live;
 //! - what is live is what is published, and has the training screen;
-//! - what is live holds the audio unless it is paused;
+//! - what is live holds the audio unless it is paused, and its stage says
+//!   so: Running while it holds the audio, Paused while it shows paused;
 //! - while it is paused, its mark holds what End would keep were it pressed
 //!   then, so that the app stopping keeps that;
 //! - the history only grows, and a session stored stays as it was stored.
@@ -52,6 +53,7 @@ use crate::audio::fake::{Behaviour, Call};
 use crate::contest_runtime::{change_speed, pause_run, press_key, resume_run, tick};
 use crate::persist::Store;
 use crate::session_runtime::{abort_run, finish_run, hold_run, send_event};
+use crate::state::live::Stage;
 use crate::state::{Finished, Live, Screen};
 use crate::testing::{
     Harness, contest_settings, copy_what_was_heard, quiet, run, test_settings, type_into,
@@ -657,6 +659,25 @@ impl Walk {
                         "{at}: a run not paused without the audio"
                     );
                 }
+            }
+            if let Some(live) = slot.as_ref() {
+                let held = live.lease().is_current();
+                let paused = runtime.as_ref().is_some_and(|session| session.paused())
+                    || contest
+                        .as_ref()
+                        .is_some_and(|view| matches!(view.phase, ContestPhase::Paused { .. }));
+                assert_eq!(
+                    live.stage() == Stage::Running,
+                    held,
+                    "{at}: {:?} where the audio is held: {held}",
+                    live.stage()
+                );
+                assert_eq!(
+                    live.stage() == Stage::Paused,
+                    paused,
+                    "{at}: {:?} where it shows paused: {paused}",
+                    live.stage()
+                );
             }
             assert_eq!(
                 self.h.screen() == Screen::Training,

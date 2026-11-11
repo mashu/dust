@@ -11,17 +11,64 @@
 
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, EntryField, MonoMs, OpKey, PauseWhy,
-    TrainingSettings, Turn, plan_turn,
+    Sampler, TrainingSettings, Turn, plan_turn,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
+use crate::live_run::{self, RunMachine};
 use crate::page::{Caret, control_id, focus_by_id_anywhere};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::live::{LiveRun, RunOwn};
+use crate::state::live::{LiveRun, RunOwn, Stage};
 use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen, keep_and_show};
 use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
+
+/// A contest run, as its life knows it ([`live_run`]).
+pub(crate) type Run = ContestMachine<Sampler>;
+
+impl RunMachine for Run {
+    type Own = RunOwn;
+
+    fn of(live: &Live) -> Option<&LiveContest> {
+        match live {
+            Live::Contest(live) => Some(live),
+            Live::Groups(_) => None,
+        }
+    }
+
+    fn of_mut(live: &mut Live) -> Option<&mut LiveContest> {
+        match live {
+            Live::Contest(live) => Some(live),
+            Live::Groups(_) => None,
+        }
+    }
+
+    fn unboxed(live: Live) -> Option<LiveContest> {
+        match live {
+            Live::Contest(live) => Some(*live),
+            Live::Groups(_) => None,
+        }
+    }
+
+    /// What End run would keep: none while it has worked nobody.
+    fn so_far(live: &LiveContest, now: MonoMs, finished_at: u64) -> Option<SoFar> {
+        let mut ended = live.machine.clone();
+        let effects = ended.apply(ContestEvent::FinishNow, now);
+        effects
+            .contains(&ContestEffect::PersistAndShowResults)
+            .then(|| SoFar {
+                result: ended.result(finished_at, live.started_on.clone()),
+                settings: None,
+            })
+    }
+
+    /// Its sound has stopped, so what it held for a screen reader is said
+    /// now.
+    fn ending(ctx: AppCtx, live: &mut LiveContest) {
+        say(ctx, std::mem::take(&mut live.own.unsaid));
+    }
+}
 
 /// Start a run of `settings`, clamped already: the training screen comes up
 /// on its countdown, or on its first CQ. A run that cannot start says what
@@ -72,6 +119,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     *app.session.borrow_mut() = Some(Live::Contest(Box::new(LiveRun {
         machine,
         lease: lease.clone(),
+        stage: Stage::Running,
         seen: None,
         started_on: local_date_string(),
         mark,
@@ -99,7 +147,7 @@ pub fn send_run_event(ctx: AppCtx, event: ContestEvent) {
 /// carries the fields as they are then.
 pub fn press_key(ctx: AppCtx, key: OpKey) {
     ctx.entry.finish_letter();
-    let Some(lease) = run_lease(ctx) else {
+    let Some(lease) = live_run::lease::<Run>(ctx) else {
         return;
     };
     lease.wake();
@@ -118,7 +166,7 @@ pub fn press_key(ctx: AppCtx, key: OpKey) {
 /// press, as for a key. The setting is stored once the run screen is left,
 /// as nothing is stored while a run is on.
 pub fn change_speed(ctx: AppCtx, delta: i32) {
-    let Some(lease) = run_lease(ctx) else {
+    let Some(lease) = live_run::lease::<Run>(ctx) else {
         return;
     };
     lease.wake();
@@ -147,10 +195,8 @@ pub fn pause_run(ctx: AppCtx, why: PauseWhy) {
 /// alone: a claim would cut the turn on the air from under it.
 pub fn resume_run(ctx: AppCtx) {
     let app = ctx.app();
-    let paused = match app.session.borrow().as_ref() {
-        Some(Live::Contest(live))
-            if matches!(live.machine.phase(), ContestPhase::Paused { .. }) =>
-        {
+    let paused = match app.session.borrow().as_ref().and_then(Run::of) {
+        Some(live) if matches!(live.machine.phase(), ContestPhase::Paused { .. }) => {
             Some(live.own.sound.clone())
         }
         _ => None,
@@ -165,8 +211,11 @@ pub fn resume_run(ctx: AppCtx) {
     else {
         return;
     };
-    if let Some(Live::Contest(live)) = app.session.borrow_mut().as_mut() {
+    if let Some(live) = app.session.borrow_mut().as_mut().and_then(Run::of_mut)
+        && let Some(running) = live.stage.claimed()
+    {
         live.lease = lease;
+        live.stage = running;
     }
     apply(ctx, Some(ContestEvent::Resume));
     // The paused page is shorter, so a phone scrolled down to Pause is left
@@ -183,43 +232,21 @@ pub fn tick(ctx: AppCtx) {
     apply(ctx, None);
 }
 
-impl LiveContest {
-    /// What the run would keep were it ended at `now`, as End run keeps it,
-    /// worked out on a copy of it: none while it has worked nobody.
-    /// `finished_at` is the wall time it says it ended at.
-    fn so_far(&self, now: MonoMs, finished_at: u64) -> Option<SoFar> {
-        let mut ended = self.machine.clone();
-        let effects = ended.apply(ContestEvent::FinishNow, now);
-        effects
-            .contains(&ContestEffect::PersistAndShowResults)
-            .then(|| SoFar {
-                result: ended.result(finished_at, self.started_on.clone()),
-                settings: None,
-            })
-    }
-}
-
-/// The run's hold on the audio, while a run is live.
-fn run_lease(ctx: AppCtx) -> Option<Lease> {
-    match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(live)) => Some(live.lease.clone()),
-        _ => None,
-    }
-}
-
 /// Hand the run news from its own tasks: a timer, a send. What comes under
 /// the run's own lease is its to hear while it holds the audio, and while it
 /// is paused, having given the audio back, as a paused session hears it:
-/// the news of the send its pause cut short. News under another lease — a
-/// run that has ended, one before it — is dropped. A timer never comes to a
-/// paused run: the lease it was armed under drops it ([`Lease::after`]).
+/// the news of the send its pause cut short ([`live_run::hears`]). News
+/// under another lease — a run that has ended, one before it — is dropped.
+/// A timer never comes to a paused run: the lease it was armed under drops
+/// it ([`Lease::after`]).
 fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
-    let hears = matches!(
-        ctx.app().session.borrow().as_ref(),
-        Some(Live::Contest(live)) if live.lease.is(lease)
-            && (lease.is_current()
-                || matches!(live.machine.phase(), ContestPhase::Paused { .. }))
-    );
+    let hears = ctx
+        .app()
+        .session
+        .borrow()
+        .as_ref()
+        .and_then(Run::of)
+        .is_some_and(|live| live_run::hears(live, lease));
     if hears {
         apply(ctx, Some(event));
     }
@@ -237,7 +264,7 @@ fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
     let app = ctx.app();
     let (lease, effects, so_far) = {
         let mut slot = app.session.borrow_mut();
-        let Some(Live::Contest(live)) = slot.as_mut() else {
+        let Some(live) = slot.as_mut().and_then(Run::of_mut) else {
             return;
         };
         let now = MonoMs(mono_ms());
@@ -245,8 +272,8 @@ fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
         // Paused, having given the audio back, what it would keep before it
         // hears this: a turn it hears of now as held up takes the times of
         // the copies heard in it.
-        let paused =
-            (event.is_some() && !live.lease.is_current()).then(|| live.so_far(now, finished_at));
+        let paused = (event.is_some() && !live.lease.is_current())
+            .then(|| Run::so_far(live, now, finished_at));
         let away = live.away(now, event.is_none());
         if away.is_none() && event.is_none() {
             return;
@@ -276,11 +303,10 @@ fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
         let so_far = if live.machine.is_terminal() {
             None
         } else if logged {
-            live.so_far(now, finished_at)
+            Run::so_far(live, now, finished_at)
         } else {
             paused.and_then(|before| {
-                live.so_far(now, finished_at)
-                    .filter(|after| before.as_ref() != Some(after))
+                Run::so_far(live, now, finished_at).filter(|after| before.as_ref() != Some(after))
             })
         }
         .map(|so_far| (live.mark.clone(), so_far));
@@ -300,10 +326,7 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
         match effect {
             ContestEffect::PlayTurn(turn) => play_turn(ctx, lease, turn),
             ContestEffect::StopAudio => lease.stop_sending(),
-            ContestEffect::ReleaseAudio => {
-                lease.release();
-                mark_paused(ctx, lease);
-            }
+            ContestEffect::ReleaseAudio => live_run::give_back::<Run>(ctx, lease),
             ContestEffect::StartTimer { id, ms } => {
                 // One wait for the whole of it. A timer the machine has since
                 // forgotten wakes once, is told so, and is gone; one a pause
@@ -323,27 +346,12 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
     speak_if_silent(ctx);
 }
 
-/// The run under `lease` has paused, or its sound failed: what End run
-/// would keep now goes with its mark, the QSO the pause cut as lost,
-/// should the app stop while it is paused. What it hears while paused that
-/// changes that puts it there anew ([`apply`]).
-fn mark_paused(ctx: AppCtx, lease: &Lease) {
-    let so_far = match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(live)) if live.lease.is(lease) => live
-            .so_far(MonoMs(mono_ms()), now_ms())
-            .map(|so_far| (live.mark.clone(), so_far)),
-        _ => None,
-    };
-    if let Some((mark, so_far)) = so_far {
-        ctx.mark_so_far(&mark, so_far);
-    }
-}
-
 /// Hold `text` for a screen reader until the air is silent.
 fn announce(ctx: AppCtx, text: String) {
-    match ctx.app().session.borrow_mut().as_mut() {
-        Some(Live::Contest(live)) => live.own.unsaid.push(text),
-        _ => say(ctx, vec![text]),
+    let app = ctx.app();
+    match app.session.borrow_mut().as_mut().and_then(Run::of_mut) {
+        Some(live) => live.own.unsaid.push(text),
+        None => say(ctx, vec![text]),
     }
 }
 
@@ -357,9 +365,15 @@ fn speak_if_silent(ctx: AppCtx) {
     if !silent {
         return;
     }
-    let unsaid = match ctx.app().session.borrow_mut().as_mut() {
-        Some(Live::Contest(live)) => std::mem::take(&mut live.own.unsaid),
-        _ => return,
+    let unsaid = match ctx
+        .app()
+        .session
+        .borrow_mut()
+        .as_mut()
+        .and_then(Run::of_mut)
+    {
+        Some(live) => std::mem::take(&mut live.own.unsaid),
+        None => return,
     };
     say(ctx, unsaid);
 }
@@ -379,10 +393,14 @@ fn say(ctx: AppCtx, unsaid: Vec<String>) {
 /// It plays from the run's own settings, fading off ([`RunOwn::sound`]),
 /// not from whatever the settings screen holds now.
 fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
-    let sound = match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(live)) if live.lease.is(lease) => Some(live.own.sound.clone()),
-        _ => None,
-    };
+    let sound = ctx
+        .app()
+        .session
+        .borrow()
+        .as_ref()
+        .and_then(Run::of)
+        .filter(|live| live.lease.is(lease))
+        .map(|live| live.own.sound.clone());
     let Some(settings) = sound else {
         return;
     };
@@ -471,27 +489,10 @@ pub fn refocus_run(ctx: AppCtx) {
     }
 }
 
-/// The run, taken out of the app, with the audio given back: marked over
-/// once it is stored or let go. Its sound has stopped, so what it held for a
-/// screen reader is said now.
-fn end_run(ctx: AppCtx) -> Option<LiveContest> {
-    let taken = ctx
-        .app()
-        .session
-        .borrow_mut()
-        .take_if(|live| matches!(live, Live::Contest(_)));
-    let Some(Live::Contest(mut live)) = taken else {
-        return None;
-    };
-    live.lease.release();
-    say(ctx, std::mem::take(&mut live.own.unsaid));
-    Some(*live)
-}
-
 /// Store the run as a session of the history, its log beside its groups,
 /// and show it, as a session of groups is shown.
 fn keep_run(ctx: AppCtx) {
-    let Some(live) = end_run(ctx) else {
+    let Some(live) = live_run::end::<Run>(ctx) else {
         return;
     };
     let AppCtx {
@@ -525,7 +526,7 @@ fn keep_nothing(ctx: AppCtx) {
         mut auto_message,
         ..
     } = ctx;
-    if end_run(ctx).is_none() {
+    if live_run::end::<Run>(ctx).is_none() {
         return;
     }
     ctx.mark_ended();
@@ -542,7 +543,7 @@ fn abandon_run(ctx: AppCtx) {
         contest: mut view,
         ..
     } = ctx;
-    if end_run(ctx).is_none() {
+    if live_run::end::<Run>(ctx).is_none() {
         return;
     }
     ctx.mark_ended();

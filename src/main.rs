@@ -27,6 +27,7 @@ mod keep_awake;
 mod lifecycle_walk;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod linux_webview;
+mod live_run;
 #[cfg(feature = "desktop")]
 mod menus;
 mod page;

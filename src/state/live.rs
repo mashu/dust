@@ -35,6 +35,8 @@ pub type LiveContest = LiveRun<ContestMachine<Sampler>, RunOwn>;
 pub struct LiveRun<M, O> {
     pub(crate) machine: M,
     pub(crate) lease: Lease,
+    /// Where it is in its life: what reaches it, and how it may move on.
+    pub(crate) stage: Stage,
     /// When the app was last seen running it, once it has been: a session
     /// from its start, seen by every heartbeat and by everything it hears;
     /// a run from its screen's first tick, seen by its ticks alone.
@@ -67,6 +69,62 @@ pub struct RunOwn {
     pub(crate) unsaid: Vec<String>,
 }
 
+/// Where what is live is in its life, as the runtime holds it beside what
+/// its machine decides: whether it holds the audio, and so what reaches it
+/// ([`Stage::hears`]). It goes live Running, once its claim on the audio
+/// is in; its machine's pause gives the audio back, and it is Paused;
+/// Resume claims the audio again, and it is Running; End or Discard takes
+/// it out, Ending, to be kept or let go. Each move is made in one place,
+/// and refused from any other stage. A start and an end are each one
+/// call, on the one thread, so nothing reaches it while it starts, or once
+/// it has ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// It holds the audio: its lease is current.
+    Running,
+    /// Its machine has paused, and the audio is given back.
+    Paused,
+    /// Taken out, to be kept or let go.
+    Ending,
+}
+
+impl Stage {
+    /// Its machine paused, the audio given back: from Running only.
+    pub(crate) fn gave_back(self) -> Option<Self> {
+        (self == Self::Running).then_some(Self::Paused)
+    }
+
+    /// Resume claimed the audio afresh: from Paused only, as a claim while
+    /// it runs would cut its send from under it.
+    pub(crate) fn claimed(self) -> Option<Self> {
+        (self == Self::Paused).then_some(Self::Running)
+    }
+
+    /// Taken out to be kept or let go: once, from either stage it lives in.
+    pub(crate) fn ending(self) -> Option<Self> {
+        (self != Self::Ending).then_some(Self::Ending)
+    }
+
+    /// Whether what comes under a lease reaches it: under one of its own
+    /// (`own`) that still holds the audio (`current`); or, while it is
+    /// paused, under any of its own, as what is done to it then — End,
+    /// Discard, typing — and the news of the send its pause cut short
+    /// still are. A timer never comes then: the lease it was set under
+    /// drops it ([`Lease::after`]). Nothing reaches it once it is taken
+    /// out.
+    ///
+    /// Running, it holds the audio: nothing else claims or gives back the
+    /// audio while anything is live, so its own lease is the current one,
+    /// and what the user does reaches it.
+    pub(crate) fn hears(self, own: bool, current: bool) -> bool {
+        own && match self {
+            Self::Running => current,
+            Self::Paused => true,
+            Self::Ending => false,
+        }
+    }
+}
+
 impl<M, O> LiveRun<M, O> {
     /// When it was last seen, if that was longer than [`AWAY_GAP_MS`] before
     /// `now`: the start of a gap the app was not running in. It is seen now
@@ -89,6 +147,14 @@ impl Live {
             Self::Contest(live) => &live.lease,
         }
     }
+
+    /// Where it is in its life.
+    pub(crate) fn stage(&self) -> Stage {
+        match self {
+            Self::Groups(live) => live.stage,
+            Self::Contest(live) => live.stage,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +173,7 @@ mod tests {
         LiveRun {
             machine: (),
             lease,
+            stage: Stage::Running,
             seen,
             started_on: String::new(),
             mark: OpenSession {
@@ -117,6 +184,48 @@ mod tests {
                 over: false,
             },
             own: (),
+        }
+    }
+
+    /// Each stage moves only as a live run's life allows: its machine's
+    /// pause gives the audio back from Running only, and Resume's claim
+    /// takes it again from Paused only; either is taken out once. What
+    /// comes under a lease reaches it as its stage says.
+    #[test]
+    fn a_live_runs_stage_moves_only_as_its_life_allows() {
+        use Stage::{Ending, Paused, Running};
+        for (stage, gave_back, claimed, ending) in [
+            (Running, Some(Paused), None, Some(Ending)),
+            (Paused, None, Some(Running), Some(Ending)),
+            (Ending, None, None, None),
+        ] {
+            assert_eq!(
+                stage.gave_back(),
+                gave_back,
+                "{stage:?}, the audio given back"
+            );
+            assert_eq!(stage.claimed(), claimed, "{stage:?}, the audio claimed");
+            assert_eq!(stage.ending(), ending, "{stage:?}, taken out");
+        }
+        for (stage, own, current, hears) in [
+            (Running, true, true, true),
+            (Running, true, false, false),
+            (Running, false, true, false),
+            (Running, false, false, false),
+            (Paused, true, true, true),
+            (Paused, true, false, true),
+            (Paused, false, true, false),
+            (Paused, false, false, false),
+            (Ending, true, true, false),
+            (Ending, true, false, false),
+            (Ending, false, true, false),
+            (Ending, false, false, false),
+        ] {
+            assert_eq!(
+                stage.hears(own, current),
+                hears,
+                "{stage:?}, under a lease of its own {own}, holding the audio {current}"
+            );
         }
     }
 
