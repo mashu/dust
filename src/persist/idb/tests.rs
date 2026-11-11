@@ -594,6 +594,35 @@ fn a_history_kept_whole_that_cannot_be_read_now_is_moved_later() {
     assert!(fake.layout().is_some());
 }
 
+/// A move made again over a record left beside its tombstone counts it as
+/// here, as the files do, where the tombstone names no session, as an empty
+/// one names none: the session it holds, under a name the move does not
+/// give, is not written again. Left out, the move wrote it again, under the
+/// move's own name, and a session deleted came back. A browser leaves no
+/// record beside its tombstone of its own accord: latent.
+#[test]
+fn a_move_made_again_counts_a_record_left_beside_its_tombstone_as_here() {
+    let session = ago(4);
+    let page = Page::holding(std::slice::from_ref(&session));
+    let fake = Fake::on(&page);
+    let json = serde_json::to_string(&session).expect("writes");
+    let placed = RecordId::placed(session.timestamp, &json);
+    {
+        let mut shelves = fake.shelves();
+        shelves.sessions.insert(placed.name(), json);
+        shelves.deleted.insert(placed.name(), "{}".into());
+        shelves.meta.insert("layout".into(), "{ damaged".into());
+    }
+    let load = opened(&fake).load();
+    assert!(load.complete);
+    assert_eq!(load.sessions, [], "still deleted");
+    assert_eq!(
+        fake.records().into_keys().collect::<Vec<_>>(),
+        [placed],
+        "none written"
+    );
+}
+
 /// A deletion another tab makes as this one makes the move over records
 /// stored here already, in a visit that could not read the page storage,
 /// once this one has read them, is not undone: the tombstones are read

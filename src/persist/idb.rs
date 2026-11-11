@@ -260,7 +260,7 @@ struct Read {
     /// holds no text says nothing, as damaged ([`unreadable`]).
     unread: Vec<(RecordId, Unreadable)>,
     /// What each record holds, as it is stored, where a move is to be made
-    /// over them.
+    /// over them: one left beside its tombstone among them.
     raw: BTreeMap<RecordId, String>,
 }
 
@@ -436,8 +436,11 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
 
     /// Every record in the database, read a page at a time, in order, but
     /// those deleted, `gone`, which read as deleted. `keep` keeps what each
-    /// holds as it is stored, for a move made over them. A name that names
-    /// no record is left alone. Each page read is counted ([`Self::progress`]).
+    /// holds as it is stored, for a move made over them, a record left
+    /// beside its tombstone among them, as the files count one: its session
+    /// is here all the same, for the move, though the tombstone names none.
+    /// A name that names no record is left alone. Each page read is counted
+    /// ([`Self::progress`]).
     async fn read_all(&self, gone: &BTreeSet<RecordId>, keep: bool) -> Result<Read, Refused> {
         let mut read = Read::default();
         let mut after = None;
@@ -451,9 +454,15 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
                 for (name, raw) in page {
                     let id = RecordId::parse(&name);
                     after = Some(name);
-                    let Some(id) = id.filter(|id| !gone.contains(id)) else {
+                    let Some(id) = id else {
                         continue;
                     };
+                    if gone.contains(&id) {
+                        if keep && let Some(raw) = raw {
+                            read.raw.insert(id, raw);
+                        }
+                        continue;
+                    }
                     match raw.as_deref().and_then(read_record) {
                         Some(session) => {
                             keys.insert(id, SessionKey::of(&session));
