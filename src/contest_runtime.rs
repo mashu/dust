@@ -82,8 +82,13 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
 }
 
 /// Hand the run something the user did: End run, Discard, the page going
-/// out of sight. Nothing happens when no run is live.
+/// out of sight. Nothing happens when no run is live. Resume claims the
+/// audio first ([`resume_run`]), as a session's does.
 pub fn send_run_event(ctx: AppCtx, event: ContestEvent) {
+    if event == ContestEvent::Resume {
+        resume_run(ctx);
+        return;
+    }
     apply(ctx, Some(event));
 }
 
@@ -1907,6 +1912,37 @@ mod tests {
                     }
                 }
             }
+        });
+    }
+
+    /// Resume handed to a run as an event goes the way Resume's button
+    /// does: the audio is claimed afresh inside the tap, and the run goes
+    /// on under the new claim, a CQ keyed after it going out.
+    #[test]
+    fn resume_sent_as_an_event_claims_the_audio_first() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            assert!(h.run_until(10_000, quiet).await);
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            let paused = h.lease();
+            assert!(!paused.is_current());
+            h.in_app(|| send_run_event(ctx, ContestEvent::Resume));
+            h.pump();
+            let lease = h.lease();
+            assert!(
+                lease.is_current() && !lease.is(&paused),
+                "resumed under the lease the pause gave back"
+            );
+            assert_eq!(phase(&h), Some(ContestPhase::Running));
+            let sends = h.texts().len();
+            press(&mut h, OpKey::Cq);
+            assert!(
+                h.run_until(1_500, |h| h.texts().len() > sends).await,
+                "nothing went out after Resume"
+            );
         });
     }
 }
