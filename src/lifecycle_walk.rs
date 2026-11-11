@@ -150,6 +150,16 @@ enum Typing {
 }
 
 impl Do {
+    /// Whether it takes what a run's screen offers only while the run is
+    /// on: the fields, which a paused run's screen does not show, and
+    /// − / +, which it disables, as it does the keyboard's speed keys.
+    fn wants_a_run_on(self) -> bool {
+        matches!(
+            self,
+            Self::Copy | Self::CopyNow | Self::Work | Self::WrongCall | Self::Speed(_)
+        )
+    }
+
     /// Whether it is a tap, which a webview takes even while every task
     /// is held back.
     fn is_tap(self) -> bool {
@@ -283,6 +293,17 @@ struct Walk {
 impl Walk {
     fn live(&self) -> bool {
         self.h.app.session.borrow().is_some()
+    }
+
+    /// Whether the run screen shows a paused run: what it offers then, and
+    /// what it does not ([`Do::wants_a_run_on`]).
+    fn shows_a_paused_run(&self) -> bool {
+        self.h
+            .ctx
+            .contest
+            .peek()
+            .as_ref()
+            .is_some_and(|view| matches!(view.phase, ContestPhase::Paused { .. }))
     }
 
     /// The run screen comes up with a run, and its clock ticks from then;
@@ -496,10 +517,11 @@ impl Walk {
             Kind::Contest => RUNS,
         };
         let hidden = self.hidden;
+        let paused = self.shows_a_paused_run();
         let what = pick(&mut self.rng, table, |what| match what {
             Do::Hide => !hidden,
             Do::Show => hidden,
-            _ => true,
+            what => !(paused && what.wants_a_run_on()),
         });
         match what {
             Do::Advance => {
@@ -512,7 +534,10 @@ impl Walk {
                 tokio::time::advance(Duration::from_millis(ms)).await;
                 tokio::task::yield_now().await;
                 let tap = if self.rng.f64() < 0.5 {
-                    let tap = pick(&mut self.rng, table, Do::is_tap);
+                    // As the screen was when everything stopped.
+                    let tap = pick(&mut self.rng, table, |what| {
+                        what.is_tap() && !(paused && what.wants_a_run_on())
+                    });
                     format!(", {} meanwhile", self.tap(tap, false))
                 } else {
                     String::new()
