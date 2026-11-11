@@ -1,19 +1,19 @@
 //! The life of what is live, a session of groups or a contest run, written
 //! once for both: what reaches it, each step of it, how it gives the audio
-//! back as it pauses, and how it is taken out at its end. Its machine
-//! decides what it does; the runtime holds where it is in its life, its
-//! [`Stage`], and makes each move in one place here. Each kind's machine
-//! is a [`RunMachine`], whose hooks its own runtime gives.
+//! back as it pauses, and how it ends, kept or let go. Its machine decides
+//! what it does; the runtime holds where it is in its life, its [`Stage`],
+//! and makes each move in one place here. Each kind's machine is a
+//! [`RunMachine`], whose hooks its own runtime gives.
 
 use std::borrow::Cow;
 
-use cw_core::MonoMs;
+use cw_core::{MonoMs, SessionResult};
 use dioxus::prelude::*;
 
 use crate::persist::SoFar;
 use crate::player::Lease;
 use crate::state::live::{LiveRun, Stage};
-use crate::state::{AppCtx, Live};
+use crate::state::{AppCtx, Finished, Live, Screen, keep_and_show};
 use crate::time::{mono_ms, now_ms};
 
 /// A machine that can be what is live: what the lifecycle cannot do the
@@ -35,6 +35,8 @@ pub(crate) trait RunMachine: Sized {
     type Progress;
     /// What only its kind holds while it is live.
     type Own;
+    /// What keeping it does to its level, settled once it is marked kept.
+    type Level;
 
     /// What is live, if it is of this kind.
     fn of(live: &Live) -> Option<&LiveRun<Self, Self::Own>>;
@@ -79,6 +81,15 @@ pub(crate) trait RunMachine: Sized {
 
     /// What its kind does as it is taken out, the audio given back.
     fn ending(_ctx: AppCtx, _live: &mut LiveRun<Self, Self::Own>) {}
+
+    /// What it keeps, ended, to be stored and shown, and what that does to
+    /// its level.
+    fn kept(ctx: AppCtx, live: &LiveRun<Self, Self::Own>) -> (SessionResult, Self::Level);
+
+    /// Its level settled as `level` says: what that said, if anything.
+    fn settle(_ctx: AppCtx, _level: Self::Level) -> Option<String> {
+        None
+    }
 }
 
 /// Whether what comes under `lease` reaches `live`, as its stage says
@@ -212,4 +223,52 @@ pub(crate) fn end<M: RunMachine>(ctx: AppCtx) -> Option<LiveRun<M, M::Own>> {
     live.lease.release();
     M::ending(ctx, &mut live);
     Some(live)
+}
+
+/// What is live of kind `M` ends, kept: what it keeps goes with its mark as
+/// it is to be stored, then its level is settled and its screen cleared,
+/// and it is stored and shown. Marked before its level moves, it is kept
+/// once, its level counted once, should the app stop from here on. Whether
+/// there was one.
+pub(crate) fn keep<M: RunMachine>(ctx: AppCtx) -> bool {
+    let Some(live) = end::<M>(ctx) else {
+        return false;
+    };
+    let (result, level) = M::kept(ctx, &live);
+    let so_far = SoFar {
+        result: result.clone(),
+        settings: None,
+    };
+    ctx.mark_so_far(&live.mark, so_far);
+    let mut auto_message = ctx.auto_message;
+    auto_message.set(M::settle(ctx, level));
+    M::shown(ctx).set(None);
+    keep_and_show(ctx, result);
+    true
+}
+
+/// What is live of kind `M` ends, let go: nothing of it is kept. The
+/// results screen says so, as `finished` has it, or the app goes Home.
+/// Whether there was one.
+pub(crate) fn let_go<M: RunMachine>(ctx: AppCtx, finished: Option<Finished>) -> bool {
+    if end::<M>(ctx).is_none() {
+        return false;
+    }
+    ctx.mark_ended();
+    M::shown(ctx).set(None);
+    let AppCtx {
+        mut screen,
+        mut result,
+        mut auto_message,
+        ..
+    } = ctx;
+    match finished {
+        Some(finished) => {
+            result.set(Some(finished));
+            auto_message.set(None);
+            screen.set(Screen::Results);
+        }
+        None => screen.set(Screen::Home),
+    }
+    true
 }

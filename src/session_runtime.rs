@@ -14,9 +14,10 @@
 use std::borrow::Cow;
 
 use cw_core::{
-    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, Group, GroupSession,
-    MonoMs, Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SplitMix64,
-    Transmission, complete_session, generate_training_group, resolve_station,
+    AnswerClose, AutoLevelChange, CharSamplingState, CharSetMode, ContestEvent, CountersKey,
+    CountersUpdate, Group, GroupSession, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId,
+    SessionMachine, SessionResult, SplitMix64, Transmission, complete_session,
+    generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -26,7 +27,7 @@ use crate::live_run::{self, RunMachine};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::state::live::{GroupsOwn, LiveRun, SEEN_EVERY_MS, Stage};
-use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, keep_and_show, settle_level};
+use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, settle_level};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
 /// A session of groups, as its life knows it ([`live_run`]).
@@ -39,6 +40,7 @@ impl RunMachine for Groups {
     /// How many of its groups are answered.
     type Progress = usize;
     type Own = GroupsOwn;
+    type Level = (CountersUpdate, Option<AutoLevelChange>);
 
     fn of(live: &Live) -> Option<&LiveSession> {
         match live {
@@ -104,6 +106,21 @@ impl RunMachine for Groups {
                     settings: Some(session.settings().clone()),
                 }
             })
+    }
+
+    /// Scored with its level's run as stored. The machine only finishes a
+    /// session it has scored something in.
+    fn kept(ctx: AppCtx, live: &LiveSession) -> (SessionResult, Self::Level) {
+        let store = ctx.app().store;
+        let session = live.machine.session();
+        let run = store.load_auto_counters(&CountersKey::of(session.settings()));
+        let done = complete_session(session, run, now_ms(), live.started_on.clone());
+        (done.result, (done.counters, done.change))
+    }
+
+    /// Its level's run stored, and the level moved if the run earned it.
+    fn settle(ctx: AppCtx, (counters, change): Self::Level) -> Option<String> {
+        settle_level(ctx, &counters, change.as_ref())
     }
 }
 
@@ -424,10 +441,10 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
                 });
             }
             SessionEffect::PersistAndShowResults => {
-                finish_session(ctx);
+                live_run::keep::<Groups>(ctx);
             }
             SessionEffect::AbortToHome => {
-                abandon_session(ctx);
+                live_run::let_go::<Groups>(ctx, None);
             }
         }
     }
@@ -495,53 +512,6 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     });
 }
 
-/// End the session without keeping it. Whether there was one.
-fn abandon_session(ctx: AppCtx) -> bool {
-    let AppCtx {
-        mut screen,
-        mut runtime,
-        ..
-    } = ctx;
-    if live_run::end::<Groups>(ctx).is_none() {
-        return false;
-    }
-    ctx.mark_ended();
-    runtime.set(None);
-    screen.set(Screen::Home);
-    true
-}
-
-/// Score the session, move the level if it earned it, store it, and show
-/// the results. Whether there was one.
-fn finish_session(ctx: AppCtx) -> bool {
-    let AppCtx {
-        mut runtime,
-        mut auto_message,
-        ..
-    } = ctx;
-    let Some(live) = live_run::end::<Groups>(ctx) else {
-        return false;
-    };
-    let store = ctx.app().store;
-    let session = live.machine.session();
-    let run = store.load_auto_counters(&CountersKey::of(session.settings()));
-    // The machine only finishes a session it has scored something in.
-    let done = complete_session(session, run, now_ms(), live.started_on.clone());
-    // Held with its mark as it is to be stored, before its level's run is:
-    // the app stopping from here on keeps it once, its level counted once.
-    ctx.mark_so_far(
-        &live.mark,
-        SoFar {
-            result: done.result.clone(),
-            settings: None,
-        },
-    );
-    auto_message.set(settle_level(ctx, &done));
-    runtime.set(None);
-    keep_and_show(ctx, done.result);
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +525,18 @@ mod tests {
     use cw_core::SessionPhase;
     use std::cell::Cell;
     use std::rc::Rc;
+
+    /// End the session without keeping it, as its machine's AbortToHome
+    /// does. Whether there was one.
+    fn abandon_session(ctx: AppCtx) -> bool {
+        live_run::let_go::<Groups>(ctx, None)
+    }
+
+    /// Keep the session, as its machine's PersistAndShowResults does.
+    /// Whether there was one.
+    fn finish_session(ctx: AppCtx) -> bool {
+        live_run::keep::<Groups>(ctx)
+    }
 
     /// A session kept has the prior the next one starts from built once
     /// the results are up, so the tap on Again replays no history: only a

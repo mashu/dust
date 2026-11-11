@@ -13,7 +13,7 @@ use std::borrow::Cow;
 
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, EntryField, MonoMs,
-    OpKey, PauseWhy, Sampler, TrainingSettings, Turn, plan_turn,
+    OpKey, PauseWhy, Sampler, SessionResult, TrainingSettings, Turn, plan_turn,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -23,7 +23,7 @@ use crate::page::{Caret, control_id, focus_by_id_anywhere};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::state::live::{LiveRun, RunOwn, Stage};
-use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen, keep_and_show};
+use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen};
 use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
 
 /// A contest run, as its life knows it ([`live_run`]).
@@ -35,6 +35,8 @@ impl RunMachine for Run {
     type View = ContestView;
     type Progress = ();
     type Own = RunOwn;
+    /// A run moves no level.
+    type Level = ();
 
     fn of(live: &Live) -> Option<&LiveContest> {
         match live {
@@ -96,6 +98,12 @@ impl RunMachine for Run {
     /// now.
     fn ending(ctx: AppCtx, live: &mut LiveContest) {
         say(ctx, std::mem::take(&mut live.own.unsaid));
+    }
+
+    /// A session of the history, its log beside its groups, shown as a
+    /// session of groups is shown.
+    fn kept(_ctx: AppCtx, live: &LiveContest) -> (SessionResult, ()) {
+        (live.machine.result(now_ms(), live.started_on.clone()), ())
     }
 }
 
@@ -313,9 +321,18 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
             ContestEffect::ClearFields => ctx.entry.clear(),
             ContestEffect::Focus(field) => focus_field(ctx, field),
             ContestEffect::Announce(text) => announce(ctx, text),
-            ContestEffect::PersistAndShowResults => keep_run(ctx),
-            ContestEffect::ShowNothingKept => keep_nothing(ctx),
-            ContestEffect::AbortToHome => abandon_run(ctx),
+            ContestEffect::PersistAndShowResults => {
+                live_run::keep::<Run>(ctx);
+            }
+            // A run with no station worked has nothing for any stat: it is
+            // let go, and the results screen says so, with another run a
+            // press away.
+            ContestEffect::ShowNothingKept => {
+                live_run::let_go::<Run>(ctx, Some(Finished::NothingKept));
+            }
+            ContestEffect::AbortToHome => {
+                live_run::let_go::<Run>(ctx, None);
+            }
         }
     }
     speak_if_silent(ctx);
@@ -462,68 +479,6 @@ pub fn refocus_run(ctx: AppCtx) {
     if *ctx.screen.peek() == Screen::Training && ctx.contest.peek().is_some() {
         focus_field(ctx, ctx.entry.focus());
     }
-}
-
-/// Store the run as a session of the history, its log beside its groups,
-/// and show it, as a session of groups is shown.
-fn keep_run(ctx: AppCtx) {
-    let Some(live) = live_run::end::<Run>(ctx) else {
-        return;
-    };
-    let AppCtx {
-        contest: mut view,
-        mut auto_message,
-        ..
-    } = ctx;
-    view.set(None);
-    // A run moves no level.
-    auto_message.set(None);
-    let result = live.machine.result(now_ms(), live.started_on.clone());
-    // Held with its mark as it is to be stored: the app stopping from here
-    // on keeps it once.
-    ctx.mark_so_far(
-        &live.mark,
-        SoFar {
-            result: result.clone(),
-            settings: None,
-        },
-    );
-    keep_and_show(ctx, result);
-}
-
-/// A run with no station worked has nothing for any stat: it is let go, and
-/// the results screen says so, with another run a press away.
-fn keep_nothing(ctx: AppCtx) {
-    let AppCtx {
-        mut screen,
-        contest: mut view,
-        mut result,
-        mut auto_message,
-        ..
-    } = ctx;
-    if live_run::end::<Run>(ctx).is_none() {
-        return;
-    }
-    ctx.mark_ended();
-    view.set(None);
-    result.set(Some(Finished::NothingKept));
-    auto_message.set(None);
-    screen.set(Screen::Results);
-}
-
-/// End the run without keeping it.
-fn abandon_run(ctx: AppCtx) {
-    let AppCtx {
-        mut screen,
-        contest: mut view,
-        ..
-    } = ctx;
-    if live_run::end::<Run>(ctx).is_none() {
-        return;
-    }
-    ctx.mark_ended();
-    view.set(None);
-    screen.set(Screen::Home);
 }
 
 #[cfg(test)]
