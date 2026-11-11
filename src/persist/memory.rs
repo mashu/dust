@@ -2,7 +2,8 @@
 //! own, so nothing one saves reaches another, or the user's real data.
 //!
 //! Its history is kept by record, as a store's on disk is ([`super::record`]),
-//! with what a test needs to make it misbehave as a real one can: full,
+//! by the rules every store keeps it by ([`super::record_store`]), with what
+//! a test needs to make it misbehave as a real one can: full,
 //! failing, unlisted, slow to answer, short of room as a browser's page
 //! storage is, or losing a record from under the app. Beside it is the
 //! history as an older build keeps it whole, which it moves and takes up as
@@ -11,26 +12,24 @@
 //! open ([`MemoryStore::in_page`]).
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::backup::{BackupFile, NotSaved};
-use super::legacy::{
-    self, Aside, BlobHistory, BlobKeys, Fingerprint, Layout, parse_sessions, read_history,
-};
+use super::legacy::{Aside, BlobHistory, BlobKeys, Fingerprint, Gate, Layout, parse_sessions};
 use super::progress::{HistoryProgress, LoadProgress};
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
-    Unreadable, done, failed_for_now, key_of, read_record, records_for_blob, unreadable,
+    done, failed_for_now, key_of, read_record, records_for_blob, unreadable,
 };
-use super::record_store::notes::{self, Note};
+use super::record_store::notes::Note;
 use super::record_store::steps::{Steps, There, make_steps};
 use super::record_store::{
-    Reading, RecordRead, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of,
-    deleted_sessions_of, deletions_of, keys_of_tombstones, sort,
+    self, Backend, By, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, Order, Raw, RecordRead,
+    Refusal, Tombstone, TombstoneRead, TombstonesOf, Writes, at_once,
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Lock, LockHeld, Locking, MarkId,
@@ -626,43 +625,15 @@ impl Store for MemoryStore {
         if let Some(page) = &self.page {
             return page.load();
         }
-        let mut load = HistoryLoad::default();
         if self.unlistable.get() {
-            return load;
+            return HistoryLoad::default();
         }
-        let moved = self.layout.borrow().is_some();
-        if !moved && let Err(why) = self.migrate(&mut load) {
-            load.notices.push(HistoryNotice::MovePending(why));
-        }
-        self.import(true);
-        // Each record that holds no session this build reads, with what it
-        // says of itself; and each that could not be read at all, as one
-        // held open cannot be.
-        let read: Vec<(RecordId, RecordRead)> = {
-            let (tombstones, held_open) = (self.tombstones.borrow(), self.held_open.borrow());
-            self.records
-                .borrow()
-                .iter()
-                .filter(|(id, _)| !tombstones.contains_key(id))
-                .map(|(id, held)| {
-                    let read = (!held_open.contains(id))
-                        .then(|| held.session().ok_or_else(|| unreadable(&held.json)));
-                    (*id, read)
-                })
-                .collect()
-        };
-        let sorted = sort(read, &mut self.keys.borrow_mut());
-        load.notices
-            .extend(self.tell(&sorted.unread, &sorted.failed));
-        load.sessions = sorted.sessions;
-        load.unread = sorted.unread.into_iter().map(|(id, _)| id).collect();
-        load.later = sorted.later;
-        load.failed = sorted.failed;
-        // Complete once the move is made: until then, the sessions kept
-        // whole are stored, though not here.
-        load.complete = self.layout.borrow().is_some();
-        self.seen.set(self.looking());
-        load
+        // What was held back is tried again, and held back afresh where it
+        // still cannot be taken up.
+        self.held_back.set(false);
+        at_once(record_store::load(&InMem(self)))
+            .and_then(Result::ok)
+            .unwrap_or_default()
     }
 
     /// Made at once, or, while changes are deferred, when the test settles
@@ -672,7 +643,7 @@ impl Store for MemoryStore {
             return done(page.apply(&change));
         }
         if !self.deferred.get() {
-            return done(self.make(&change));
+            return done(self.apply(&change));
         }
         let answer = Rc::new(RefCell::new(Answer::default()));
         self.waiting
@@ -697,30 +668,8 @@ impl Store for MemoryStore {
         if self.unlistable.get() {
             return done(None);
         }
-        self.import(false);
-        self.seen.set(self.looking());
-        let tombstones = self.tombstones.borrow();
-        let listed: Vec<RecordId> = self
-            .records
-            .borrow()
-            .keys()
-            .filter(|id| !tombstones.contains_key(id))
-            .copied()
-            .collect();
-        drop(tombstones);
-        // Those no longer listed are gone, and told of no more, as the files
-        // note them: should one come back and fail, that is a failure of its
-        // own, told of in turn.
-        let there: HashSet<String> = listed.iter().map(|id| id.name()).collect();
-        for note in notes::LISTED {
-            if let Some(raw) = self.note(note) {
-                let gone = notes::gone_from(&raw, &there);
-                if !gone.is_empty() {
-                    self.no_more(note, &gone);
-                }
-            }
-        }
-        done(Some(listed))
+        self.held_back.set(false);
+        done(at_once(record_store::listing(&InMem(self))).flatten())
     }
 
     /// Each that cannot be read could not be read just now: the memory
@@ -757,7 +706,7 @@ impl Store for MemoryStore {
         if self.deletions_unknown.get() {
             return done(None);
         }
-        done(Some(deleted_sessions_of(self.tombstones_of(&ids))))
+        done(at_once(record_store::deleted_sessions(&InMem(self), &ids)).flatten())
     }
 
     fn deleted_keys(&self, keys: Vec<SessionKey>) -> Pending<Option<Vec<SessionKey>>> {
@@ -767,8 +716,7 @@ impl Store for MemoryStore {
         if self.deletions_unknown.get() {
             return done(None);
         }
-        let gone = keys_of_tombstones(&self.tombstones_read(), Reading::Lenient);
-        done(gone.ok().map(|gone| deleted_keys_of(&gone, keys)))
+        done(at_once(record_store::deleted_keys(&InMem(self), keys)).flatten())
     }
 
     fn deletions(&self, ids: Vec<RecordId>) -> Pending<Option<Deletions>> {
@@ -800,15 +748,7 @@ impl Store for MemoryStore {
     /// noted as failing too, as this build's failures.
     fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
         self.still_unread_asks.set(self.still_unread_asks.get() + 1);
-        let (notices, unread_told) =
-            notes::still_unread(&ids, self.note(Note::UnreadTold).as_deref());
-        if let Some(names) = unread_told {
-            self.write_note(Note::UnreadTold, Some(&names));
-            if let Some(failing) = notes::noted_unread(&ids, self.note(Note::Failing).as_deref()) {
-                self.write_note(Note::Failing, Some(&failing));
-            }
-        }
-        done(notices)
+        done(at_once(record_store::still_unread(&InMem(self), &ids)).unwrap_or_default())
     }
 
     fn load_sync(&self) -> Option<String> {
@@ -945,6 +885,248 @@ impl Steps for InMemory<'_> {
     }
 }
 
+/// The test store as the record store reads and writes it
+/// ([`record_store`]), as the files are, every read and change made then and
+/// there: its knobs, a page's history, deferred answers and counters, are
+/// answered by [`MemoryStore`]'s own methods before the record store is
+/// asked. Its records are text, its notes of what was told the files' but
+/// the note builds before formats read, and the history an older build keeps
+/// whole is beside them, read whole.
+struct InMem<'a>(&'a MemoryStore);
+
+/// Why the test store made no change: what became of it.
+struct Refused(HistorySaved);
+
+impl Refusal for Refused {
+    fn saved(&self) -> HistorySaved {
+        self.0.clone()
+    }
+
+    fn words(&self) -> String {
+        match &self.0 {
+            HistorySaved::Failed(why) => why.clone(),
+            _ => "no room left".into(),
+        }
+    }
+}
+
+impl Backend for InMem<'_> {
+    type Refused = Refused;
+    type Look = (u64, Option<Fingerprint>);
+    type Listed = ();
+    const ORDER: Order = Order::MoveThenRead;
+    const FALLS_BACK: bool = false;
+    const NOTES_STILL_UNREAD: bool = true;
+
+    fn keys(&self) -> &RefCell<KeyCache> {
+        &self.0.keys
+    }
+
+    async fn gate(&self) -> Result<Gate, Refused> {
+        Ok(match self.0.layout.borrow().as_ref() {
+            Some(layout) => Gate::Open(Box::new(layout.clone())),
+            None => Gate::Unmoved,
+        })
+    }
+
+    async fn list(&self) -> Result<Listing<()>, Refused> {
+        Ok(Listing {
+            records: self.0.records.borrow().keys().copied().collect(),
+            gone: self.0.tombstones.borrow().keys().copied().collect(),
+            skipped: false,
+            listed: (),
+        })
+    }
+
+    /// Each as it went in, one held open not at all.
+    async fn read_listed(&self, listing: &Listing<()>) -> Vec<(RecordId, RecordRead)> {
+        let (records, held_open) = (self.0.records.borrow(), self.0.held_open.borrow());
+        listing
+            .records
+            .difference(&listing.gone)
+            .filter_map(|id| {
+                let held = records.get(id)?;
+                let read = (!held_open.contains(id))
+                    .then(|| held.session().ok_or_else(|| unreadable(&held.json)));
+                Some((*id, read))
+            })
+            .collect()
+    }
+
+    async fn read(&self, ids: &[RecordId], _listed: Option<&()>) -> Vec<Raw> {
+        let (records, held_open) = (self.0.records.borrow(), self.0.held_open.borrow());
+        ids.iter()
+            .map(|id| match records.get(id) {
+                Some(held) if !self.0.unlistable.get() && !held_open.contains(id) => {
+                    Raw::Text(held.json.clone())
+                }
+                _ => Raw::Failed,
+            })
+            .collect()
+    }
+
+    async fn tombstones(&self) -> Result<Vec<Tombstone>, Refused> {
+        Ok(self.0.tombstones_read())
+    }
+
+    async fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
+        Some(self.0.tombstones_of(ids))
+    }
+
+    async fn note(&self, note: Note) -> Option<Vec<u8>> {
+        self.0.note(note)
+    }
+
+    async fn write_note(&self, note: Note, names: Option<&BTreeSet<String>>) {
+        self.0.write_note(note, names);
+    }
+
+    /// Read whole, as it is: whether it changed is the take-up's to say.
+    async fn legacy_look(&self, _layout: &Layout) -> LegacyLook {
+        LegacyLook::Changed(Some(self.0.kept_whole()))
+    }
+
+    async fn legacy(&self) -> Result<Legacy, String> {
+        Ok(self.0.kept_whole())
+    }
+
+    async fn legacy_deleted(&self) -> Vec<Deleted> {
+        self.0.legacy_deleted.borrow().clone()
+    }
+
+    /// Taken away, and kept aside: what an older build keeps whole is gone.
+    async fn set_aside_history(&self, _raw: &[u8]) -> (Option<SetAside>, bool) {
+        let whole = self.0.legacy.borrow_mut().take();
+        self.0.legacy_aside.borrow_mut().extend(whole);
+        (Some(SetAside::History { kept: None }), true)
+    }
+
+    async fn set_aside_sessions(
+        &self,
+        unread: &str,
+        count: usize,
+    ) -> Result<Option<SetAside>, String> {
+        let mut aside = self.0.legacy_aside.borrow_mut();
+        if aside.iter().any(|kept| kept == unread) {
+            return Ok(None);
+        }
+        aside.push(unread.to_string());
+        Ok(Some(SetAside::Sessions { count, kept: None }))
+    }
+
+    /// None, while one here cannot be read for now, as one held open
+    /// cannot, as the files' move waits on each it reads: it may hold a
+    /// session the move would write again.
+    async fn here(&self) -> Result<(BTreeSet<RecordId>, BTreeSet<RecordId>), Refused> {
+        let records = self.0.records.borrow();
+        let held_open = self.0.held_open.borrow();
+        if records.keys().any(|id| held_open.contains(id)) {
+            let why = "a record here could not be read just now".to_string();
+            return Err(Refused(HistorySaved::Failed(why)));
+        }
+        let gone = self.0.tombstones.borrow().keys().copied().collect();
+        Ok((records.keys().copied().collect(), gone))
+    }
+
+    async fn texts(&self, ids: &[RecordId]) -> Result<Vec<(RecordId, String)>, Refused> {
+        let records = self.0.records.borrow();
+        Ok(ids
+            .iter()
+            .filter_map(|id| Some((*id, records.get(id)?.json.clone())))
+            .collect())
+    }
+
+    /// Step by step, as the files make it; where it takes something up,
+    /// how the history is kept noted once it is made.
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<Refused> {
+        let (placed, saved) = if by == By::Store && writes.change.is_empty() {
+            (Vec::new(), HistorySaved::Stored { kept: 0 })
+        } else {
+            self.0.make(writes)
+        };
+        if saved.kept().is_none() {
+            return Made {
+                placed,
+                saved: Err(Refused(saved)),
+            };
+        }
+        if let Laid::Over(next) = laid {
+            *self.0.layout.borrow_mut() = Some(next.clone());
+        }
+        Made {
+            placed,
+            saved: Ok(saved),
+        }
+    }
+
+    /// As a change is made, its records' keys noted; how the history is
+    /// kept noted last. One with nothing to store stores nothing, where the
+    /// store would take no change.
+    async fn write_move(
+        &self,
+        records: &[Record],
+        layout: &Layout,
+    ) -> Result<Vec<Option<RecordId>>, Refused> {
+        let (placed, saved) = if records.is_empty() {
+            let saved = self.0.refused().unwrap_or(HistorySaved::Stored { kept: 0 });
+            (Vec::new(), saved)
+        } else {
+            let change = HistoryChange {
+                put: records.to_vec(),
+                ..HistoryChange::default()
+            };
+            let writes = Writes::of(&change)
+                .map_err(|err| Refused(HistorySaved::Failed(err.to_string())))?;
+            let (placed, saved) = self.0.make(&writes);
+            let mut keys = self.0.keys.borrow_mut();
+            for (record, id) in records.iter().zip(&placed) {
+                if let Some(id) = id
+                    && let Some(key) = key_of(&record.json)
+                {
+                    keys.insert(*id, key);
+                }
+            }
+            (placed, saved)
+        };
+        if saved.kept().is_none() {
+            return Err(Refused(saved));
+        }
+        *self.0.layout.borrow_mut() = Some(layout.clone());
+        Ok(placed)
+    }
+
+    fn look(&self) -> (u64, Option<Fingerprint>) {
+        self.0.looking()
+    }
+
+    fn saw(&self, look: (u64, Option<Fingerprint>)) {
+        self.0.seen.set(look);
+    }
+
+    fn held_back(&self) {
+        self.0.held_back.set(true);
+    }
+
+    /// Each session as it went in, as the test store hands it back, and the
+    /// store as it is now taken for seen: what this read stored itself is
+    /// no change for it to take up.
+    fn loaded(&self, load: &mut HistoryLoad) {
+        let records = self.0.records.borrow();
+        // Short of room, a take-up lets the oldest go: they are no longer
+        // here to read.
+        load.sessions.retain(|(id, _)| records.contains_key(id));
+        load.unread.retain(|id| records.contains_key(id));
+        load.later.retain(|(id, _)| records.contains_key(id));
+        load.failed.retain(|id| records.contains_key(id));
+        for (id, session) in &mut load.sessions {
+            if let Some(whole) = records.get(id).and_then(Held::session) {
+                *session = whole;
+            }
+        }
+        self.0.seen.set(self.0.looking());
+    }
+}
+
 /// What a tombstone holds, as it is written.
 fn written(deleted: &Deleted) -> Vec<u8> {
     serde_json::to_vec(deleted).expect("a tombstone writes")
@@ -1008,7 +1190,7 @@ impl MemoryStore {
     /// A copy of the app that keeps the history whole in `shelf`, a
     /// browser's page storage, which other copies may share, each through
     /// an adapter of its own, as tabs share a browser's
-    /// ([`legacy::BlobHistory`]); with room for all of it.
+    /// ([`BlobHistory`]); with room for all of it.
     pub fn in_page(shelf: &PageShelf) -> Self {
         Self {
             page: Some(BlobHistory::new(shelf.clone(), PAGE_KEYS, usize::MAX)),
@@ -1076,7 +1258,7 @@ impl MemoryStore {
             let Some((change, answer)) = self.waiting.borrow_mut().pop_front() else {
                 return;
             };
-            let saved = self.make(&change);
+            let saved = self.apply(&change);
             let mut answer = answer.borrow_mut();
             answer.saved = Some(saved);
             if let Some(waker) = answer.waker.take() {
@@ -1097,7 +1279,7 @@ impl MemoryStore {
         if self.deletions_unknown.get() {
             return None;
         }
-        Some(deletions_of(self.tombstones_of(&ids)))
+        at_once(record_store::deletions(&InMem(self), &ids)).flatten()
     }
 
     /// Of `ids`, those deleted by hand, each beside what its tombstone
@@ -1128,22 +1310,8 @@ impl MemoryStore {
     /// next read is not told of then, and one that fails again after the
     /// app's tries, or is damaged, is told of again.
     fn read_now(&self, ids: Vec<RecordId>) -> Vec<Result<Record, Unopened>> {
-        let (records, held_open) = (self.records.borrow(), self.held_open.borrow());
-        let read: Vec<Result<Record, Unopened>> = ids
-            .into_iter()
-            .map(|id| match records.get(&id) {
-                Some(held) if !self.unlistable.get() && !held_open.contains(&id) => Ok(Record {
-                    id,
-                    json: held.json.clone(),
-                }),
-                _ => Err(Unopened::Failed(id)),
-            })
-            .collect();
-        drop((records, held_open));
-        for (note, gone) in notes::after_read(&read) {
-            self.no_more(note, &gone);
-        }
-        read
+        at_once(record_store::read(&InMem(self), &ids))
+            .unwrap_or_else(|| ids.iter().map(|&id| Err(Unopened::Failed(id))).collect())
     }
 
     /// What `note` holds, as it is written: none where it is not there, as
@@ -1166,40 +1334,6 @@ impl MemoryStore {
             Note::DamagedTold => &self.damaged_told,
         };
         *held.borrow_mut() = names.map(|names| serde_json::to_vec(names).expect("a note writes"));
-    }
-
-    /// Take `gone`, records by name, out of `note`, as the files take them
-    /// out ([`notes::no_more`]).
-    fn no_more(&self, note: Note, gone: &HashSet<String>) {
-        if let Some(raw) = self.note(note)
-            && let Some(left) = notes::no_more(note, &raw, gone)
-        {
-            self.write_note(note, left.as_ref());
-        }
-    }
-
-    /// What to tell of `unread`, the records this build cannot read, each
-    /// with what it says of itself, and of `failed`, those that could not
-    /// be read at all just now, as the files tell of them: of the first,
-    /// those not told of since each last read; of the second, those that
-    /// could not be read as the history was last read either, and have not
-    /// read since, nor been told of. Then noted, as the files note them: a
-    /// failure told of while it still fails, a record that cannot be read
-    /// while it cannot be read, or fails, and what failed now.
-    fn tell(&self, unread: &[(RecordId, Unreadable)], failed: &[RecordId]) -> Vec<HistoryNotice> {
-        let (failing, unread_told) = (self.note(Note::Failing), self.note(Note::UnreadTold));
-        let damaged_told = self.note(Note::DamagedTold);
-        let held = notes::Held {
-            told: None,
-            failing: failing.as_deref(),
-            unread_told: unread_told.as_deref(),
-            damaged_told: damaged_told.as_deref(),
-        };
-        let told = notes::at_open(unread, failed, held);
-        for (note, names) in &told.noted {
-            self.write_note(*note, names.as_ref());
-        }
-        told.notices
     }
 
     /// Answer every read asked for ([`Self::reads_later`]), as the store
@@ -1293,6 +1427,8 @@ impl MemoryStore {
         if let Some(held) = self.records.borrow_mut().get_mut(&id) {
             held.json = raw.to_string();
         }
+        // What it holds is read afresh for its key.
+        self.keys.borrow_mut().remove(&id);
     }
 
     /// The tombstone of the record `id`, if it was deleted.
@@ -1323,6 +1459,13 @@ impl MemoryStore {
         self.legacy.borrow().clone()
     }
 
+    /// The history an older build keeps whole, with what tells it from
+    /// another state of it ([`Self::fingerprint`]).
+    fn kept_whole(&self) -> Legacy {
+        let raw = self.legacy.borrow().clone()?;
+        Some((raw.into_bytes(), self.fingerprint()?))
+    }
+
     /// What tells the history kept whole as it stands from another state
     /// of it: how long it is, and how often it was written.
     fn fingerprint(&self) -> Option<Fingerprint> {
@@ -1342,44 +1485,28 @@ impl MemoryStore {
         (self.changes.get(), self.fingerprint())
     }
 
-    /// Make `change`, as the files make it ([`make_steps`]).
-    fn make(&self, change: &HistoryChange) -> HistorySaved {
+    /// Make `change` through the record store, as the files make it.
+    fn apply(&self, change: &HistoryChange) -> HistorySaved {
+        at_once(record_store::apply(&InMem(self), change))
+            .unwrap_or_else(|| HistorySaved::Failed("it waited".into()))
+    }
+
+    /// Make `writes`, as the files make them ([`make_steps`]), and say where
+    /// each record went, as far as it got.
+    fn make(&self, writes: &Writes<'_>) -> (Vec<Option<RecordId>>, HistorySaved) {
         if let Some(refused) = self.refused() {
-            return refused;
+            return (Vec::new(), refused);
         }
-        let written: Vec<(RecordId, String)> = change
-            .forget
-            .iter()
-            .map(|(id, deleted)| {
-                (
-                    *id,
-                    serde_json::to_string(deleted).expect("a tombstone writes"),
-                )
-            })
-            .collect();
-        let forget: Vec<(RecordId, &str)> = written
-            .iter()
-            .map(|(id, held)| (*id, held.as_str()))
-            .collect();
-        let (placed, made) = make_steps(&InMemory(self), &change.put, &forget, &change.unforget);
-        {
-            let mut keys = self.keys.borrow_mut();
-            for (record, id) in change.put.iter().zip(placed) {
-                if let Some(id) = id
-                    && let Some(key) = key_of(&record.json)
-                {
-                    keys.insert(id, key);
-                }
-            }
-            if made.is_ok() {
-                for (id, _) in &change.forget {
-                    keys.remove(id);
-                }
-            }
-        }
+        let change = writes.change;
+        let (placed, made) = make_steps(
+            &InMemory(self),
+            &change.put,
+            &writes.tombstones(),
+            &change.unforget,
+        );
         if let Err(saved) = made {
             self.changed_here();
-            return saved;
+            return (placed, saved);
         }
         let (tombstones, mut records) = (self.tombstones.borrow(), self.records.borrow_mut());
         self.stored.set(true);
@@ -1402,15 +1529,17 @@ impl MemoryStore {
                 .values()
                 .filter_map(Held::session)
                 .any(|session| session.contest.is_some());
-            return HistorySaved::Squeezed {
+            let squeezed = HistorySaved::Squeezed {
                 kept: room,
                 runs,
                 trimmed,
             };
+            return (placed, squeezed);
         }
-        HistorySaved::Stored {
+        let stored = HistorySaved::Stored {
             kept: change.put.len(),
-        }
+        };
+        (placed, stored)
     }
 
     /// Why the store takes no change to the history now, the way a full or
@@ -1420,160 +1549,6 @@ impl MemoryStore {
             return Some(HistorySaved::Failed(why));
         }
         self.full.get().then_some(HistorySaved::Full)
-    }
-
-    /// Move the history kept whole into records, as the files move it:
-    /// what does not read set aside, the rest in its order, but what is
-    /// here already ([`legacy::not_moved_yet`]), and the layout noted last. A store that takes no change makes no move, and says
-    /// why: the history kept whole is not taken for moved, and the next
-    /// read moves it. So does one with a record held open, as the files
-    /// make none while a record they would read cannot be.
-    fn migrate(&self, load: &mut HistoryLoad) -> Result<(), String> {
-        let raw = self.legacy.borrow().clone();
-        let read = raw.as_deref().map(read_history);
-        let kept_whole = matches!(read, Some(Some(_)));
-        let sessions = match read {
-            None => Vec::new(),
-            Some(None) => {
-                self.legacy_aside
-                    .borrow_mut()
-                    .extend(self.legacy.borrow_mut().take());
-                load.set_aside.push(SetAside::History { kept: None });
-                Vec::new()
-            }
-            Some(Some(read)) => {
-                if let Some(unread) = read.unread_json()
-                    && !self.legacy_aside.borrow().contains(&unread)
-                {
-                    self.legacy_aside.borrow_mut().push(unread);
-                    let count = read.unread.len();
-                    load.set_aside
-                        .push(SetAside::Sessions { count, kept: None });
-                }
-                read.sessions
-            }
-        };
-        let (moved, layout) = legacy::moved(
-            &sessions,
-            self.fingerprint(),
-            kept_whole,
-            &self.legacy_deleted.borrow(),
-            crate::time::now_ms(),
-        );
-        // A move made over records stored since, as the files make one,
-        // writes no session held already, nor one deleted; and, where it
-        // has any to write, waits while one here cannot be read for now, as
-        // one held open cannot, as the files' move waits on each it reads:
-        // it may hold a session the move would write again.
-        let moved = {
-            let (records, tombstones) = (self.records.borrow(), self.tombstones.borrow());
-            let held_open = self.held_open.borrow();
-            if !moved.is_empty() && records.keys().any(|id| held_open.contains(id)) {
-                return Err("a record here could not be read just now".into());
-            }
-            let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
-            let gone: BTreeSet<RecordId> = tombstones.keys().copied().collect();
-            let gone_keys = keys_of_tombstones(&self.tombstones_read(), Reading::Strict)?;
-            let elsewhere = records
-                .iter()
-                .filter(|(id, _)| !names.contains(id))
-                .map(|(_, held)| held.json.as_str());
-            legacy::not_moved_yet(
-                moved,
-                |id| records.contains_key(&id),
-                &gone,
-                elsewhere,
-                &gone_keys,
-            )
-        };
-        // The layout, written last, needs the room a record does.
-        let saved = if moved.is_empty() {
-            self.refused().unwrap_or(HistorySaved::Stored { kept: 0 })
-        } else {
-            self.make(&HistoryChange {
-                put: moved,
-                ..HistoryChange::default()
-            })
-        };
-        if saved.kept().is_none() {
-            return Err(match saved {
-                HistorySaved::Failed(why) => why,
-                _ => "no room left".into(),
-            });
-        }
-        *self.layout.borrow_mut() = Some(layout);
-        Ok(())
-    }
-
-    /// Take up what an older build stored in, or deleted from, the history
-    /// kept whole since it was last taken up. `reading` says the history is
-    /// being read whole: nothing is taken up then while a record cannot be
-    /// read, as the files' read takes nothing up while one failed. What the
-    /// store takes no change for is still to take up ([`Self::held_back`]).
-    fn import(&self, reading: bool) {
-        self.held_back.set(false);
-        let Some(layout) = self.layout.borrow().clone() else {
-            return;
-        };
-        let sessions = self
-            .legacy
-            .borrow()
-            .as_deref()
-            .and_then(read_history)
-            .map(|read| read.sessions)
-            .unwrap_or_default();
-        // Every record here by the session it holds, or a later build's by
-        // the one it says it holds, as the files take them: a damaged one
-        // holds none. One that cannot be read for now holds the session it
-        // held as it was last read; one never read holds every take-up
-        // back, as it may hold a session the older build holds too, and so
-        // does any, at a read of the history whole.
-        let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
-        {
-            let (tombstones, held_open) = (self.tombstones.borrow(), self.held_open.borrow());
-            let mut keys = self.keys.borrow_mut();
-            for (id, held) in self.records.borrow().iter() {
-                if tombstones.contains_key(id) {
-                    continue;
-                }
-                let key = if held_open.contains(id) {
-                    match keys.get(id) {
-                        Some(key) if !reading => Some(key.clone()),
-                        _ => return,
-                    }
-                } else {
-                    let key = match held.session() {
-                        Some(session) => Some(SessionKey::of(&session)),
-                        None => unreadable(&held.json).later_key().cloned(),
-                    };
-                    if let Some(key) = &key {
-                        keys.insert(*id, key.clone());
-                    }
-                    key
-                };
-                if let Some(key) = key {
-                    live.entry(key).or_default().push(*id);
-                }
-            }
-        }
-        let Ok(gone) = keys_of_tombstones(&self.tombstones_read(), Reading::Strict) else {
-            return;
-        };
-        let Some((change, next)) = legacy::imported(
-            &layout,
-            self.fingerprint(),
-            &sessions,
-            &self.legacy_deleted.borrow(),
-            &live,
-            &gone,
-        ) else {
-            return;
-        };
-        if change.is_empty() || self.make(&change).kept().is_some() {
-            *self.layout.borrow_mut() = Some(next);
-        } else {
-            self.held_back.set(true);
-        }
     }
 }
 
