@@ -56,8 +56,9 @@ use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::progress::LoadProgress;
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unopened, Unreadable,
-    held_key, key_of, names_noted, not_told, read_record, taken_up, unreadable,
+    held_key, key_of, read_record, taken_up, unreadable,
 };
+use super::record_store::notes::{self, Note};
 use super::record_store::{
     Raw, Reading, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of, deleted_sessions_of,
     deletions_of, keys_of_tombstones, live_of, sort,
@@ -345,7 +346,7 @@ impl HistoryFiles {
     ///
     /// A record and its tombstone read as deleted, and the deletion cut
     /// short is finished. A record this build cannot read is left where it
-    /// is, and told of once, as a newer Dust's or as damaged ([`not_told`]).
+    /// is, and told of once, as a newer Dust's or as damaged ([`notes::at_open`]).
     /// One that could not be read at all just now failed
     /// ([`HistoryLoad::failed`]), for the app to read again: told of, once,
     /// only where it could not be read as the history was last read either
@@ -659,17 +660,13 @@ impl HistoryFiles {
 
     /// Take out of this build's notes of records it could not read
     /// ([`FAILING`], [`UNREAD_TOLD`], [`DAMAGED_TOLD`]) each that `listed`,
-    /// every record a look found, holds no more: it is gone, and should it
-    /// come back and fail, that is a failure of its own, told of in turn.
+    /// every record a look found, holds no more ([`notes::gone_from`]).
     fn note_listed(&self, listed: &HashSet<String>) {
-        for note in [FAILING, UNREAD_TOLD, DAMAGED_TOLD] {
-            let Ok(raw) = fs::read(self.dir.join(note)) else {
+        for note in notes::LISTED {
+            let Ok(raw) = fs::read(self.dir.join(note_file(note))) else {
                 continue;
             };
-            let gone: HashSet<String> = names_noted(Some(&raw))
-                .into_iter()
-                .filter(|name| !listed.contains(name))
-                .collect();
+            let gone = notes::gone_from(&raw, listed);
             if !gone.is_empty() {
                 self.note_no_more(note, &gone);
             }
@@ -695,57 +692,41 @@ impl HistoryFiles {
             .zip(ids)
             .map(|(raw, &id)| raw.record(id))
             .collect();
-        let read_now: HashSet<String> = read
-            .iter()
-            .filter_map(|read| read.as_ref().ok().map(|record| record.id.name()))
-            .collect();
-        let damaged = read.iter().filter_map(|read| match read {
-            Err(Unopened::Damaged(id)) => Some(id.name()),
-            _ => None,
-        });
-        self.note_no_more(DAMAGED_TOLD, &read_now);
-        let failing_no_longer: HashSet<String> = read_now.into_iter().chain(damaged).collect();
-        self.note_no_more(FAILING, &failing_no_longer);
-        self.note_no_more(UNREAD_TOLD, &failing_no_longer);
+        self.note_read(&read);
         read
     }
 
-    /// Take `gone`, records by name, out of `note`, a note of records this
-    /// build could not read: [`FAILING`], as those just read, or found
-    /// damaged, fail no longer, so that one of them that fails for a moment
-    /// again as the history is next read whole, at a later launch, is not
-    /// told of then, as one that failed at the last read and has not read
-    /// since is ([`Self::tell`]); [`UNREAD_TOLD`], as those it told of that
-    /// read now are told of no more, so that one that fails again after, a
-    /// failure of its own, is told of in turn ([`Self::still_unread`]); and
-    /// [`DAMAGED_TOLD`], as those just read are damaged no more. Those a
-    /// look no longer lists are gone, and go from each the same way
-    /// ([`Self::note_listed`]). What a build before this one noted in
-    /// [`TOLD`], the records it cannot read, is no failure this build noted,
-    /// and stays as it is: dropped, that build would tell of it again as it
-    /// next opens. Taken out only where this build may write to the
-    /// history, as the note is made; a note that names none of them is left
-    /// as it is, and one left naming none is removed, but for
-    /// [`DAMAGED_TOLD`].
-    fn note_no_more(&self, note: &str, gone: &HashSet<String>) {
-        let path = self.dir.join(note);
-        let Ok(raw) = fs::read(&path) else {
-            return;
-        };
-        let noted = names_noted(Some(&raw));
-        let left: BTreeSet<&String> = noted.iter().filter(|name| !gone.contains(*name)).collect();
-        if left.len() == noted.len() || !matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved)) {
-            return;
+    /// Take out of this build's notes of records it could not read each of
+    /// `read` that read, or was found damaged ([`notes::after_read`]).
+    fn note_read(&self, read: &[Result<Record, Unopened>]) {
+        for (note, gone) in notes::after_read(read) {
+            self.note_no_more(note, &gone);
         }
-        // The note of damage stays, though it names none: from its first
-        // writing it alone holds back such a notice ([`DAMAGED_TOLD`]).
-        let _ = if left.is_empty() && note != DAMAGED_TOLD {
-            remove_if_there(&path)
-        } else {
-            serde_json::to_vec(&left)
-                .map_err(io::Error::other)
-                .and_then(|raw| write_whole(&self.dir, note, &raw))
+    }
+
+    /// Take `gone`, records by name, out of `note`, a note of records this
+    /// build could not read, as [`notes::no_more`] says: only where this
+    /// build may write to the history, as the note is made.
+    fn note_no_more(&self, note: Note, gone: &HashSet<String>) {
+        let Ok(raw) = fs::read(self.dir.join(note_file(note))) else {
+            return;
         };
+        let Some(left) = notes::no_more(note, &raw, gone) else {
+            return;
+        };
+        if matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved)) {
+            let _ = self.write_note(note, left.as_ref());
+        }
+    }
+
+    /// Write `note` to hold `names`, or, given none, take it away.
+    fn write_note(&self, note: Note, names: Option<&BTreeSet<String>>) -> io::Result<()> {
+        match names {
+            Some(names) => serde_json::to_vec(names)
+                .map_err(io::Error::other)
+                .and_then(|raw| write_whole(&self.dir, note_file(note), &raw)),
+            None => remove_if_there(&self.dir.join(note_file(note))),
+        }
     }
 
     /// Write a backup to `out`: `backup`, with every record stored here,
@@ -1232,139 +1213,36 @@ impl HistoryFiles {
 
     /// What to tell of `unread`, the records this build cannot read, each
     /// with what it says of itself, and of `failed`, those that could not
-    /// be read at all just now ([`not_told`]): of the second, only those
-    /// that could not be read as the history was last read either, and have
-    /// not read since ([`FAILING`]), as a moment's failure is over by the
-    /// app's first try at reading it again; and nothing, once each has been
-    /// told of.
-    /// `writable` is whether what was told may be noted, so it is told of
-    /// once, and what failed, for the next read to tell of.
-    ///
-    /// Each kind of notice goes by a note of its own. One of a record this
-    /// build cannot read, by [`DAMAGED_TOLD`], which keeps each of those it
-    /// cannot read now and each it told of that fails now, and drops the
-    /// rest, as read or gone; until it is first written, [`TOLD`] stands
-    /// for it, and from then on a record a build before formats told of
-    /// first is told of again here. One of a failure, by [`UNREAD_TOLD`],
-    /// which keeps each told of before, by this launch or by the app's
-    /// tries ([`Self::still_unread`]), that still fails, and drops one that
-    /// reads now or is gone: should it fail again, that is a failure of its
-    /// own, told of in turn. This build only adds names to [`TOLD`], where
-    /// a build before formats looks: every one told of, of either kind,
-    /// beside what such a build noted there, the records it could not open
-    /// or make out, some of which this one reads; dropped, such a build
-    /// would tell of one again as it next opened. Such a build writes it
-    /// over, as it tells of a record it does not name, with every record it
-    /// cannot read just then. A look drops from this build's notes the
-    /// records it reads, and those it no longer lists ([`Self::read`],
-    /// [`Self::listing`]).
+    /// be read at all just now, by this build's notes of what it told
+    /// ([`notes::at_open`]); `writable` is whether what was told may be
+    /// noted, so it is told of once, and what failed, for the next read to
+    /// tell of. The notes are read in order, [`FAILING`], [`TOLD`],
+    /// [`UNREAD_TOLD`] and [`DAMAGED_TOLD`], before any is written. A look
+    /// drops from this build's notes the records it reads, and those it no
+    /// longer lists ([`Self::read`], [`Self::listing`]).
     fn tell(
         &self,
         unread: &[(RecordId, Unreadable)],
         failed: &[RecordId],
         writable: bool,
     ) -> Vec<HistoryNotice> {
-        let failing = self.dir.join(FAILING);
-        let failed_before = names_noted(fs::read(&failing).ok().as_deref());
-        let unread_now: Vec<(RecordId, Option<Unreadable>)> = unread
-            .iter()
-            .map(|(id, said)| (*id, Some(said.clone())))
-            .collect();
-        let failed_now: Vec<(RecordId, Option<Unreadable>)> = failed
-            .iter()
-            .filter(|id| failed_before.contains(&id.name()))
-            .map(|id| (*id, None))
-            .collect();
-        let path = self.dir.join(TOLD);
-        let told = fs::read(&path).ok();
-        let unread_told = fs::read(self.dir.join(UNREAD_TOLD)).ok();
-        let damaged_told = fs::read(self.dir.join(DAMAGED_TOLD)).ok();
-        // Of a record this build cannot read, and of a failure, as this
-        // build told of it, whatever a build before this one noted of the
-        // record ([`DAMAGED_TOLD`], [`UNREAD_TOLD`]); of the first, as such
-        // a build noted it, until this build first notes one.
-        let mut notices = not_told(&unread_now, damaged_told.as_deref().or(told.as_deref()));
-        notices.extend(not_told(&failed_now, unread_told.as_deref()));
-        if !writable {
-            return notices;
+        let read = |note| fs::read(self.dir.join(note_file(note))).ok();
+        let failing = read(Note::Failing);
+        let (told, unread_told) = (read(Note::Told), read(Note::UnreadTold));
+        let damaged_told = read(Note::DamagedTold);
+        let held = notes::Held {
+            told: told.as_deref(),
+            failing: failing.as_deref(),
+            unread_told: unread_told.as_deref(),
+            damaged_told: damaged_told.as_deref(),
+        };
+        let told = notes::at_open(unread, failed, held);
+        if writable {
+            for (note, names) in &told.noted {
+                let _ = self.write_note(*note, names.as_ref());
+            }
         }
-        // What it noted, with what it tells of now, whether or not there is
-        // anything new to tell: what a build before this one noted there
-        // stays. A failure told of, now or before, is noted there too,
-        // where such a build looks, so that it does not tell of it again.
-        let told_before = names_noted(told.as_deref());
-        let names: BTreeSet<String> = told_before
-            .iter()
-            .cloned()
-            .chain(unread_now.iter().map(|(id, _)| id.name()))
-            .chain(failed_now.iter().map(|(id, _)| id.name()))
-            .collect();
-        let told_more = names.len() != told_before.len();
-        if told_more {
-            let _ = serde_json::to_vec(&names)
-                .map_err(io::Error::other)
-                .and_then(|raw| write_whole(&self.dir, TOLD, &raw));
-        }
-        // Of the failures told of, before or now, those that still fail.
-        let unread_told_before = names_noted(unread_told.as_deref());
-        let failing_now: HashSet<String> = failed.iter().map(|id| id.name()).collect();
-        let still_told: BTreeSet<String> = unread_told_before
-            .iter()
-            .filter(|name| failing_now.contains(*name))
-            .cloned()
-            .chain(failed_now.iter().map(|(id, _)| id.name()))
-            .collect();
-        if still_told.len() != unread_told_before.len()
-            || still_told
-                .iter()
-                .any(|name| !unread_told_before.contains(name))
-        {
-            let _ = if still_told.is_empty() {
-                remove_if_there(&self.dir.join(UNREAD_TOLD))
-            } else {
-                serde_json::to_vec(&still_told)
-                    .map_err(io::Error::other)
-                    .and_then(|raw| write_whole(&self.dir, UNREAD_TOLD, &raw))
-            };
-        }
-        // Of the records this build cannot read, every one it cannot read
-        // now, told of now or before, and every one it told of that fails
-        // now: one that reads, or is gone, is told of no more. Written the
-        // first time where told.json is there, or this build writes it,
-        // though it names none, so that told.json stands for it no more:
-        // what this build notes there is no build before's.
-        let damaged_before = names_noted(damaged_told.as_deref());
-        let damaged_now: BTreeSet<String> = unread_now
-            .iter()
-            .map(|(id, _)| id.name())
-            .chain(
-                damaged_before
-                    .iter()
-                    .filter(|name| failing_now.contains(*name))
-                    .cloned(),
-            )
-            .collect();
-        let changed = damaged_now.len() != damaged_before.len()
-            || damaged_now
-                .iter()
-                .any(|name| !damaged_before.contains(name));
-        let first = damaged_told.is_none() && (told.is_some() || told_more);
-        if first || changed {
-            let _ = serde_json::to_vec(&damaged_now)
-                .map_err(io::Error::other)
-                .and_then(|raw| write_whole(&self.dir, DAMAGED_TOLD, &raw));
-        }
-        if failing_now != failed_before {
-            let _ = if failing_now.is_empty() {
-                remove_if_there(&failing)
-            } else {
-                let names: BTreeSet<&String> = failing_now.iter().collect();
-                serde_json::to_vec(&names)
-                    .map_err(io::Error::other)
-                    .and_then(|raw| write_whole(&self.dir, FAILING, &raw))
-            };
-        }
-        notices
+        told.notices
     }
 
     /// What to tell of `ids`, records listed that could not be read at all
@@ -1373,52 +1251,33 @@ impl HistoryFiles {
     /// ([`HistoryNotice::Unread`]), each noted as told, where this build may
     /// write, so it is told of once ([`super::Store::still_unread`]), and in
     /// [`TOLD`] too, so that a build before formats does not tell of it
-    /// again. What a build before this one noted of one in [`TOLD`] holds
-    /// back nothing: such a build notes there every record it could not
-    /// open, a moment's failure among them, and one that has read since
-    /// fails now on its own.
+    /// again ([`notes::still_unread`]). What a build before this one noted
+    /// of one in [`TOLD`] holds back nothing: such a build notes there every
+    /// record it could not open, a moment's failure among them, and one
+    /// that has read since fails now on its own.
     pub(super) fn still_unread(&self, ids: &[RecordId]) -> Vec<HistoryNotice> {
         self.on_its_thread();
-        let told = fs::read(self.dir.join(UNREAD_TOLD)).ok();
-        let still: Vec<(RecordId, Option<Unreadable>)> = ids.iter().map(|id| (*id, None)).collect();
-        let notices = not_told(&still, told.as_deref());
+        let read = |note| fs::read(self.dir.join(note_file(note))).ok();
+        let (notices, unread_told) = notes::still_unread(ids, read(Note::UnreadTold).as_deref());
         let writable = matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved));
-        if !notices.is_empty() && writable {
-            let mut names: BTreeSet<String> = names_noted(told.as_deref()).into_iter().collect();
-            names.extend(ids.iter().map(|id| id.name()));
-            if let Ok(raw) = serde_json::to_vec(&names) {
-                let _ = write_whole(&self.dir, UNREAD_TOLD, &raw);
-            }
+        if let Some(names) = unread_told
+            && writable
+        {
+            let _ = self.write_note(Note::UnreadTold, Some(&names));
             // Noted where a build before formats looks too ([`TOLD`]), so
             // such a build does not tell of it a second time.
-            let mut older: BTreeSet<String> =
-                names_noted(fs::read(self.dir.join(TOLD)).ok().as_deref())
-                    .into_iter()
-                    .collect();
-            let held = older.len();
-            older.extend(ids.iter().map(|id| id.name()));
-            if older.len() != held
-                && let Ok(raw) = serde_json::to_vec(&older)
-            {
-                let _ = write_whole(&self.dir, TOLD, &raw);
+            if let Some(older) = notes::noted_unread(ids, read(Note::Told).as_deref()) {
+                let _ = self.write_note(Note::Told, Some(&older));
                 // What this build notes there stands for no note of damage
                 // of its own ([`DAMAGED_TOLD`]): from here on that note does.
                 if !self.dir.join(DAMAGED_TOLD).exists() {
-                    let _ = write_whole(&self.dir, DAMAGED_TOLD, b"[]");
+                    let _ = self.write_note(Note::DamagedTold, Some(&BTreeSet::new()));
                 }
             }
             // Noted failing as well, as this build's failures: told of no
             // more once they read ([`Self::note_no_more`], [`Self::tell`]).
-            let failing = self.dir.join(FAILING);
-            let mut failing_now: BTreeSet<String> = names_noted(fs::read(&failing).ok().as_deref())
-                .into_iter()
-                .collect();
-            let before = failing_now.len();
-            failing_now.extend(ids.iter().map(|id| id.name()));
-            if failing_now.len() != before
-                && let Ok(raw) = serde_json::to_vec(&failing_now)
-            {
-                let _ = write_whole(&self.dir, FAILING, &raw);
+            if let Some(failing) = notes::noted_unread(ids, read(Note::Failing).as_deref()) {
+                let _ = self.write_note(Note::Failing, Some(&failing));
             }
         }
         notices
@@ -1792,6 +1651,16 @@ fn saved_or_not(made: io::Result<usize>) -> HistorySaved {
     }
 }
 
+/// The file `note` is kept in, in the history's folder.
+fn note_file(note: Note) -> &'static str {
+    match note {
+        Note::Told => TOLD,
+        Note::Failing => FAILING,
+        Note::UnreadTold => UNREAD_TOLD,
+        Note::DamagedTold => DAMAGED_TOLD,
+    }
+}
+
 /// The file record `id` is kept in.
 fn file_name(id: RecordId) -> String {
     format!("{}.json", id.name())
@@ -1906,7 +1775,7 @@ pub(super) fn copy_aside(root: &Path, unread: &[u8]) -> io::Result<Option<String
 mod tests {
     use super::*;
     use crate::persist::desktop::tests::TempDir;
-    use crate::persist::record::{records_for_blob, scored};
+    use crate::persist::record::{names_noted, records_for_blob, scored};
     use crate::persist::tests::{as_an_older_build_wrote, session};
     use crate::persist::worker::{HistoryJobs, wait};
     use std::cell::Cell;

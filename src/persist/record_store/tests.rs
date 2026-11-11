@@ -1,8 +1,10 @@
 //! The records and tombstones as every store reads them.
 
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::persist::Deleted;
-use crate::persist::record::unreadable;
+use crate::persist::record::{HistoryNotice, unreadable};
 use crate::persist::tests::session;
 
 fn finished(at: u64) -> SessionResult {
@@ -137,4 +139,146 @@ fn deletions_say_when_and_of_which_session_where_their_tombstones_do() {
     );
     assert_eq!(deleted_sessions_of(found()), [(id(1), gone.key())]);
     assert_eq!(deletions_of(Vec::new()), []);
+}
+
+/// The names a note holds, as it is written.
+fn noted(names: &[RecordId]) -> Vec<u8> {
+    let names: BTreeSet<String> = names.iter().map(|id| id.name()).collect();
+    serde_json::to_vec(&names).unwrap()
+}
+
+fn names_of(ids: &[RecordId]) -> BTreeSet<String> {
+    ids.iter().map(|id| id.name()).collect()
+}
+
+/// A record this build cannot read is told of once, by the note of what
+/// was told until this build first writes its note of damage, and by that
+/// note from then on, which is written the first time, though it names
+/// none, where the note of what was told is there; the note of what was
+/// told only gains names, and a failure is told of only where it failed at
+/// the last read too, and is noted as failing for the next.
+#[test]
+fn what_is_told_at_a_read_goes_by_the_notes_kind_by_kind() {
+    use notes::{Held, Note, at_open};
+    let damaged = (id(1), Unreadable::default());
+    let older = noted(&[id(1), id(7)]);
+    // Told of by a build before formats: not again, and its note of what
+    // it told keeps every name, with this build's note of damage written.
+    let told = at_open(
+        std::slice::from_ref(&damaged),
+        &[],
+        Held {
+            told: Some(&older),
+            ..Held::default()
+        },
+    );
+    assert_eq!(told.notices, []);
+    assert_eq!(told.noted, [(Note::DamagedTold, Some(names_of(&[id(1)])))]);
+    // This build's note of damage written, it alone holds a notice back.
+    let none = noted(&[]);
+    let told = at_open(
+        std::slice::from_ref(&damaged),
+        &[],
+        Held {
+            told: Some(&older),
+            damaged_told: Some(&none),
+            ..Held::default()
+        },
+    );
+    assert_eq!(told.notices, [HistoryNotice::Damaged { count: 1 }]);
+    assert_eq!(told.noted, [(Note::DamagedTold, Some(names_of(&[id(1)])))]);
+    // A failure is told of where it failed at the last read too, noted as
+    // told of, and in the note of what was told, which only gains names.
+    let failing = noted(&[id(2)]);
+    let told = at_open(
+        &[],
+        &[id(2), id(3)],
+        Held {
+            told: Some(&older),
+            failing: Some(&failing),
+            damaged_told: Some(&none),
+            ..Held::default()
+        },
+    );
+    assert_eq!(told.notices, [HistoryNotice::Unread { count: 1 }]);
+    assert_eq!(
+        told.noted,
+        [
+            (Note::Told, Some(names_of(&[id(1), id(2), id(7)]))),
+            (Note::UnreadTold, Some(names_of(&[id(2)]))),
+            (Note::Failing, Some(names_of(&[id(2), id(3)]))),
+        ]
+    );
+    // Nothing failing, nothing told: the note of failures goes.
+    let told = at_open(
+        &[],
+        &[],
+        Held {
+            failing: Some(&failing),
+            ..Held::default()
+        },
+    );
+    assert_eq!(told.notices, []);
+    assert_eq!(told.noted, [(Note::Failing, None)]);
+}
+
+/// What a read and a listing take out of the notes: a note left naming
+/// none goes, but for the note of damage, which stays; one that names none
+/// of them is left as it is.
+#[test]
+fn a_record_read_or_gone_is_taken_out_of_this_builds_notes() {
+    use notes::{LISTED, Note, after_read, gone_from, no_more};
+    let read = [
+        Ok(Record {
+            id: id(1),
+            json: "{}".into(),
+        }),
+        Err(Unopened::Damaged(id(2))),
+        Err(Unopened::Failed(id(3))),
+    ];
+    let [damage, failing, unread] = after_read(&read);
+    assert_eq!(damage, (Note::DamagedTold, HashSet::from([id(1).name()])));
+    let either = HashSet::from([id(1).name(), id(2).name()]);
+    assert_eq!(failing, (Note::Failing, either.clone()));
+    assert_eq!(unread, (Note::UnreadTold, either.clone()));
+    let held = noted(&[id(1), id(2)]);
+    assert_eq!(no_more(Note::Failing, &held, &either), Some(None));
+    assert_eq!(
+        no_more(Note::DamagedTold, &held, &either),
+        Some(Some(BTreeSet::new()))
+    );
+    assert_eq!(
+        no_more(Note::UnreadTold, &held, &HashSet::from([id(1).name()])),
+        Some(Some(names_of(&[id(2)])))
+    );
+    assert_eq!(
+        no_more(Note::Failing, &held, &HashSet::from([id(3).name()])),
+        None
+    );
+    assert_eq!(
+        gone_from(&held, &HashSet::from([id(2).name()])),
+        HashSet::from([id(1).name()])
+    );
+    assert_eq!(LISTED, [Note::Failing, Note::UnreadTold, Note::DamagedTold]);
+}
+
+/// Records still unread after the app's tries are told of once, and noted
+/// as told of, where a note gains a name by them.
+#[test]
+fn records_still_unread_are_told_of_once() {
+    use notes::{noted_unread, still_unread};
+    let told = noted(&[id(1)]);
+    assert_eq!(still_unread(&[id(1)], Some(&told)), (Vec::new(), None));
+    assert_eq!(
+        still_unread(&[id(1), id(2)], Some(&told)),
+        (
+            vec![HistoryNotice::Unread { count: 1 }],
+            Some(names_of(&[id(1), id(2)]))
+        )
+    );
+    assert_eq!(noted_unread(&[id(1)], Some(&told)), None);
+    assert_eq!(
+        noted_unread(&[id(2)], Some(b"not a note")),
+        Some(names_of(&[id(2)]))
+    );
 }
