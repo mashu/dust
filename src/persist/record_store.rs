@@ -15,8 +15,11 @@
 //! they held ([`keys_of_tombstones`], [`deletions_of`],
 //! [`deleted_sessions_of`]).
 #![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the stores take the record store up next")
+    not(any(feature = "native-runtime", test)),
+    expect(
+        dead_code,
+        reason = "the browser's store takes the record store up next"
+    )
 )]
 
 use std::cell::RefCell;
@@ -50,6 +53,7 @@ pub(super) enum Raw {
     Failed,
     /// Nothing: it is not there, as a browser's database says of a record
     /// gone since it was listed.
+    #[cfg_attr(not(any(feature = "web", test)), allow(dead_code))]
     Missing,
 }
 
@@ -305,6 +309,7 @@ pub(super) enum Opening {
     Gate(Gate),
     /// A newer Dust keeps it, and even how it is kept could not be read:
     /// nothing is read of it, and nothing written.
+    #[cfg_attr(not(any(feature = "web", test)), allow(dead_code))]
     NewerUnread,
 }
 

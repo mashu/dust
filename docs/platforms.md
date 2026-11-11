@@ -874,7 +874,8 @@ otherwise; a move made again over their records finds each session there
 all the same, by what it holds less its format.
 
 On a computer or a phone the history is the folder `history/`, beside the
-settings (`src/persist/files.rs`):
+settings (`src/persist/files.rs`, which keeps it by the record store's rules,
+`src/persist/record_store.rs`):
 
 - `sessions/<id>.json`: a session, as the build that stored it wrote it.
 - `deleted/<id>.json`: a tombstone. The session of that name was deleted by

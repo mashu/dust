@@ -30,6 +30,10 @@
 //! ([`super::worker`]), and asks nothing of them on its own but whether
 //! they changed elsewhere ([`Watch`]).
 //!
+//! What is read and written, in what order, and what is made of it, is the
+//! record store's, as for every store ([`record_store`]): this module makes
+//! its reads and its durable steps on the files ([`Disk`]).
+//!
 //! An older build never looks in `history/`. It keeps its history whole, in
 //! `sessions.json`, which the move reads once and leaves as it was, and
 //! whatever an older build stores there after the move is taken up here
@@ -52,17 +56,17 @@ use flate2::read::GzDecoder;
 
 use super::backup::{BackedUp, BackupFile, NotSaved};
 use super::disk::{aside_name, flush, move_aside, place_whole, shown, sync_dir, write_whole};
-use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
+use super::legacy::{self, Fingerprint, Gate, Layout};
 use super::progress::LoadProgress;
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unopened, Unreadable,
-    held_key, key_of, read_record, taken_up, unreadable,
+    read_record, unreadable,
 };
-use super::record_store::notes::{self, Note};
+use super::record_store::notes::Note;
 use super::record_store::steps::{Steps, There, make_steps, place};
 use super::record_store::{
-    Raw, Reading, Tombstone, TombstoneRead, TombstonesOf, deleted_keys_of, deleted_sessions_of,
-    deletions_of, keys_of_tombstones, live_of, sort,
+    self, Backend, By, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, Order, Raw, RecordRead,
+    Refusal, Tombstone, TombstoneRead, TombstonesOf, Writes, at_once,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -88,11 +92,14 @@ const TOLD: &str = "told.json";
 /// The records that could not be read at all as the history was last read
 /// whole, by name ([`HistoryLoad::failed`]), or at the app's last try at
 /// one ([`HistoryFiles::still_unread`]), and have not read since, nor gone
-/// ([`HistoryFiles::note_no_more`]): one that still cannot be read as it is
-/// read again, at a later launch, is told of then ([`HistoryFiles::tell`]).
+/// ([`notes::no_more`]): one that still cannot be read as it is read again,
+/// at a later launch, is told of then ([`notes::at_open`]).
 /// It holds this build's failures alone, whether told of or not; [`TOLD`]
 /// names those this build told of, beside every record a build before
 /// formats could not open or make out.
+///
+/// [`notes::no_more`]: record_store::notes::no_more
+/// [`notes::at_open`]: record_store::notes::at_open
 const FAILING: &str = "failing.json";
 /// The records this build told of as ones that could not be read at all,
 /// a moment's failure that lasted ([`HistoryNotice::Unread`]), by name,
@@ -210,23 +217,10 @@ struct Stamps {
     legacy: Option<Fingerprint>,
 }
 
-/// A take-up that could not be made just now ([`HistoryFiles::import`]):
-/// what an older build changed is still to take up.
-struct HeldBack;
-
-/// What the history's folders hold.
-struct Listing {
-    /// Every record, loose or packed, in order: one in a pack that could
-    /// not be opened among them where the pack held it when it last opened.
-    records: BTreeSet<RecordId>,
-    /// Every tombstone.
-    gone: BTreeSet<RecordId>,
-    /// What each packed record holds, as it was written.
-    packed: BTreeMap<RecordId, String>,
-    /// Whether a pack could not be opened: what it holds is in none of
-    /// the above, but for the records it held when it last opened.
-    skipped: bool,
-}
+/// What each record a later build packed holds, by its id, as it was
+/// written: what a listing of the history found in the packs
+/// ([`Listing::listed`]).
+type Packed = BTreeMap<RecordId, String>;
 
 /// What the packs a later build wrote hold, as they were read
 /// ([`HistoryFiles::packed`]).
@@ -343,135 +337,21 @@ impl HistoryFiles {
     ///
     /// A record and its tombstone read as deleted, and the deletion cut
     /// short is finished. A record this build cannot read is left where it
-    /// is, and told of once, as a newer Dust's or as damaged ([`notes::at_open`]).
-    /// One that could not be read at all just now failed
-    /// ([`HistoryLoad::failed`]), for the app to read again: told of, once,
-    /// only where it could not be read as the history was last read either
-    /// ([`Self::tell`]). A history a newer build keeps in a way this one
-    /// would harm is read, and nothing is written to it, not even to tidy
-    /// up.
+    /// is, and told of once, as a newer Dust's or as damaged. One that could
+    /// not be read at all just now failed ([`HistoryLoad::failed`]), for the
+    /// app to read again: told of, once, only where it could not be read as
+    /// the history was last read either ([`notes::at_open`]). A history a
+    /// newer build keeps in a way this one would harm is read, and nothing
+    /// is written to it, not even to tidy up.
+    ///
+    /// [`notes::at_open`]: record_store::notes::at_open
     pub(super) fn load(&self) -> HistoryLoad {
         self.on_its_thread();
-        let mut load = HistoryLoad::default();
-        // How the history is kept, once moved, and whether this build may
-        // write to it at all.
-        let (layout, writable) = match self.gate() {
-            Ok(Gate::Open(layout)) => (Some(*layout), true),
-            Ok(Gate::Unmoved) => match self.migrate(&mut load) {
-                Ok(layout) => (Some(layout), true),
-                Err(why) => {
-                    load.notices.push(HistoryNotice::MovePending(why));
-                    (None, true)
-                }
-            },
-            Ok(Gate::Newer) => {
-                load.notices.push(HistoryNotice::Newer);
-                (None, false)
-            }
-            Ok(Gate::Unread) => (None, false),
-            Err(err) => {
-                eprintln!("could not read how the history is kept: {err}");
-                (None, false)
-            }
-        };
-        if writable {
-            self.clear_temporaries();
-            load.notices.extend(self.journals_cut_short());
-        }
-        // What the tombstones name before the records are listed, for a
-        // take-up of what an older build changed ([`Self::import`]).
-        let deleted_before = layout
-            .as_ref()
-            .filter(|layout| self.legacy_changed(layout))
-            .map(|_| self.tombstoned_keys());
-        // As the folders were before they were read: whatever another copy
-        // changes from here on is taken up at the next look. Where they
-        // cannot be read, nothing was seen, and the next look reads them.
-        // Noted as seen once they are listed, so that what this read stores
-        // itself, as it finishes a deletion cut short or takes up what an
-        // older build stored, is noted as its own change, none to take up.
-        let before = self.watch.stamps();
-        let listing = match self.listing_now() {
-            Ok(listing) => listing,
-            Err(err) => {
-                eprintln!("could not list the history: {err}");
-                return load;
-            }
-        };
-        self.watch.looked(before);
-        // Deleted, and the record left behind: a deletion cut short, which
-        // this copy finishes, where it may write.
-        let (beside, live): (Vec<RecordId>, Vec<RecordId>) = listing
-            .records
-            .iter()
-            .copied()
-            .partition(|id| listing.gone.contains(id));
-        if writable && !beside.is_empty() {
-            let unlinking = self.watch.stamps();
-            let mut unlinked = false;
-            for id in beside {
-                unlinked |= fs::remove_file(self.records().join(file_name(id))).is_ok();
-            }
-            if unlinked {
-                let _ = sync_dir(&self.records());
-            }
-            self.watch.made(unlinking);
-        }
-        let records = self.records();
-        self.progress.reading(Some(live.len() as u64));
-        let mut read = read_each(&records, &live, &listing.packed, &self.progress);
-        // One a later build packed once the packs were read, and took the
-        // loose copy of before it was read, is in neither place: it is
-        // looked for again, once, in the packs as they are by now.
-        if read.iter().any(Option::is_none) {
-            let packed = self.packed().unwrap_or_default().records;
-            for (read, id) in read.iter_mut().zip(&live) {
-                if read.is_none() {
-                    *read = read_one(&records, *id, &packed);
-                }
-            }
-        }
-        let size = read.iter().flatten().map(|(_, bytes)| *bytes).sum();
-        self.size.store(size, Ordering::Relaxed);
-        // A later build's is there all the same: what an older build stores
-        // of the session it says it holds is no session to take up beside
-        // it. A damaged one holds none ([`held_key`]).
-        let read = live
-            .into_iter()
-            .zip(read)
-            .map(|(id, read)| (id, read.map(|(read, _)| read)));
-        let sorted = sort(read, &mut self.keys.borrow_mut());
-        load.notices
-            .extend(self.tell(&sorted.unread, &sorted.failed, writable));
-        load.sessions = sorted.sessions;
-        load.unread = sorted.unread.into_iter().map(|(id, _)| id).collect();
-        load.later = sorted.later;
-        load.failed = sorted.failed;
-        // Nothing is taken up from an older build while a record here
-        // cannot be read for now, nor a pack of them opened: it may hold a
-        // session the older build holds too. A later look takes it up, once
-        // every record reads ([`Self::listing`]).
-        if let Some(layout) = &layout
-            && load.failed.is_empty()
-            && !listing.skipped
-        {
-            let live = live_of(&load.sessions, &load.later);
-            let taken = match &deleted_before {
-                Some(Ok(before)) => self.import(layout, &live, before),
-                Some(Err(err)) => {
-                    eprintln!("could not read what was deleted here: {err}");
-                    Err(HeldBack)
-                }
-                None => self.import(layout, &live, &HashSet::new()),
-            };
-            match taken {
-                Ok(Some(change)) => taken_up(&mut load.sessions, &change),
-                Ok(None) => {}
-                Err(HeldBack) => self.watch.unsee(),
-            }
-        }
-        load.complete = layout.is_some();
-        load
+        // The files fall back to nothing: a refused read is no history read,
+        // and the next look reads it.
+        then_and_there(record_store::load(&Disk(self)))
+            .and_then(Result::ok)
+            .unwrap_or_default()
     }
 
     /// Make `change`, and say what became of it.
@@ -489,53 +369,8 @@ impl HistoryFiles {
     /// is left until the next read.
     pub(super) fn apply(&self, change: &HistoryChange) -> HistorySaved {
         self.on_its_thread();
-        match self.gate() {
-            Ok(Gate::Open(_) | Gate::Unmoved) => {}
-            Ok(Gate::Newer) => return HistorySaved::Newer,
-            Ok(Gate::Unread) => {
-                return HistorySaved::Failed("how the history is kept could not be read.".into());
-            }
-            Err(err) => return saved_or_not(Err(err)),
-        }
-        let journal = if restores_many(change) {
-            match self.begin_journal(change) {
-                Ok(journal) => Some(journal),
-                Err(err) => return saved_or_not(Err(err)),
-            }
-        } else {
-            None
-        };
-        let before = self.watch.stamps();
-        let made = self.make(change);
-        // Made or not, the change is over, and what became of it is said
-        // now: a journal left behind says only that Dust stopped first.
-        if let Some(journal) = journal {
-            end_journal(journal, &self.dir);
-        }
-        self.watch.made(before);
-        saved_or_not(made.map(|()| change.put.len()))
-    }
-
-    fn make(&self, change: &HistoryChange) -> io::Result<()> {
-        let forget = tombstones_of_change(change)?;
-        let forget: Vec<(RecordId, &str)> = forget
-            .iter()
-            .map(|(id, held)| (*id, held.as_str()))
-            .collect();
-        let (placed, made) = make_steps(&self.folders(), &change.put, &forget, &change.unforget);
-        let mut keys = self.keys.borrow_mut();
-        for (record, id) in change.put.iter().zip(placed) {
-            if let Some(id) = id
-                && let Some(key) = key_of(&record.json)
-            {
-                keys.insert(id, key);
-            }
-        }
-        made?;
-        for (id, _) in &change.forget {
-            keys.remove(id);
-        }
-        Ok(())
+        then_and_there(record_store::apply(&Disk(self), change))
+            .unwrap_or_else(|| HistorySaved::Failed(WAITED.into()))
     }
 
     /// The history's folders, as a change is made in them, step by step.
@@ -549,117 +384,29 @@ impl HistoryFiles {
 
     /// Every record there is, deleted ones left out, once whatever an older
     /// build stored since has been taken up, where every record here can be
-    /// read ([`Self::live_keys`]). None where the history cannot be listed.
+    /// read ([`record_store::listing`]). None where the history cannot be
+    /// listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
         self.on_its_thread();
-        let mut held_back = false;
-        if let Ok(Gate::Open(layout)) = self.gate()
-            && self.legacy_changed(&layout)
-        {
-            // What the tombstones name before the records are listed, beside
-            // what they name after ([`Self::import`]).
-            held_back = match self.tombstoned_keys() {
-                Ok(before) => self
-                    .live_keys()
-                    .is_some_and(|live| self.import(&layout, &live, &before).is_err()),
-                Err(err) => {
-                    eprintln!("could not read what was deleted here: {err}");
-                    true
-                }
-            };
-        }
-        // As the folders were before they were looked at, the history kept
-        // whole among them, and once what was taken up of it was stored, as
-        // this copy's own change is none for it to take up: whatever another
-        // copy changes from here on is taken up at the next look. What was
-        // held back is still to take up.
-        let before = self.watch.stamps();
-        let listing = self.listing_now();
-        if listing.is_ok() {
-            self.watch.looked(before);
-        }
-        if held_back {
-            self.watch.unsee();
-        }
-        let listing = listing.ok()?;
-        let listed: Vec<RecordId> = listing.records.difference(&listing.gone).copied().collect();
-        // Of what this build noted of records, those gone since: a listing
-        // that skipped a pack it could not open does not say which are.
-        if !listing.skipped {
-            self.note_listed(&listed.iter().map(|id| id.name()).collect());
-        }
-        Some(listed)
-    }
-
-    /// Take out of this build's notes of records it could not read
-    /// ([`FAILING`], [`UNREAD_TOLD`], [`DAMAGED_TOLD`]) each that `listed`,
-    /// every record a look found, holds no more ([`notes::gone_from`]).
-    fn note_listed(&self, listed: &HashSet<String>) {
-        for note in notes::LISTED {
-            let Ok(raw) = fs::read(self.dir.join(note_file(note))) else {
-                continue;
-            };
-            let gone = notes::gone_from(&raw, listed);
-            if !gone.is_empty() {
-                self.note_no_more(note, &gone);
-            }
-        }
+        then_and_there(record_store::listing(&Disk(self))).flatten()
     }
 
     /// The records `ids`, as they are stored, each that can be read: one
     /// that cannot comes back as why ([`Unopened`]): it could not be read
     /// just now, or its bytes are no text, damaged, as the history read
     /// whole takes such a record ([`Raw::record`]). Each read fails no
-    /// longer, and is told of no more ([`Self::note_no_more`]).
+    /// longer, and is told of no more ([`notes::no_more`]).
     ///
     /// One a later build packed once the packs were read, and took the
     /// loose copy of before it was read, is in neither place: every one of
     /// `ids` is read first, and the packs again only then, for all those in
     /// neither place ([`Self::raw_each`]).
+    ///
+    /// [`notes::no_more`]: record_store::notes::no_more
     pub(super) fn read(&self, ids: &[RecordId]) -> Vec<Result<Record, Unopened>> {
         self.on_its_thread();
-        let mut packed = self.packed().unwrap_or_default().records;
-        let read: Vec<Result<Record, Unopened>> = self
-            .raw_each(ids, &mut packed)
-            .into_iter()
-            .zip(ids)
-            .map(|(raw, &id)| raw.record(id))
-            .collect();
-        self.note_read(&read);
-        read
-    }
-
-    /// Take out of this build's notes of records it could not read each of
-    /// `read` that read, or was found damaged ([`notes::after_read`]).
-    fn note_read(&self, read: &[Result<Record, Unopened>]) {
-        for (note, gone) in notes::after_read(read) {
-            self.note_no_more(note, &gone);
-        }
-    }
-
-    /// Take `gone`, records by name, out of `note`, a note of records this
-    /// build could not read, as [`notes::no_more`] says: only where this
-    /// build may write to the history, as the note is made.
-    fn note_no_more(&self, note: Note, gone: &HashSet<String>) {
-        let Ok(raw) = fs::read(self.dir.join(note_file(note))) else {
-            return;
-        };
-        let Some(left) = notes::no_more(note, &raw, gone) else {
-            return;
-        };
-        if matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved)) {
-            let _ = self.write_note(note, left.as_ref());
-        }
-    }
-
-    /// Write `note` to hold `names`, or, given none, take it away.
-    fn write_note(&self, note: Note, names: Option<&BTreeSet<String>>) -> io::Result<()> {
-        match names {
-            Some(names) => serde_json::to_vec(names)
-                .map_err(io::Error::other)
-                .and_then(|raw| write_whole(&self.dir, note_file(note), &raw)),
-            None => remove_if_there(&self.dir.join(note_file(note))),
-        }
+        then_and_there(record_store::read(&Disk(self), ids))
+            .unwrap_or_else(|| ids.iter().map(|&id| Err(Unopened::Failed(id))).collect())
     }
 
     /// Write a backup to `out`: `backup`, with every record stored here,
@@ -694,7 +441,7 @@ impl HistoryFiles {
             }
         };
         let ids: Vec<RecordId> = listing.records.difference(&listing.gone).copied().collect();
-        let mut packed = listing.packed;
+        let mut packed = listing.listed;
         let stored = ids.chunks(BACKUP_PART).flat_map(|part| {
             let read = self.raw_each(part, &mut packed);
             part.iter()
@@ -740,7 +487,7 @@ impl HistoryFiles {
     /// One with no tombstone was not: missing is never deleted.
     pub(super) fn deletions(&self, ids: &[RecordId]) -> Option<Deletions> {
         self.on_its_thread();
-        self.tombstones_of(ids).map(deletions_of)
+        then_and_there(record_store::deletions(&Disk(self), ids)).flatten()
     }
 
     /// Which of `ids` were deleted by hand, each beside the session its
@@ -750,24 +497,7 @@ impl HistoryFiles {
     /// that would not read gave no word at all, of any of `ids`.
     pub(super) fn deleted_sessions(&self, ids: &[RecordId]) -> Option<Vec<(RecordId, SessionKey)>> {
         self.on_its_thread();
-        self.tombstones_of(ids).map(deleted_sessions_of)
-    }
-
-    /// The tombstone of each of `ids` that has one, and what it holds: none
-    /// where it is there but does not read. None where a tombstone could
-    /// not be looked for, as where their folder will not open.
-    fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
-        let tombstones = self.tombstones();
-        let mut found = Vec::new();
-        for &id in ids {
-            let tombstone = tombstones.join(file_name(id));
-            match fs::symlink_metadata(&tombstone) {
-                Ok(_) => found.push((id, fs::read(&tombstone).ok())),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(_) => return None,
-            }
-        }
-        Some(found)
+        then_and_there(record_store::deleted_sessions(&Disk(self), ids)).flatten()
     }
 
     /// Which of the sessions `keys` a tombstone remembers, whatever record
@@ -776,9 +506,7 @@ impl HistoryFiles {
     /// cannot be listed.
     pub(super) fn deleted_keys(&self, keys: &[SessionKey]) -> Option<Vec<SessionKey>> {
         self.on_its_thread();
-        let tombstones = self.read_tombstones().ok()?;
-        let gone = keys_of_tombstones(&tombstones, Reading::Lenient).ok()?;
-        Some(deleted_keys_of(&gone, keys.iter().cloned()))
+        then_and_there(record_store::deleted_keys(&Disk(self), keys.to_vec())).flatten()
     }
 
     /// The gate `layout.json` sets. One that does not read is set aside
@@ -802,7 +530,7 @@ impl HistoryFiles {
     /// before the packs: a later build packs records by writing the pack
     /// before it takes their loose copies away, so one packed meanwhile is
     /// found loose, or else in its pack, and never in neither.
-    fn listing_now(&self) -> io::Result<Listing> {
+    fn listing_now(&self) -> io::Result<Listing<Packed>> {
         let mut records = ids_in(&self.records())?;
         self.meanwhile();
         let packs = self.packed()?;
@@ -813,8 +541,8 @@ impl HistoryFiles {
         Ok(Listing {
             records,
             gone,
-            packed: packs.records,
             skipped: packs.skipped,
+            listed: packs.records,
         })
     }
 
@@ -897,286 +625,6 @@ impl HistoryFiles {
         Ok(packs)
     }
 
-    /// Every record there is by its session's key: those read before as
-    /// they were read, the rest read now for their keys alone. One that is
-    /// damaged has none, though it may say one, as one whose bytes are no
-    /// text has none: only one that reads, or that a later build stored,
-    /// holds its session ([`held_key`]). None where the history cannot be
-    /// listed, or a record in it cannot be read for now, or a pack of them
-    /// opened: it may hold a session an older build holds too, which would
-    /// be taken up a second time beside it.
-    fn live_keys(&self) -> Option<HashMap<SessionKey, Vec<RecordId>>> {
-        let listing = self.listing_now().ok()?;
-        if listing.skipped {
-            return None;
-        }
-        let records = self.records();
-        let mut keys = self.keys.borrow_mut();
-        let mut live: HashMap<SessionKey, Vec<RecordId>> = HashMap::new();
-        for id in listing.records.difference(&listing.gone) {
-            let key = match keys.get(id) {
-                Some(key) => key.clone(),
-                None => match raw_at(&records, *id, &listing.packed) {
-                    Raw::Text(raw) => {
-                        let Some(key) = held_key(&raw) else {
-                            continue;
-                        };
-                        keys.insert(*id, key.clone());
-                        key
-                    }
-                    Raw::NoText(_) | Raw::Missing => continue,
-                    Raw::Failed => return None,
-                },
-            };
-            live.entry(key).or_default().push(*id);
-        }
-        Some(live)
-    }
-
-    /// Whether the history kept whole changed since it was last taken up.
-    fn legacy_changed(&self, layout: &Layout) -> bool {
-        fingerprint_of(&self.root.join(SESSIONS)).is_ok_and(|now| Some(now) != layout.taken_up())
-    }
-
-    /// Make the move from the history kept whole, `sessions.json`, and say
-    /// how the history is kept now, or why the move cannot be made yet.
-    ///
-    /// What does not read is set aside first, as a history kept whole
-    /// always was: a file that is no list is moved out of the way, and the
-    /// sessions that do not read are copied out beside it. Every session
-    /// that reads becomes a record, and the layout is written last, so a
-    /// move cut short is made again, to the same records. The file itself
-    /// is never written: older builds keep their history in it.
-    fn migrate(&self, load: &mut HistoryLoad) -> Result<Layout, String> {
-        let path = self.root.join(SESSIONS);
-        let (raw, mut fingerprint) = match read_with_fingerprint(&path) {
-            Ok(Some((raw, fingerprint))) => (Some(raw), Some(fingerprint)),
-            Ok(None) => (None, None),
-            Err(err) => return Err(err.to_string()),
-        };
-        let read = raw
-            .as_deref()
-            .map(|raw| std::str::from_utf8(raw).ok().and_then(read_history));
-        let kept_whole = matches!(read, Some(Some(_)));
-        let sessions = match read {
-            None => Vec::new(),
-            Some(None) => {
-                let moved = move_aside(&self.root, &path, "sessions");
-                if moved.is_some() {
-                    fingerprint = None;
-                }
-                let kept = moved.as_deref().unwrap_or(SESSIONS);
-                load.set_aside.push(SetAside::History {
-                    kept: shown(&self.root, kept),
-                });
-                Vec::new()
-            }
-            Some(Some(read)) => {
-                if let Some(unread) = read.unread_json() {
-                    let copied = copy_aside(&self.root, unread.as_bytes())
-                        .map_err(|err| format!("the sessions that do not read: {err}"))?;
-                    if let Some(name) = copied {
-                        load.set_aside.push(SetAside::Sessions {
-                            count: read.unread.len(),
-                            kept: shown(&self.root, &name),
-                        });
-                    }
-                }
-                read.sessions
-            }
-        };
-        let deleted = legacy_deleted(&self.root);
-        let (records, layout) = legacy::moved(
-            &sessions,
-            fingerprint,
-            kept_whole,
-            &deleted,
-            crate::time::now_ms(),
-        );
-        let moving = self.not_moved_yet(records).map_err(|err| err.to_string())?;
-        self.progress.moving(Some(moving.len() as u64));
-        place_each(&self.folders(), &moving, &self.progress).map_err(|err| err.to_string())?;
-        sync_if_there(&self.records()).map_err(|err| err.to_string())?;
-        layout
-            .written()
-            .map_err(io::Error::other)
-            .and_then(|raw| write_whole(&self.dir, LAYOUT_FILE, &raw))
-            .map_err(|err| err.to_string())?;
-        Ok(layout)
-    }
-
-    /// Take up what an older build stored in, or deleted from, the history
-    /// kept whole since it was last taken up, `live` being every record
-    /// here by key ([`legacy::imported`]), and `before` the sessions the
-    /// tombstones named as they were read before those records were listed,
-    /// and hand back what was made of it: nothing, where nothing changed
-    /// there. Held back where what changed, or a tombstone here, cannot be
-    /// read now, or the change made: it is still to take up, as the caller
-    /// notes, and the next look tries again ([`Watch::unsee`]).
-    ///
-    /// The tombstones are read again here, after the records: a session
-    /// another copy deletes in between is either still here or deleted
-    /// after, and one it puts back in between, by Undo or a restore, is
-    /// either deleted before or here, once its Undo has put it back.
-    ///
-    /// It is no restore, and is not journaled: what was taken up is noted
-    /// only once it is stored, so a take-up cut short is made again by the
-    /// next read, and nobody need be told.
-    fn import(
-        &self,
-        layout: &Layout,
-        live: &HashMap<SessionKey, Vec<RecordId>>,
-        before: &HashSet<SessionKey>,
-    ) -> Result<Option<HistoryChange>, HeldBack> {
-        if !self.legacy_changed(layout) {
-            return Ok(None);
-        }
-        let (sessions, fingerprint) = match read_with_fingerprint(&self.root.join(SESSIONS)) {
-            Ok(Some((raw, fingerprint))) => {
-                let read = std::str::from_utf8(&raw).ok().and_then(read_history);
-                (
-                    read.map(|read| read.sessions).unwrap_or_default(),
-                    Some(fingerprint),
-                )
-            }
-            Ok(None) => (Vec::new(), None),
-            Err(err) => {
-                eprintln!("could not read the history an older build keeps: {err}");
-                return Err(HeldBack);
-            }
-        };
-        let deleted = legacy_deleted(&self.root);
-        // A tombstone that cannot be read now may name a session to keep
-        // deleted: nothing is taken up until it reads.
-        let mut gone = match self.tombstoned_keys() {
-            Ok(gone) => gone,
-            Err(err) => {
-                eprintln!("could not read what was deleted here: {err}");
-                return Err(HeldBack);
-            }
-        };
-        gone.extend(before.iter().cloned());
-        let Some((change, next)) =
-            legacy::imported(layout, fingerprint, &sessions, &deleted, live, &gone)
-        else {
-            return Ok(None);
-        };
-        if !change.is_empty() && self.apply(&change).kept().is_none() {
-            return Err(HeldBack);
-        }
-        let noted = next
-            .written()
-            .map_err(io::Error::other)
-            .and_then(|raw| write_whole(&self.dir, LAYOUT_FILE, &raw));
-        if let Err(err) = noted {
-            eprintln!("could not note what was taken up of an older build's history: {err}");
-        }
-        Ok(Some(change))
-    }
-
-    /// Of `moved`, the records a move makes, those to write: all of them
-    /// on a first move. A move made again, as one whose layout no longer
-    /// reads is, finds records already here: a session deleted since stays
-    /// deleted, and one taken up from an older build since, under the name
-    /// it was taken up by, is not written a second time under another. An
-    /// error where what is here cannot be looked at, a tombstone, or a
-    /// record under a name the move does not give, that cannot be read now
-    /// among it: the move waits. A move with nothing to write looks at
-    /// nothing, and waits for nothing.
-    fn not_moved_yet(&self, moved: Vec<Record>) -> io::Result<Vec<Record>> {
-        if moved.is_empty() {
-            return Ok(moved);
-        }
-        let (here, gone) = (ids_in(&self.records())?, ids_in(&self.tombstones())?);
-        if here.is_empty() && gone.is_empty() {
-            return Ok(moved);
-        }
-        let gone_keys = self.tombstoned_keys().map_err(io::Error::other)?;
-        let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
-        // What each record here under a name the move does not give holds:
-        // a session that needs no record of the move's. One that cannot be
-        // read now, as a file held open cannot, may hold one; one whose
-        // bytes are no text holds none, nor does one gone since it was
-        // listed.
-        let mut elsewhere = Vec::new();
-        for id in here.difference(&names) {
-            match fs::read(self.records().join(file_name(*id))) {
-                Ok(bytes) => elsewhere.extend(String::from_utf8(bytes).ok()),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(legacy::not_moved_yet(
-            moved,
-            |id| here.contains(&id),
-            &gone,
-            elsewhere,
-            &gone_keys,
-        ))
-    }
-
-    /// The key of every session deleted here that its tombstone names: why
-    /// not, where the tombstones cannot be listed, or one of them is there
-    /// but cannot be read, as a folder in its place cannot, or one held
-    /// open, as it may name a session to keep deleted. One that reads but
-    /// names none, as an empty one, names none, and so does one gone since
-    /// the tombstones were listed, as a put-back elsewhere takes one away.
-    fn tombstoned_keys(&self) -> Result<HashSet<SessionKey>, String> {
-        let tombstones = self.read_tombstones().map_err(|err| err.to_string())?;
-        keys_of_tombstones(&tombstones, Reading::Strict)
-    }
-
-    /// Every tombstone there is, and what it holds, or why it could not be
-    /// read just then ([`TombstoneRead::Failed`]): one gone since they were
-    /// listed is left out. An error where they cannot be listed.
-    fn read_tombstones(&self) -> io::Result<Vec<Tombstone>> {
-        let tombstones = self.tombstones();
-        let mut found = Vec::new();
-        for id in ids_in(&tombstones)? {
-            let read = match fs::read(tombstones.join(file_name(id))) {
-                Ok(raw) => TombstoneRead::Bytes(raw),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => TombstoneRead::Failed(err.to_string()),
-            };
-            found.push(Tombstone { id: Some(id), read });
-        }
-        Ok(found)
-    }
-
-    /// What to tell of `unread`, the records this build cannot read, each
-    /// with what it says of itself, and of `failed`, those that could not
-    /// be read at all just now, by this build's notes of what it told
-    /// ([`notes::at_open`]); `writable` is whether what was told may be
-    /// noted, so it is told of once, and what failed, for the next read to
-    /// tell of. The notes are read in order, [`FAILING`], [`TOLD`],
-    /// [`UNREAD_TOLD`] and [`DAMAGED_TOLD`], before any is written. A look
-    /// drops from this build's notes the records it reads, and those it no
-    /// longer lists ([`Self::read`], [`Self::listing`]).
-    fn tell(
-        &self,
-        unread: &[(RecordId, Unreadable)],
-        failed: &[RecordId],
-        writable: bool,
-    ) -> Vec<HistoryNotice> {
-        let read = |note| fs::read(self.dir.join(note_file(note))).ok();
-        let failing = read(Note::Failing);
-        let (told, unread_told) = (read(Note::Told), read(Note::UnreadTold));
-        let damaged_told = read(Note::DamagedTold);
-        let held = notes::Held {
-            told: told.as_deref(),
-            failing: failing.as_deref(),
-            unread_told: unread_told.as_deref(),
-            damaged_told: damaged_told.as_deref(),
-        };
-        let told = notes::at_open(unread, failed, held);
-        if writable {
-            for (note, names) in &told.noted {
-                let _ = self.write_note(*note, names.as_ref());
-            }
-        }
-        told.notices
-    }
-
     /// What to tell of `ids`, records listed that could not be read at all
     /// at any of the app's tries since it found them so: of those this build
     /// has not told of before ([`UNREAD_TOLD`]), how many
@@ -1187,32 +635,11 @@ impl HistoryFiles {
     /// of one in [`TOLD`] holds back nothing: such a build notes there every
     /// record it could not open, a moment's failure among them, and one
     /// that has read since fails now on its own.
+    ///
+    /// [`notes::still_unread`]: record_store::notes::still_unread
     pub(super) fn still_unread(&self, ids: &[RecordId]) -> Vec<HistoryNotice> {
         self.on_its_thread();
-        let read = |note| fs::read(self.dir.join(note_file(note))).ok();
-        let (notices, unread_told) = notes::still_unread(ids, read(Note::UnreadTold).as_deref());
-        let writable = matches!(self.gate(), Ok(Gate::Open(_) | Gate::Unmoved));
-        if let Some(names) = unread_told
-            && writable
-        {
-            let _ = self.write_note(Note::UnreadTold, Some(&names));
-            // Noted where a build before formats looks too ([`TOLD`]), so
-            // such a build does not tell of it a second time.
-            if let Some(older) = notes::noted_unread(ids, read(Note::Told).as_deref()) {
-                let _ = self.write_note(Note::Told, Some(&older));
-                // What this build notes there stands for no note of damage
-                // of its own ([`DAMAGED_TOLD`]): from here on that note does.
-                if !self.dir.join(DAMAGED_TOLD).exists() {
-                    let _ = self.write_note(Note::DamagedTold, Some(&BTreeSet::new()));
-                }
-            }
-            // Noted failing as well, as this build's failures: told of no
-            // more once they read ([`Self::note_no_more`], [`Self::tell`]).
-            if let Some(failing) = notes::noted_unread(ids, read(Note::Failing).as_deref()) {
-                let _ = self.write_note(Note::Failing, Some(&failing));
-            }
-        }
-        notices
+        then_and_there(record_store::still_unread(&Disk(self), ids)).unwrap_or_default()
     }
 
     /// Clear what writes cut short left behind: temporary files no write
@@ -1357,7 +784,7 @@ impl Watch {
     }
 
     /// Note nothing as seen, as a look that held back the take-up of what an
-    /// older build changed leaves it ([`HistoryFiles::import`]): it is still
+    /// older build changed leaves it ([`Backend::held_back`]): it is still
     /// to take up, and the next look tries again, though the folders, and
     /// the history kept whole, stay as they are, as a tombstone held open
     /// reads again without its folder changing.
@@ -1482,6 +909,313 @@ fn read_each(
     })
 }
 
+/// What the app is told of a change to the files that waited, as none does
+/// ([`then_and_there`]).
+const WAITED: &str = "the history's files did not answer at once.";
+
+/// What `op`, made on the files through the record store, comes to: every
+/// look and write it makes is made then and there, so it is done as it is
+/// first asked ([`at_once`]). None where it waited, as none does: a debug
+/// build stops there.
+fn then_and_there<T>(op: impl Future<Output = T>) -> Option<T> {
+    let done = at_once(op);
+    debug_assert!(done.is_some(), "a look at the history's files waited");
+    done
+}
+
+/// The history's files, as the record store reads and writes them
+/// ([`record_store`]): every look and every write made then and there, on
+/// the worker's thread, so each of its futures is ready as it is first
+/// polled ([`at_once`]).
+struct Disk<'a>(&'a HistoryFiles);
+
+impl Refusal for io::Error {
+    /// A full disk is a full store.
+    fn saved(&self) -> HistorySaved {
+        if matches!(
+            self.kind(),
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+        ) {
+            HistorySaved::Full
+        } else {
+            HistorySaved::Failed(self.to_string())
+        }
+    }
+
+    fn words(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl Backend for Disk<'_> {
+    type Refused = io::Error;
+    type Look = Stamps;
+    type Listed = Packed;
+    const ORDER: Order = Order::MoveThenRead;
+    const FALLS_BACK: bool = false;
+    const NOTES_STILL_UNREAD: bool = true;
+
+    fn keys(&self) -> &RefCell<KeyCache> {
+        &self.0.keys
+    }
+
+    async fn gate(&self) -> io::Result<Gate> {
+        self.0.gate()
+    }
+
+    async fn list(&self) -> io::Result<Listing<Packed>> {
+        self.0.listing_now()
+    }
+
+    /// Read on as many as [`READERS`] threads at once, a long history in
+    /// parts, each counted as it is read; one a later build packed once the
+    /// packs were read, and took the loose copy of before it was read, is
+    /// in neither place, and is looked for again, once, in the packs as they
+    /// are by now. What they hold, in bytes, is what the history holds.
+    async fn read_listed(&self, listing: &Listing<Self::Listed>) -> Vec<(RecordId, RecordRead)> {
+        let live: Vec<RecordId> = listing.records.difference(&listing.gone).copied().collect();
+        let records = self.0.records();
+        self.0.progress.reading(Some(live.len() as u64));
+        let mut read = read_each(&records, &live, &listing.listed, &self.0.progress);
+        if read.iter().any(Option::is_none) {
+            let packed = self.0.packed().unwrap_or_default().records;
+            for (read, id) in read.iter_mut().zip(&live) {
+                if read.is_none() {
+                    *read = read_one(&records, *id, &packed);
+                }
+            }
+        }
+        let size = read.iter().flatten().map(|(_, bytes)| *bytes).sum();
+        self.0.size.store(size, Ordering::Relaxed);
+        live.into_iter()
+            .zip(read)
+            .map(|(id, read)| (id, read.map(|(read, _)| read)))
+            .collect()
+    }
+
+    /// By what a listing found in the packs, where it is given, as a
+    /// take-up reads the records it listed for their keys; or else as the
+    /// app asks, the packs read afresh, and again for those in neither
+    /// place ([`HistoryFiles::raw_each`]).
+    async fn read(&self, ids: &[RecordId], listed: Option<&Self::Listed>) -> Vec<Raw> {
+        let records = self.0.records();
+        match listed {
+            Some(packed) => ids.iter().map(|&id| raw_at(&records, id, packed)).collect(),
+            None => {
+                let mut packed = self.0.packed().unwrap_or_default().records;
+                self.0.raw_each(ids, &mut packed)
+            }
+        }
+    }
+
+    async fn tombstones(&self) -> io::Result<Vec<Tombstone>> {
+        let tombstones = self.0.tombstones();
+        let mut found = Vec::new();
+        for id in ids_in(&tombstones)? {
+            let read = match fs::read(tombstones.join(file_name(id))) {
+                Ok(raw) => TombstoneRead::Bytes(raw),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => TombstoneRead::Failed(err.to_string()),
+            };
+            found.push(Tombstone { id: Some(id), read });
+        }
+        Ok(found)
+    }
+
+    /// Each looked for on its own: one whose look fails other than as not
+    /// there gives no word of any.
+    async fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
+        let tombstones = self.0.tombstones();
+        let mut found = Vec::new();
+        for &id in ids {
+            let tombstone = tombstones.join(file_name(id));
+            match fs::symlink_metadata(&tombstone) {
+                Ok(_) => found.push((id, fs::read(&tombstone).ok())),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return None,
+            }
+        }
+        Some(found)
+    }
+
+    async fn note(&self, note: Note) -> Option<Vec<u8>> {
+        fs::read(self.0.dir.join(note_file(note))).ok()
+    }
+
+    async fn write_note(&self, note: Note, names: Option<&BTreeSet<String>>) {
+        let _ = match names {
+            Some(names) => serde_json::to_vec(names)
+                .map_err(io::Error::other)
+                .and_then(|raw| write_whole(&self.0.dir, note_file(note), &raw)),
+            None => remove_if_there(&self.0.dir.join(note_file(note))),
+        };
+    }
+
+    /// By when `sessions.json` was last written, and how long it is: one
+    /// that cannot be looked at now changed for all this copy knows, and is
+    /// read with the rest.
+    async fn legacy_look(&self, layout: &Layout) -> LegacyLook {
+        let changed = fingerprint_of(&self.0.root.join(SESSIONS))
+            .is_ok_and(|now| Some(now) != layout.taken_up());
+        if changed {
+            LegacyLook::Changed(None)
+        } else {
+            LegacyLook::Same
+        }
+    }
+
+    async fn legacy(&self) -> Result<Legacy, String> {
+        read_with_fingerprint(&self.0.root.join(SESSIONS)).map_err(|err| err.to_string())
+    }
+
+    async fn legacy_deleted(&self) -> Vec<Deleted> {
+        legacy_deleted(&self.0.root)
+    }
+
+    /// Moved out of the way, where it can be, and told of either way.
+    async fn set_aside_history(&self, _raw: &[u8]) -> (Option<SetAside>, bool) {
+        let root = &self.0.root;
+        let moved = move_aside(root, &root.join(SESSIONS), "sessions");
+        let kept = moved.as_deref().unwrap_or(SESSIONS);
+        let aside = SetAside::History {
+            kept: shown(root, kept),
+        };
+        (Some(aside), moved.is_some())
+    }
+
+    async fn set_aside_sessions(
+        &self,
+        unread: &str,
+        count: usize,
+    ) -> Result<Option<SetAside>, String> {
+        let root = &self.0.root;
+        let copied = copy_aside(root, unread.as_bytes())
+            .map_err(|err| format!("the sessions that do not read: {err}"))?;
+        Ok(copied.map(|name| SetAside::Sessions {
+            count,
+            kept: shown(root, &name),
+        }))
+    }
+
+    /// The loose records alone, by name, beside the tombstones.
+    async fn here(&self) -> io::Result<(BTreeSet<RecordId>, BTreeSet<RecordId>)> {
+        Ok((ids_in(&self.0.records())?, ids_in(&self.0.tombstones())?))
+    }
+
+    async fn texts(&self, ids: &[RecordId]) -> io::Result<Vec<(RecordId, String)>> {
+        let mut texts = Vec::new();
+        for &id in ids {
+            match fs::read(self.0.records().join(file_name(id))) {
+                Ok(bytes) => texts.extend(String::from_utf8(bytes).ok().map(|text| (id, text))),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(texts)
+    }
+
+    async fn cut_short(&self) -> Vec<HistoryNotice> {
+        self.0.clear_temporaries();
+        self.0.journals_cut_short()
+    }
+
+    /// Taken away as this copy's own change: none for it to take up.
+    async fn unlink(&self, ids: &[RecordId]) {
+        let unlinking = self.0.watch.stamps();
+        let records = self.0.records();
+        let mut unlinked = false;
+        for &id in ids {
+            unlinked |= fs::remove_file(records.join(file_name(id))).is_ok();
+        }
+        if unlinked {
+            let _ = sync_dir(&records);
+        }
+        self.0.watch.made(unlinking);
+    }
+
+    /// Step by step, each made durable before the next ([`make_steps`]); a
+    /// restore of many sessions at once journaled while it runs, so the
+    /// next to read the history can say it was cut short; and how the
+    /// history is kept written after, where the change is made. What the
+    /// change made is this copy's own: no change for it to take up. An
+    /// empty one this copy makes of its own, as a take-up that only notes
+    /// what it took, makes nothing.
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<io::Error> {
+        let change = writes.change;
+        let files = self.0;
+        let journal = if restores_many(change) {
+            match files.begin_journal(change) {
+                Ok(journal) => Some(journal),
+                Err(err) => {
+                    return Made {
+                        placed: Vec::new(),
+                        saved: Err(err),
+                    };
+                }
+            }
+        } else {
+            None
+        };
+        let (placed, made) = if by == By::Store && change.is_empty() {
+            (Vec::new(), Ok(()))
+        } else {
+            let before = files.watch.stamps();
+            let tombstones = writes.tombstones();
+            let made = make_steps(&files.folders(), &change.put, &tombstones, &change.unforget);
+            // Made or not, the change is over, and what became of it is said
+            // now: a journal left behind says only that Dust stopped first.
+            if let Some(journal) = journal {
+                end_journal(journal, &files.dir);
+            }
+            files.watch.made(before);
+            made
+        };
+        if made.is_ok()
+            && let Laid::Over(next) = laid
+        {
+            let noted = next
+                .written()
+                .map_err(io::Error::other)
+                .and_then(|raw| write_whole(&files.dir, LAYOUT_FILE, &raw));
+            if let Err(err) = noted {
+                eprintln!("could not note what was taken up of an older build's history: {err}");
+            }
+        }
+        Made {
+            placed,
+            saved: made.map(|()| HistorySaved::Stored {
+                kept: change.put.len(),
+            }),
+        }
+    }
+
+    /// Each record flushed before it takes its name, on as many threads as
+    /// it takes ([`place_each`]), all of them made durable, and the layout
+    /// written last.
+    async fn write_move(&self, records: &[Record], layout: &Layout) -> io::Result<()> {
+        let files = self.0;
+        files.progress.moving(Some(records.len() as u64));
+        place_each(&files.folders(), records, &files.progress)?;
+        sync_if_there(&files.records())?;
+        layout
+            .written()
+            .map_err(io::Error::other)
+            .and_then(|raw| write_whole(&files.dir, LAYOUT_FILE, &raw))
+    }
+
+    fn look(&self) -> Stamps {
+        self.0.watch.stamps()
+    }
+
+    fn saw(&self, look: Stamps) {
+        self.0.watch.looked(look);
+    }
+
+    fn held_back(&self) {
+        self.0.watch.unsee();
+    }
+}
+
 /// The history's folders, as a change is made in them step by step
 /// ([`make_steps`]), and as the move stores its records, on as many threads
 /// at once as it takes ([`place_each`]), `size` counting what they hold.
@@ -1585,18 +1319,6 @@ impl Steps for Folders<'_> {
     }
 }
 
-/// What the tombstones `change` makes hold, as they are written
-/// ([`super::Deleted`]): a tombstone that cannot be written down fails the
-/// change.
-fn tombstones_of_change(change: &HistoryChange) -> io::Result<Vec<(RecordId, String)>> {
-    change
-        .forget
-        .iter()
-        .map(|(id, deleted)| Ok((*id, serde_json::to_string(deleted)?)))
-        .collect::<serde_json::Result<_>>()
-        .map_err(io::Error::other)
-}
-
 /// Store each of `records` in `folders` ([`place`]), each counted in `progress`
 /// once stored, on as many as [`WRITERS`] threads at once, a part each, as
 /// the move to records stores a whole history while the app waits on it,
@@ -1646,23 +1368,6 @@ fn restores_many(change: &HistoryChange) -> bool {
 fn end_journal(journal: Journal, dir: &Path) {
     let _ = fs::remove_file(&journal.path);
     let _ = sync_dir(dir);
-}
-
-/// What became of a change, in the store's words: stored, `put` sessions
-/// of it, or why not. A full disk is a full store.
-fn saved_or_not(made: io::Result<usize>) -> HistorySaved {
-    match made {
-        Ok(put) => HistorySaved::Stored { kept: put },
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
-            ) =>
-        {
-            HistorySaved::Full
-        }
-        Err(err) => HistorySaved::Failed(err.to_string()),
-    }
 }
 
 /// The file `note` is kept in, in the history's folder.
@@ -1789,7 +1494,7 @@ pub(super) fn copy_aside(root: &Path, unread: &[u8]) -> io::Result<Option<String
 mod tests {
     use super::*;
     use crate::persist::desktop::tests::TempDir;
-    use crate::persist::record::{names_noted, records_for_blob, scored};
+    use crate::persist::record::{key_of, keyed, names_noted, records_for_blob, scored};
     use crate::persist::record_store::steps::BUMPS;
     use crate::persist::tests::{as_an_older_build_wrote, session};
     use crate::persist::worker::{HistoryJobs, wait};
@@ -3232,13 +2937,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_tombstone_gone_as_it_is_read_names_no_session() {
+        use crate::persist::record_store::{Reading, keys_of_tombstones};
         let (dir, files) = raw_history("tombstone-gone-as-read");
         let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
         fs::create_dir_all(&tombstones).unwrap();
         // Listed, and gone as it is read: a link to nothing.
         let id = record(&finished(1_000)).id;
         std::os::unix::fs::symlink(dir.0.join("nothing"), tombstones.join(file_name(id))).unwrap();
-        assert_eq!(files.tombstoned_keys(), Ok(HashSet::new()));
+        let tombstones = at_once(Disk(&files).tombstones())
+            .expect("at once")
+            .expect("listed");
+        assert_eq!(
+            keys_of_tombstones(&tombstones, Reading::Strict),
+            Ok(HashSet::new())
+        );
         let now = crate::time::now_ms();
         let old = finished(now - 10 * DAY);
         keep_whole(&dir, std::slice::from_ref(&old));
@@ -3819,7 +3531,8 @@ mod tests {
         let old = finished(now - 10 * DAY);
         keep_whole(&dir, std::slice::from_ref(&old));
         let files = HistoryFiles::at(&dir.0);
-        files.load();
+        let moved = files.load();
+        let live = keyed(moved.sessions.iter().map(|(id, session)| (*id, session)));
         // An older build stores two sessions: taken up together, and no
         // restore.
         let (first, second) = (finished(now + 60_000), finished(now + 120_000));
@@ -3828,24 +3541,29 @@ mod tests {
         let Ok(Gate::Open(layout)) = files.gate() else {
             panic!("not moved");
         };
-        let live = files.live_keys().expect("listed");
         let fingerprint = fingerprint_of(&dir.0.join(SESSIONS)).unwrap();
         let (change, _) =
             legacy::imported(&layout, fingerprint, &whole, &[], &live, &HashSet::new())
                 .expect("something new");
         assert_eq!(change.put.len(), 2);
         assert!(!restores_many(&change));
-        // The second cannot be taken up for now: the take-up is tried
-        // again, and leaves nothing to tell of.
-        let in_the_way = change.put[1].id;
+        // The second cannot be taken up for now, every name it could go
+        // under held by other bytes: the take-up is tried again, the first
+        // stored already, and leaves nothing to tell of.
         let records = dir.0.join(HISTORY).join(RECORDS);
-        fs::create_dir_all(records.join(file_name(in_the_way))).unwrap();
-        assert!(
-            files.import(&layout, &live, &HashSet::new()).is_err(),
-            "held back, to be tried again"
-        );
+        let mut in_the_way = Vec::new();
+        let mut id = change.put[1].id;
+        for _ in 0..=BUMPS {
+            fs::write(records.join(file_name(id)), "other bytes").unwrap();
+            in_the_way.push(id);
+            id = id.bumped();
+        }
+        assert!(files.listing().is_some());
+        assert!(files.watch.changed(), "held back, to be tried again");
         assert!(journals(&dir).is_empty(), "{:?}", journals(&dir));
-        fs::remove_dir(records.join(file_name(in_the_way))).unwrap();
+        for id in in_the_way {
+            fs::remove_file(records.join(file_name(id))).unwrap();
+        }
         let read = HistoryFiles::at(&dir.0).load();
         assert!(read.notices.is_empty(), "{:?}", read.notices);
         assert_eq!(
@@ -5141,6 +4859,48 @@ mod tests {
             String::from_utf8(out).unwrap(),
             write_backup(&settings, &history, 7)
         );
+    }
+
+    /// Every operation on the files, made through the record store, is
+    /// done as it is first asked, as the worker has it done ([`at_once`]):
+    /// the move, a change, a take-up of what an older build stored, the
+    /// reads, and each ask of what was deleted or is still unread.
+    #[test]
+    fn every_operation_on_the_files_is_done_as_it_is_first_asked() {
+        let (dir, files) = raw_history("first-poll");
+        let (first, second, later) = (finished(DAY), finished(2 * DAY), finished(3 * DAY));
+        keep_whole(&dir, &[first.clone(), second.clone()]);
+        let disk = Disk(&files);
+        let moved = at_once(record_store::load(&disk)).expect("the move, at once");
+        assert_eq!(stamps(&moved.expect("read")), [DAY, 2 * DAY]);
+        assert_eq!(
+            at_once(record_store::apply(&disk, &put(&[record(&later)]))),
+            Some(HistorySaved::Stored { kept: 1 })
+        );
+        let listed = at_once(record_store::listing(&disk)).expect("a listing, at once");
+        let listed = listed.expect("listed");
+        assert_eq!(listed.len(), 3);
+        let read = at_once(record_store::read(&disk, &listed)).expect("a read, at once");
+        assert!(read.iter().all(Result::is_ok), "{read:?}");
+        let gone: &Record = read[0].as_ref().unwrap();
+        let session = read_record(&gone.json).expect("a session");
+        assert_eq!(
+            at_once(record_store::apply(&disk, &forget(&[(gone, &session)]))),
+            Some(HistorySaved::Stored { kept: 0 })
+        );
+        // An older build stores a session since, which a load takes up.
+        keep_whole(&dir, &[first, second, finished(4 * DAY)]);
+        let load = at_once(record_store::load(&disk)).expect("a take-up, at once");
+        assert_eq!(load.expect("read").sessions.len(), 3);
+        let deletions = at_once(record_store::deletions(&disk, &[gone.id])).expect("at once");
+        assert_eq!(deletions.map(|found| found.len()), Some(1));
+        let deleted = at_once(record_store::deleted_sessions(&disk, &[gone.id])).expect("at once");
+        assert_eq!(deleted.map(|found| found.len()), Some(1));
+        let key = SessionKey::of(&session);
+        let keys = at_once(record_store::deleted_keys(&disk, vec![key.clone()])).expect("at once");
+        assert_eq!(keys, Some(vec![key]));
+        let unread = at_once(record_store::still_unread(&disk, &[gone.id])).expect("at once");
+        assert_eq!(unread, [HistoryNotice::Unread { count: 1 }]);
     }
 
     /// Each test of the files that reaches them as the app does, made
