@@ -785,3 +785,44 @@ dioxus.send(fakeIdb.contents("dust_history", "sessions"));"#,
         "each once, beside the other bytes"
     );
 }
+
+/// A record a change names twice among its deletions keeps one tombstone,
+/// the first that names it, on every store, a browser's among them: the
+/// record store hands each store each record once ([`Writes::of`]). The
+/// page script, handed both, keeps the last, as it counts each record's
+/// tombstones before it writes any; since 4834961 no store hands it both,
+/// as idb.rs handed it what the app asked, and none of the app's changes
+/// names a record twice.
+#[test]
+fn a_record_deleted_twice_in_one_change_keeps_its_first_tombstone() {
+    use crate::persist::record::HistoryChange;
+    use crate::persist::record_store::Writes;
+    use crate::persist::session::Deleted;
+    let gone = crate::persist::tests::session("day 1");
+    let id = RecordId { order: 1, nonce: 1 };
+    let (first, second) = (Deleted::of(&gone, 5), Deleted::of(&gone, 6));
+    let change = HistoryChange {
+        forget: vec![(id, first.clone()), (id, second)],
+        ..HistoryChange::default()
+    };
+    let writes = Writes::of(&change).expect("written");
+    let held = serde_json::to_string(&first).expect("written");
+    assert_eq!(
+        writes.tombstones(),
+        [(id, held.as_str())],
+        "the first alone"
+    );
+    let Some(sent) = on_page(
+        r#"const tab = glue();
+await tab.open();
+await tab.apply(change({ forget: [[name(1), "first"], [name(1), "second"]] }));
+dioxus.send(fakeIdb.contents("dust_history", "deleted"));"#,
+    ) else {
+        return;
+    };
+    assert_eq!(
+        sent[0],
+        json!({ id.name(): "second" }),
+        "handed both, the script keeps the last"
+    );
+}
