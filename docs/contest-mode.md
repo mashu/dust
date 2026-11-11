@@ -2024,7 +2024,9 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   lock, so a pause gives no free thinking time, and a copy typed before it
   and sent after it is timed in run time, the pause left out (9.1), unless
   the pause cut short the turn it was heard in: nothing heard in that turn
-  is timed, and its copies say they were paused. So do the copies of a call
+  is timed, not even a copy keyed in full before the pause (where a session
+  keeps timed a group answered in full before a pause that cut its send),
+  and its copies say they were paused. So do the copies of a call
   or an exchange whose first sending the pause cut part way, and a copy
   every key of which came after a pause. A send
   the pause cut after it began to reach you is owed on its caller's

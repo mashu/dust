@@ -4847,10 +4847,12 @@ impl<S: CallSource> ContestMachine<S> {
 
     /// Pause for `why`, from `at`, as [`ContestEvent::Pause`] says: the turn
     /// on the air is cut short, and nothing heard in it is timed, its
-    /// copies saying the pause is why, as a session's group the pause cut
-    /// says it; so do the copies of a call or an exchange whose first
-    /// sending it cut part way ([`Self::note_cut`]). A run whose limit
-    /// passed before `at` finishes instead.
+    /// copies saying the pause is why; so do the copies of a call or an
+    /// exchange whose first sending it cut part way ([`Self::note_cut`]).
+    /// A copy keyed in full before the pause is no exception, where a
+    /// session's group whose answer was complete when a pause cut its send
+    /// stands timed: a run keeps no times from a turn a pause interrupted.
+    /// A run whose limit passed before `at` finishes instead.
     fn pause(&mut self, why: PauseWhy, at: MonoMs, now: MonoMs) -> Vec<ContestEffect> {
         match self.phase {
             ContestPhase::Countdown { .. } => {
@@ -14470,10 +14472,11 @@ mod tests {
     }
 
     /// A pause cuts short the turn on the air: nothing heard in it is
-    /// timed, and its copies say the pause is why, as a session's group
-    /// the pause cut says it. Here the pause comes as the caller's call has
-    /// been heard whole, keyed along as it was heard, and the turn's end is
-    /// yet to be told: the call is heard at the cut, and is not timed. A
+    /// timed, and its copies say the pause is why. Here the pause comes as
+    /// the caller's call has been heard whole, keyed along as it was heard,
+    /// and the turn's end is yet to be told: the call is heard at the cut,
+    /// and is not timed, though keyed in full before the pause, unlike a
+    /// session's group answered in full before a pause that cut its send. A
     /// pause in a splice's overlap cuts the continuation alone: the turn
     /// keyed over has played out but the character of yours sounding at
     /// the key.

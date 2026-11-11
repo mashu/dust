@@ -252,7 +252,11 @@ the first reason found kept. A copy whose first sending a pause cut part
 way, where heard whole it would have been timed from, says `"paused"` too,
 the turn the pause cut giving its reason, and so does one every key of
 which came after a pause, as a group answered only after a pause does,
-unless the turn it was heard in says otherwise. A run kept
+unless the turn it was heard in says otherwise. A copy heard in a turn a
+pause cut short has no times even when it was keyed in full before the
+pause, unlike a group whose answer was complete when a pause cut its send,
+which stands timed (above): a run keeps no times from a turn a pause
+interrupted. A run kept
 by an earlier build has such a copy with neither, and reads as it did.
 
 So a pile-up leaves most calls untimed, and Simple QSO's doubled
