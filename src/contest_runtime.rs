@@ -19,7 +19,7 @@ use dioxus::prelude::*;
 use crate::page::{Caret, control_id, focus_by_id_anywhere};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::live::AWAY_GAP_MS;
+use crate::state::live::{LiveRun, RunOwn};
 use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen, keep_and_show};
 use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
 
@@ -69,14 +69,16 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     view.set(Some(machine.view()));
     screen.set(Screen::Training);
     let mark = ctx.mark_running(true);
-    *app.session.borrow_mut() = Some(Live::Contest(Box::new(LiveContest {
+    *app.session.borrow_mut() = Some(Live::Contest(Box::new(LiveRun {
         machine,
-        sound,
         lease: lease.clone(),
-        last_tick: None,
-        unsaid: Vec::new(),
+        seen: None,
         started_on: local_date_string(),
         mark,
+        own: RunOwn {
+            sound,
+            unsaid: Vec::new(),
+        },
     })));
     run_effects(ctx, &lease, effects);
 }
@@ -149,7 +151,7 @@ pub fn resume_run(ctx: AppCtx) {
         Some(Live::Contest(live))
             if matches!(live.machine.phase(), ContestPhase::Paused { .. }) =>
         {
-            Some(live.sound.clone())
+            Some(live.own.sound.clone())
         }
         _ => None,
     };
@@ -174,29 +176,14 @@ pub fn resume_run(ctx: AppCtx) {
     crate::page::scroll_to_top();
 }
 
-/// The run screen's clock ticked. A tick long after the one before is time
-/// the app was not running, and the run is paused from that one first.
+/// The run screen's clock ticked: the run is seen running now. A tick long
+/// after the one before is time the app was not running, and the run is
+/// paused from that one first.
 pub fn tick(ctx: AppCtx) {
-    let now = MonoMs(mono_ms());
-    let away = match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(live)) => live.away_since(now).is_some(),
-        _ => return,
-    };
-    if away {
-        apply(ctx, None);
-    }
-    if let Some(Live::Contest(live)) = ctx.app().session.borrow_mut().as_mut() {
-        live.last_tick = Some(now);
-    }
+    apply(ctx, None);
 }
 
 impl LiveContest {
-    /// The tick the app was last seen running at, if it has not been seen
-    /// since for longer than a tick can take.
-    fn away_since(&self, now: MonoMs) -> Option<MonoMs> {
-        self.last_tick.filter(|tick| now.since(*tick) > AWAY_GAP_MS)
-    }
-
     /// What the run would keep were it ended at `now`, as End run keeps it,
     /// worked out on a copy of it: none while it has worked nobody.
     /// `finished_at` is the wall time it says it ended at.
@@ -238,7 +225,8 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
     }
 }
 
-/// Let the machine decide what `event` means, then do what it says.
+/// Let the machine decide what `event` means, then do what it says: none
+/// is a tick ([`tick`]), which sees the run running.
 ///
 /// Before anything is heard, a gap since the run screen last ticked longer
 /// than any tick takes is credited as paused, from that tick: a process
@@ -259,12 +247,15 @@ fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
         // the copies heard in it.
         let paused =
             (event.is_some() && !live.lease.is_current()).then(|| live.so_far(now, finished_at));
+        let away = live.away(now, event.is_none());
+        if away.is_none() && event.is_none() {
+            return;
+        }
         let mut effects = Vec::new();
-        if let Some(tick) = live.away_since(now) {
-            live.last_tick = Some(now);
+        if let Some(at) = away {
             let away = ContestEvent::Pause {
                 why: PauseWhy::Hidden,
-                at: tick,
+                at,
             };
             effects.extend(live.machine.apply(away, now));
         }
@@ -351,7 +342,7 @@ fn mark_paused(ctx: AppCtx, lease: &Lease) {
 /// Hold `text` for a screen reader until the air is silent.
 fn announce(ctx: AppCtx, text: String) {
     match ctx.app().session.borrow_mut().as_mut() {
-        Some(Live::Contest(live)) => live.unsaid.push(text),
+        Some(Live::Contest(live)) => live.own.unsaid.push(text),
         _ => say(ctx, vec![text]),
     }
 }
@@ -367,7 +358,7 @@ fn speak_if_silent(ctx: AppCtx) {
         return;
     }
     let unsaid = match ctx.app().session.borrow_mut().as_mut() {
-        Some(Live::Contest(live)) => std::mem::take(&mut live.unsaid),
+        Some(Live::Contest(live)) => std::mem::take(&mut live.own.unsaid),
         _ => return,
     };
     say(ctx, unsaid);
@@ -385,11 +376,11 @@ fn say(ctx: AppCtx, unsaid: Vec<String>) {
 /// Play `turn`, and tell the machine when each attempt at it started, and
 /// how it went.
 ///
-/// It plays from the run's own settings, fading off ([`LiveContest::sound`]),
+/// It plays from the run's own settings, fading off ([`RunOwn::sound`]),
 /// not from whatever the settings screen holds now.
 fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     let sound = match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(live)) if live.lease.is(lease) => Some(live.sound.clone()),
+        Some(Live::Contest(live)) if live.lease.is(lease) => Some(live.own.sound.clone()),
         _ => None,
     };
     let Some(settings) = sound else {
@@ -493,7 +484,7 @@ fn end_run(ctx: AppCtx) -> Option<LiveContest> {
         return None;
     };
     live.lease.release();
-    say(ctx, std::mem::take(&mut live.unsaid));
+    say(ctx, std::mem::take(&mut live.own.unsaid));
     Some(*live)
 }
 
@@ -571,13 +562,6 @@ mod tests {
     use crate::time::POLL_MS;
     use cw_core::band::BandKey;
     use cw_core::{CharSetMode, ContestView, MONITOR_LEVEL, plan_morse_playback_for};
-
-    impl LiveContest {
-        /// The run's hold on the audio, for a test to end or to stop.
-        pub(crate) fn lease(&self) -> &Lease {
-            &self.lease
-        }
-    }
 
     fn view(h: &Harness) -> Option<ContestView> {
         h.ctx.contest.peek().clone()

@@ -22,7 +22,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::{send_run_event, start_run};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::live::AWAY_GAP_MS;
+use crate::state::live::{GroupsOwn, LiveRun, SEEN_EVERY_MS};
 use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, keep_and_show, settle_level};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
@@ -42,10 +42,6 @@ impl Live {
         }
     }
 }
-
-/// How often a running session's heartbeat says the app is still running
-/// ([`beat`]).
-const HEARTBEAT_MS: u32 = 250;
 
 impl LiveSession {
     /// How many of its groups are answered.
@@ -99,7 +95,7 @@ impl LiveSession {
     /// station you answer counts.
     fn transmission(&self, index: usize, text: String) -> Transmission {
         let settings = self.machine.session().settings();
-        let group = self.stations.fork(index as u64);
+        let group = self.own.stations.fork(index as u64);
         let mut voice = resolve_station(settings, &mut group.fork(GroupStream::Voice as u64));
         // Adaptive speed chose this group's speed; the station keeps its own
         // tone, strength and fist.
@@ -185,27 +181,29 @@ pub fn start_session(ctx: AppCtx) {
     runtime.set(Some(machine.session().clone()));
     screen.set(Screen::Training);
     let mark = ctx.mark_running(false);
-    *app.session.borrow_mut() = Some(Live::Groups(Box::new(LiveSession {
+    *app.session.borrow_mut() = Some(Live::Groups(Box::new(LiveRun {
         machine,
-        stations: SplitMix64::new(seed_rng()),
         lease: lease.clone(),
-        last_seen: now,
+        seen: Some(now),
         started_on: local_date_string(),
         mark,
+        own: GroupsOwn {
+            stations: SplitMix64::new(seed_rng()),
+        },
     })));
     beat(ctx, lease.clone());
     run_effects(ctx, &lease, effects);
 }
 
-/// While `lease` holds the audio, say every [`HEARTBEAT_MS`] that the app is
-/// still running the session. A pause gives the audio back, and the beat
+/// While `lease` holds the audio, say every [`SEEN_EVERY_MS`] that the app
+/// is still running the session. A pause gives the audio back, and the beat
 /// stops with it; Resume starts it again under the new claim.
 ///
 /// It is the session's own task, on the root scope, so it beats whatever
 /// screen is up, and stops with the session, the way its timers do.
 fn beat(ctx: AppCtx, lease: Lease) {
     spawn_forever(async move {
-        while lease.sleep(HEARTBEAT_MS).await.is_ok() {
+        while lease.sleep(SEEN_EVERY_MS).await.is_ok() {
             pause_if_away(ctx, &lease);
         }
     });
@@ -235,9 +233,10 @@ fn pause_if_away(ctx: AppCtx, lease: &Lease) {
         else {
             return;
         };
-        let now = MonoMs(mono_ms());
-        let seen = std::mem::replace(&mut live.last_seen, now);
-        if now.since(seen) <= AWAY_GAP_MS || live.machine.session().paused() {
+        let Some(seen) = live.away(MonoMs(mono_ms()), true) else {
+            return;
+        };
+        if live.machine.session().paused() {
             return;
         }
         let mut effects = ctx
@@ -629,16 +628,6 @@ mod tests {
     use cw_core::SessionPhase;
     use std::cell::Cell;
     use std::rc::Rc;
-
-    impl Live {
-        /// Its hold on the audio, for a test to end or to stop.
-        pub(crate) fn lease(&self) -> &Lease {
-            match self {
-                Self::Groups(live) => &live.lease,
-                Self::Contest(live) => live.lease(),
-            }
-        }
-    }
 
     /// A session kept has the prior the next one starts from built once
     /// the results are up, so the tap on Again replays no history: only a
