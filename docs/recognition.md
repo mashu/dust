@@ -92,8 +92,10 @@ back with it.
 A group whose first send could not be timed from says why instead, under
 `untimed`: `"heldUp"` (the audio held it up on its way), `"sentAgain"`
 (tried again from the start, heard in part already) or `"paused"` (a pause
-came while its answer was open, or cut its send, the session then resumed
-or ended). The first reason found is the one kept. It is
+came while its answer was open, or cut its send). The first reason found
+is the one kept, and a pause is found as it comes: a send it cut, heard of
+after it as held up, as a hidden page's is, still says `"paused"`. An
+answer complete when the pause came stands as timed. It is
 written only where there is one, which healthy audio never gives, and read
 as leniently: a reason this build does not know reads as none. A session
 run with Lock typing while sending on says so, `"typingLocked": true`, so

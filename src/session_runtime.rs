@@ -2854,40 +2854,64 @@ mod tests {
     }
 
     /// A paused session still hears what comes under the lease its pause
-    /// gave back: the news that the send the pause cut short was held up
-    /// on its way untimes its group for that, the first reason found, where
-    /// without it the group says only that it was paused.
+    /// gave back: the news that the send of a group answered along it was
+    /// held up on its way untimes that group, saying so, where without it
+    /// the group stays timed. The group the pause cut, its answer open,
+    /// says it was paused, whatever is heard of its send after the pause:
+    /// the pause is the first reason found.
     #[test]
     fn a_paused_session_hears_the_news_of_its_own_sends() {
         run(|| async {
             for told in [false, true] {
                 let mut settings = test_settings();
-                settings.curriculum.num_groups = 1;
+                settings.curriculum.num_groups = 2;
+                settings.playback.lock_input_during_group_playback = false;
                 let mut h = Harness::with_settings(settings);
                 h.start_training();
+                assert!(
+                    h.run_until(4_000, |h| !h.recorder.starts().is_empty())
+                        .await
+                );
+                let started = h.recorder.starts()[0].clone();
+                let span = &started.plan.wanted.chars[0];
+                let first_end = started.at.0 + (span.end_sec * 1_000.0).round() as u64;
+                h.advance(first_end + 50 - mono_ms()).await;
+                answer_keyed(&mut h, 0);
+                assert!(
+                    h.run_until(4_000, |h| h.phase()
+                        == Some(SessionPhase::Playing { index: 1 }))
+                        .await,
+                    "{told}"
+                );
                 h.advance(100).await;
                 let cut = h.lease();
                 h.send(SessionEvent::Pause);
                 assert!(!cut.is_current(), "{told}");
                 if told {
                     let ctx = h.ctx;
-                    h.in_app(|| dispatch(ctx, &cut, SessionEvent::PlaybackHeldUp { index: 0 }));
+                    h.in_app(|| {
+                        for index in 0..2 {
+                            dispatch(ctx, &cut, SessionEvent::PlaybackHeldUp { index });
+                        }
+                    });
                     h.pump();
                 }
                 h.send(SessionEvent::Resume);
                 assert!(
-                    h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await,
+                    h.run_until(4_000, |h| h.awaiting_answer() == Some(1)).await,
                     "{told}"
                 );
-                answer_keyed(&mut h, 0);
+                answer_keyed(&mut h, 1);
                 assert!(h.run_until(1_000, |h| h.screen() == Screen::Results).await);
-                let timing = stored_last(&h).group_timings[0].clone();
-                let said = if told {
-                    cw_core::Untimed::HeldUp
+                let timings = stored_last(&h).group_timings;
+                let answered = (timings[0].char_times.is_some(), timings[0].untimed);
+                if told {
+                    assert_eq!(answered, (false, Some(cw_core::Untimed::HeldUp)));
                 } else {
-                    cw_core::Untimed::Paused
-                };
-                assert_eq!((timing.char_times, timing.untimed), (None, Some(said)));
+                    assert_eq!(answered, (true, None));
+                }
+                let cut = (timings[1].char_times.clone(), timings[1].untimed);
+                assert_eq!(cut, (None, Some(cw_core::Untimed::Paused)), "{told}");
             }
         });
     }
@@ -2947,6 +2971,7 @@ mod tests {
             let sent = h.sent(0);
             let first: String = sent.chars().take(1).collect();
             h.ctx.answer.hold(0, first.clone(), Some(MonoMs(mono_ms())));
+            h.set_page_hidden(true);
             h.send(SessionEvent::Pause);
             assert_eq!(
                 h.phase(),
@@ -2957,6 +2982,7 @@ mod tests {
             );
             assert_eq!(input_of(&h, 0), Some(first), "what was typed is kept");
             h.advance(10_000).await;
+            h.set_page_hidden(false);
             h.send(SessionEvent::Resume);
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
             answer_keyed(&mut h, 0);
@@ -3092,6 +3118,7 @@ mod tests {
             h.advance(first_end + 50 - mono_ms()).await;
             let first: String = h.sent(0).chars().take(1).collect();
             h.ctx.answer.hold(0, first.clone(), Some(MonoMs(mono_ms())));
+            h.set_page_hidden(true);
             h.send(SessionEvent::Pause);
             assert!(matches!(
                 h.phase(),

@@ -668,7 +668,11 @@ impl<S: GroupSource> SessionMachine<S> {
     /// stopped, every timer let go. A group answered in full, its
     /// auto-confirm still waiting, needs no sending again: it is confirmed
     /// once resumed. A send cut short counts as heard once its first
-    /// character had sounded, unless some of it had gone unheard.
+    /// character had sounded, unless some of it had gone unheard. The group
+    /// held, its answer open, says from now on that a pause cut it, the
+    /// first reason found, so news of its send heard after the pause, as
+    /// that it was held up when the page hid, finds it so, as a run's turn
+    /// the pause cut does; one answered in full stands as timed.
     fn pause(&mut self, why: PauseWhy, now: MonoMs) -> Vec<SessionEffect> {
         let complete = self.auto_confirm.as_ref().map(|pending| pending.index);
         let resume = match self.phase() {
@@ -689,6 +693,7 @@ impl<S: GroupSource> SessionMachine<S> {
         };
         let (Resume::Send(index) | Resume::Answer(index)) = resume;
         self.session.cut_send(index, now);
+        self.session.note_paused(index, 0);
         self.cancel_timers();
         self.resume = Some((resume, now));
         self.set_phase(SessionPhase::Paused { index, why });
@@ -1407,6 +1412,54 @@ mod tests {
         assert!(
             timing.char_times.is_some() && timing.untimed.is_none(),
             "{timing:?}"
+        );
+    }
+
+    /// A pause notes at once that it cut the group it holds, its answer
+    /// open: news of the cut send heard after it, that it was held up on
+    /// its way, finds the pause the first reason, as a run's turn the pause
+    /// cut says it ([`crate::Untimed`]), whether the session is then ended
+    /// or resumed. An answer complete by the pause has nothing to note, and
+    /// the news untimes it as ever.
+    #[test]
+    fn a_group_a_pause_cut_says_so_whatever_is_heard_of_its_send_after() {
+        let typed = |text: &str, at: &[u64]| SessionEvent::Input {
+            index: 0,
+            text: text.into(),
+            keys: Keys {
+                at: at.iter().map(|at| Some(MonoMs(*at))).collect(),
+                corrected: Vec::new(),
+            },
+        };
+        for resumed in [false, true] {
+            let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
+            let _ = m.apply(kmr_started(0), MonoMs(0));
+            let _ = m.apply(typed("K", &[300]), MonoMs(300));
+            let _ = m.apply(SessionEvent::Pause, MonoMs(400));
+            let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(410));
+            if resumed {
+                let _ = m.apply(SessionEvent::Resume, MonoMs(60_400));
+            }
+            let _ = m.apply(SessionEvent::FinishNow, MonoMs(60_500));
+            let result = m.session().result(0, "2026-11-11".into());
+            let timing = &result.group_timings[0];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(Untimed::Paused)),
+                "resumed {resumed}"
+            );
+        }
+
+        let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
+        let _ = m.apply(kmr_started(0), MonoMs(0));
+        let _ = m.apply(typed("KMR", &[300, 600, 900]), MonoMs(900));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(950));
+        let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(960));
+        let _ = m.apply(SessionEvent::FinishNow, MonoMs(60_950));
+        let timing = &m.session().result(0, "2026-11-11".into()).group_timings[0];
+        assert_eq!(
+            (timing.char_times.clone(), timing.untimed),
+            (None, Some(Untimed::HeldUp))
         );
     }
 

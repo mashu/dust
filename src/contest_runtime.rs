@@ -1838,9 +1838,11 @@ mod tests {
                 "the turn's end was told"
             );
             let ctx = h.ctx;
+            h.set_page_hidden(true);
             h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
             h.pump();
             h.advance(5_000).await;
+            h.set_page_hidden(false);
             h.in_app(|| resume_run(ctx));
             h.pump();
             // Its call sent, its number copied, and the QSO logged.

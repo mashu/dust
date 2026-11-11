@@ -122,9 +122,10 @@ pub enum Untimed {
     /// some of it went unheard, or the attempt failed.
     SentAgain,
     /// The session was paused with its answer open, or part way through
-    /// its send and then resumed or ended: keys either side of a pause, or
-    /// along a send it cut, cannot be timed against one send. A run's copy
-    /// says so when a pause cut short the turn it was heard in.
+    /// its send: keys either side of a pause, or along a send it cut,
+    /// cannot be timed against one send. Found as the pause begins, before
+    /// any news of the send it cut. A run's copy says so when a pause cut
+    /// short the turn it was heard in.
     Paused,
 }
 
@@ -653,7 +654,8 @@ impl GroupSession {
     /// or sent again: the answer is timed from the end of its send as if the
     /// pause had not been, and keys typed either side of the pause cannot be
     /// timed against its characters. An answer already complete when it
-    /// paused is timed as it stands.
+    /// paused is timed as it stands. Noted as the pause begins, for none of
+    /// it yet, and again as it ends, for all of it.
     pub(crate) fn note_paused(&mut self, index: usize, ms: u64) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
