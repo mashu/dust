@@ -1,9 +1,11 @@
-//! What every store must do with the history, tested once for all of them:
-//! each store's tests run these cases on it ([`conformance_tests`]), the
-//! files on a folder of their own, a browser's database on the tests'
-//! stand-in for one, and the test store, each reached as the app reaches it
-//! ([`Harness`]). A store that cannot meet a case leaves it out by name,
-//! saying why, beside where it runs the rest.
+//! What every store must do with the history, each case written once for
+//! all of them: each store's tests run these cases on it
+//! ([`conformance_tests`]), the files on a folder of their own, a browser's
+//! database on the tests' stand-in for one, and the test store, each
+//! reached as the app reaches it ([`Harness`]). A store that cannot meet a
+//! case leaves it out by name, saying why, beside where it runs the rest.
+//! What a store's protocol adds, its bytes on a disk, its packs and
+//! journals, its pages and transactions, its own tests hold.
 
 use cw_core::SessionResult;
 
