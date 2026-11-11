@@ -111,10 +111,11 @@ pub struct MemoryStore {
     /// How many records and tombstones have been written.
     pub record_writes: Cell<usize>,
     pub tombstone_writes: Cell<usize>,
-    /// How many times the history has changed, and how many changes this
-    /// copy had seen when it last looked.
+    /// How many times the history has changed; and how many changes this
+    /// copy had seen when it last looked, beside the history kept whole as
+    /// it stood then, as an older build's write to it is a change too.
     changes: Cell<u64>,
-    seen_changes: Cell<u64>,
+    seen: Cell<(u64, Option<Fingerprint>)>,
     /// What reads set aside, as they could not read it, not yet told of.
     pub set_aside: RefCell<Vec<SetAside>>,
     last_backup: Cell<Option<u64>>,
@@ -639,7 +640,7 @@ impl Store for MemoryStore {
         // Complete once the move is made: until then, the sessions kept
         // whole are stored, though not here.
         load.complete = self.layout.borrow().is_some();
-        self.seen_changes.set(self.changes.get());
+        self.seen.set(self.looking());
         load
     }
 
@@ -676,7 +677,7 @@ impl Store for MemoryStore {
             return done(None);
         }
         self.import();
-        self.seen_changes.set(self.changes.get());
+        self.seen.set(self.looking());
         let tombstones = self.tombstones.borrow();
         done(Some(
             self.records
@@ -821,8 +822,9 @@ impl Store for MemoryStore {
     }
 
     /// Whether the history changed since this store last read or listed
-    /// it. Tabs sharing one store share what it last saw, so a test of
-    /// tabs syncs each by hand.
+    /// it, or the history an older build keeps whole beside it did. Tabs
+    /// sharing one store share what it last saw, so a test of tabs syncs
+    /// each by hand.
     ///
     /// Nothing is noted: a change is told of each time it is asked, until
     /// a read or a listing of the history takes it up, as the files and a
@@ -832,7 +834,7 @@ impl Store for MemoryStore {
         if let Some(page) = &self.page {
             return page.changed();
         }
-        self.seen_changes.get() != self.changes.get()
+        self.seen.get() != self.looking()
     }
 
     fn history_news(&self) -> Option<Pending<()>> {
@@ -1154,6 +1156,12 @@ impl MemoryStore {
 
     fn changed_here(&self) {
         self.changes.set(self.changes.get() + 1);
+    }
+
+    /// What a look at the history sees: how many times it has changed, and
+    /// the history kept whole as it stands ([`Self::seen`]).
+    fn looking(&self) -> (u64, Option<Fingerprint>) {
+        (self.changes.get(), self.fingerprint())
     }
 
     /// Make `change`, as the files make it.
@@ -1700,6 +1708,27 @@ mod tests {
         assert!(read.sessions.is_empty());
         assert_eq!(read.set_aside, [SetAside::History { kept: None }]);
         assert_eq!(*damaged.legacy_aside.borrow(), ["{ not a list"]);
+    }
+
+    /// An older build's write to the history it keeps whole is a change to
+    /// take up, as the files and a browser's database see one: the history
+    /// changed, until a listing takes it up. It was no change, so the app
+    /// never listed to take up what the older build stored.
+    #[test]
+    fn an_older_builds_write_to_the_history_kept_whole_is_a_change_to_take_up() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let first = finished(now_ms - 9 * DAY);
+        store.keep_whole(std::slice::from_ref(&first));
+        store.load_history();
+        assert!(!store.history_changed());
+        store.keep_whole(&[first, finished(now_ms + 60_000)]);
+        assert!(store.history_changed(), "to take up");
+        assert_eq!(
+            now(store.history_listing()).map(|listed| listed.len()),
+            Some(2)
+        );
+        assert!(!store.history_changed(), "taken up");
     }
 
     /// A record here a later build stored, which says which session it
