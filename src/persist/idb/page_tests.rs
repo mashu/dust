@@ -189,6 +189,27 @@ dioxus.send((await one.head()).ok.layout);"#,
     assert_eq!(sent[5], r#"{"layout":1,"compatible":1,"migratedAt":6}"#);
 }
 
+/// What was noted of the records told of comes back with how the history
+/// is kept as it is opened, read under the name builds read it by, `told`
+/// beside the layout, which 0.16.4 to 0.16.9 go by too; null where none is
+/// held. Read under another name, every record this build cannot read was
+/// told of at every launch, and its next note dropped what such a build
+/// noted there.
+#[test]
+fn the_head_hands_back_what_was_told_under_the_name_builds_read_it_by() {
+    let Some(sent) = on_page(
+        r#"const tab = glue();
+await tab.open();
+dioxus.send((await tab.head()).ok.told);
+fakeIdb.plant("dust_history", "meta", "told", '["x"]');
+dioxus.send((await tab.head()).ok.told);"#,
+    ) else {
+        return;
+    };
+    assert_eq!(sent[0], Value::Null);
+    assert_eq!(sent[1], json!(r#"["x"]"#));
+}
+
 /// A newer Dust opening the database in another tab, to change how the
 /// history is kept, has this tab let go of it: this one then writes
 /// nothing, and says the page has to be reloaded. A tab of this build
