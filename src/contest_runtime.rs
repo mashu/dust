@@ -21,9 +21,9 @@ use crate::live_run::{self, Outgoing, RunMachine};
 use crate::page::{Caret, control_id, focus_by_id_anywhere};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews, Sent};
-use crate::state::live::{LiveRun, RunOwn, Stage};
-use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen};
-use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
+use crate::state::live::RunOwn;
+use crate::state::{AppCtx, Finished, Live, LiveContest, Said, Screen};
+use crate::time::{local_hour, mono_ms, now_ms, seed_rng};
 
 /// A contest run, as its life knows it ([`live_run`]).
 pub(crate) type Run = ContestMachine<Sampler>;
@@ -37,6 +37,7 @@ impl RunMachine for Run {
     /// The turn a send is.
     type Tag = u64;
     const RESUME: ContestEvent = ContestEvent::Resume;
+    const IS_RUN: bool = true;
     /// A run moves no level.
     type Level = ();
 
@@ -52,6 +53,10 @@ impl RunMachine for Run {
             Live::Contest(live) => Some(live),
             Live::Groups(_) => None,
         }
+    }
+
+    fn boxed(run: LiveContest) -> Live {
+        Live::Contest(Box::new(run))
     }
 
     fn unboxed(live: Live) -> Option<LiveContest> {
@@ -212,23 +217,13 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     }
     let rules = settings.contest.contest_kind.rules();
     let side = settings.contest.side();
-    let AppCtx {
-        mut screen,
-        contest: mut view,
-        mut announced,
-        mut preview,
-        entry,
-        ..
-    } = ctx;
     // The audio is claimed with what the run plays from, so every claim and
     // every turn of it has the one band.
     let mut sound = settings.clone();
     sound.band.qsb_enabled = false;
     // The run has the audio now, whether or not it can open it: any preview
     // that had it has stopped.
-    preview.set(Preview::Idle);
-    let app = ctx.app();
-    let Some(lease) = live_run::claim(ctx, &sound) else {
+    let Some(lease) = live_run::take_audio(ctx, &sound) else {
         return;
     };
     // The callers' calls lean on what the history says is hard, and on what
@@ -238,24 +233,14 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     let (mut machine, effects) = ContestMachine::start(seed_rng(), now, settings, sampler);
     // Before anything of yours that greets: the first CQ greets nobody.
     machine.set_local_hour(local_hour());
-    entry.start(rules, side);
+    ctx.entry.start(rules, side);
+    let mut announced = ctx.announced;
     announced.set(None);
-    view.set(Some(machine.view()));
-    screen.set(Screen::Training);
-    let mark = ctx.mark_running(true);
-    *app.session.borrow_mut() = Some(Live::Contest(Box::new(LiveRun {
-        machine,
-        lease: lease.clone(),
-        stage: Stage::Running,
-        seen: None,
-        started_on: local_date_string(),
-        mark,
-        own: RunOwn {
-            sound,
-            unsaid: Vec::new(),
-        },
-    })));
-    live_run::run_effects::<Run>(ctx, &lease, effects);
+    // Seen from its screen's first tick.
+    live_run::go_live(ctx, lease, machine, effects, None, || RunOwn {
+        sound,
+        unsaid: Vec::new(),
+    });
 }
 
 /// Hand the run something the user did: End run, Discard, the page going

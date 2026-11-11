@@ -14,8 +14,8 @@ use dioxus::prelude::*;
 use crate::persist::SoFar;
 use crate::player::{Asked, AudioError, Lease, SendNews, Sent};
 use crate::state::live::{LiveRun, Stage};
-use crate::state::{AppCtx, Finished, Live, Screen, keep_and_show};
-use crate::time::{mono_ms, now_ms};
+use crate::state::{AppCtx, Finished, Live, Preview, Screen, keep_and_show};
+use crate::time::{local_date_string, mono_ms, now_ms};
 
 /// A machine that can be what is live: what the lifecycle cannot do the
 /// same way for a session of groups and for a contest run.
@@ -42,6 +42,8 @@ pub(crate) trait RunMachine: Sized + 'static {
     /// What tells it to carry on after a pause, once the audio is claimed
     /// again ([`resume`]).
     const RESUME: Self::Event;
+    /// A contest run, as its mark says ([`AppCtx::mark_running`]).
+    const IS_RUN: bool;
     /// What keeping it does to its level, settled once it is marked kept.
     type Level;
 
@@ -50,6 +52,9 @@ pub(crate) trait RunMachine: Sized + 'static {
 
     /// What is live, if it is of this kind, to be changed.
     fn of_mut(live: &mut Live) -> Option<&mut LiveRun<Self, Self::Own>>;
+
+    /// What goes live, of this kind.
+    fn boxed(run: LiveRun<Self, Self::Own>) -> Live;
 
     /// What was live, taken out, if it is of this kind.
     fn unboxed(live: Live) -> Option<LiveRun<Self, Self::Own>>;
@@ -133,6 +138,47 @@ pub(crate) trait RunMachine: Sized + 'static {
     fn settle(_ctx: AppCtx, _level: Self::Level) -> Option<String> {
         None
     }
+}
+
+/// The audio, taken for what goes live: whatever preview had it has
+/// stopped, whether or not it can be opened; then claimed to play `sound`
+/// ([`claim`]).
+pub(crate) fn take_audio(ctx: AppCtx, sound: &TrainingSettings) -> Option<Lease> {
+    let mut preview = ctx.preview;
+    preview.set(Preview::Idle);
+    claim(ctx, sound)
+}
+
+/// What was built, `machine`, goes live under `lease`, Running: it has the
+/// training screen, is marked running, and is the app's, with what only
+/// its kind holds, `own`, made once it is marked, then watched, as its
+/// kind watches a claim; then what its machine said at its start is done.
+/// It was last seen at `seen`, if it has been.
+pub(crate) fn go_live<M: RunMachine>(
+    ctx: AppCtx,
+    lease: Lease,
+    machine: M,
+    effects: Vec<M::Effect>,
+    seen: Option<MonoMs>,
+    own: impl FnOnce() -> M::Own,
+) {
+    let mut shown = M::shown(ctx);
+    shown.set(Some(machine.as_shown().into_owned()));
+    let mut screen = ctx.screen;
+    screen.set(Screen::Training);
+    let mark = ctx.mark_running(M::IS_RUN);
+    let live = M::boxed(LiveRun {
+        machine,
+        lease: lease.clone(),
+        stage: Stage::Running,
+        seen,
+        started_on: local_date_string(),
+        mark,
+        own: own(),
+    });
+    *ctx.app().session.borrow_mut() = Some(live);
+    M::watch(ctx, &lease);
+    run_effects::<M>(ctx, &lease, effects);
 }
 
 /// The audio, claimed to play `sound`; or, if it cannot be had, a toast

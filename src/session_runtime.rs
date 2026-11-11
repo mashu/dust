@@ -26,9 +26,9 @@ use crate::contest_runtime::{send_run_event, start_run};
 use crate::live_run::{self, Outgoing, RunMachine};
 use crate::persist::SoFar;
 use crate::player::{AudioError, Lease, SendNews, Sent};
-use crate::state::live::{GroupsOwn, LiveRun, SEEN_EVERY_MS, Stage};
-use crate::state::{AppCtx, Live, LiveSession, Preview, Screen, settle_level};
-use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
+use crate::state::live::{GroupsOwn, SEEN_EVERY_MS};
+use crate::state::{AppCtx, Live, LiveSession, settle_level};
+use crate::time::{mono_ms, now_ms, seed_rng};
 
 /// A session of groups, as its life knows it ([`live_run`]).
 pub(crate) type Groups = SessionMachine<Sampler>;
@@ -43,6 +43,7 @@ impl RunMachine for Groups {
     /// The group a send is of.
     type Tag = usize;
     const RESUME: SessionEvent = SessionEvent::Resume;
+    const IS_RUN: bool = false;
     type Level = (CountersUpdate, Option<AutoLevelChange>);
 
     fn of(live: &Live) -> Option<&LiveSession> {
@@ -57,6 +58,10 @@ impl RunMachine for Groups {
             Live::Groups(live) => Some(live),
             Live::Contest(_) => None,
         }
+    }
+
+    fn boxed(run: LiveSession) -> Live {
+        Live::Groups(Box::new(run))
     }
 
     fn unboxed(live: Live) -> Option<LiveSession> {
@@ -302,13 +307,7 @@ pub fn start_session(ctx: AppCtx) {
     if ctx.session_running() {
         return;
     }
-    let AppCtx {
-        mut screen,
-        mut runtime,
-        mut settings,
-        mut preview,
-        ..
-    } = ctx;
+    let mut settings = ctx.settings;
     let clamped = settings.peek().clone().clamp();
     if *settings.peek() != clamped {
         settings.set(clamped);
@@ -324,10 +323,8 @@ pub fn start_session(ctx: AppCtx) {
         return;
     }
     // The session has the audio now, whether or not it can open it: any
-    // preview that had it has stopped.
-    preview.set(Preview::Idle);
-    let app = ctx.app();
-    let Some(lease) = live_run::claim(ctx, &fitted) else {
+    // preview that had it has stopped. Its id is the claim's.
+    let Some(lease) = live_run::take_audio(ctx, &fitted) else {
         return;
     };
     // Each session draws from a sampler of its own, seeded afresh.
@@ -336,22 +333,10 @@ pub fn start_session(ctx: AppCtx) {
     let now = MonoMs(mono_ms());
     let (machine, effects) =
         SessionMachine::start(SessionId::new(lease.turn()), now, fitted, sampler);
-    runtime.set(Some(machine.session().clone()));
-    screen.set(Screen::Training);
-    let mark = ctx.mark_running(false);
-    *app.session.borrow_mut() = Some(Live::Groups(Box::new(LiveRun {
-        machine,
-        lease: lease.clone(),
-        stage: Stage::Running,
-        seen: Some(now),
-        started_on: local_date_string(),
-        mark,
-        own: GroupsOwn {
-            stations: SplitMix64::new(seed_rng()),
-        },
-    })));
-    beat(ctx, lease.clone());
-    live_run::run_effects::<Groups>(ctx, &lease, effects);
+    // Seen from its start; its stations drawn once it is marked.
+    live_run::go_live(ctx, lease, machine, effects, Some(now), || GroupsOwn {
+        stations: SplitMix64::new(seed_rng()),
+    });
 }
 
 /// While `lease` holds the audio, say every [`SEEN_EVERY_MS`] that the app
@@ -436,6 +421,7 @@ pub fn finish_run(ctx: AppCtx) {
 /// caller's to end.
 #[cfg(any(test, feature = "web", target_os = "android"))]
 pub fn hold_run(ctx: AppCtx) -> bool {
+    use crate::state::live::Stage;
     let held = |ctx: AppCtx| match ctx.app().session.borrow().as_ref() {
         Some(Live::Contest(live)) => live.stage == Stage::Paused,
         Some(Live::Groups(live)) => live.stage == Stage::Paused,
@@ -490,7 +476,7 @@ mod tests {
     use crate::audio::fake::{Behaviour, Call};
     use crate::persist::{CutOff, OpenSession, Store};
     use crate::state::answer::Entry;
-    use crate::state::{Finished, Notice, keep_cut_off};
+    use crate::state::{Finished, Notice, Screen, keep_cut_off};
     use crate::testing::{Harness, run, test_settings};
     use cw_core::AutoLevelCounters;
     use cw_core::SessionEffect;
