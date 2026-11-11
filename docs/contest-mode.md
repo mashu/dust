@@ -779,7 +779,7 @@ The machine needs the fields only at a key press. The runtime maps
 | any | TurnMissed{id, from, until} | the turn is marked untimed, as held up; on the air, a caller's send any of which the browser skipped is no send heard, as one under your message (5.3, `Counted::Muted`), a call on its timeout spending its try; no effects |
 | any | TurnCancelled, or another id | ignored |
 | Silent | TimerFired (patience) | waiting callers call again (4.3); if the station you work has left, "K5XYZ has gone" is announced, by the call it put yours right with, or else the call you had for it, or "The station", and Enter starts afresh, as after a CQ, calling CQ in place of its call (4.4) → a turn of replies |
-| Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count, and the turn is marked untimed, as paused: nothing heard in a turn a pause cut short is timed (docs/recognition.md). A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout, which waits afresh; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
+| Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count, and the turn is marked untimed, as paused: nothing heard in a turn a pause cut short is timed (docs/recognition.md), and a call or an exchange whose first sending it cut part way, which heard whole would have been timed, is marked as cut by it, its copies saying they were paused. A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout, which waits afresh; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
 | Paused | Resume | clock resumes; run end re-armed with the time left; a 1 s resume timer → Running |
 | Running | the resume timer | callers the pause or failure cut short send again, as the rows above say; the others wait for you afresh, as after a turn, so what was heard whole comes again only on a timeout or at your asking: a pause is no free `?`. A key that sends forgets the timer; one that sends nothing (Wipe, Shift+Enter, Esc with nothing on the air) leaves it to bring the callers back |
 | Running | run-end timer, or the limit passed on any event but TurnStarted (a look at the clock, which stamps nothing, 6.3) | → Finished. While the turn on the air may be retrying its sound (an attempt after the first has started, or the one playing is past its length and 2 s), only what keeps its reading ends the run (its end, a key, End run): its failure gives the retries back (5.2), and the run end waits until its last attempt would have failed |
@@ -2024,7 +2024,9 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   lock, so a pause gives no free thinking time, and a copy typed before it
   and sent after it is timed in run time, the pause left out (9.1), unless
   the pause cut short the turn it was heard in: nothing heard in that turn
-  is timed, and its copies say they were paused. A send
+  is timed, and its copies say they were paused. So do the copies of a call
+  or an exchange whose first sending the pause cut part way, and a copy
+  every key of which came after a pause. A send
   the pause cut after it began to reach you is owed on its caller's
   timeout, as one heard whole, so a pause is no free `?`; one cut before
   it began goes again a moment after Resume (4.2). The news of its own

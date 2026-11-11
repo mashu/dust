@@ -1860,6 +1860,58 @@ mod tests {
         });
     }
 
+    /// The owner's second rule, for a run, as it comes most often: the page
+    /// going out of sight part way through a caller's call, its first
+    /// sending, leaves the copy of that call with no times, saying it was
+    /// paused, where a run worked with no pause keeps it timed.
+    #[test]
+    fn a_run_paused_part_way_through_a_call_stores_its_copy_as_paused() {
+        run(|| async {
+            for cut in [false, true] {
+                crate::time::pin_seeds(Some(7));
+                let mut h = Harness::with_settings(contest_settings());
+                h.start_training();
+                let cq = h.recorder.starts()[0].clone();
+                let call = cq.transcript.others[0].text.clone();
+                let tones = &cq.plan.others[0].events;
+                let begins = tones
+                    .iter()
+                    .map(|tone| tone.start_sec)
+                    .fold(f64::INFINITY, f64::min);
+                let heard_by = tones.iter().map(|tone| tone.end_sec()).fold(0.0, f64::max);
+                let mid = cq.at.0 + ((begins + heard_by) / 2.0 * 1_000.0) as u64;
+                h.advance(mid - mono_ms()).await;
+                assert!(view(&h).is_some_and(|view| view.air.is_some()), "{cut}");
+                if cut {
+                    let ctx = h.ctx;
+                    h.set_page_hidden(true);
+                    h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
+                    h.pump();
+                    h.advance(5_000).await;
+                    h.set_page_hidden(false);
+                    h.in_app(|| resume_run(ctx));
+                    h.pump();
+                }
+                work(&mut h, 30_000, Some(1)).await;
+                end(&mut h);
+                let (kept, _) = stored_last(&h);
+                assert_eq!(kept.groups[0].sent, call, "{cut}");
+                let timing = &kept.group_timings[0];
+                if cut {
+                    assert_eq!(
+                        (timing.char_times.clone(), timing.untimed),
+                        (None, Some(cw_core::Untimed::Paused))
+                    );
+                } else {
+                    assert!(
+                        timing.char_times.is_some() && timing.untimed.is_none(),
+                        "{timing:?}"
+                    );
+                }
+            }
+        });
+    }
+
     /// The owner's third rule, cut off: a run the app stops under while it
     /// is paused is kept at the next launch as End run would have kept it
     /// at the pause, the QSO the pause cut kept as lost beside the one

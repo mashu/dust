@@ -125,7 +125,8 @@ pub enum Untimed {
     /// its send: keys either side of a pause, or along a send it cut,
     /// cannot be timed against one send. Found as the pause begins, before
     /// any news of the send it cut. A run's copy says so when a pause cut
-    /// short the turn it was heard in.
+    /// short the turn it was heard in, cut part way the first sending it
+    /// would have been timed from, or came before every key of it.
     Paused,
 }
 

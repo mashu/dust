@@ -425,6 +425,11 @@ struct Heard {
     /// heard once, whole and alone: what their characters are timed from.
     call_sounded: Option<Sounded>,
     exch_sounded: Vec<(Field, Sounded)>,
+    /// The turn whose pause cut its call's first sending part way, and its
+    /// exchange's, where heard whole they would have been timed from: no
+    /// copy of them is, and their copies say the pause is why.
+    call_cut: Option<u64>,
+    exch_cut: Option<u64>,
     /// For each repeat of its call you asked for and heard, before you sent
     /// it with your exchange, the Call field as read at the key, without
     /// `?`.
@@ -489,7 +494,10 @@ struct Shown {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Sends {
     count: u32,
-    until: Option<u64>,
+    /// When its second sending began to go out.
+    again_from: Option<u64>,
+    /// When the run first paused once any of it had reached you.
+    paused_from: Option<u64>,
 }
 
 impl Sends {
@@ -497,19 +505,23 @@ impl Sends {
     fn began(&mut self, out_run: u64) {
         self.count = self.count.saturating_add(1);
         if self.count == 2 {
-            self.cut(out_run);
+            self.again_from = Some(out_run);
         }
     }
 
     /// The run paused at `run`, once any of it had reached you.
     fn paused(&mut self, run: u64) {
         if self.count > 0 {
-            self.cut(run);
+            self.paused_from.get_or_insert(run);
         }
     }
 
-    fn cut(&mut self, at: u64) {
-        self.until = Some(self.until.map_or(at, |until| until.min(at)));
+    /// From when on a key says nothing of how soon you recognised it.
+    fn until(&self) -> Option<u64> {
+        match (self.again_from, self.paused_from) {
+            (Some(again), Some(paused)) => Some(again.min(paused)),
+            (again, paused) => again.or(paused),
+        }
     }
 }
 
@@ -544,6 +556,18 @@ impl Sounded {
             turn: self.turn,
             times,
         })
+    }
+
+    /// Its copy `copy`'s times, its keys saying nothing from where `sends`
+    /// cut them on ([`Self::timed`]); and, where it has none only for a
+    /// pause, every key of it that would have counted coming after one,
+    /// the turn it went out in.
+    fn timed_by(&self, copy: &Typed, sends: Sends) -> (Option<Timed>, Option<u64>) {
+        let timed = self.timed(copy, sends.until());
+        let paused = timed.is_none()
+            && sends.paused_from.is_some()
+            && self.timed(copy, sends.again_from).is_some();
+        (timed, paused.then_some(self.turn))
     }
 
     /// When the last of it reached you, in run time.
@@ -600,6 +624,19 @@ struct Kept {
 }
 
 impl Kept {
+    /// It has no times for a pause, and says so: every key of it came after
+    /// one, its token's first sending going out in turn `after`, or the
+    /// pause of turn `cut` cut that sending part way, the pause's reason
+    /// the turn's. A reason found for the turn, as it is kept, is said
+    /// first ([`Self::stored`]).
+    fn paused(mut self, after: Option<u64>, cut: Option<u64>) -> Self {
+        if after.is_some() {
+            self.timing.untimed = Some(Untimed::Paused);
+        }
+        self.heard_in = self.heard_in.or(after).or(cut);
+        self
+    }
+
     /// As the run keeps it: untimed where its sound's turn is `untrusted`,
     /// saying why, as a session's group says it.
     fn stored(&self, untrusted: &[(u64, Untimed)]) -> (GroupResult, SessionTiming) {
@@ -634,7 +671,8 @@ impl Heard {
     /// when its text showed, if it showed before you copied it, with the
     /// showing a send of its own and only the repeats asked before it, and
     /// untimed; else the copy as kept, timed as `ms`, and its characters
-    /// from its first sending, if that was heard so.
+    /// from its first sending, if that was heard so. One a pause left with
+    /// no times says so ([`Kept::paused`]).
     fn call_group(&self, sent: &str, kept: &Typed, ms: u64, voice: &StationVoice) -> Kept {
         let (copy, ms, asks, shown) = match &self.call_frozen {
             Some((had, asked)) => (
@@ -649,11 +687,10 @@ impl Heard {
             None => (kept.clone(), ms, &self.call_asks[..], 0),
         };
         let sends = 1 + shown + Self::call_repeats(asks, &copy.text);
-        let timed = self
-            .call_sounded
-            .as_ref()
-            .and_then(|sounded| sounded.timed(&copy, self.call_sends.until));
-        group(sent, &copy.text, ms, sends, voice, timed)
+        let (timed, after) = self.call_sounded.as_ref().map_or((None, None), |sounded| {
+            sounded.timed_by(&copy, self.call_sends)
+        });
+        group(sent, &copy.text, ms, sends, voice, timed).paused(after, self.call_cut)
     }
 
     /// A send of `says` began to reach you in `voice`: of a call put right
@@ -695,6 +732,8 @@ impl Heard {
         self.exch_sends = now.exch_sends;
         self.call_sounded.clone_from(&now.call_sounded);
         self.exch_sounded.clone_from(&now.exch_sounded);
+        self.call_cut = now.call_cut;
+        self.exch_cut = now.exch_cut;
         self.call_asks.clone_from(&now.call_asks);
         self.exch_begun = now.exch_begun;
         self.exch_ends.clone_from(&now.exch_ends);
@@ -733,7 +772,7 @@ impl Heard {
     /// then, the showing a send of its own, and only the repeats asked
     /// before it. `rules` say what values are the same. A field typed as
     /// it was sent is timed from its token's first sending, if that was
-    /// heard so.
+    /// heard so; one a pause left with no times says so ([`Kept::paused`]).
     fn field_groups(
         &self,
         rules: &ContestRules,
@@ -790,9 +829,11 @@ impl Heard {
                     .find(|(read, _)| read == field)
                     .map(|(_, keyed)| keyed.as_copy(&copy))
                     .filter(|_| shown == 0 && copy == typed);
-                let timed = keyed
+                let (timed, after) = keyed
                     .zip(self.sounded(*field))
-                    .and_then(|(keyed, sounded)| sounded.timed(&keyed, self.exch_sends.until));
+                    .map_or((None, None), |(keyed, sounded)| {
+                        sounded.timed_by(&keyed, self.exch_sends)
+                    });
                 group(
                     token,
                     &copy,
@@ -801,6 +842,7 @@ impl Heard {
                     voice,
                     timed,
                 )
+                .paused(after, self.exch_cut)
             })
             .collect()
     }
@@ -3718,31 +3760,23 @@ impl<S: CallSource> ContestMachine<S> {
                         latency_ms,
                     })
                 };
-                let length = segment.text.len();
-                let exchange_from = match says {
-                    Says::Exchange => Some(0),
-                    Says::CorrectionAndExchange => exchange_at(&segment.text),
-                    _ => None,
-                };
-                let call_to = match says {
-                    Says::Call | Says::Correction => Some(length),
-                    Says::CorrectionAndExchange => Some(exchange_from.unwrap_or(length)),
-                    _ => None,
-                };
-                if let Some(call_to) = call_to
+                let (call, exchange) = call_and_exchange(*says, &segment.text);
+                if let Some(call) = call
                     && heard.call_sends.count == 1
                     && heard.call_sounded.is_none()
                 {
-                    heard.call_sounded = sounded(0..call_to, &station.caller.call.text);
+                    heard.call_sounded = sounded(call, &station.caller.call.text);
                 }
-                if let Some(from) = exchange_from
+                if let Some(exchange) = exchange
                     && heard.exch_sends.count == 1
                     && heard.exch_sounded.is_empty()
                     && let Some(tokens) = station.caller.sent_exchange()
                 {
                     heard.exch_sounded = tokens
                         .iter()
-                        .filter_map(|(field, token)| Some((*field, sounded(from..length, token)?)))
+                        .filter_map(|(field, token)| {
+                            Some((*field, sounded(exchange.clone(), token)?))
+                        })
                         .collect();
                 }
             }
@@ -4760,10 +4794,63 @@ impl<S: CallSource> ContestMachine<S> {
         self.phase = ContestPhase::Paused { why };
     }
 
+    /// The first sendings of a call or an exchange that a pause cut part
+    /// way, `air` counted up to it: begun to reach you, not heard whole,
+    /// where heard whole, fresh and alone they would have been timed from
+    /// ([`Sounded`]). No copy of them is, and their copies say the pause is
+    /// why ([`Heard::call_cut`]). Show copy times nothing.
+    fn note_cut(&mut self, air: &Air) {
+        if self.settings.contest.contest_show_copy {
+            return;
+        }
+        let turn = &air.turn;
+        let callers = turn
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| segment.who.is_caller());
+        for (((at, segment), (reply, says)), counted) in callers.zip(&air.replies).zip(&air.counted)
+        {
+            let begun = matches!(counted, Counted::Begun | Counted::CallBegun { .. });
+            if !begun || segment.skip_sec != 0.0 || air.texts.get(at) != Some(&segment.text) {
+                continue;
+            }
+            let spans = char_spans(&segment.text, &self.settings, &segment.voice);
+            let alone = |within: std::ops::Range<usize>, token: &str| {
+                sounded_alone(turn, at, &spans, within, token).is_some()
+            };
+            let (call, exchange) = call_and_exchange(*says, &segment.text);
+            let station = &mut self.stations[reply.station];
+            let heard = &mut station.heard;
+            if let Some(call) = call
+                && heard.call_sends.count == 1
+                && heard.call_sounded.is_none()
+                && alone(call, &station.caller.call.text)
+            {
+                heard.call_cut = Some(turn.id);
+            }
+            // A call put right begun, its exchange not yet, cut no exchange.
+            if let Some(exchange) = exchange
+                && *counted == Counted::Begun
+                && heard.exch_sends.count == 1
+                && heard.exch_sounded.is_empty()
+                && station.caller.sent_exchange().is_some_and(|tokens| {
+                    tokens
+                        .iter()
+                        .any(|(_, token)| alone(exchange.clone(), token))
+                })
+            {
+                heard.exch_cut = Some(turn.id);
+            }
+        }
+    }
+
     /// Pause for `why`, from `at`, as [`ContestEvent::Pause`] says: the turn
     /// on the air is cut short, and nothing heard in it is timed, its
     /// copies saying the pause is why, as a session's group the pause cut
-    /// says it. A run whose limit passed before `at` finishes instead.
+    /// says it; so do the copies of a call or an exchange whose first
+    /// sending it cut part way ([`Self::note_cut`]). A run whose limit
+    /// passed before `at` finishes instead.
     fn pause(&mut self, why: PauseWhy, at: MonoMs, now: MonoMs) -> Vec<ContestEffect> {
         match self.phase {
             ContestPhase::Countdown { .. } => {
@@ -4789,9 +4876,14 @@ impl<S: CallSource> ContestMachine<S> {
                 let mut effects = vec![ContestEffect::StopAudio, ContestEffect::ReleaseAudio];
                 // A pause with nothing on the air, in the moment after
                 // Resume, keeps who the last one cut short.
-                if let Some(air) = self.air.take() {
+                if let Some(mut air) = self.air.take() {
                     self.untrust(air.turn.id, Untimed::Paused);
                     self.cut_short.extend(air.cut_short(run_ms, why));
+                    // What reached you by the pause counts first, as the cut
+                    // counts it, counting nothing twice: what it cut part way
+                    // is known then.
+                    self.count_heard(&mut air, Some(run_ms), run_ms, &mut effects);
+                    self.note_cut(&air);
                     let carried = self.cut(air, run_ms, false, &mut effects);
                     self.resolve(&carried.pending, &mut effects);
                 }
@@ -4934,6 +5026,32 @@ fn misses(exchange: &[(Field, String)], voice: &StationVoice) -> Vec<Kept> {
         .iter()
         .map(|(_, token)| group(token, "", 0, 1, voice, None))
         .collect()
+}
+
+/// The bytes of a caller's send of `says`, `text`, that carry its call, and
+/// those that carry its exchange, where it sends them.
+fn call_and_exchange(
+    says: Says,
+    text: &str,
+) -> (
+    Option<std::ops::Range<usize>>,
+    Option<std::ops::Range<usize>>,
+) {
+    let length = text.len();
+    let exchange_from = match says {
+        Says::Exchange => Some(0),
+        Says::CorrectionAndExchange => exchange_at(text),
+        _ => None,
+    };
+    let call_to = match says {
+        Says::Call | Says::Correction => Some(length),
+        Says::CorrectionAndExchange => Some(exchange_from.unwrap_or(length)),
+        _ => None,
+    };
+    (
+        call_to.map(|to| 0..to),
+        exchange_from.map(|from| from..length),
+    )
 }
 
 /// Where each character of `token` ends in segment `at` of `turn`, whose
@@ -14466,6 +14584,167 @@ mod tests {
             timing.char_times.is_some() && timing.untimed.is_none(),
             "{timing:?}"
         );
+    }
+
+    /// A call whose first sending a pause cut part way is never heard whole
+    /// alone, so no copy of it is timed, and its copy says the pause is why,
+    /// as a session's group the pause cut says it, whether the page hid or
+    /// you paused: what comes after Resume is its second sending. A pause
+    /// before its sending began to reach you leaves that sending to go out
+    /// after Resume as its first.
+    #[test]
+    fn a_call_whose_first_sending_a_pause_cut_says_paused() {
+        for why in [PauseWhy::Hidden, PauseWhy::You] {
+            let mut cut = runtime(&["K5XYZ"]);
+            let cq = cut.last_turn().clone();
+            let call = sent_by(&cq, 0)[0].clone();
+            let ends = token_ends(&cut, 0, &call, "K5XYZ");
+            cut.run_to(ends[2]);
+            assert_eq!(cut.playing_id(), Some(cq.id), "{why:?}");
+            cut.apply(ContestEvent::Pause {
+                why,
+                at: MonoMs(ends[2]),
+            });
+            cut.now += 60_000;
+            cut.apply(ContestEvent::Resume);
+            while cut.machine.stations[0].heard.call_sends.count < 2 {
+                assert!(cut.step(), "{why:?}: its call never came again");
+            }
+            cut.finish_turn();
+            cut.now += 300;
+            cut.apply(ContestEvent::Key {
+                key: OpKey::Esm,
+                fields: Box::new(typed(&[(EntryField::Call, "K5XYZ", cut.now)])),
+            });
+            let nr = serial(replies(cut.last_turn())[0]);
+            cut.finish_turn();
+            cut.key(OpKey::Esm, "K5XYZ", &nr);
+            cut.finish_turn();
+            cut.now += 1_000;
+            cut.apply(ContestEvent::FinishNow);
+            let (result, _) = result(&cut);
+            assert_eq!(result.groups[0].sent, "K5XYZ", "{why:?}");
+            let timing = &result.group_timings[0];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(Untimed::Paused)),
+                "{why:?}"
+            );
+        }
+
+        let mut early = runtime(&["K5XYZ"]);
+        let cq = early.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        let begins = whole_ms(call.start_sec);
+        early.run_to(begins.saturating_sub(1));
+        early.apply(ContestEvent::Pause {
+            why: PauseWhy::Hidden,
+            at: MonoMs(early.now),
+        });
+        let heard = &early.machine.stations[0].heard;
+        assert_eq!((heard.call_sends.count, heard.call_cut), (0, None));
+    }
+
+    /// An exchange whose first sending a pause cut part way leaves each of
+    /// its fields' copies saying the pause is why it is not timed, as a
+    /// call's does.
+    #[test]
+    fn an_exchange_whose_first_sending_a_pause_cut_says_paused() {
+        let mut cut = runtime(&["K5XYZ"]);
+        cut.finish_turn();
+        cut.key(OpKey::Esm, "K5XYZ", "");
+        let turn = cut.last_turn().clone();
+        let sent_at = cut.now;
+        let reply = sent_by(&turn, 0)[0].clone();
+        let tokens = cut.machine.stations[0]
+            .caller
+            .sent_exchange()
+            .expect("its exchange drawn")
+            .len();
+        // Part way through its exchange's first sending.
+        cut.run_to(sent_at + whole_ms((reply.start_sec + reply.end_sec) / 2.0));
+        assert_eq!(cut.playing_id(), Some(turn.id), "its exchange on the air");
+        cut.apply(ContestEvent::Pause {
+            why: PauseWhy::You,
+            at: MonoMs(cut.now),
+        });
+        cut.now += 60_000;
+        cut.apply(ContestEvent::Resume);
+        while cut.machine.stations[0].heard.exch_sends.count < 2 {
+            assert!(cut.step(), "its exchange never came again");
+        }
+        cut.finish_turn();
+        let nr = serial(replies(cut.last_turn())[0]);
+        cut.key(OpKey::Esm, "K5XYZ", &nr);
+        cut.finish_turn();
+        cut.now += 1_000;
+        cut.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&cut);
+        assert_eq!(result.groups.len(), 1 + tokens);
+        for timing in &result.group_timings[1..] {
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(Untimed::Paused))
+            );
+        }
+    }
+
+    /// A call heard whole in a turn that played out, every key of its copy
+    /// after a pause, has no time, its keys saying nothing once the run
+    /// paused ([`Sends`]), and its copy says the pause is why, as a
+    /// session's group answered only after a pause in its answer window
+    /// does. One keyed only after its second sending began, with no pause,
+    /// has no time and nothing to say why, as a group keyed after it is
+    /// sent again.
+    #[test]
+    fn a_copy_keyed_only_after_a_pause_says_paused() {
+        let mut paused = runtime(&["K5XYZ"]);
+        paused.finish_turn();
+        assert!(paused.machine.stations[0].heard.call_sounded.is_some());
+        paused.now += 100;
+        paused.apply(ContestEvent::Pause {
+            why: PauseWhy::Hidden,
+            at: MonoMs(paused.now),
+        });
+        paused.now += 60_000;
+        paused.apply(ContestEvent::Resume);
+        paused.now += 300;
+        paused.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(typed(&[(EntryField::Call, "K5XYZ", paused.now)])),
+        });
+        let nr = serial(replies(paused.last_turn())[0]);
+        paused.finish_turn();
+        paused.key(OpKey::Esm, "K5XYZ", &nr);
+        paused.finish_turn();
+        paused.now += 1_000;
+        paused.apply(ContestEvent::FinishNow);
+        let (kept, _) = result(&paused);
+        let timing = &kept.group_timings[0];
+        assert_eq!(
+            (timing.char_times.clone(), timing.untimed),
+            (None, Some(Untimed::Paused))
+        );
+
+        let mut again = runtime(&["K5XYZ"]);
+        again.finish_turn();
+        again.key(OpKey::Esm, "K5?", "");
+        again.finish_turn();
+        assert_eq!(again.machine.stations[0].heard.call_sends.count, 2);
+        again.now += 300;
+        again.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(typed(&[(EntryField::Call, "K5XYZ", again.now)])),
+        });
+        let nr = serial(replies(again.last_turn())[0]);
+        again.finish_turn();
+        again.key(OpKey::Esm, "K5XYZ", &nr);
+        again.finish_turn();
+        again.now += 1_000;
+        again.apply(ContestEvent::FinishNow);
+        let (kept, _) = result(&again);
+        let timing = &kept.group_timings[0];
+        assert_eq!((timing.char_times.clone(), timing.untimed), (None, None));
     }
 
     /// A group timed from a turn found late after it was logged is kept
