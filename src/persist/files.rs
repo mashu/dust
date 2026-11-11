@@ -377,6 +377,12 @@ impl HistoryFiles {
             self.clear_temporaries();
             load.notices.extend(self.journals_cut_short());
         }
+        // What the tombstones name before the records are listed, for a
+        // take-up of what an older build changed ([`Self::import`]).
+        let deleted_before = layout
+            .as_ref()
+            .filter(|layout| self.legacy_changed(layout))
+            .map(|_| self.tombstoned_keys());
         // As the folders were before they were read: whatever another copy
         // changes from here on is taken up at the next look. Where they
         // cannot be read, nothing was seen, and the next look reads them.
@@ -467,7 +473,15 @@ impl HistoryFiles {
             for (id, key) in &load.later {
                 live.entry(key.clone()).or_default().push(*id);
             }
-            match self.import(layout, &live) {
+            let taken = match &deleted_before {
+                Some(Ok(before)) => self.import(layout, &live, before),
+                Some(Err(err)) => {
+                    eprintln!("could not read what was deleted here: {err}");
+                    Err(HeldBack)
+                }
+                None => self.import(layout, &live, &HashSet::new()),
+            };
+            match taken {
                 Ok(Some(change)) => taken_up(&mut load.sessions, &change),
                 Ok(None) => {}
                 Err(HeldBack) => self.watch.unsee(),
@@ -622,9 +636,18 @@ impl HistoryFiles {
         let mut held_back = false;
         if let Ok(Gate::Open(layout)) = self.gate()
             && self.legacy_changed(&layout)
-            && let Some(live) = self.live_keys()
         {
-            held_back = self.import(&layout, &live).is_err();
+            // What the tombstones name before the records are listed, beside
+            // what they name after ([`Self::import`]).
+            held_back = match self.tombstoned_keys() {
+                Ok(before) => self
+                    .live_keys()
+                    .is_some_and(|live| self.import(&layout, &live, &before).is_err()),
+                Err(err) => {
+                    eprintln!("could not read what was deleted here: {err}");
+                    true
+                }
+            };
         }
         // As the folders were before they were looked at, the history kept
         // whole among them, and once what was taken up of it was stored, as
@@ -1106,11 +1129,17 @@ impl HistoryFiles {
 
     /// Take up what an older build stored in, or deleted from, the history
     /// kept whole since it was last taken up, `live` being every record
-    /// here by key ([`legacy::imported`]), and hand back what was made of
-    /// it: nothing, where nothing changed there. Held back where what
-    /// changed, or a tombstone here, cannot be read now, or the change
-    /// made: it is still to take up, as the caller notes, and the next look
-    /// tries again ([`Watch::unsee`]).
+    /// here by key ([`legacy::imported`]), and `before` the sessions the
+    /// tombstones named as they were read before those records were listed,
+    /// and hand back what was made of it: nothing, where nothing changed
+    /// there. Held back where what changed, or a tombstone here, cannot be
+    /// read now, or the change made: it is still to take up, as the caller
+    /// notes, and the next look tries again ([`Watch::unsee`]).
+    ///
+    /// The tombstones are read again here, after the records: a session
+    /// another copy deletes in between is either still here or deleted
+    /// after, and one it puts back in between, by Undo or a restore, is
+    /// either deleted before or here, once its Undo has put it back.
     ///
     /// It is no restore, and is not journaled: what was taken up is noted
     /// only once it is stored, so a take-up cut short is made again by the
@@ -1119,6 +1148,7 @@ impl HistoryFiles {
         &self,
         layout: &Layout,
         live: &HashMap<SessionKey, Vec<RecordId>>,
+        before: &HashSet<SessionKey>,
     ) -> Result<Option<HistoryChange>, HeldBack> {
         if !self.legacy_changed(layout) {
             return Ok(None);
@@ -1140,13 +1170,14 @@ impl HistoryFiles {
         let deleted = legacy_deleted(&self.root);
         // A tombstone that cannot be read now may name a session to keep
         // deleted: nothing is taken up until it reads.
-        let gone = match self.tombstoned_keys() {
+        let mut gone = match self.tombstoned_keys() {
             Ok(gone) => gone,
             Err(err) => {
                 eprintln!("could not read what was deleted here: {err}");
                 return Err(HeldBack);
             }
         };
+        gone.extend(before.iter().cloned());
         let Some((change, next)) =
             legacy::imported(layout, fingerprint, &sessions, &deleted, live, &gone)
         else {
@@ -3407,6 +3438,74 @@ mod tests {
         );
     }
 
+    /// An Undo another copy makes of a deletion here as this one takes up
+    /// what an older build stored, between this one's listing of the
+    /// records and its read of the tombstones, leaves the session stored
+    /// once, at a listing and as the history is read: the tombstones read
+    /// before the records still name it. Read after them alone, they left
+    /// the session neither here nor deleted, and it was taken up beside the
+    /// record the Undo put back.
+    #[test]
+    fn an_undo_another_copy_makes_as_this_one_takes_up_leaves_one_record() {
+        for reading_whole in [false, true] {
+            let dir = TempDir::new("undo-as-taken-up");
+            let now = crate::time::now_ms();
+            let old = finished(now - 10 * DAY);
+            keep_whole(&dir, std::slice::from_ref(&old));
+            let files = Files::at(&dir.0);
+            files.load();
+            // Held here as a later build stored it, so not as the older
+            // build's bytes, and deleted here.
+            let session = finished(now - 5 * DAY);
+            let mut held = serde_json::to_value(&session).unwrap();
+            held["laterKey"] = serde_json::json!(1);
+            let json = serde_json::to_string(&held).unwrap();
+            let here = Record {
+                id: RecordId::placed(session.timestamp, &json),
+                json,
+            };
+            files.apply(&put(std::slice::from_ref(&here)));
+            files.apply(&forget(&[(&here, &session)]));
+            // An older build's copy, holding it as new, writes its history
+            // back; and another copy undoes the deletion once this one has
+            // listed the records.
+            keep_whole(&dir, &[old, session.clone()]);
+            let history = dir.0.join(HISTORY);
+            let (tombstone, record) = (
+                history.join(TOMBSTONES).join(file_name(here.id)),
+                history.join(RECORDS).join(file_name(here.id)),
+            );
+            let looking = if reading_whole {
+                Files::at(&dir.0)
+            } else {
+                files
+            };
+            let mut looks = 0;
+            let undone = here.json.clone();
+            looking.meanwhile(move || {
+                looks += 1;
+                if looks == 3 {
+                    fs::remove_file(&tombstone).unwrap();
+                    fs::write(&record, &undone).unwrap();
+                }
+            });
+            if reading_whole {
+                looking.load();
+            } else {
+                looking.listing();
+            }
+            let key = SessionKey::of(&session);
+            let holding = names(&history.join(RECORDS))
+                .iter()
+                .filter(|name| {
+                    fs::read_to_string(history.join(RECORDS).join(name))
+                        .is_ok_and(|json| key_of(&json).as_ref() == Some(&key))
+                })
+                .count();
+            assert_eq!(holding, 1, "reading whole {reading_whole}");
+        }
+    }
+
     /// Which records were deleted by hand comes with when each was, as its
     /// tombstone says, none for one that does not say; and which session
     /// each was, where its tombstone says. On every platform, as the
@@ -3923,7 +4022,7 @@ mod tests {
         let records = dir.0.join(HISTORY).join(RECORDS);
         fs::create_dir_all(records.join(file_name(in_the_way))).unwrap();
         assert!(
-            files.import(&layout, &live).is_err(),
+            files.import(&layout, &live, &HashSet::new()).is_err(),
             "held back, to be tried again"
         );
         assert!(journals(&dir).is_empty(), "{:?}", journals(&dir));
@@ -5293,6 +5392,7 @@ mod tests {
         a_take_up_held_back_by_a_tombstone_that_cannot_be_read_is_still_to_take_up,
         #[cfg(unix)]
         a_take_up_that_cannot_be_made_now_is_still_to_take_up,
+        an_undo_another_copy_makes_as_this_one_takes_up_leaves_one_record,
         a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
