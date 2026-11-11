@@ -1052,8 +1052,8 @@ impl Backend for Disk<'_> {
     }
 
     /// By when `sessions.json` was last written, and how long it is: one
-    /// that cannot be looked at now changed for all this copy knows, and is
-    /// read with the rest.
+    /// that cannot be looked at now is taken as unchanged, and nothing is
+    /// taken up until it can be ([`LegacyLook::Same`]).
     async fn legacy_look(&self, layout: &Layout) -> LegacyLook {
         let changed = fingerprint_of(&self.0.root.join(SESSIONS))
             .is_ok_and(|now| Some(now) != layout.taken_up());
@@ -2939,6 +2939,27 @@ mod tests {
             "taken up"
         );
         assert!(!files.changed(), "taken up");
+    }
+
+    /// A history kept whole that cannot be looked at now, as a link that
+    /// leads back to itself cannot, is taken as unchanged since it was last
+    /// taken up: nothing is taken up of it until it can be, and nothing is
+    /// held back meanwhile ([`LegacyLook::Same`]). Taken as changed, as the
+    /// files' look at it said it was, it could not be read either, and each
+    /// look would hold the take-up back and tell of a change again.
+    #[cfg(unix)]
+    #[test]
+    fn a_history_kept_whole_that_cannot_be_looked_at_is_taken_as_unchanged() {
+        let dir = TempDir::new("cannot-be-looked-at");
+        keep_whole(&dir, &[finished(1_000), finished(2_000)]);
+        let files = Files::at(&dir.0);
+        let moved = ids(&files.load());
+        let sessions = dir.0.join(SESSIONS);
+        fs::remove_file(&sessions).unwrap();
+        std::os::unix::fs::symlink(&sessions, &sessions).unwrap();
+        assert_eq!(files.listing(), Some(moved.clone()));
+        assert!(!files.changed(), "nothing held back");
+        assert_eq!(files.listing(), Some(moved));
     }
 
     /// A tombstone gone by the time it is read, as another copy's put-back
@@ -5074,6 +5095,8 @@ mod tests {
         a_take_up_held_back_by_a_tombstone_that_cannot_be_read_is_still_to_take_up,
         #[cfg(unix)]
         a_take_up_that_cannot_be_made_now_is_still_to_take_up,
+        #[cfg(unix)]
+        a_history_kept_whole_that_cannot_be_looked_at_is_taken_as_unchanged,
         an_undo_another_copy_makes_as_this_one_takes_up_leaves_one_record,
         a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
