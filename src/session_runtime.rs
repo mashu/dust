@@ -11,10 +11,12 @@
 //! settings in Contest start one, and [`finish_run`] and [`abort_run`] reach
 //! whichever is live.
 
+use std::borrow::Cow;
+
 use cw_core::{
-    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, Group, MonoMs, Sampler,
-    SessionEffect, SessionEvent, SessionId, SessionMachine, SplitMix64, Transmission,
-    complete_session, generate_training_group, resolve_station,
+    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, Group, GroupSession,
+    MonoMs, Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SplitMix64,
+    Transmission, complete_session, generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -31,6 +33,11 @@ use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 pub(crate) type Groups = SessionMachine<Sampler>;
 
 impl RunMachine for Groups {
+    type Event = SessionEvent;
+    type Effect = SessionEffect;
+    type View = GroupSession;
+    /// How many of its groups are answered.
+    type Progress = usize;
     type Own = GroupsOwn;
 
     fn of(live: &Live) -> Option<&LiveSession> {
@@ -54,6 +61,33 @@ impl RunMachine for Groups {
         }
     }
 
+    fn shown(ctx: AppCtx) -> Signal<Option<GroupSession>> {
+        ctx.runtime
+    }
+
+    fn hear(&mut self, event: SessionEvent, now: MonoMs) -> Vec<SessionEffect> {
+        self.apply(event, now)
+    }
+
+    fn over(&self) -> bool {
+        self.is_terminal()
+    }
+
+    fn as_shown(&self) -> Cow<'_, GroupSession> {
+        Cow::Borrowed(self.session())
+    }
+
+    fn progress(&self) -> usize {
+        let session = self.session();
+        (0..session.group_count())
+            .filter(|&index| session.group(index).is_some_and(Group::confirmed))
+            .count()
+    }
+
+    fn progressed(&self, before: usize, _: Option<&GroupSession>, _: &GroupSession) -> bool {
+        self.progress() > before
+    }
+
     /// What End session would keep, with the settings auto level judges it
     /// by. A group just answered leaves nothing typed in the next, so then
     /// it is the groups answered; paused, it is the group the pause cut
@@ -74,14 +108,6 @@ impl RunMachine for Groups {
 }
 
 impl LiveSession {
-    /// How many of its groups are answered.
-    fn answered(&self) -> usize {
-        let session = self.machine.session();
-        (0..session.group_count())
-            .filter(|&index| session.group(index).is_some_and(Group::confirmed))
-            .count()
-    }
-
     /// What the receiver hears for group `index`: the station being copied,
     /// and whoever else is calling across it.
     ///
@@ -226,35 +252,21 @@ fn beat(ctx: AppCtx, lease: Lease) {
 /// pauses the session, and they find it paused. Typing still waiting out
 /// the box's pause came before the gap, so the session hears it first.
 fn pause_if_away(ctx: AppCtx, lease: &Lease) {
-    let mut runtime = ctx.runtime;
-    let app = ctx.app();
-    let effects = {
-        let mut slot = app.session.borrow_mut();
-        let Some(live) = slot
-            .as_mut()
-            .and_then(Groups::of_mut)
-            .filter(|live| live_run::hears(live, lease))
-        else {
-            return;
-        };
-        let Some(seen) = live.away(MonoMs(mono_ms()), true) else {
-            return;
-        };
+    let away = live_run::step::<Groups>(ctx, lease, None, |live, now| {
+        let seen = live.away(now, true)?;
         if live.machine.session().paused() {
-            return;
+            return None;
         }
         let mut effects = ctx
             .answer
             .take()
             .map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), seen));
         effects.extend(live.machine.apply(SessionEvent::Pause, seen));
-        let session = live.machine.session();
-        if runtime.peek().as_ref() != Some(session) {
-            runtime.set(Some(session.clone()));
-        }
-        effects
-    };
-    run_effects(ctx, lease, effects);
+        Some(effects)
+    });
+    if let Some((lease, effects)) = away {
+        run_effects(ctx, &lease, effects);
+    }
 }
 
 /// Carry on after a pause. The audio a pause gave back is claimed afresh
@@ -355,9 +367,8 @@ pub fn abort_run(ctx: AppCtx) {
 /// paused from the start of the gap ([`pause_if_away`]).
 fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
     pause_if_away(ctx, lease);
-    let mut runtime = ctx.runtime;
-    let app = ctx.app();
-    let closes = app
+    let closes = ctx
+        .app()
         .session
         .borrow()
         .as_ref()
@@ -387,56 +398,15 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         Some(AnswerClose::Unbegun) => ctx.answer.finish(),
         Some(AnswerClose::Settled) | None => {}
     }
-    let (effects, so_far) = {
-        let mut slot = app.session.borrow_mut();
-        let Some(live) = slot
-            .as_mut()
-            .and_then(Groups::of_mut)
-            .filter(|live| live_run::hears(live, lease))
-        else {
-            return;
-        };
-        let now = MonoMs(mono_ms());
-        let finished_at = now_ms();
-        let answered = live.answered();
-        // Paused, having given the audio back, what it would keep before it
-        // hears this: a send it hears of now as held up takes the times of
-        // the group it was a send of.
-        let paused = (!lease.is_current()).then(|| Groups::so_far(live, now, finished_at));
-        // Typing still waiting out the box's pause came before this event,
-        // so the machine hears it first.
-        let mut effects = ctx
-            .answer
-            .take()
-            .map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), now));
-        effects.extend(live.machine.apply(event, now));
-        // A group answered, or what it would keep changed by what it heard
-        // while paused, and the session going on: what it would keep now
-        // goes with its mark, should the app stop under it.
-        let so_far = if live.machine.is_terminal() {
-            None
-        } else if live.answered() > answered {
-            Groups::so_far(live, now, finished_at)
-        } else {
-            paused.and_then(|before| {
-                Groups::so_far(live, now, finished_at)
-                    .filter(|after| before.as_ref() != Some(after))
-            })
-        }
-        .map(|so_far| (live.mark.clone(), so_far));
-        // Much of what arrives changes nothing — a key while the box is
-        // locked, a timer the machine has forgotten — and publishing it
-        // anyway would copy the whole session and redraw the screen for it.
-        let session = live.machine.session();
-        if runtime.peek().as_ref() != Some(session) {
-            runtime.set(Some(session.clone()));
-        }
-        (effects, so_far)
-    };
-    if let Some((mark, so_far)) = so_far {
-        ctx.mark_so_far(&mark, so_far);
+    // Typing still waiting out the box's pause came before this event, so
+    // the machine hears it first.
+    let heard = live_run::step::<Groups>(ctx, lease, Some(event), |live, now| {
+        let typed = ctx.answer.take();
+        Some(typed.map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), now)))
+    });
+    if let Some((lease, effects)) = heard {
+        run_effects(ctx, &lease, effects);
     }
-    run_effects(ctx, lease, effects);
 }
 
 /// Do what the machine said.

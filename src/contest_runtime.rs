@@ -9,9 +9,11 @@
 //! falls silent and the screen may sleep; Resume claims it again inside the
 //! tap, where a browser lets a player start.
 
+use std::borrow::Cow;
+
 use cw_core::{
-    ContestEffect, ContestEvent, ContestMachine, ContestPhase, EntryField, MonoMs, OpKey, PauseWhy,
-    Sampler, TrainingSettings, Turn, plan_turn,
+    ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, EntryField, MonoMs,
+    OpKey, PauseWhy, Sampler, TrainingSettings, Turn, plan_turn,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -28,6 +30,10 @@ use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
 pub(crate) type Run = ContestMachine<Sampler>;
 
 impl RunMachine for Run {
+    type Event = ContestEvent;
+    type Effect = ContestEffect;
+    type View = ContestView;
+    type Progress = ();
     type Own = RunOwn;
 
     fn of(live: &Live) -> Option<&LiveContest> {
@@ -49,6 +55,29 @@ impl RunMachine for Run {
             Live::Contest(live) => Some(*live),
             Live::Groups(_) => None,
         }
+    }
+
+    fn shown(ctx: AppCtx) -> Signal<Option<ContestView>> {
+        ctx.contest
+    }
+
+    fn hear(&mut self, event: ContestEvent, now: MonoMs) -> Vec<ContestEffect> {
+        self.apply(event, now)
+    }
+
+    fn over(&self) -> bool {
+        self.is_terminal()
+    }
+
+    fn as_shown(&self) -> Cow<'_, ContestView> {
+        Cow::Owned(self.view())
+    }
+
+    fn progress(&self) {}
+
+    /// A QSO logged, or its check shown.
+    fn progressed(&self, (): (), published: Option<&ContestView>, shown: &ContestView) -> bool {
+        published.is_some_and(|before| before.log != shown.log)
     }
 
     /// What End run would keep: none while it has worked nobody.
@@ -139,7 +168,9 @@ pub fn send_run_event(ctx: AppCtx, event: ContestEvent) {
         resume_run(ctx);
         return;
     }
-    apply(ctx, Some(event));
+    if let Some(lease) = live_run::lease::<Run>(ctx) {
+        dispatch(ctx, &lease, event);
+    }
 }
 
 /// A key or a message button: whatever paddle letter is keyed in full goes
@@ -151,14 +182,8 @@ pub fn press_key(ctx: AppCtx, key: OpKey) {
         return;
     };
     lease.wake();
-    let fields = ctx.entry.snapshot();
-    apply(
-        ctx,
-        Some(ContestEvent::Key {
-            key,
-            fields: Box::new(fields),
-        }),
-    );
+    let fields = Box::new(ctx.entry.snapshot());
+    dispatch(ctx, &lease, ContestEvent::Key { key, fields });
 }
 
 /// − / +: your speed, moved by `delta` WPM from your next message on, and
@@ -170,7 +195,7 @@ pub fn change_speed(ctx: AppCtx, delta: i32) {
         return;
     };
     lease.wake();
-    apply(ctx, Some(ContestEvent::Speed { delta }));
+    dispatch(ctx, &lease, ContestEvent::Speed { delta });
     let moved = ctx.contest.peek().as_ref().map(|view| view.my_wpm);
     if let Some(wpm) = moved {
         // Whole already: − / + move it from the whole speed nearest it.
@@ -186,7 +211,7 @@ pub fn change_speed(ctx: AppCtx, delta: i32) {
 /// sight.
 pub fn pause_run(ctx: AppCtx, why: PauseWhy) {
     let at = MonoMs(mono_ms());
-    apply(ctx, Some(ContestEvent::Pause { why, at }));
+    send_run_event(ctx, ContestEvent::Pause { why, at });
 }
 
 /// Carry on after a pause. The audio is claimed afresh here, inside the tap
@@ -214,10 +239,10 @@ pub fn resume_run(ctx: AppCtx) {
     if let Some(live) = app.session.borrow_mut().as_mut().and_then(Run::of_mut)
         && let Some(running) = live.stage.claimed()
     {
-        live.lease = lease;
+        live.lease = lease.clone();
         live.stage = running;
     }
-    apply(ctx, Some(ContestEvent::Resume));
+    dispatch(ctx, &lease, ContestEvent::Resume);
     // The paused page is shorter, so a phone scrolled down to Pause is left
     // part way down it, the run bar and the fields above the screen's top:
     // the run carries on from its top, as every screen opens. Pausing
@@ -229,96 +254,46 @@ pub fn resume_run(ctx: AppCtx) {
 /// after the one before is time the app was not running, and the run is
 /// paused from that one first.
 pub fn tick(ctx: AppCtx) {
-    apply(ctx, None);
-}
-
-/// Hand the run news from its own tasks: a timer, a send. What comes under
-/// the run's own lease is its to hear while it holds the audio, and while it
-/// is paused, having given the audio back, as a paused session hears it:
-/// the news of the send its pause cut short ([`live_run::hears`]). News
-/// under another lease — a run that has ended, one before it — is dropped.
-/// A timer never comes to a paused run: the lease it was armed under drops
-/// it ([`Lease::after`]).
-fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
-    let hears = ctx
-        .app()
-        .session
-        .borrow()
-        .as_ref()
-        .and_then(Run::of)
-        .is_some_and(|live| live_run::hears(live, lease));
-    if hears {
-        apply(ctx, Some(event));
+    let Some(lease) = live_run::lease::<Run>(ctx) else {
+        return;
+    };
+    let away = live_run::step::<Run>(ctx, &lease, None, |live, now| {
+        let at = live.away(now, true)?;
+        Some(away_from(live, at, now))
+    });
+    if let Some((lease, effects)) = away {
+        run_effects(ctx, &lease, effects);
     }
 }
 
-/// Let the machine decide what `event` means, then do what it says: none
-/// is a tick ([`tick`]), which sees the run running.
+/// The run paused from `at`, when it was last seen before a gap the app was
+/// not running in.
+fn away_from(live: &mut LiveContest, at: MonoMs, now: MonoMs) -> Vec<ContestEffect> {
+    let why = PauseWhy::Hidden;
+    live.machine.apply(ContestEvent::Pause { why, at }, now)
+}
+
+/// Let the machine decide what `event` means, then do what it says: what
+/// the user did, and news from the run's own tasks, a timer, a send. What
+/// comes under the run's own lease is its to hear while it holds the audio,
+/// and while it is paused, having given the audio back, as a paused session
+/// hears it: what is done to it then, and the news of the send its pause
+/// cut short ([`live_run::hears`]). News under another lease — a run that
+/// has ended, one before it — is dropped. A timer never comes to a paused
+/// run: the lease it was armed under drops it ([`Lease::after`]).
 ///
 /// Before anything is heard, a gap since the run screen last ticked longer
 /// than any tick takes is credited as paused, from that tick: a process
 /// frozen whole — a locked phone — hears nothing until it thaws, and then
 /// its first news is old.
-fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
-    let mut view = ctx.contest;
-    let app = ctx.app();
-    let (lease, effects, so_far) = {
-        let mut slot = app.session.borrow_mut();
-        let Some(live) = slot.as_mut().and_then(Run::of_mut) else {
-            return;
-        };
-        let now = MonoMs(mono_ms());
-        let finished_at = now_ms();
-        // Paused, having given the audio back, what it would keep before it
-        // hears this: a turn it hears of now as held up takes the times of
-        // the copies heard in it.
-        let paused = (event.is_some() && !live.lease.is_current())
-            .then(|| Run::so_far(live, now, finished_at));
-        let away = live.away(now, event.is_none());
-        if away.is_none() && event.is_none() {
-            return;
-        }
-        let mut effects = Vec::new();
-        if let Some(at) = away {
-            let away = ContestEvent::Pause {
-                why: PauseWhy::Hidden,
-                at,
-            };
-            effects.extend(live.machine.apply(away, now));
-        }
-        if let Some(event) = event {
-            effects.extend(live.machine.apply(event, now));
-        }
-        // Much of what arrives changes nothing — a stale send's news, a key
-        // that sends nothing — and publishing it anyway would redraw the
-        // screen for it.
-        let shown = live.machine.view();
-        // A QSO logged, or its check shown, or what it would keep changed by
-        // what it heard while paused, the run going on: what it would keep
-        // now goes with its mark, should the app stop under it.
-        let logged = view
-            .peek()
-            .as_ref()
-            .is_some_and(|before| before.log != shown.log);
-        let so_far = if live.machine.is_terminal() {
-            None
-        } else if logged {
-            Run::so_far(live, now, finished_at)
-        } else {
-            paused.and_then(|before| {
-                Run::so_far(live, now, finished_at).filter(|after| before.as_ref() != Some(after))
-            })
-        }
-        .map(|so_far| (live.mark.clone(), so_far));
-        if view.peek().as_ref() != Some(&shown) {
-            view.set(Some(shown));
-        }
-        (live.lease.clone(), effects, so_far)
-    };
-    if let Some((mark, so_far)) = so_far {
-        ctx.mark_so_far(&mark, so_far);
+fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
+    let heard = live_run::step::<Run>(ctx, lease, Some(event), |live, now| {
+        let away = live.away(now, false);
+        Some(away.map_or_else(Vec::new, |at| away_from(live, at, now)))
+    });
+    if let Some((lease, effects)) = heard {
+        run_effects(ctx, &lease, effects);
     }
-    run_effects(ctx, &lease, effects);
 }
 
 fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
