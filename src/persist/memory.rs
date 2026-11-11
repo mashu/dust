@@ -25,7 +25,7 @@ use super::legacy::{
 use super::progress::{HistoryProgress, LoadProgress};
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId, Unopened,
-    done, failed_for_now, read_record, records_for_blob, unread_notices, unreadable,
+    Unreadable, done, failed_for_now, read_record, records_for_blob, unread_notices, unreadable,
 };
 use super::{
     BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Lock, LockHeld, Locking, MarkId,
@@ -55,14 +55,22 @@ pub struct MemoryStore {
     pub legacy_deleted: RefCell<Vec<Deleted>>,
     /// What the move set aside of the history kept whole.
     pub legacy_aside: RefCell<Vec<String>>,
-    /// The records this build could not read and has told of.
-    told: RefCell<BTreeSet<RecordId>>,
+    /// The records this build told of as damaged, or as a newer Dust's,
+    /// until each reads, or is gone, as the files note them in
+    /// `damaged-told.json`: one damaged again after is told of again.
+    damaged_told: RefCell<BTreeSet<RecordId>>,
+    /// The records this build told of as ones that could not be read, a
+    /// failure that outlasted the app's tries, until each reads, or is
+    /// gone, as the files note them in `unread-told.json`: one that fails
+    /// again after is told of again.
+    unread_told: RefCell<BTreeSet<RecordId>>,
     /// How many times the store was asked to tell of records still unread
     /// after every try ([`Store::still_unread`]).
     pub still_unread_asks: Cell<usize>,
     /// The records that could not be read at all as the history was last
-    /// read: one that still cannot be read at the next read is told of
-    /// then, as the files tell of it.
+    /// read, or at the app's last try, and have not read since, nor gone,
+    /// as the files note them in `failing.json`: one that still cannot be
+    /// read at the next read is told of then.
     failed_last: RefCell<BTreeSet<RecordId>>,
     counters: RefCell<BTreeMap<CountersKey, AutoLevelCounters>>,
     /// How many times the settings were written, for a test that cares how
@@ -600,20 +608,15 @@ impl Store for MemoryStore {
         let tombstones = self.tombstones.borrow();
         let held_open = self.held_open.borrow();
         // Each record that holds no session this build reads, with what it
-        // says of itself, and each that could not be read at all, as one
-        // held open cannot be, where it could not be read as the history
-        // was last read either: none of it said.
-        let failed_before = self.failed_last.take();
-        let mut told_of = Vec::new();
+        // says of itself; and each that could not be read at all, as one
+        // held open cannot be.
+        let mut unread = Vec::new();
         for (id, held) in self.records.borrow().iter() {
             if tombstones.contains_key(id) {
                 continue;
             }
             if held_open.contains(id) {
                 load.failed.push(*id);
-                if failed_before.contains(id) {
-                    told_of.push((*id, None));
-                }
                 continue;
             }
             match held.session() {
@@ -626,17 +629,11 @@ impl Store for MemoryStore {
                         load.later.push((*id, key.clone()));
                     }
                     load.unread.push(*id);
-                    told_of.push((*id, Some(said)));
+                    unread.push((*id, said));
                 }
             }
         }
-        self.failed_last
-            .replace(load.failed.iter().copied().collect());
-        let mut told = self.told.borrow_mut();
-        let new = told_of.iter().filter(|(id, _)| !told.contains(id));
-        load.notices
-            .extend(unread_notices(new.map(|(_, said)| said.as_ref())));
-        told.extend(told_of.iter().map(|(id, _)| *id));
+        load.notices.extend(self.tell(&unread, &load.failed));
         // Complete once the move is made: until then, the sessions kept
         // whole are stored, though not here.
         load.complete = self.layout.borrow().is_some();
@@ -679,14 +676,21 @@ impl Store for MemoryStore {
         self.import();
         self.seen.set(self.looking());
         let tombstones = self.tombstones.borrow();
-        done(Some(
-            self.records
-                .borrow()
-                .keys()
-                .filter(|id| !tombstones.contains_key(id))
-                .copied()
-                .collect(),
-        ))
+        let listed: Vec<RecordId> = self
+            .records
+            .borrow()
+            .keys()
+            .filter(|id| !tombstones.contains_key(id))
+            .copied()
+            .collect();
+        // Those no longer listed are gone, and told of no more, as the files
+        // note them: should one come back and fail, that is a failure of its
+        // own, told of in turn.
+        let there: HashSet<RecordId> = listed.iter().copied().collect();
+        for note in [&self.damaged_told, &self.unread_told, &self.failed_last] {
+            note.borrow_mut().retain(|id| there.contains(id));
+        }
+        done(Some(listed))
     }
 
     /// Each that cannot be read could not be read just now: the memory
@@ -774,13 +778,17 @@ impl Store for MemoryStore {
         }))
     }
 
-    /// As the files tell of them: once each.
+    /// As the files tell of them: once each, until each reads or is gone;
+    /// noted as failing too, as this build's failures.
     fn still_unread(&self, ids: Vec<RecordId>) -> Pending<Vec<HistoryNotice>> {
         self.still_unread_asks.set(self.still_unread_asks.get() + 1);
-        let mut told = self.told.borrow_mut();
-        let new: Vec<RecordId> = ids.into_iter().filter(|id| !told.contains(id)).collect();
-        told.extend(new.iter().copied());
-        done(unread_notices(new.iter().map(|_| None)))
+        let mut told = self.unread_told.borrow_mut();
+        let notices = unread_notices(ids.iter().filter(|id| !told.contains(id)).map(|_| None));
+        if !notices.is_empty() {
+            told.extend(ids.iter().copied());
+            self.failed_last.borrow_mut().extend(ids.iter().copied());
+        }
+        done(notices)
     }
 
     fn load_sync(&self) -> Option<String> {
@@ -1002,9 +1010,10 @@ impl MemoryStore {
     }
 
     /// The records `ids`, as they are stored now: one that cannot be read
-    /// comes back as its id. Each read fails no longer, as the files note
-    /// it: one that fails again as the history is next read is not told of
-    /// then.
+    /// comes back as its id. Each read fails no longer, and is told of no
+    /// more, as the files note it: one that fails again as the history is
+    /// next read is not told of then, and one that fails again after the
+    /// app's tries, or is damaged, is told of again.
     fn read_now(&self, ids: Vec<RecordId>) -> Vec<Result<Record, Unopened>> {
         let (records, held_open) = (self.records.borrow(), self.held_open.borrow());
         let read: Vec<Result<Record, Unopened>> = ids
@@ -1017,11 +1026,51 @@ impl MemoryStore {
                 _ => Err(Unopened::Failed(id)),
             })
             .collect();
-        let mut failed = self.failed_last.borrow_mut();
         for record in read.iter().flatten() {
-            failed.remove(&record.id);
+            for note in [&self.damaged_told, &self.unread_told, &self.failed_last] {
+                note.borrow_mut().remove(&record.id);
+            }
         }
         read
+    }
+
+    /// What to tell of `unread`, the records this build cannot read, each
+    /// with what it says of itself, and of `failed`, those that could not
+    /// be read at all just now, as the files tell of them: of the first,
+    /// those not told of since each last read; of the second, those that
+    /// could not be read as the history was last read either, and have not
+    /// read since, nor been told of. Then noted, as the files note them: a
+    /// failure told of while it still fails, a record that cannot be read
+    /// while it cannot be read, or fails, and what failed now.
+    fn tell(&self, unread: &[(RecordId, Unreadable)], failed: &[RecordId]) -> Vec<HistoryNotice> {
+        let (mut damaged_told, mut unread_told) = (
+            self.damaged_told.borrow_mut(),
+            self.unread_told.borrow_mut(),
+        );
+        let failing_now: BTreeSet<RecordId> = failed.iter().copied().collect();
+        let failed_before = self.failed_last.replace(failing_now.clone());
+        let failed_again: Vec<RecordId> = failed
+            .iter()
+            .filter(|id| failed_before.contains(id))
+            .copied()
+            .collect();
+        let notices = unread_notices(
+            unread
+                .iter()
+                .filter(|(id, _)| !damaged_told.contains(id))
+                .map(|(_, said)| Some(said))
+                .chain(
+                    failed_again
+                        .iter()
+                        .filter(|id| !unread_told.contains(id))
+                        .map(|_| None),
+                ),
+        );
+        unread_told.retain(|id| failing_now.contains(id));
+        unread_told.extend(failed_again);
+        damaged_told.retain(|id| failing_now.contains(id));
+        damaged_told.extend(unread.iter().map(|(id, _)| *id));
+        notices
     }
 
     /// Answer every read asked for ([`Self::reads_later`]), as the store
@@ -1670,6 +1719,130 @@ mod tests {
         assert!(store.history_changed());
         store.load_history();
         assert!(!store.history_changed(), "taken up as it is read");
+    }
+
+    /// A record told of as one that could not be read, which then reads,
+    /// at a later launch or at one of the app's tries, and fails again
+    /// after, is told of again, once, as the files tell of it: that is a
+    /// failure of its own. The test store kept one note of all it told of,
+    /// for good, and it was never told of again.
+    #[test]
+    fn a_record_told_of_as_unread_that_reads_and_fails_again_is_told_of_again() {
+        let store = MemoryStore::default();
+        store.load_history();
+        let busy = record(&finished(2_000));
+        now(store.change_history(put(std::slice::from_ref(&busy))));
+        let hold = |held: bool| {
+            let mut open = store.held_open.borrow_mut();
+            if held {
+                open.insert(busy.id);
+            } else {
+                open.clear();
+            }
+        };
+        let told = [HistoryNotice::Unread { count: 1 }];
+        hold(true);
+        assert_eq!(store.load_history().notices, []);
+        assert_eq!(
+            now(store.still_unread(vec![busy.id])),
+            told,
+            "after every try"
+        );
+        // It reads at the next launch, and fails at the one after.
+        hold(false);
+        assert_eq!(store.load_history().sessions.len(), 1);
+        hold(true);
+        assert_eq!(store.load_history().failed, [busy.id]);
+        assert_eq!(
+            now(store.still_unread(vec![busy.id])),
+            told,
+            "told of again"
+        );
+        assert_eq!(now(store.still_unread(vec![busy.id])), [], "once");
+        // It reads at one of the app's tries, and fails at a later one.
+        hold(false);
+        assert_eq!(now(store.read_records(vec![busy.id])), [Ok(busy.clone())]);
+        hold(true);
+        assert_eq!(
+            now(store.read_records(vec![busy.id])),
+            [Err(Unopened::Failed(busy.id))]
+        );
+        assert_eq!(now(store.still_unread(vec![busy.id])), told, "and again");
+        assert_eq!(now(store.still_unread(vec![busy.id])), [], "once");
+    }
+
+    /// A record told of as one that could not be read, after the app's
+    /// tries, that is found damaged at a later launch is told of as damaged,
+    /// as the files tell of it: one note of all it told of held it back.
+    #[test]
+    fn a_record_told_of_as_unread_that_is_damaged_since_is_told_of_as_damaged() {
+        let store = MemoryStore::default();
+        store.load_history();
+        let json = serde_json::to_string(&finished(2_000)).expect("writes");
+        let busy = store.plant_unreadable(&json);
+        store.held_open.borrow_mut().insert(busy);
+        assert_eq!(store.load_history().failed, [busy]);
+        assert_eq!(
+            now(store.still_unread(vec![busy])),
+            [HistoryNotice::Unread { count: 1 }]
+        );
+        store.held_open.borrow_mut().clear();
+        store.mend(busy, "{ cut short");
+        assert_eq!(
+            store.load_history().notices,
+            [HistoryNotice::Damaged { count: 1 }],
+            "told of as damaged"
+        );
+    }
+
+    /// A record told of as one that could not be read, which is no longer
+    /// listed at a look, is told of no more, as the files note it: it is
+    /// gone, and should it come back and fail, that is a failure of its own,
+    /// told of in turn. One note of all it told of held it back for good.
+    #[test]
+    fn a_record_told_of_that_is_gone_at_a_look_is_told_of_no_more() {
+        let store = MemoryStore::default();
+        store.load_history();
+        let busy = record(&finished(2_000));
+        now(store.change_history(put(std::slice::from_ref(&busy))));
+        store.held_open.borrow_mut().insert(busy.id);
+        assert_eq!(store.load_history().failed, [busy.id]);
+        let told = [HistoryNotice::Unread { count: 1 }];
+        assert_eq!(now(store.still_unread(vec![busy.id])), told);
+        store.lose(busy.id);
+        assert_eq!(
+            now(store.history_listing()),
+            Some(Vec::new()),
+            "gone, at a look"
+        );
+        now(store.change_history(put(std::slice::from_ref(&busy))));
+        assert_eq!(
+            now(store.read_records(vec![busy.id])),
+            [Err(Unopened::Failed(busy.id))]
+        );
+        assert_eq!(
+            now(store.still_unread(vec![busy.id])),
+            told,
+            "back, and failing on its own"
+        );
+    }
+
+    /// A record told of as damaged, which reads again, then is damaged once
+    /// more, is told of again, as the files tell of it: that is a damage of
+    /// its own. One note of all it told of held it back for good.
+    #[test]
+    fn a_record_told_of_as_damaged_that_reads_and_is_damaged_again_is_told_of_again() {
+        let store = MemoryStore::default();
+        store.load_history();
+        let damaged = store.plant_unreadable("{ cut short");
+        let told = [HistoryNotice::Damaged { count: 1 }];
+        assert_eq!(store.load_history().notices, told);
+        assert_eq!(store.load_history().notices, [], "once");
+        let json = serde_json::to_string(&finished(2_000)).expect("writes");
+        store.mend(damaged, &json);
+        assert_eq!(store.load_history().sessions.len(), 1, "it reads");
+        store.mend(damaged, "{ cut short again");
+        assert_eq!(store.load_history().notices, told, "damaged again");
     }
 
     /// Changes made later are made in the order they were asked for, each
