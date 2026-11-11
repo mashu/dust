@@ -339,6 +339,8 @@ struct Script<const READ_FIRST: bool> {
     moves: RefCell<VecDeque<Result<(), Said>>>,
     /// How the history is kept, as the last change laid it.
     laid: RefCell<Option<Layout>>,
+    /// How many records each read asked for, in the order asked.
+    reads: RefCell<Vec<usize>>,
 }
 
 impl<const READ_FIRST: bool> Script<READ_FIRST> {
@@ -358,6 +360,7 @@ impl<const READ_FIRST: bool> Script<READ_FIRST> {
             commits: RefCell::new(VecDeque::new()),
             moves: RefCell::new(VecDeque::new()),
             laid: RefCell::new(None),
+            reads: RefCell::new(Vec::new()),
         }
     }
 
@@ -490,6 +493,7 @@ impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
         } else {
             "read"
         });
+        self.reads.borrow_mut().push(ids.len());
         let records = self.records.borrow();
         ids.iter()
             .map(|id| match records.get(id) {
@@ -800,6 +804,26 @@ fn a_store_that_moves_first_takes_up_after_the_records_reading_the_tombstones_be
             "loaded",
         ])
     );
+}
+
+/// A take-up reads the records it knows no session of a part at a time,
+/// for their keys, each part's texts let go of before the next is read:
+/// however many another copy stored, no more than [`READ_PART`] are held
+/// at once. Read all at once, as since 95e0361, every text another copy
+/// stored was held at once, as the files had never held them.
+#[test]
+fn a_take_up_reads_the_records_it_knows_no_session_of_a_part_at_a_time() {
+    let script = Script::<false>::new(Ok(Gate::Open(Box::new(moved_layout()))));
+    script.changed.set(true);
+    for at in 1..=600 {
+        let record = record_of(at * 1_000);
+        script.hold(record.id, &record.json);
+    }
+    now(listing(&script)).expect("listed");
+    let reads = script.reads.borrow();
+    assert_eq!(reads.iter().sum::<usize>(), 600, "each read once");
+    assert!(reads.iter().all(|&asked| asked <= READ_PART), "{reads:?}");
+    assert_eq!(script.keys.borrow().len(), 600, "each one's key noted");
 }
 
 /// A store that reads first notes its look before anything is read, reads

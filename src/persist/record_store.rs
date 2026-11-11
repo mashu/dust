@@ -246,6 +246,12 @@ pub(super) fn deleted_sessions_of(found: TombstonesOf) -> Vec<(RecordId, Session
 /// takes, as every copy moves the same records.
 pub(super) const MOVE_TRIES: usize = 3;
 
+/// How many records a take-up reads at a time for the sessions they hold
+/// ([`live_keys`]): each part's texts are let go of before the next is
+/// read, some two megabytes at most, at some seven kilobytes a session,
+/// however many another copy stored since.
+const READ_PART: usize = 256;
+
 /// Why a store does not keep the history this visit, as a browser's
 /// database would not ([`Backend::FALLS_BACK`]), and what reading the
 /// history kept whole set aside meanwhile, as it could not read it.
@@ -1053,13 +1059,13 @@ async fn take_up<B: Backend>(
 }
 
 /// Every record there is by its session's key: those read before as they
-/// were read, the rest read now for their keys alone. One that is damaged
-/// has none, though it may say one, as one whose bytes are no text has
-/// none: only one that reads, or that a later build stored, holds its
-/// session ([`held_key`]). None where the history cannot be listed, or a
-/// record in it cannot be read for now, or all of them listed: it may hold
-/// a session an older build holds too, which would be taken up a second
-/// time beside it.
+/// were read, the rest read now for their keys alone, a part at a time
+/// ([`READ_PART`]). One that is damaged has none, though it may say one, as
+/// one whose bytes are no text has none: only one that reads, or that a
+/// later build stored, holds its session ([`held_key`]). None where the
+/// history cannot be listed, or a record in it cannot be read for now, or
+/// all of them listed: it may hold a session an older build holds too,
+/// which would be taken up a second time beside it.
 async fn live_keys<B: Backend>(store: &B) -> Option<Live> {
     let listing = store.list().await.ok()?;
     if listing.skipped {
@@ -1073,10 +1079,10 @@ async fn live_keys<B: Backend>(store: &B) -> Option<Live> {
             .copied()
             .collect()
     };
-    if !unknown.is_empty() {
-        let read = store.read(&unknown, Some(&listing.listed)).await;
+    for part in unknown.chunks(READ_PART) {
+        let read = store.read(part, Some(&listing.listed)).await;
         let mut keys = store.keys().borrow_mut();
-        for (id, raw) in unknown.into_iter().zip(read) {
+        for (&id, raw) in part.iter().zip(read) {
             match raw {
                 Raw::Text(raw) => {
                     if let Some(key) = held_key(&raw) {
