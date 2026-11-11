@@ -991,8 +991,8 @@ deleted there by a build that keeps none, which finished after that
 cut-off, a later one than every session the move took among them, comes
 back with such a copy, as it does in that build. It
 makes here each deletion the older build made since, once, by what it is,
-whatever its clock said (`deletionsTaken`,
-beside `deletedSeen`, which builds before them go by). But where a build
+whatever its clock said, and two of one session as one, the later
+(`deletionsTaken`, beside `deletedSeen`, which builds before them go by). But where a build
 before those rules took deletions up first, moving `deletedSeen` on, every
 deletion stamped after what this build had seen and no later than that
 counts as one that build took, and is not made here. That includes one a

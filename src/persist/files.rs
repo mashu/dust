@@ -4423,6 +4423,29 @@ mod tests {
         assert_eq!(stamps(&Files::at(&dir.0).load()), [first.timestamp]);
     }
 
+    /// Two deletions of one session an older build remembers, as two of its
+    /// copies each deleted it, are made here as one, its tombstone stamped
+    /// with the later, as in a browser: the first was kept here, the last
+    /// in a browser.
+    #[test]
+    fn two_deletions_of_one_session_an_older_build_made_are_one_tombstone_stamped_with_the_later() {
+        let dir = TempDir::new("older-deleted-twice");
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 10 * DAY), finished(now - 9 * DAY));
+        keep_whole(&dir, &[first.clone(), second.clone()]);
+        let read = Files::at(&dir.0).load();
+        let second_id = read.sessions[1].0;
+        keep_whole(&dir, std::slice::from_ref(&first));
+        let deleted = [Deleted::of(&second, now), Deleted::of(&second, now + 1)];
+        fs::write(dir.0.join(DELETED), serde_json::to_vec(&deleted).unwrap()).unwrap();
+        let files = Files::at(&dir.0);
+        assert_eq!(stamps(&files.load()), [first.timestamp]);
+        assert_eq!(
+            files.deletions(&[second_id]),
+            Some(vec![(second_id, Some(now + 1))])
+        );
+    }
+
     /// A deletion an older build makes after the move is made here,
     /// whatever its clock says: here, behind a deletion a clock set a year
     /// ahead stamped before the move. Only one stamped past every deletion

@@ -738,7 +738,9 @@ fn as_moved(json: &str) -> String {
 ///
 /// A deletion the older build made is made here too, of every record with
 /// its key, as it would have been there, once: each taken is noted
-/// ([`Layout::deletions_taken`]), whatever its stamp says. Where a layout
+/// ([`Layout::deletions_taken`]), whatever its stamp says. Two of one
+/// session, as two of its copies each made one, delete each record once,
+/// as the later. Where a layout
 /// notes none, as an earlier build wrote it, each made no later than the
 /// latest taken is taken, as such builds take them; where a build that
 /// notes none has taken deletions up since ([`DeletionsTaken::seen`]),
@@ -828,12 +830,22 @@ pub(super) fn imported(
                 .map(DeletionSeen::of),
         );
     }
+    // A record has one tombstone: of two deletions of its session, as two
+    // copies there each made one, the later.
+    let mut forgotten: HashMap<RecordId, usize> = HashMap::new();
     for gone in deleted
         .iter()
         .filter(|gone| !made.contains(&DeletionSeen::of(gone)))
     {
-        for id in live.get(&gone.key()).into_iter().flatten() {
-            change.forget.push((*id, gone.clone()));
+        for &id in live.get(&gone.key()).into_iter().flatten() {
+            match forgotten.get(&id) {
+                Some(&at) if change.forget[at].1.at < gone.at => change.forget[at].1 = gone.clone(),
+                Some(_) => {}
+                None => {
+                    forgotten.insert(id, change.forget.len());
+                    change.forget.push((id, gone.clone()));
+                }
+            }
         }
     }
     let mut next = layout.clone();
@@ -2003,6 +2015,42 @@ mod tests {
         )
         .expect("taken up");
         assert!(change.forget.is_empty(), "made once: {:?}", change.forget);
+    }
+
+    /// Two deletions of one session that an older build remembers, both
+    /// new here, as two of its copies each deleted it, forget its record
+    /// once, with the later: a record has one tombstone, and which one a
+    /// store kept of two was the first on a computer and the last in a
+    /// browser. In whatever order they are remembered.
+    #[test]
+    fn two_deletions_of_one_session_taken_up_at_once_forget_its_record_once_with_the_later() {
+        let (kept, other) = (finished(T), finished(T + DAY));
+        let (records, layout) = moved(
+            &[kept.clone(), other.clone()],
+            written(1),
+            true,
+            &[],
+            T + 2 * DAY,
+        );
+        let (first, later) = (
+            Deleted::of(&other, T + 3 * DAY),
+            Deleted::of(&other, T + 4 * DAY),
+        );
+        let live = live_of(&records);
+        for deleted in [[first.clone(), later.clone()], [later.clone(), first]] {
+            let (change, next) = imported(
+                &layout,
+                written(2),
+                std::slice::from_ref(&kept),
+                &deleted,
+                &live,
+                &HashSet::new(),
+            )
+            .expect("taken up");
+            assert_eq!(change.forget, [(records[1].id, later.clone())]);
+            let taken = next.deletions_taken.expect("noted").taken;
+            assert_eq!(taken.len(), 2, "both taken");
+        }
     }
 
     /// A layout an earlier build wrote says nothing of which deletions were

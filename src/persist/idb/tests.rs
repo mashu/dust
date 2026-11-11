@@ -1378,6 +1378,28 @@ fn a_move_made_again_writes_no_session_twice() {
     );
 }
 
+/// Two deletions of one session an older build remembers, as two of its
+/// tabs each deleted it, are made here as one, its tombstone stamped with
+/// the later, as on a computer: the page script kept the last, and the
+/// files and this Fake the first.
+#[test]
+fn two_deletions_of_one_session_an_older_build_made_are_one_tombstone_stamped_with_the_later() {
+    let (first, second) = (ago(10), ago(9));
+    let page = Page::holding(&[first.clone(), second.clone()]);
+    let fake = Fake::on(&page);
+    let load = opened(&fake).load();
+    let second_id = load.sessions[1].0;
+    page.keep(std::slice::from_ref(&first));
+    let now = crate::time::now_ms();
+    page.deleted(&[Deleted::of(&second, now), Deleted::of(&second, now + 1)]);
+    let tab = opened(&fake);
+    assert_eq!(sessions_of(&tab.load()), [first]);
+    assert_eq!(
+        done(tab.deletions(vec![second_id])),
+        Some(vec![(second_id, Some(now + 1))])
+    );
+}
+
 /// A session an older build stored in the history kept whole after a move
 /// made long after the sessions it took, which a build before this one's
 /// take-up rules looked at first, is taken up here, as the page opens and
