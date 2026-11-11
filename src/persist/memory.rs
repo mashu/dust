@@ -2444,6 +2444,7 @@ mod tests {
             a_record_this_build_cannot_read_is_told_of_once,
             records_still_unread_are_told_of_once,
             a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went,
+            a_session_stored_under_a_name_other_bytes_have_is_known_by_where_it_went,
         );
     }
 }

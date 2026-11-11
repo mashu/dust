@@ -262,3 +262,47 @@ pub(crate) fn a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_
         .collect();
     assert_eq!(gone, [went]);
 }
+
+/// A session the app stores where other bytes have the name it asks for
+/// goes under the next name, and is known by that name: an older build's
+/// deletion of it, taken up by the same copy, deletes its record, and not
+/// the other bytes'.
+pub(crate) fn a_session_stored_under_a_name_other_bytes_have_is_known_by_where_it_went<
+    H: Harness,
+>() {
+    let before = [ago(30)];
+    let mut store = H::holding(&before);
+    store.load();
+    let since = ago(10);
+    let asked =
+        Record::of(&since, |json| RecordId::placed(since.timestamp, json)).expect("a record");
+    let other = serde_json::to_string(&ago(5)).expect("JSON");
+    store.plant(asked.id, &other);
+    let put = HistoryChange {
+        put: vec![asked.clone()],
+        ..HistoryChange::default()
+    };
+    assert_eq!(store.apply(put), HistorySaved::Stored { kept: 1 });
+    let went = asked.id.bumped();
+    // An older build that holds it too stores another, and deletes it.
+    let theirs = ago(3);
+    store.keep_whole(&[before[0].clone(), theirs]);
+    store.keep_deleted(&[Deleted::of(&since, crate::time::now_ms())]);
+    let listed = store.listing().expect("listed");
+    assert!(
+        listed.contains(&asked.id) && !listed.contains(&went),
+        "{listed:?}"
+    );
+    assert_eq!(
+        store.read(vec![asked.id]),
+        [Some(other)],
+        "the other bytes stay"
+    );
+    let gone: Vec<RecordId> = store
+        .deletions(vec![asked.id, went])
+        .expect("asked")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(gone, [went]);
+}
