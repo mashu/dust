@@ -2425,6 +2425,46 @@ mod tests {
         assert_eq!(read.notices, [], "nor at the next launch");
     }
 
+    /// What this build notes of the records it told of, and of those that
+    /// failed, is kept under the names older builds and this one read:
+    /// `told.json`, which 0.16.4 to 0.16.9 go by too, and this build's own
+    /// `damaged-told.json`, `unread-told.json` and `failing.json`, each in
+    /// `history/`. Under another name a note is lost to every build that
+    /// reads it, and what it held back is told of again.
+    #[test]
+    fn the_notes_of_what_was_told_keep_the_names_builds_read_them_by() {
+        let (dir, files) = history("notes-by-name");
+        files.load();
+        let records = dir.0.join("history/sessions");
+        let damaged = RecordId {
+            order: 2_000_000,
+            nonce: 1,
+        };
+        fs::create_dir_all(&records).unwrap();
+        fs::write(records.join(format!("{}.json", damaged.name())), "[").unwrap();
+        let busy = record(&finished(3_000));
+        fs::create_dir_all(records.join(format!("{}.json", busy.id.name()))).unwrap();
+        let read = files.load();
+        assert_eq!(read.notices, [HistoryNotice::Damaged { count: 1 }]);
+        assert_eq!(read.failed, [busy.id]);
+        assert_eq!(
+            files.still_unread(&[busy.id]),
+            [HistoryNotice::Unread { count: 1 }]
+        );
+        let noted = |name: &str| -> BTreeSet<String> {
+            let raw = fs::read(dir.0.join(name)).unwrap_or_else(|err| panic!("{name}: {err}"));
+            names_noted(Some(&raw)).into_iter().collect()
+        };
+        let (damaged, busy) = (damaged.name(), busy.id.name());
+        assert_eq!(
+            noted("history/told.json"),
+            [damaged.clone(), busy.clone()].into()
+        );
+        assert_eq!(noted("history/damaged-told.json"), [damaged].into());
+        assert_eq!(noted("history/unread-told.json"), [busy.clone()].into());
+        assert_eq!(noted("history/failing.json"), [busy].into());
+    }
+
     /// A record told of as one that could not be read, which then reads,
     /// at a later launch or at one of the app's tries, and fails again
     /// after, is told of again, once: that is a failure of its own. The

@@ -922,6 +922,32 @@ fn a_record_this_build_cannot_read_is_left_and_told_of_once() {
     assert!(fake.records().contains_key(&id), "left where it is");
 }
 
+/// What this build notes of the records it told of is kept under the name
+/// older builds and this one read it by: `told`, beside how the history is
+/// kept, which 0.16.4 to 0.16.9 go by too. Under another name the note is
+/// lost to every build that reads it, and what it held back is told of
+/// again. A browser notes nothing of a record still unread after the app's
+/// tries, so a damaged one is all there is to note.
+#[test]
+fn the_note_of_what_was_told_keeps_the_name_builds_read_it_by() {
+    let fake = Fake::default();
+    opened(&fake);
+    let damaged = RecordId {
+        order: 5_000,
+        nonce: 9,
+    };
+    fake.shelves().sessions.insert(damaged.name(), "[".into());
+    assert_eq!(
+        opened(&fake).load().notices,
+        [HistoryNotice::Damaged { count: 1 }]
+    );
+    let told = fake.db.borrow().meta.get("told").cloned();
+    assert_eq!(
+        record::names_noted(told.as_deref().map(str::as_bytes)),
+        [damaged.name()].into()
+    );
+}
+
 /// The history is read whole, a page at a time, however long it is: more
 /// than any page storage held, with nothing let go.
 #[test]
