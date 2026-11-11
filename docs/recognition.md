@@ -235,15 +235,17 @@ A caller's call, or an exchange token, is timed the same way, in run time
   carried on from a turn you keyed over), alone (no other caller, QRM or
   your own message sounding over it) and as one word in its send, with no
   other sending of it begun before (its caller's timeouts counted), in a
-  turn that played on time and was not retried, with Show copy off. Keys
+  turn that played on time, was not retried and no pause cut short, with
+  Show copy off. Keys
   from its second sending on are `null`, as a group's are, and so are keys
   after a pause: run time stands still while paused, and would leave the
   pause out of the time. A turn found held up after its QSO was logged
   takes the time back when the run is kept.
 
 A copy its turn leaves untimed says why, under `untimed`, as a group does:
-`"heldUp"` for a turn the audio held up on its way or skipped in part, and
-`"sentAgain"` for one tried again, the first reason found kept. A run kept
+`"heldUp"` for a turn the audio held up on its way or skipped in part,
+`"sentAgain"` for one tried again, and `"paused"` for one a pause cut short,
+the first reason found kept. A run kept
 by an earlier build has such a copy with neither, and reads as it did.
 
 So a pile-up leaves most calls untimed, and Simple QSO's doubled

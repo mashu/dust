@@ -1766,4 +1766,52 @@ mod tests {
             }
         });
     }
+
+    /// The owner's second rule, for a run: a call heard whole and alone in
+    /// the turn on the air, and keyed as soon as it was heard, is stored
+    /// with no times when the page going out of sight cut that turn short,
+    /// in the moment before the turn's end was told, and says it was
+    /// paused.
+    #[test]
+    fn a_run_paused_mid_turn_stores_the_copies_heard_in_it_as_paused() {
+        run(|| async {
+            crate::time::pin_seeds(Some(7));
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let cq = h.recorder.starts()[0].clone();
+            let call = cq.transcript.others[0].text.clone();
+            let heard_by = cq.plan.others[0]
+                .events
+                .iter()
+                .map(|tone| tone.end_sec())
+                .fold(0.0, f64::max);
+            let call_ends = cq.at.0 + (heard_by * 1_000.0).ceil() as u64;
+            // The turn's end is told a poll or so after its sound ends.
+            h.advance(call_ends - mono_ms()).await;
+            type_into(&mut h, EntryField::Call, &call);
+            h.advance(4).await;
+            assert!(
+                view(&h).is_some_and(|view| view.air.is_some()),
+                "the turn's end was told"
+            );
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
+            h.pump();
+            h.advance(5_000).await;
+            h.in_app(|| resume_run(ctx));
+            h.pump();
+            // Its call sent, its number copied, and the QSO logged.
+            assert!(h.run_until(10_000, quiet).await);
+            press(&mut h, OpKey::Esm);
+            work(&mut h, 30_000, Some(1)).await;
+            end(&mut h);
+            let (kept, _) = stored_last(&h);
+            assert_eq!(kept.groups[0].sent, call);
+            let timing = &kept.group_timings[0];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(cw_core::Untimed::Paused))
+            );
+        });
+    }
 }

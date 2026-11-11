@@ -1280,8 +1280,9 @@ pub struct ContestMachine<S> {
     /// air, kept once it ends naturally, till the next turn or a pause.
     shown_last: Vec<ShownText>,
     /// The turns whose sound nothing can be timed from, each with why:
-    /// tried again, or played late or skipped in part. The first reason
-    /// found is the one kept, as a session's group keeps it.
+    /// tried again, played late or skipped in part, or cut short by a
+    /// pause. The first reason found is the one kept, as a session's group
+    /// keeps it.
     untrusted: Vec<(u64, Untimed)>,
     /// The hint has said this run that a station still sending never heard
     /// you ([`QsoState::unheard_by`]): it says so once.
@@ -4759,6 +4760,10 @@ impl<S: CallSource> ContestMachine<S> {
         self.phase = ContestPhase::Paused { why };
     }
 
+    /// Pause for `why`, from `at`, as [`ContestEvent::Pause`] says: the turn
+    /// on the air is cut short, and nothing heard in it is timed, its
+    /// copies saying the pause is why, as a session's group the pause cut
+    /// says it. A run whose limit passed before `at` finishes instead.
     fn pause(&mut self, why: PauseWhy, at: MonoMs, now: MonoMs) -> Vec<ContestEffect> {
         match self.phase {
             ContestPhase::Countdown { .. } => {
@@ -4785,6 +4790,7 @@ impl<S: CallSource> ContestMachine<S> {
                 // A pause with nothing on the air, in the moment after
                 // Resume, keeps who the last one cut short.
                 if let Some(air) = self.air.take() {
+                    self.untrust(air.turn.id, Untimed::Paused);
                     self.cut_short.extend(air.cut_short(run_ms, why));
                     let carried = self.cut(air, run_ms, false, &mut effects);
                     self.resolve(&carried.pending, &mut effects);
@@ -14342,6 +14348,123 @@ mod tests {
             (call.char_times.clone(), call.untimed),
             (None, Some(Untimed::HeldUp)),
             "the call"
+        );
+    }
+
+    /// A pause cuts short the turn on the air: nothing heard in it is
+    /// timed, and its copies say the pause is why, as a session's group
+    /// the pause cut says it. Here the pause comes as the caller's call has
+    /// been heard whole, keyed along as it was heard, and the turn's end is
+    /// yet to be told: the call is heard at the cut, and is not timed. A
+    /// pause in a splice's overlap cuts the continuation alone: the turn
+    /// keyed over has played out but the character of yours sounding at
+    /// the key.
+    #[test]
+    fn nothing_heard_in_a_turn_a_pause_cut_short_is_timed() {
+        let mut cut = runtime(&["K5XYZ"]);
+        let cq = cut.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        let ends = token_ends(&cut, 0, &call, "K5XYZ");
+        let edits = keyed_along(EntryField::Call, "", "K5XYZ", &ends, 100);
+        let end = whole_ms(cq.duration_sec());
+        cut.run_to(end.saturating_sub(1));
+        cut.now = end;
+        assert_eq!(cut.playing_id(), Some(cq.id), "the turn is on the air");
+        cut.apply(ContestEvent::Pause {
+            why: PauseWhy::You,
+            at: MonoMs(end),
+        });
+        assert!(
+            cut.machine.stations[0].heard.call_sounded.is_some(),
+            "heard whole"
+        );
+        cut.now += 60_000;
+        cut.apply(ContestEvent::Resume);
+        cut.now += 300;
+        let fields: Vec<(EntryField, &str, u64)> = edits
+            .iter()
+            .map(|(field, text, at)| (*field, text.as_str(), *at))
+            .collect();
+        cut.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(typed(&fields)),
+        });
+        let nr = serial(replies(cut.last_turn())[0]);
+        cut.finish_turn();
+        cut.key(OpKey::Esm, "K5XYZ", &nr);
+        cut.finish_turn();
+        cut.now += 1_000;
+        cut.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&cut);
+        let timing = &result.group_timings[0];
+        assert_eq!(
+            (timing.char_times.clone(), timing.untimed),
+            (None, Some(Untimed::Paused))
+        );
+
+        // A pause in a splice's overlap: your exchange keyed over your call
+        // to K5XYZ goes on where the call's next character starts.
+        let mut spliced = runtime(&["K5XYZ"]);
+        spliced.finish_turn();
+        spliced.key(OpKey::HisCall, "K5XYZ", "");
+        let keyed_over = spliced.last_turn().id;
+        spliced.now += 100;
+        spliced.key(OpKey::Exchange, "K5XYZ", "");
+        let continuation = spliced.last_turn().clone();
+        assert_ne!(continuation.id, keyed_over);
+        assert!(continuation.starts_at.is_some(), "spliced on");
+        let at = MonoMs(spliced.now);
+        spliced.apply(ContestEvent::Pause {
+            why: PauseWhy::You,
+            at,
+        });
+        assert_eq!(
+            spliced.machine.untrusted,
+            [(continuation.id, Untimed::Paused)]
+        );
+    }
+
+    /// A turn that played out before a pause keeps what was heard in it
+    /// timed: a call heard alone and keyed along as it was heard keeps its
+    /// keys' times, the pause after it taking only what is keyed from then
+    /// on ([`Sends`]).
+    #[test]
+    fn a_turn_that_played_out_before_a_pause_keeps_its_times() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let cq = runtime.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        let ends = token_ends(&runtime, 0, &call, "K5XYZ");
+        let edits = keyed_along(EntryField::Call, "", "K5XYZ", &ends, 300);
+        runtime.finish_turn();
+        let typed_by = edits.last().map_or(0, |(_, _, at)| *at);
+        runtime.now = runtime.now.max(typed_by + 10);
+        let at = MonoMs(runtime.now);
+        runtime.apply(ContestEvent::Pause {
+            why: PauseWhy::You,
+            at,
+        });
+        runtime.now += 60_000;
+        runtime.apply(ContestEvent::Resume);
+        runtime.now += 300;
+        let fields: Vec<(EntryField, &str, u64)> = edits
+            .iter()
+            .map(|(field, text, at)| (*field, text.as_str(), *at))
+            .collect();
+        runtime.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(typed(&fields)),
+        });
+        let nr = serial(replies(runtime.last_turn())[0]);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
+        let timing = &result.group_timings[0];
+        assert!(
+            timing.char_times.is_some() && timing.untimed.is_none(),
+            "{timing:?}"
         );
     }
 

@@ -122,7 +122,8 @@ pub enum Untimed {
     /// some of it went unheard, or the attempt failed.
     SentAgain,
     /// The session was paused with its answer open: keys either side of a
-    /// pause cannot be timed against one send.
+    /// pause cannot be timed against one send. A run's copy says so when a
+    /// pause cut short the turn it was heard in.
     Paused,
 }
 
