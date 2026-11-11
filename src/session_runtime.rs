@@ -56,14 +56,23 @@ impl LiveSession {
             .count()
     }
 
-    /// What the session would keep were it ended now, as End session keeps
-    /// it, and the settings auto level judges it by.
-    fn so_far(&self) -> SoFar {
-        let session = self.machine.session();
-        SoFar {
-            result: session.result(now_ms(), self.started_on.clone()),
-            settings: Some(session.settings().clone()),
-        }
+    /// What the session would keep were it ended at `now`, as End session
+    /// keeps it, worked out on a copy of it, and the settings auto level
+    /// judges it by: none while it would keep nothing. A group just
+    /// answered leaves nothing typed in the next, so then it is the groups
+    /// answered; paused, it is the group the pause cut too, as it stood.
+    fn so_far(&self, now: MonoMs) -> Option<SoFar> {
+        let mut ended = self.machine.clone();
+        let effects = ended.apply(SessionEvent::FinishNow, now);
+        effects
+            .contains(&SessionEffect::PersistAndShowResults)
+            .then(|| {
+                let session = ended.session();
+                SoFar {
+                    result: session.result(now_ms(), self.started_on.clone()),
+                    settings: Some(session.settings().clone()),
+                }
+            })
     }
 
     /// Whether what comes under `lease` is this session's to hear: its own
@@ -403,7 +412,8 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         // A group answered, and the session going on: what it would keep
         // now goes with its mark, should the app stop under it.
         let so_far = (live.answered() > answered && !live.machine.is_terminal())
-            .then(|| (live.mark.clone(), live.so_far()));
+            .then(|| live.so_far(now).map(|so_far| (live.mark.clone(), so_far)))
+            .flatten();
         // Much of what arrives changes nothing — a key while the box is
         // locked, a timer the machine has forgotten — and publishing it
         // anyway would copy the whole session and redraw the screen for it.
@@ -426,6 +436,7 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
             SessionEffect::StopAudio => lease.stop_sending(),
             SessionEffect::ReleaseAudio => {
                 lease.release();
+                mark_paused(ctx, lease);
             }
             SessionEffect::Play { index, text } => play(ctx, lease, index, text),
             SessionEffect::StartTimer { id, ms } => {
@@ -442,6 +453,26 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
                 abandon_session(ctx);
             }
         }
+    }
+}
+
+/// The session under `lease` has paused: what End session would keep
+/// now goes with its mark, the group the pause cut as it stood, should the
+/// app stop while it is paused.
+fn mark_paused(ctx: AppCtx, lease: &Lease) {
+    let so_far = ctx
+        .app()
+        .session
+        .borrow()
+        .as_ref()
+        .and_then(Live::groups)
+        .filter(|live| live.lease.is(lease))
+        .and_then(|live| {
+            let so_far = live.so_far(MonoMs(mono_ms()))?;
+            Some((live.mark.clone(), so_far))
+        });
+    if let Some((mark, so_far)) = so_far {
+        ctx.mark_so_far(&mark, so_far);
     }
 }
 
@@ -3056,6 +3087,53 @@ mod tests {
             let stored = stored_last(&h);
             assert_eq!(stored.groups[0].received, first);
             let timing = &stored.group_timings[0];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(cw_core::Untimed::Paused))
+            );
+        });
+    }
+
+    /// The owner's third rule, cut off: a session the app stops under while
+    /// it is paused is kept at the next launch as End session would have
+    /// kept it at the pause, the group the pause cut among its groups, as
+    /// typed, said to be paused.
+    #[test]
+    fn a_session_the_app_stops_under_while_paused_keeps_the_group_the_pause_cut() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            settings.playback.lock_input_during_group_playback = false;
+            let mut h = Harness::with_settings(settings);
+            h.store.mark_tutorial_done();
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            answer_keyed(&mut h, 0);
+            assert!(
+                h.run_until(4_000, |h| h.phase()
+                    == Some(SessionPhase::Playing { index: 1 }))
+                    .await
+            );
+            let started = h.recorder.starts().last().expect("group 1 sent").clone();
+            let span = &started.plan.wanted.chars[0];
+            let first_end = started.at.0 + (span.end_sec * 1_000.0).round() as u64;
+            h.advance(first_end + 50 - mono_ms()).await;
+            let first: String = h.sent(1).chars().take(1).collect();
+            h.ctx.answer.hold(1, first.clone(), Some(MonoMs(mono_ms())));
+            h.send(SessionEvent::Pause);
+            assert!(matches!(
+                h.phase(),
+                Some(SessionPhase::Paused { index: 1, .. })
+            ));
+            assert!(h.store.load_sessions().is_empty(), "stored while paused");
+
+            let (mut ui, _recorder) = crate::testing::Ui::launch(h.store.clone());
+            ui.advance(20).await;
+            let kept = h.store.load_sessions();
+            assert_eq!(kept.len(), 1, "the session was kept");
+            assert_eq!(kept[0].groups.len(), 2, "{:?}", kept[0].groups);
+            assert_eq!(kept[0].groups[1].received, first);
+            let timing = &kept[0].group_timings[1];
             assert_eq!(
                 (timing.char_times.clone(), timing.untimed),
                 (None, Some(cw_core::Untimed::Paused))

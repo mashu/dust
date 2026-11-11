@@ -285,6 +285,7 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
             ContestEffect::StopAudio => lease.stop_sending(),
             ContestEffect::ReleaseAudio => {
                 lease.release();
+                mark_paused(ctx, lease);
             }
             ContestEffect::StartTimer { id, ms } => {
                 // One wait for the whole of it. A timer the machine has since
@@ -303,6 +304,21 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
         }
     }
     speak_if_silent(ctx);
+}
+
+/// The run under `lease` has paused, or its sound failed: what End run
+/// would keep now goes with its mark, the QSO the pause cut as lost,
+/// should the app stop while it is paused.
+fn mark_paused(ctx: AppCtx, lease: &Lease) {
+    let so_far = match ctx.app().session.borrow().as_ref() {
+        Some(Live::Contest(live)) if live.lease.is(lease) => live
+            .so_far(MonoMs(mono_ms()))
+            .map(|so_far| (live.mark.clone(), so_far)),
+        _ => None,
+    };
+    if let Some((mark, so_far)) = so_far {
+        ctx.mark_so_far(&mark, so_far);
+    }
 }
 
 /// Hold `text` for a screen reader until the air is silent.
@@ -1812,6 +1828,32 @@ mod tests {
                 (timing.char_times.clone(), timing.untimed),
                 (None, Some(cw_core::Untimed::Paused))
             );
+        });
+    }
+
+    /// The owner's third rule, cut off: a run the app stops under while it
+    /// is paused is kept at the next launch as End run would have kept it
+    /// at the pause, the QSO the pause cut kept as lost beside the one
+    /// logged.
+    #[test]
+    fn a_run_the_app_stops_under_while_paused_keeps_the_qso_the_pause_cut() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.store.mark_tutorial_done();
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            open_a_second_qso(&mut h).await;
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
+            h.pump();
+            assert!(matches!(phase(&h), Some(ContestPhase::Paused { .. })));
+            assert!(h.store.load_sessions().is_empty(), "stored while paused");
+
+            let (mut ui, _recorder) = crate::testing::Ui::launch(h.store.clone());
+            ui.advance(20).await;
+            let (_, log) = stored_last(&h);
+            let kinds: Vec<&str> = log.qsos.iter().map(|qso| qso.k.as_str()).collect();
+            assert_eq!(kinds, ["", "lost"]);
         });
     }
 }

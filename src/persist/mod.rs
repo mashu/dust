@@ -315,11 +315,11 @@ pub struct OpenSession {
     pub started_at: u64,
     /// A contest run, rather than a session of groups.
     pub run: bool,
-    /// What it would keep were it ended now, as of its last answered group
-    /// or logged QSO: kept in its place should the app stop under it. None
-    /// before then, in a mark from before marks held it, and in one whose
-    /// copy of it no longer reads. Once it has ended, as it was ended, until
-    /// the store has taken it.
+    /// What it would keep were it ended now, as of its last answered group,
+    /// logged QSO or pause: kept in its place should the app stop under it.
+    /// None before then, in a mark from before marks held it, and in one
+    /// whose copy of it no longer reads. Once it has ended, as it was ended,
+    /// until the store has taken it.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
