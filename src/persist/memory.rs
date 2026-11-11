@@ -470,7 +470,9 @@ impl Store for MemoryStore {
 
     /// Written whole, from every record held, as a browser writes one; or,
     /// where they cannot be listed, from what the app holds, once it has
-    /// given all of it.
+    /// given all of it. One that cannot be read now, as one held open
+    /// cannot be, is the app's to give, as the files and a browser's
+    /// database ask it of the app.
     fn save_backup(&self, name: &str, backup: BackupFile) -> BackupSaving {
         if self.no_backups.get() {
             return saved_now(Err(NotSaved::Failed(
@@ -478,22 +480,34 @@ impl Store for MemoryStore {
             )));
         }
         let tombstones = self.tombstones.borrow();
-        let stored = match &self.page {
-            Some(page) => page.records(),
-            None if self.unlistable.get() => None,
-            None => Some(
-                self.records
+        let deleted = |id: RecordId| tombstones.contains_key(&id);
+        let written = match &self.page {
+            Some(page) => backup.whole(page.records(), deleted),
+            None if self.unlistable.get() => backup.whole(None, deleted),
+            None => {
+                let held_open = self.held_open.borrow();
+                let stored: Vec<Result<Record, RecordId>> = self
+                    .records
                     .borrow()
                     .iter()
                     .filter(|(id, _)| !tombstones.contains_key(id))
-                    .map(|(id, held)| Record {
-                        id: *id,
-                        json: held.json.clone(),
+                    .map(|(id, held)| {
+                        if held_open.contains(id) {
+                            return Err(*id);
+                        }
+                        Ok(Record {
+                            id: *id,
+                            json: held.json.clone(),
+                        })
                     })
-                    .collect(),
-            ),
+                    .collect();
+                let mut out = Vec::new();
+                backup
+                    .write(&mut out, stored, deleted)
+                    .map(|backed| (String::from_utf8(out).unwrap_or_default(), backed))
+            }
         };
-        let (contents, backed) = match backup.whole(stored, |id| tombstones.contains_key(&id)) {
+        let (contents, backed) = match written {
             Ok(whole) => whole,
             Err(not) => return saved_now(Err(not)),
         };
@@ -1843,6 +1857,30 @@ mod tests {
         assert_eq!(store.load_history().sessions.len(), 1, "it reads");
         store.mend(damaged, "{ cut short again");
         assert_eq!(store.load_history().notices, told, "damaged again");
+    }
+
+    /// A backup asks the app for a record the store holds but cannot read
+    /// now, as one held open cannot be, as the files and a browser's
+    /// database ask for it: the app saves again with every session it
+    /// holds. The test store backed up the record's text all the same.
+    #[test]
+    fn a_backup_asks_the_app_for_a_record_that_cannot_be_read_now() {
+        let store = MemoryStore::default();
+        store.load_history();
+        let busy = record(&finished(2_000));
+        now(store.change_history(put(std::slice::from_ref(&busy))));
+        store.held_open.borrow_mut().insert(busy.id);
+        let backup = BackupFile::new(&TrainingSettings::default(), 5, Vec::new());
+        assert_eq!(
+            now(store.save_backup("b.json", backup)),
+            Err(NotSaved::Unread)
+        );
+        assert!(store.backup_files.borrow().is_empty(), "none saved");
+        let every =
+            BackupFile::new(&TrainingSettings::default(), 5, Vec::new()).holding_every_session();
+        assert!(now(store.save_backup("b.json", every)).is_ok());
+        let (_, saved) = store.backup_files.borrow()[0].clone();
+        assert!(!saved.contains(&busy.json), "{saved}");
     }
 
     /// Changes made later are made in the order they were asked for, each
