@@ -18,14 +18,16 @@ use crate::state::{AppCtx, Finished, Live, Preview, Screen, keep_and_show};
 use crate::time::{local_date_string, mono_ms, now_ms};
 
 /// A machine that can be what is live: what the lifecycle cannot do the
-/// same way for a session of groups and for a contest run.
+/// same way for a session of groups and for a contest run, in the order of
+/// its life.
 ///
-/// [`step`] calls some of these with what is live borrowed from the app
-/// (`first`, `progress`, `progressed`, `so_far`, `as_shown`, `hear`, and
-/// a step's own `ahead`): they must leave the app alone, borrowing
-/// nothing of it, doing nothing the machine said, handing nothing to it,
-/// and showing no toast. `so_far` changes only its copy of the machine. The
-/// others are called with nothing borrowed.
+/// Some are called with what is live borrowed from the app — `first`,
+/// `hear`, `as_shown`, `progress`, `progressed` and `so_far` by [`step`],
+/// as a step's own `ahead` is, `so_far` by [`give_back`] too, and `sound`
+/// by [`resume`] — and must leave the app alone: borrow nothing of it, do
+/// nothing the machine said, hand it nothing, and show no toast. `so_far`
+/// changes only its copy of the machine. The rest are called with nothing
+/// borrowed.
 pub(crate) trait RunMachine: Sized + 'static {
     /// What it hears: what the user did, or news from its own tasks.
     type Event: PartialEq;
@@ -35,17 +37,17 @@ pub(crate) trait RunMachine: Sized + 'static {
     type View: Clone + PartialEq + 'static;
     /// How far it has got, for what to mark as it goes.
     type Progress;
-    /// What only its kind holds while it is live.
-    type Own;
     /// Which of its sends news is of: a group's index, a turn's id.
     type Tag: Copy + 'static;
+    /// What only its kind holds while it is live.
+    type Own;
+    /// What keeping it does to its level, settled once it is marked kept.
+    type Level;
+    /// A contest run, as its mark says ([`AppCtx::mark_running`]).
+    const IS_RUN: bool;
     /// What tells it to carry on after a pause, once the audio is claimed
     /// again ([`resume`]).
     const RESUME: Self::Event;
-    /// A contest run, as its mark says ([`AppCtx::mark_running`]).
-    const IS_RUN: bool;
-    /// What keeping it does to its level, settled once it is marked kept.
-    type Level;
 
     /// What is live, if it is of this kind.
     fn of(live: &Live) -> Option<&LiveRun<Self, Self::Own>>;
@@ -62,22 +64,12 @@ pub(crate) trait RunMachine: Sized + 'static {
     /// Where what it shows is published.
     fn shown(ctx: AppCtx) -> Signal<Option<Self::View>>;
 
-    /// What it does on hearing `event` at `now`.
-    #[must_use = "the effects are the machine's instructions to the runtime"]
-    fn hear(&mut self, event: Self::Event, now: MonoMs) -> Vec<Self::Effect>;
-
-    /// What tells it timer `id` has run out.
-    fn timer_fired(id: u64) -> Self::Event;
-
     /// What a claim of the audio for it plays from.
     fn sound(live: &LiveRun<Self, Self::Own>) -> &TrainingSettings;
 
     /// What its kind does with each claim of the audio it runs under, as
     /// it starts and as it resumes.
     fn watch(_ctx: AppCtx, _lease: &Lease) {}
-
-    /// What its kind does once it has resumed.
-    fn resumed(_ctx: AppCtx) {}
 
     /// What its kind does with `event`, come under `lease`, before the
     /// machine hears it: `event` to hear now, or none to hear nothing now.
@@ -88,6 +80,13 @@ pub(crate) trait RunMachine: Sized + 'static {
     /// What its machine hears at `now` before any event, as that event
     /// reaches it.
     fn first(live: &mut LiveRun<Self, Self::Own>, ctx: AppCtx, now: MonoMs) -> Vec<Self::Effect>;
+
+    /// What it does on hearing `event` at `now`.
+    #[must_use = "the effects are the machine's instructions to the runtime"]
+    fn hear(&mut self, event: Self::Event, now: MonoMs) -> Vec<Self::Effect>;
+
+    /// What tells it timer `id` has run out.
+    fn timer_fired(id: u64) -> Self::Event;
 
     /// Whether it is over, its end said.
     fn over(&self) -> bool;
@@ -126,6 +125,9 @@ pub(crate) trait RunMachine: Sized + 'static {
     /// What tells it how its send `tag` ended: played to its end, stopped,
     /// or failed after every retry, which was said already.
     fn sent(tag: Self::Tag, sent: Result<Sent, AudioError>) -> Self::Event;
+
+    /// What its kind does once it has resumed.
+    fn resumed(_ctx: AppCtx) {}
 
     /// What its kind does as it is taken out, the audio given back.
     fn ending(_ctx: AppCtx, _live: &mut LiveRun<Self, Self::Own>) {}
