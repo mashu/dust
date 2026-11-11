@@ -1090,6 +1090,41 @@ fn the_note_of_what_was_told_keeps_the_name_builds_read_it_by() {
     );
 }
 
+/// What a build before formats noted as told of, a record it cannot read
+/// that this build reads (0.16.9's, of a session stored with a null score),
+/// stays noted when this build has something new of its own to tell, as
+/// told.json does on a computer: dropped, such a build tells of it again
+/// as it next opens. This build only adds names to the note, in order. It
+/// wrote the note over with what it could not read just then.
+#[test]
+fn what_an_older_build_noted_as_told_of_stays_when_this_build_tells_of_another() {
+    let fake = Fake::default();
+    let tab = opened(&fake);
+    tab.load();
+    let first = record_of(&ago(3));
+    let change = HistoryChange {
+        put: vec![first.clone()],
+        ..HistoryChange::default()
+    };
+    assert_eq!(done(tab.apply(change)), HistorySaved::Stored { kept: 1 });
+    let noted = serde_json::to_string(&[first.id.name()]).expect("writes");
+    fake.shelves().meta.insert("told".into(), noted);
+    let damaged = RecordId {
+        order: 5_000,
+        nonce: 9,
+    };
+    fake.shelves().sessions.insert(damaged.name(), "[".into());
+    assert_eq!(
+        opened(&fake).load().notices,
+        [HistoryNotice::Damaged { count: 1 }]
+    );
+    assert_eq!(
+        fake.db.borrow().meta.get("told").cloned(),
+        Some(serde_json::to_string(&[damaged.name(), first.id.name()]).expect("writes")),
+        "the older build's name stays"
+    );
+}
+
 /// The history is read whole, a page at a time, however long it is: more
 /// than any page storage held, with nothing let go.
 #[test]

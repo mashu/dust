@@ -935,7 +935,8 @@ In a browser the history is the IndexedDB database `dust_history`
 (`src/persist/idb.rs`, `src/persist/idb.js`), whose keys and values are all
 text, so what a build writes comes back byte for byte: the stores `sessions`
 and `deleted`, by record name, as the folders above, and `meta`, which holds
-`layout` and `told`. Each change is one transaction, whole or not at all; a
+`layout` and `told`, the latter kept as `told.json` is: this build only adds
+names to it. Each change is one transaction, whole or not at all; a
 browser that has no room for one keeps none of it, and the app says the
 browser is full. The database is opened, and the history read 2,000 records
 at a time, while the page's boot screen shows, before the app starts; it

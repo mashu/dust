@@ -32,8 +32,8 @@ use super::legacy::{self, Aside, BlobKeys, Fingerprint, Gate, Kept, Layout, keep
 use super::progress::LoadProgress;
 use super::record::{
     self, Deletions, HistoryChange, HistoryLoad, HistoryNotice, Pending, Record, RecordId,
-    Unreadable, key_of, keyed, not_told, read_record, taken_up, tombstone_at, tombstone_key,
-    unreadable,
+    Unreadable, key_of, keyed, names_noted, not_told, read_record, taken_up, tombstone_at,
+    tombstone_key, unreadable,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -698,7 +698,11 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// What to tell of `unread`, the records this build cannot read, each
     /// with what it says of itself ([`not_told`]), `told` being those told
     /// of before: nothing, once each has been. They are noted as told,
-    /// where this build may write.
+    /// where this build may write, beside what the note held: this build
+    /// only adds names to it, as to told.json on a computer, so what a
+    /// build before formats noted there, a record it cannot read that this
+    /// one reads among them, stays, and such a build does not tell of it
+    /// again.
     async fn tell(
         &self,
         unread: &[(RecordId, Option<Unreadable>)],
@@ -708,7 +712,10 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         if notices.is_empty() {
             return notices;
         }
-        let names: Vec<String> = unread.iter().map(|(id, _)| id.name()).collect();
+        let names: BTreeSet<String> = names_noted(told.map(str::as_bytes))
+            .into_iter()
+            .chain(unread.iter().map(|(id, _)| id.name()))
+            .collect();
         if self.writable.get()
             && let Ok(raw) = serde_json::to_string(&names)
         {
