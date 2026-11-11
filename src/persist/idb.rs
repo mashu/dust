@@ -377,13 +377,18 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
         let layout = if moving {
             // Read again after the records: a session another tab deleted
             // meanwhile, under a name the move does not give it, is no
-            // session to move in.
-            let tombstones = self.glue.tombstones().await.map_err(refused)?;
-            let gone: BTreeSet<RecordId> = tombstones
+            // session to move in. Nor is one it put back meanwhile, by Undo
+            // or a restore, there under such a name: the tombstones read
+            // before the records name it by its key. By name the later read
+            // alone says what is deleted: a record put back before the pages
+            // were read is here, read with them.
+            let after = self.glue.tombstones().await.map_err(refused)?;
+            let gone: BTreeSet<RecordId> = after
                 .iter()
                 .filter_map(|(name, _)| RecordId::parse(name))
                 .collect();
-            let gone_keys = tombstoned_keys(&tombstones);
+            let mut gone_keys = tombstoned_keys(&tombstones);
+            gone_keys.extend(tombstoned_keys(&after));
             let moved = self
                 .move_in(head.layout.as_deref(), &read, &gone, &gone_keys, &mut load)
                 .await?;
@@ -418,7 +423,10 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
                     live.entry(key.clone()).or_default().push(*id);
                 }
             }
-            if let Some(change) = self.import(Some(live)).await {
+            if let Some(change) = self
+                .import(Some((live, tombstoned_keys(&tombstones))))
+                .await
+            {
                 taken_up(&mut read.sessions, &change);
             }
         }
@@ -585,18 +593,19 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     }
 
     /// Take up what an older build stored in, or deleted from, the history
-    /// kept whole since it was last taken up ([`legacy::imported`]), `live`
-    /// being every record here by its session's key, where it is known
-    /// already; and hand back the change made of it. Nothing, where nothing
-    /// changed there, or what changed cannot be read or made now: it is
-    /// tried again the next time.
+    /// kept whole since it was last taken up ([`legacy::imported`]), `known`
+    /// being every record here by its session's key, beside the sessions
+    /// the tombstones named as they were read before those records were,
+    /// where both are known already; and hand back the change made of it.
+    /// Nothing, where nothing changed there, or what changed cannot be read
+    /// or made now: it is tried again the next time.
     ///
     /// What was taken up is noted in how the history is kept, written in
     /// the same transaction, and only over the layout it was worked out
     /// from: two tabs taking it up at once take it up once.
     async fn import(
         &self,
-        live: Option<HashMap<SessionKey, Vec<RecordId>>>,
+        known: Option<(LiveKeys, HashSet<SessionKey>)>,
     ) -> Option<HistoryChange> {
         if !self.writable.get() {
             return None;
@@ -613,13 +622,19 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
             .map(|whole| whole.sessions)
             .unwrap_or_default();
         let deleted = self.legacy_deleted();
-        // The tombstones after the records, as on a computer: a session
-        // another tab deletes in between is either still here or deleted.
-        let live = match live {
-            Some(live) => live,
-            None => self.live_keys().await?,
+        // The tombstones before the records and after: a session another
+        // tab deletes in between is either still here or deleted after, and
+        // one it puts back in between, by Undo or a restore, is either
+        // deleted before or here.
+        let (live, before) = match known {
+            Some(known) => known,
+            None => {
+                let before = tombstoned_keys(&self.glue.tombstones().await.ok()?);
+                (self.live_keys().await?, before)
+            }
         };
-        let gone = tombstoned_keys(&self.glue.tombstones().await.ok()?);
+        let mut gone = tombstoned_keys(&self.glue.tombstones().await.ok()?);
+        gone.extend(before);
         let (change, next) =
             legacy::imported(&layout, fingerprint, &sessions, &deleted, &live, &gone)?;
         let written = layout_text(&next)?;
@@ -666,7 +681,7 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
     /// they were read, the rest read now for their keys alone. One that is
     /// damaged has none, though it may say one: only one that reads, or that
     /// a later build stored, holds its session ([`record::held_key`]).
-    async fn live_keys(&self) -> Option<HashMap<SessionKey, Vec<RecordId>>> {
+    async fn live_keys(&self) -> Option<LiveKeys> {
         let ids = live_ids(&self.glue.list().await.ok()?);
         let unknown: Vec<RecordId> = {
             let keys = self.session_keys.borrow();
@@ -997,6 +1012,9 @@ fn tombstoned_keys(tombstones: &[(String, Option<String>)]) -> HashSet<SessionKe
         .collect()
 }
 
+/// Every record here by its session's key.
+type LiveKeys = HashMap<SessionKey, Vec<RecordId>>;
+
 /// Every record listed, but those deleted.
 fn live_ids(listed: &Listed) -> Vec<RecordId> {
     let gone: HashSet<&String> = listed.deleted.iter().collect();
@@ -1039,14 +1057,15 @@ fn writes_of(change: &HistoryChange) -> Writes {
 /// made again over a layout that no longer reads — writes no session twice:
 /// one deleted since, by name or by key, stays deleted, and one taken up
 /// from an older build since, under the name it was taken up by, is not
-/// written a second time under another.
+/// written a second time under another; nor is one whose key a tombstone
+/// gone since named, put back meanwhile under its name.
 fn not_moved_yet(
     moved: Vec<Record>,
     read: &Read,
     gone: &BTreeSet<RecordId>,
     gone_keys: &HashSet<SessionKey>,
 ) -> Vec<Record> {
-    if read.raw.is_empty() && gone.is_empty() {
+    if read.raw.is_empty() && gone.is_empty() && gone_keys.is_empty() {
         return moved;
     }
     let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
