@@ -2491,11 +2491,39 @@ mod tests {
         fn plant_tombstone(&self, _id: RecordId, _held: Option<&str>) {
             unreachable!("the test store's tombstones each name their session");
         }
+
+        /// None: the test store is one copy's, and what another copy saw
+        /// is not kept apart from it, so the cases of two copies leave it
+        /// out.
+        fn another(&self) -> Self {
+            unreachable!("the test store is one copy's");
+        }
+
+        /// The layout written back through what a build writes of it, by how
+        /// long the history kept whole is now, and how often it was written.
+        fn as_an_older_build_looks(&self, made_the_move: bool) {
+            let mut held = self.0.layout.borrow_mut();
+            let written = held.as_ref().expect("moved").written().expect("written");
+            let mut layout: serde_json::Value = serde_json::from_slice(&written).expect("JSON");
+            if made_the_move {
+                let notes = layout.as_object_mut().expect("an object");
+                for key in ["takenThrough", "deletionsTaken", "takenLegacy"] {
+                    notes.remove(key);
+                }
+            }
+            layout["legacy"] = serde_json::to_value(self.0.fingerprint()).expect("JSON");
+            let raw = serde_json::to_vec(&layout).expect("JSON");
+            match Gate::of(Some(&raw)) {
+                Gate::Open(read) => *held = Some(*read),
+                gate => panic!("{gate:?}"),
+            }
+        }
     }
 
     /// What every store must do with the history ([`crate::persist::conformance`]).
     /// Left out: a tombstone that names no session, which the test store
-    /// cannot hold, as each of its tombstones is a [`Deleted`] (D17).
+    /// cannot hold, as each of its tombstones is a [`Deleted`] (D17); and
+    /// two copies, as it is one copy's.
     mod conformance {
         use super::InTestStore;
 
@@ -2509,6 +2537,7 @@ mod tests {
             records_still_unread_are_told_of_once,
             a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went,
             a_session_stored_under_a_name_other_bytes_have_is_known_by_where_it_went,
+            a_change_an_older_build_looked_at_first_is_taken_up,
         );
     }
 }

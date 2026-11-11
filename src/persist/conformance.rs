@@ -42,6 +42,16 @@ pub(crate) trait Harness {
     /// later build may store in a browser's database, or damage leaves of
     /// a file.
     fn plant_tombstone(&self, id: RecordId, held: Option<&str>);
+    /// Another copy of the app on the same store, which has read nothing
+    /// of it yet.
+    fn another(&self) -> Self;
+    /// A build before this one's take-up rules (0.16.3 to 0.16.9) looks at
+    /// the history kept whole as it is now, takes it up by its own rules,
+    /// and writes the layout back with `legacy` moved on to it, this
+    /// build's notes, `takenLegacy` among them, carried as they were; or,
+    /// `made_the_move`, without them, as such a build writes the layout it
+    /// moved the history under.
+    fn as_an_older_build_looks(&self, made_the_move: bool);
 }
 
 /// The cases this suite holds, each a test of the store `$harness`, named
@@ -68,6 +78,29 @@ fn ago(days: u64) -> SessionResult {
         timestamp: at,
         ..crate::persist::tests::session(&format!("day {at}"))
     })
+}
+
+/// `session` as a record of its own, finished here, as the app stores one.
+fn record_of(session: &SessionResult) -> Record {
+    Record::of(session, |json| {
+        RecordId::next(session.timestamp, None, json)
+    })
+    .expect("a record")
+}
+
+fn put(record: &Record) -> HistoryChange {
+    HistoryChange {
+        put: vec![record.clone()],
+        ..HistoryChange::default()
+    }
+}
+
+/// `record`, holding `session`, deleted by hand at `at`.
+fn forget(record: &Record, session: &SessionResult, at: u64) -> HistoryChange {
+    HistoryChange {
+        forget: vec![(record.id, Deleted::of(session, at))],
+        ..HistoryChange::default()
+    }
 }
 
 fn sessions(load: &HistoryLoad) -> Vec<SessionResult> {
@@ -345,4 +378,102 @@ pub(crate) fn a_tombstone_that_names_no_session_still_deletes_its_record<H: Harn
         "taken up"
     );
     assert_eq!(sessions(&store.load()), [whole[3].clone(), since]);
+}
+
+/// Two copies of the app on one store each take up what the other stored
+/// and deleted, and are told the store changed where the other changed it,
+/// and not where they changed it themselves.
+pub(crate) fn two_copies_take_up_each_others_changes<H: Harness>() {
+    let mut here = H::holding(&[ago(30)]);
+    let moved = here.load().sessions[0].0;
+    let mut there = here.another();
+    there.load();
+    assert!(!here.changed() && !there.changed(), "nothing since");
+    let mine = ago(5);
+    let one = record_of(&mine);
+    assert_eq!(here.apply(put(&one)), HistorySaved::Stored { kept: 1 });
+    assert!(!here.changed(), "its own change");
+    assert!(there.changed(), "the other's");
+    assert_eq!(there.listing(), Some(vec![moved, one.id]));
+    assert!(!there.changed(), "taken up");
+    assert_eq!(there.read(vec![one.id]), [Some(one.json.clone())]);
+    let at = crate::time::now_ms();
+    assert_eq!(
+        there.apply(forget(&one, &mine, at)),
+        HistorySaved::Stored { kept: 0 }
+    );
+    assert!(here.changed(), "the other's deletion");
+    assert_eq!(here.listing(), Some(vec![moved]));
+    assert_eq!(here.deletions(vec![one.id]), Some(vec![(one.id, Some(at))]));
+    assert!(!here.changed(), "taken up");
+}
+
+/// What another copy stored or deleted since this one last looked is taken
+/// up after this one makes a change of its own: its own change is none for
+/// it to take up, the other's is.
+pub(crate) fn a_change_another_copy_made_first_is_taken_up_after_ones_own<H: Harness>() {
+    let mut here = H::holding(&[]);
+    here.load();
+    let mut there = here.another();
+    there.load();
+    let (first, second, third) = (ago(30), ago(20), ago(10));
+    let (theirs, ours, more) = (record_of(&first), record_of(&second), record_of(&third));
+    there.apply(put(&theirs));
+    here.apply(put(&ours));
+    assert!(here.changed(), "theirs, to take up");
+    assert_eq!(here.listing(), Some(vec![theirs.id, ours.id]));
+    assert!(!here.changed(), "taken up");
+    let at = crate::time::now_ms();
+    there.apply(forget(&theirs, &first, at));
+    here.apply(put(&more));
+    assert!(here.changed(), "their deletion, to take up");
+    assert_eq!(here.listing(), Some(vec![ours.id, more.id]));
+    assert_eq!(
+        here.deletions(vec![theirs.id]),
+        Some(vec![(theirs.id, Some(at))])
+    );
+    assert!(!here.changed(), "taken up");
+}
+
+/// What an older build stores in the history it keeps whole, which a build
+/// before this one's take-up rules looks at first, is taken up as the
+/// history is next read here, and as it is next listed, or, where a look
+/// finds the layout changed under it, at the look after: such a build takes
+/// up by its own rules, which leave it out, and writes the layout back with
+/// `legacy` moved on to what it took, this build's notes as they were, or,
+/// where it made the move too, none of them. Gated by `legacy`, the change
+/// looked taken up already.
+pub(crate) fn a_change_an_older_build_looked_at_first_is_taken_up<H: Harness>() {
+    for made_the_move in [false, true] {
+        let whole = [ago(30), ago(20)];
+        let mut store = H::holding(&whole);
+        store.load();
+        if made_the_move {
+            store.as_an_older_build_looks(true);
+        }
+        let since = ago(10);
+        store.keep_whole(&[whole[0].clone(), whole[1].clone(), since.clone()]);
+        store.as_an_older_build_looks(made_the_move);
+        assert_eq!(
+            sessions(&store.load()),
+            [whole[0].clone(), whole[1].clone(), since.clone()],
+            "taken up as the history is read, {made_the_move}"
+        );
+        let later = ago(9);
+        store.keep_whole(&[whole[0].clone(), whole[1].clone(), since, later]);
+        store.as_an_older_build_looks(made_the_move);
+        // A browser's look finds the layout changed under it, as by another
+        // tab, and leaves the take-up to the next, which the app makes as
+        // the store says the history changed.
+        let listed = store.listing().map(|listed| listed.len());
+        assert!(
+            listed == Some(4) || store.changed(),
+            "taken up, or still to take up: {listed:?}, {made_the_move}"
+        );
+        assert_eq!(
+            store.listing().map(|listed| listed.len()),
+            Some(4),
+            "and as it is listed, {made_the_move}"
+        );
+    }
 }

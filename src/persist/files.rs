@@ -3251,56 +3251,6 @@ mod tests {
         assert_eq!(other.bytes(), two.json.len() as u64);
     }
 
-    /// Two copies on one folder each take up what the other stored and
-    /// deleted, and are told the folder changed when it did, and not when
-    /// they changed it themselves.
-    #[test]
-    fn two_copies_on_one_folder_take_up_each_others_changes() {
-        let dir = TempDir::new("two-copies");
-        let (here, there) = (Files::at(&dir.0), Files::at(&dir.0));
-        here.load();
-        there.load();
-        let first = finished(1_000);
-        let one = record(&first);
-        here.apply(&put(std::slice::from_ref(&one)));
-        assert!(!here.changed(), "its own change");
-        assert!(there.changed());
-        assert_eq!(there.listing(), Some(vec![one.id]));
-        assert!(!there.changed(), "taken up");
-        assert_eq!(there.read(&[one.id]), [Ok(one.clone())]);
-        there.apply(&forget(&[(&one, &first)]));
-        assert!(here.changed());
-        assert_eq!(here.listing(), Some(Vec::new()));
-        assert_eq!(here.forgotten(&[one.id]), [one.id]);
-    }
-
-    /// What another copy stored or deleted since this one last looked is
-    /// taken up after this one makes a change of its own: its own change
-    /// is none for it to take up, the other's is. Noting the folders as its
-    /// own change left them noted the other's as seen too, and the session
-    /// it stored, or deleted, was never taken up until the app was opened
-    /// again.
-    #[test]
-    fn a_change_another_copy_made_first_is_taken_up_after_ones_own() {
-        let dir = TempDir::new("theirs-first");
-        let (here, there) = (Files::at(&dir.0), Files::at(&dir.0));
-        here.load();
-        there.load();
-        let (first, second, third) = (finished(1_000), finished(2_000), finished(3_000));
-        let (theirs, ours, more) = (record(&first), record(&second), record(&third));
-        there.apply(&put(std::slice::from_ref(&theirs)));
-        here.apply(&put(std::slice::from_ref(&ours)));
-        assert!(here.changed(), "theirs, to take up");
-        assert_eq!(here.listing(), Some(vec![theirs.id, ours.id]));
-        assert!(!here.changed(), "taken up");
-        there.apply(&forget(&[(&theirs, &first)]));
-        here.apply(&put(std::slice::from_ref(&more)));
-        assert!(here.changed(), "their deletion, to take up");
-        assert_eq!(here.listing(), Some(vec![ours.id, more.id]));
-        assert_eq!(here.forgotten(&[theirs.id]), [theirs.id]);
-        assert!(!here.changed());
-    }
-
     /// What a read of the history whole takes up from an older build is no
     /// change for the copy that read it to take up: it stored it itself.
     /// The read noted the folders as they were before the take-up wrote,
@@ -3869,92 +3819,6 @@ mod tests {
                 .and_then(Result::ok)
                 .and_then(|record| read_record(&record.json)),
             Some(second)
-        );
-    }
-
-    /// A session an older build stored in the history kept whole after a
-    /// move made long after the sessions it took, which a build before this
-    /// one's take-up rules looked at first, is taken up as the history is
-    /// next read here, and as it is next listed. Such a build (0.16.9)
-    /// takes up by its own rules, which leave it out, and writes the layout
-    /// back with `legacy` moved on to the history kept whole as it took it,
-    /// `takenLegacy`, this build's note, left as it was. Gated by `legacy`,
-    /// the change looked taken up already, and imported() was never asked.
-    #[test]
-    fn a_change_an_older_build_looked_at_first_is_taken_up_as_the_history_is_read() {
-        let dir = TempDir::new("older-looked-first");
-        let now = crate::time::now_ms();
-        let old = [finished(now - 30 * DAY), finished(now - 20 * DAY)];
-        keep_whole(&dir, &old);
-        Files::at(&dir.0).load();
-        let older_looks = || {
-            let path = dir.0.join(HISTORY).join(LAYOUT_FILE);
-            let mut layout: serde_json::Value =
-                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            let whole = fingerprint_of(&dir.0.join(SESSIONS)).unwrap();
-            layout["legacy"] = serde_json::to_value(whole).unwrap();
-            fs::write(&path, serde_json::to_vec_pretty(&layout).unwrap()).unwrap();
-        };
-        // A copy of a build before records, left open, stores a session it
-        // finished ten days ago, and an older build looks first.
-        let since = finished(now - 10 * DAY);
-        keep_whole(&dir, &[old[0].clone(), old[1].clone(), since.clone()]);
-        older_looks();
-        assert_eq!(
-            stamps(&Files::at(&dir.0).load()),
-            [old[0].timestamp, old[1].timestamp, since.timestamp],
-            "taken up as the history is read"
-        );
-        // Another, as the history is next listed.
-        let files = Files::at(&dir.0);
-        files.load();
-        let later = finished(now - 9 * DAY);
-        keep_whole(&dir, &[old[0].clone(), old[1].clone(), since, later]);
-        older_looks();
-        assert_eq!(
-            files.listing().expect("a listing").len(),
-            4,
-            "and as it is listed"
-        );
-    }
-
-    /// The same where a build before this one's take-up rules made the move
-    /// as well, as every build from 0.16.3 to 0.16.9 did: its layout holds
-    /// none of this build's notes (`takenLegacy` among them), and the change
-    /// it looked at first is taken up as the history is next read here.
-    /// Gated by `legacy` where `takenLegacy` is missing, the change looked
-    /// taken up already, though imported() would take it up.
-    #[test]
-    fn a_change_an_older_build_looked_at_first_is_taken_up_where_it_made_the_move() {
-        let dir = TempDir::new("older-moved-looked-first");
-        let now = crate::time::now_ms();
-        let old = [finished(now - 30 * DAY), finished(now - 20 * DAY)];
-        keep_whole(&dir, &old);
-        Files::at(&dir.0).load();
-        // The layout as 0.16.9 writes it as it moves the history and as it
-        // looks: `legacy` moved on to the history kept whole as it took it.
-        let as_an_older_build_wrote_it = || {
-            let path = dir.0.join(HISTORY).join(LAYOUT_FILE);
-            let mut layout: serde_json::Value =
-                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            let held = layout.as_object_mut().expect("an object");
-            for key in ["takenThrough", "deletionsTaken", "takenLegacy"] {
-                held.remove(key);
-            }
-            let whole = fingerprint_of(&dir.0.join(SESSIONS)).unwrap();
-            layout["legacy"] = serde_json::to_value(whole).unwrap();
-            fs::write(&path, serde_json::to_vec_pretty(&layout).unwrap()).unwrap();
-        };
-        as_an_older_build_wrote_it();
-        // A copy of a build before records, left open, stores a session it
-        // finished ten days ago, and the older build looks first.
-        let since = finished(now - 10 * DAY);
-        keep_whole(&dir, &[old[0].clone(), old[1].clone(), since.clone()]);
-        as_an_older_build_wrote_it();
-        assert_eq!(
-            stamps(&Files::at(&dir.0).load()),
-            [old[0].timestamp, old[1].timestamp, since.timestamp],
-            "taken up as the history is read"
         );
     }
 
@@ -4910,9 +4774,10 @@ mod tests {
     }
 
     /// The files, on a folder of their own, as every store's cases reach
-    /// them ([`Harness`]).
+    /// them ([`Harness`]): another copy of the app reads and writes them on
+    /// the same folder.
     struct OnDisk {
-        dir: TempDir,
+        dir: std::rc::Rc<TempDir>,
         files: HistoryFiles,
     }
 
@@ -4923,7 +4788,10 @@ mod tests {
                 keep_whole(&dir, whole);
             }
             let files = HistoryFiles::at(&dir.0);
-            Self { dir, files }
+            Self {
+                dir: dir.into(),
+                files,
+            }
         }
 
         fn load(&mut self) -> HistoryLoad {
@@ -4989,6 +4857,30 @@ mod tests {
             let held = held.map_or(&b"\xff\xfe{}"[..], str::as_bytes);
             fs::write(tombstones.join(file_name(id)), held).unwrap();
         }
+
+        fn another(&self) -> Self {
+            Self {
+                dir: self.dir.clone(),
+                files: HistoryFiles::at(&self.dir.0),
+            }
+        }
+
+        /// `layout.json` written back, by when `sessions.json` was last
+        /// written and how long it is now.
+        fn as_an_older_build_looks(&self, made_the_move: bool) {
+            let path = self.dir.0.join(HISTORY).join(LAYOUT_FILE);
+            let mut layout: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if made_the_move {
+                let held = layout.as_object_mut().expect("an object");
+                for key in ["takenThrough", "deletionsTaken", "takenLegacy"] {
+                    held.remove(key);
+                }
+            }
+            let whole = fingerprint_of(&self.dir.0.join(SESSIONS)).unwrap();
+            layout["legacy"] = serde_json::to_value(whole).unwrap();
+            fs::write(&path, serde_json::to_vec_pretty(&layout).unwrap()).unwrap();
+        }
     }
 
     /// What every store must do with the history ([`crate::persist::conformance`]).
@@ -5006,6 +4898,9 @@ mod tests {
             a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went,
             a_session_stored_under_a_name_other_bytes_have_is_known_by_where_it_went,
             a_tombstone_that_names_no_session_still_deletes_its_record,
+            two_copies_take_up_each_others_changes,
+            a_change_another_copy_made_first_is_taken_up_after_ones_own,
+            a_change_an_older_build_looked_at_first_is_taken_up,
         );
     }
 
@@ -5049,8 +4944,6 @@ mod tests {
         a_deletion_that_cannot_be_made_durable_deletes_nothing,
         a_session_put_back_whose_record_stayed_is_one_record,
         the_history_knows_how_large_it_has_grown,
-        two_copies_on_one_folder_take_up_each_others_changes,
-        a_change_another_copy_made_first_is_taken_up_after_ones_own,
         what_another_copy_stores_while_the_history_is_read_is_taken_up,
         a_change_is_still_to_take_up_after_a_listing_that_failed,
         a_restore_that_fails_is_not_told_of_as_cut_short,
