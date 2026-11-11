@@ -1677,12 +1677,15 @@ fn read_each(
 }
 
 /// Store `record` in `records` under its name, or, where other bytes have
-/// that name already, the next free one: no record is ever written over.
+/// that name already, the next free one of the [`BUMPS`] past it: no record
+/// is ever written over.
 /// The name it is stored under, and its bytes counted in `size` where they
 /// were written.
 fn place(records: &Path, record: &Record, size: &AtomicU64) -> io::Result<RecordId> {
     let mut id = record.id;
-    for _ in 0..BUMPS {
+    // Its own name, and each of the BUMPS past it, as the page script tries
+    // them.
+    for _ in 0..=BUMPS {
         let name = file_name(id);
         match fs::read(records.join(&name)) {
             Ok(held) if held == record.json.as_bytes() => return Ok(id),
@@ -2154,6 +2157,50 @@ mod tests {
             "the first as it was"
         );
         assert_eq!(files.load().sessions.len(), 2, "and both kept");
+    }
+
+    /// A record whose name other bytes hold is tried under its own name and
+    /// under each of the [`BUMPS`] past it, as the page script tries it:
+    /// with every one of those but the last held, it goes under the last;
+    /// with that one held too, the change fails, and nothing is written
+    /// over. One name fewer was tried, and it failed a name early.
+    #[test]
+    fn a_record_is_tried_under_its_own_name_and_as_many_past_it_as_bumps_says() {
+        let (dir, files) = history("bumps");
+        files.load();
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::create_dir_all(&records).unwrap();
+        // Other bytes under `held` names of `record`'s, from its own on; the
+        // first name past them.
+        let crowd = |record: &Record, held: u64| {
+            let mut id = record.id;
+            for _ in 0..held {
+                fs::write(records.join(file_name(id)), "other bytes").unwrap();
+                id = id.bumped();
+            }
+            id
+        };
+        let first = record(&finished(1_000));
+        let last = crowd(&first, BUMPS);
+        assert_eq!(
+            files.apply(&put(std::slice::from_ref(&first))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        assert_eq!(
+            fs::read_to_string(records.join(file_name(last))).unwrap(),
+            first.json,
+            "under the last name tried"
+        );
+        let second = record(&finished(2_000));
+        let past = crowd(&second, BUMPS + 1);
+        assert!(
+            matches!(
+                files.apply(&put(std::slice::from_ref(&second))),
+                HistorySaved::Failed(_)
+            ),
+            "no name free"
+        );
+        assert!(!records.join(file_name(past)).exists(), "none past them");
     }
 
     /// The page script a browser's history goes through writes only to the
