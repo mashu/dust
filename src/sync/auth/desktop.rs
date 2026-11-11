@@ -171,10 +171,23 @@ fn answer_browser(mut stream: TcpStream, state: &str) -> Option<Brought> {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let mut line = String::new();
-    // No more than a request line ever holds.
-    BufReader::new(Read::take(&stream, 16 * 1024))
-        .read_line(&mut line)
-        .ok()?;
+    {
+        // No more than a request ever holds, its headers with it.
+        let mut request = BufReader::new(Read::take(&stream, 16 * 1024));
+        request.read_line(&mut line).ok()?;
+        // The rest of it is read too, to the blank line that ends its
+        // headers, before it is answered: closed with any of it unread, the
+        // connection is reset under the browser, which then shows no page.
+        let mut header = Vec::new();
+        loop {
+            header.clear();
+            match request.read_until(b'\n', &mut header) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if header.trim_ascii().is_empty() => break,
+                Ok(_) => {}
+            }
+        }
+    }
     let target = line.split_whitespace().nth(1)?;
     let asked = parse_query(target.split_once('?').map_or("", |(_, asked)| asked));
     let value = |key: &str| {
