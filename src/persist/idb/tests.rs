@@ -10,6 +10,7 @@ use std::task::{Context, Poll, Waker};
 use cw_core::SessionResult;
 
 use super::*;
+use crate::persist::conformance::Harness;
 use crate::persist::record::{HistoryNotice, key_of};
 use crate::persist::record_store::steps::{Steps, There, make_steps};
 use crate::persist::tests::session;
@@ -1651,49 +1652,6 @@ fn a_change_an_older_build_looked_at_first_is_taken_up_in_a_browser_where_it_mad
     );
 }
 
-/// A session an older build stored, taken up where other bytes have the
-/// name the take-up gives it, goes under the next name, and is known by
-/// that name: the load holds it there, beside what holds its own name, and
-/// an older build's deletion of it, taken up by the same tab, deletes that
-/// record and not the other.
-#[test]
-fn a_session_taken_up_under_a_name_other_bytes_have_is_known_by_the_name_it_went_under() {
-    let before = [ago(30), ago(20)];
-    let page = Page::holding(&before);
-    let fake = Fake::on(&page);
-    opened(&fake).load();
-    let since = ago(10);
-    let asked = Record::of(&since, |json| RecordId::placed(since.timestamp, json))
-        .expect("a record")
-        .id;
-    let other = ago(5);
-    let held = serde_json::to_string(&other).expect("JSON");
-    fake.shelves().sessions.insert(asked.name(), held.clone());
-    page.keep(&[before[0].clone(), before[1].clone(), since.clone()]);
-    let tab = opened(&fake);
-    let load = tab.load();
-    let went = asked.bumped();
-    assert!(
-        load.sessions.contains(&(went, since.clone())),
-        "where it went: {:?}",
-        load.sessions
-    );
-    assert!(
-        load.sessions.iter().any(|(id, _)| *id == asked),
-        "beside the other bytes"
-    );
-    // The older build deletes it.
-    page.keep(&before);
-    page.deleted(&[Deleted::of(&since, crate::time::now_ms() + 1)]);
-    let listed = done(tab.listing()).expect("listed");
-    assert!(
-        listed.contains(&asked) && !listed.contains(&went),
-        "{listed:?}"
-    );
-    assert_eq!(fake.records().get(&asked), Some(&held));
-    assert_eq!(done(tab.forgotten(vec![asked, went])), [went]);
-}
-
 /// A move made again over a record whose name other bytes have stores
 /// the session under the next name, and the load holds it there.
 #[test]
@@ -1714,4 +1672,103 @@ fn a_session_moved_under_a_name_other_bytes_have_is_read_where_it_went() {
         load.sessions
     );
     assert_eq!(fake.records().get(&moved[1].id), Some(&other));
+}
+
+/// A browser's database, on the tests' stand-in for one, as every store's
+/// cases reach it ([`Harness`]): each load a tab opened anew, which the
+/// asks after it go to.
+struct InBrowser {
+    fake: Fake,
+    tab: Option<Tab>,
+}
+
+impl InBrowser {
+    fn tab(&self) -> &Tab {
+        self.tab.as_ref().expect("a tab opened")
+    }
+}
+
+impl Harness for InBrowser {
+    fn holding(whole: &[SessionResult]) -> Self {
+        let page = if whole.is_empty() {
+            Page::default()
+        } else {
+            Page::holding(whole)
+        };
+        Self {
+            fake: Fake::on(&page),
+            tab: None,
+        }
+    }
+
+    fn load(&mut self) -> HistoryLoad {
+        let tab = opened(&self.fake);
+        let load = tab.load();
+        self.tab = Some(tab);
+        load
+    }
+
+    fn apply(&self, change: HistoryChange) -> HistorySaved {
+        done(self.tab().apply(change))
+    }
+
+    fn listing(&self) -> Option<Vec<RecordId>> {
+        done(self.tab().listing())
+    }
+
+    fn read(&self, ids: Vec<RecordId>) -> Vec<Option<String>> {
+        let read = done(self.tab().read(ids)).into_iter();
+        read.map(|read| read.ok().map(|record| record.json))
+            .collect()
+    }
+
+    fn deletions(&self, ids: Vec<RecordId>) -> Option<Deletions> {
+        done(self.tab().deletions(ids))
+    }
+
+    fn deleted_sessions(&self, ids: Vec<RecordId>) -> Option<Vec<(RecordId, SessionKey)>> {
+        done(self.tab().deleted_sessions(ids))
+    }
+
+    fn deleted_keys(&self, keys: Vec<SessionKey>) -> Option<Vec<SessionKey>> {
+        done(self.tab().deleted_keys(keys))
+    }
+
+    /// Every one, each time: a browser notes none ([`super::super::Store::still_unread`]).
+    fn still_unread(&self, ids: Vec<RecordId>) -> Vec<HistoryNotice> {
+        record::unread_notices(ids.iter().map(|_| None))
+    }
+
+    fn changed(&self) -> bool {
+        self.tab().changed()
+    }
+
+    fn keep_whole(&self, sessions: &[SessionResult]) {
+        self.fake.page.keep(sessions);
+    }
+
+    fn keep_deleted(&self, deleted: &[Deleted]) {
+        self.fake.page.deleted(deleted);
+    }
+
+    fn plant(&self, id: RecordId, json: &str) {
+        self.fake.shelves().sessions.insert(id.name(), json.into());
+    }
+}
+
+/// What every store must do with the history ([`crate::persist::conformance`]).
+/// Left out: records still unread after the app's tries, which a browser
+/// tells of each time, as it notes none (D31).
+mod conformance {
+    use super::InBrowser;
+
+    crate::persist::conformance::conformance_tests!(InBrowser:
+        a_history_kept_whole_moves_in_once,
+        a_deletion_is_a_tombstone_that_names_its_session,
+        a_session_put_back_is_there_again,
+        what_an_older_build_stores_after_the_move_is_taken_up_once,
+        a_deletion_an_older_build_made_after_the_move_is_honoured,
+        a_record_this_build_cannot_read_is_told_of_once,
+        a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went,
+    );
 }

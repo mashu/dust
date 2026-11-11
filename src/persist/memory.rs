@@ -1555,6 +1555,7 @@ impl MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persist::conformance::Harness;
     use crate::persist::tests::session;
 
     const DAY: u64 = 86_400_000;
@@ -1595,55 +1596,6 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => panic!("not done"),
         }
-    }
-
-    /// A session an older build stored, taken up where other bytes have the
-    /// name the take-up gives it, goes under the next name, and is read
-    /// there, as on the files and in a browser: the load holds it there,
-    /// beside what holds its own name, and an older build's deletion of it
-    /// deletes that record and not the other.
-    #[test]
-    fn a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went() {
-        let store = MemoryStore::default();
-        let at = crate::time::now_ms();
-        let before = [finished(at - 30 * DAY), finished(at - 20 * DAY)];
-        store.keep_whole(&before);
-        store.load_history();
-        let since = finished(at - 10 * DAY);
-        let asked = Record::of(&since, |json| RecordId::placed(since.timestamp, json))
-            .expect("a record")
-            .id;
-        let other = serde_json::to_string(&finished(at - 5 * DAY)).unwrap();
-        store.records.borrow_mut().insert(
-            asked,
-            Held {
-                json: other.clone(),
-                whole: None,
-            },
-        );
-        store.keep_whole(&[before[0].clone(), before[1].clone(), since.clone()]);
-        let load = store.load_history();
-        let went = asked.bumped();
-        assert!(
-            load.sessions.contains(&(went, since.clone())),
-            "where it went: {:?}",
-            load.sessions
-        );
-        assert!(
-            load.sessions.iter().any(|(id, _)| *id == asked),
-            "beside the other bytes"
-        );
-        // The older build deletes it.
-        store.keep_whole(&before);
-        *store.legacy_deleted.borrow_mut() = vec![Deleted::of(&since, at)];
-        let listed = now(store.history_listing()).expect("listed");
-        assert!(
-            listed.contains(&asked) && !listed.contains(&went),
-            "{listed:?}"
-        );
-        assert_eq!(store.record(asked), Some(other));
-        assert_eq!(store.tombstone(asked), None);
-        assert!(store.tombstone(went).is_some());
     }
 
     /// A session put back whose record is there still, as one a sync took
@@ -2413,6 +2365,85 @@ mod tests {
         assert!(
             now(store.forgotten(vec![records[0].id])).is_empty(),
             "let go, not deleted"
+        );
+    }
+
+    /// The test store, as every store's cases reach it ([`Harness`]).
+    struct InTestStore(MemoryStore);
+
+    impl Harness for InTestStore {
+        fn holding(whole: &[SessionResult]) -> Self {
+            let store = MemoryStore::default();
+            if !whole.is_empty() {
+                store.keep_whole(whole);
+            }
+            Self(store)
+        }
+
+        fn load(&mut self) -> HistoryLoad {
+            self.0.load_history()
+        }
+
+        fn apply(&self, change: HistoryChange) -> HistorySaved {
+            now(self.0.change_history(change))
+        }
+
+        fn listing(&self) -> Option<Vec<RecordId>> {
+            now(self.0.history_listing())
+        }
+
+        fn read(&self, ids: Vec<RecordId>) -> Vec<Option<String>> {
+            let read = now(self.0.read_records(ids)).into_iter();
+            read.map(|read| read.ok().map(|record| record.json))
+                .collect()
+        }
+
+        fn deletions(&self, ids: Vec<RecordId>) -> Option<Deletions> {
+            now(self.0.deletions(ids))
+        }
+
+        fn deleted_sessions(&self, ids: Vec<RecordId>) -> Option<Vec<(RecordId, SessionKey)>> {
+            now(self.0.deleted_sessions(ids))
+        }
+
+        fn deleted_keys(&self, keys: Vec<SessionKey>) -> Option<Vec<SessionKey>> {
+            now(self.0.deleted_keys(keys))
+        }
+
+        fn still_unread(&self, ids: Vec<RecordId>) -> Vec<HistoryNotice> {
+            now(self.0.still_unread(ids))
+        }
+
+        fn changed(&self) -> bool {
+            self.0.history_changed()
+        }
+
+        fn keep_whole(&self, sessions: &[SessionResult]) {
+            self.0.keep_whole(sessions);
+        }
+
+        fn keep_deleted(&self, deleted: &[Deleted]) {
+            *self.0.legacy_deleted.borrow_mut() = deleted.to_vec();
+        }
+
+        fn plant(&self, id: RecordId, json: &str) {
+            self.0.plant_unreadable_as(id, json);
+        }
+    }
+
+    /// What every store must do with the history ([`crate::persist::conformance`]).
+    mod conformance {
+        use super::InTestStore;
+
+        crate::persist::conformance::conformance_tests!(InTestStore:
+            a_history_kept_whole_moves_in_once,
+            a_deletion_is_a_tombstone_that_names_its_session,
+            a_session_put_back_is_there_again,
+            what_an_older_build_stores_after_the_move_is_taken_up_once,
+            a_deletion_an_older_build_made_after_the_move_is_honoured,
+            a_record_this_build_cannot_read_is_told_of_once,
+            records_still_unread_are_told_of_once,
+            a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went,
         );
     }
 }

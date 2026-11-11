@@ -1505,6 +1505,7 @@ pub(super) fn copy_aside(root: &Path, unread: &[u8]) -> io::Result<Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persist::conformance::Harness;
     use crate::persist::desktop::tests::TempDir;
     use crate::persist::record::{key_of, keyed, names_noted, records_for_blob, scored};
     use crate::persist::record_store::steps::BUMPS;
@@ -4298,51 +4299,6 @@ mod tests {
         assert_eq!(stamps(&Files::at(&dir.0).load()), [first.timestamp]);
     }
 
-    /// A session an older build stored, taken up where other bytes have the
-    /// name the take-up gives it, goes under the next name, and is read
-    /// there: the load holds it there, beside what holds its own name, and
-    /// an older build's deletion of it deletes that record and not the
-    /// other.
-    #[test]
-    fn a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went() {
-        let dir = TempDir::new("taken-up-under-the-next-name");
-        let now = crate::time::now_ms();
-        let before = [finished(now - 30 * DAY), finished(now - 20 * DAY)];
-        keep_whole(&dir, &before);
-        let files = Files::at(&dir.0);
-        files.load();
-        let since = finished(now - 10 * DAY);
-        let asked = Record::of(&since, |json| RecordId::placed(since.timestamp, json))
-            .expect("a record")
-            .id;
-        let other = serde_json::to_vec(&finished(now - 5 * DAY)).unwrap();
-        let records = dir.0.join(HISTORY).join(RECORDS);
-        fs::write(records.join(file_name(asked)), &other).unwrap();
-        keep_whole(&dir, &[before[0].clone(), before[1].clone(), since.clone()]);
-        let load = files.load();
-        let went = asked.bumped();
-        assert!(
-            load.sessions.contains(&(went, since.clone())),
-            "where it went: {:?}",
-            load.sessions
-        );
-        assert!(
-            load.sessions.iter().any(|(id, _)| *id == asked),
-            "beside the other bytes"
-        );
-        // The older build deletes it.
-        keep_whole(&dir, &before);
-        let deleted = Deleted::of(&since, now);
-        fs::write(dir.0.join(DELETED), serde_json::to_vec(&[deleted]).unwrap()).unwrap();
-        let listed = files.listing().expect("listed");
-        assert!(
-            listed.contains(&asked) && !listed.contains(&went),
-            "{listed:?}"
-        );
-        assert_eq!(fs::read(records.join(file_name(asked))).unwrap(), other);
-        assert_eq!(files.forgotten(&[asked, went]), [went]);
-    }
-
     /// Two deletions of one session an older build remembers, as two of its
     /// copies each deleted it, are made here as one, its tombstone stamped
     /// with the later, as in a browser: the first was kept here, the last
@@ -4958,6 +4914,96 @@ mod tests {
         assert_eq!(keys, Some(vec![key]));
         let unread = at_once(record_store::still_unread(&disk, &[gone.id])).expect("at once");
         assert_eq!(unread, [HistoryNotice::Unread { count: 1 }]);
+    }
+
+    /// The files, on a folder of their own, as every store's cases reach
+    /// them ([`Harness`]).
+    struct OnDisk {
+        dir: TempDir,
+        files: HistoryFiles,
+    }
+
+    impl Harness for OnDisk {
+        fn holding(whole: &[SessionResult]) -> Self {
+            let dir = TempDir::new("conformance");
+            if !whole.is_empty() {
+                keep_whole(&dir, whole);
+            }
+            let files = HistoryFiles::at(&dir.0);
+            Self { dir, files }
+        }
+
+        fn load(&mut self) -> HistoryLoad {
+            self.files.load()
+        }
+
+        fn apply(&self, change: HistoryChange) -> HistorySaved {
+            self.files.apply(&change)
+        }
+
+        fn listing(&self) -> Option<Vec<RecordId>> {
+            self.files.listing()
+        }
+
+        fn read(&self, ids: Vec<RecordId>) -> Vec<Option<String>> {
+            let read = self.files.read(&ids).into_iter();
+            read.map(|read| read.ok().map(|record| record.json))
+                .collect()
+        }
+
+        fn deletions(&self, ids: Vec<RecordId>) -> Option<Deletions> {
+            self.files.deletions(&ids)
+        }
+
+        fn deleted_sessions(&self, ids: Vec<RecordId>) -> Option<Vec<(RecordId, SessionKey)>> {
+            self.files.deleted_sessions(&ids)
+        }
+
+        fn deleted_keys(&self, keys: Vec<SessionKey>) -> Option<Vec<SessionKey>> {
+            self.files.deleted_keys(&keys)
+        }
+
+        fn still_unread(&self, ids: Vec<RecordId>) -> Vec<HistoryNotice> {
+            self.files.still_unread(&ids)
+        }
+
+        fn changed(&self) -> bool {
+            self.files.watch().changed()
+        }
+
+        fn keep_whole(&self, sessions: &[SessionResult]) {
+            keep_whole(&self.dir, sessions);
+        }
+
+        fn keep_deleted(&self, deleted: &[Deleted]) {
+            fs::write(
+                self.dir.0.join(DELETED),
+                serde_json::to_vec(deleted).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn plant(&self, id: RecordId, json: &str) {
+            let records = self.dir.0.join(HISTORY).join(RECORDS);
+            fs::create_dir_all(&records).unwrap();
+            fs::write(records.join(file_name(id)), json).unwrap();
+        }
+    }
+
+    /// What every store must do with the history ([`crate::persist::conformance`]).
+    mod conformance {
+        use super::OnDisk;
+
+        crate::persist::conformance::conformance_tests!(OnDisk:
+            a_history_kept_whole_moves_in_once,
+            a_deletion_is_a_tombstone_that_names_its_session,
+            a_session_put_back_is_there_again,
+            what_an_older_build_stores_after_the_move_is_taken_up_once,
+            a_deletion_an_older_build_made_after_the_move_is_honoured,
+            a_record_this_build_cannot_read_is_told_of_once,
+            records_still_unread_are_told_of_once,
+            a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went,
+        );
     }
 
     /// Each test of the files that reaches them as the app does, made
