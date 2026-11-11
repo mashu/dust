@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
 
 use super::*;
@@ -256,4 +256,39 @@ fn a_trade_answered_after_another_sign_in_keeps_nothing() {
             assert_eq!(traded, Err(AuthError::Cancelled), "{case}");
         }
     }
+}
+
+/// A browser is answered only once its whole request is read, however long
+/// its headers run, as a browser's cookies for 127.0.0.1 can. Answered at
+/// its first line and closed with the rest unread, the connection was reset
+/// under the browser, which then showed no page; and the browser of these
+/// tests, whose requests go out in pieces, now and then saw its icon's
+/// answer cut off so, and never came back with the code, leaving the
+/// sign-in to wait out its ten minutes.
+#[test]
+fn a_browser_is_answered_once_its_whole_request_is_read() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("listening");
+    let at = listener.local_addr().expect("an address");
+    let browser = std::thread::spawn(move || {
+        let mut stream = TcpStream::connect(at).expect("connected");
+        let cookie = "c".repeat(12 * 1024);
+        write!(
+            stream,
+            "GET /favicon.ico HTTP/1.1\r\nHost: {at}\r\nCookie: {cookie}\r\n\r\n"
+        )?;
+        let mut page = String::new();
+        stream.read_to_string(&mut page).map(|_| page)
+    });
+    let (stream, _) = listener.accept().expect("accepted");
+    assert_eq!(
+        answer_browser(stream, "the state"),
+        None,
+        "an icon is no answer"
+    );
+    let page = browser.join().expect("the browser");
+    assert!(
+        page.as_ref()
+            .is_ok_and(|page| page.starts_with("HTTP/1.1 404")),
+        "answered whole: {page:?}"
+    );
 }
