@@ -23,7 +23,7 @@ use cw_core::SessionResult;
 use super::legacy::{self, Fingerprint, Gate, Layout, read_history};
 use super::record::{
     Deletions, HistoryChange, HistoryLoad, HistoryNotice, Record, RecordId, Unopened, Unreadable,
-    held_key, key_of, keyed, taken_up, tombstone_at, tombstone_key, unread_notices,
+    held_key, key_of, keyed, taken_up, tombstone_at, tombstone_key,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -400,17 +400,6 @@ pub(super) enum Laid<'a> {
     },
 }
 
-/// Whose change a store makes ([`Backend::commit`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum By {
-    /// The app's: the store's own look is no account of it, but as each
-    /// store keeps that account.
-    App,
-    /// The store's own, as it reads or lists the history: no change for it
-    /// to take up.
-    Store,
-}
-
 /// What became of a change a store made ([`Backend::commit`]): where each
 /// of its records went, as far as it got, none for one left deleted; and
 /// what it came to, or why it was not made.
@@ -469,10 +458,6 @@ pub(super) trait Backend {
     /// A refused read as the history is read whole is no history read: the
     /// store falls back to another for the visit ([`NotOpened`]).
     const FALLS_BACK: bool;
-    /// It notes the records still unread after the app's tries, so each is
-    /// told of once ([`still_unread`]).
-    #[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
-    const NOTES_STILL_UNREAD: bool;
 
     /// The key of each record read so far ([`KeyCache`]).
     fn keys(&self) -> &RefCell<KeyCache>;
@@ -489,21 +474,16 @@ pub(super) trait Backend {
     /// Every record and tombstone there is.
     async fn list(&self) -> Result<Listing<Self::Listed>, Self::Refused>;
     /// The records `listing` found but those deleted, read whole, as the
-    /// history is read whole ([`Order::MoveThenRead`]).
+    /// history is read whole ([`Order::MoveThenRead`]): asked only of a
+    /// store that moves first, which gives it.
     async fn read_listed(&self, _listing: &Listing<Self::Listed>) -> Vec<(RecordId, RecordRead)> {
-        Vec::new()
+        unreachable!("only a store that moves first reads what it listed, and it gives the read")
     }
     /// Every record read whole, the tombstones first, with what each holds
-    /// where `keep` is set ([`Order::ReadThenMove`]).
+    /// where `keep` is set ([`Order::ReadThenMove`]): asked only of a store
+    /// that reads first, which gives it.
     async fn read_whole(&self, _keep: bool) -> Result<WholeRead<Self::Listed>, Self::Refused> {
-        let listing = self.list().await?;
-        let read = self.read_listed(&listing).await;
-        Ok(WholeRead {
-            listing,
-            read,
-            kept: BTreeMap::new(),
-            tombstones: Vec::new(),
-        })
+        unreachable!("only a store that reads first reads whole, and it gives the read")
     }
     /// What is stored for each of `ids`, in their order: by what `listed`
     /// found, where it is given, as what a listing found is read.
@@ -538,15 +518,17 @@ pub(super) trait Backend {
         count: usize,
     ) -> Result<Option<SetAside>, String>;
     /// Every record and tombstone there is, by name, as a move made over
-    /// them looks at them ([`Order::MoveThenRead`]).
+    /// them looks at them ([`Order::MoveThenRead`]): asked only of a store
+    /// that moves first, which gives it.
     async fn here(&self) -> Result<(BTreeSet<RecordId>, BTreeSet<RecordId>), Self::Refused> {
-        Ok(Default::default())
+        unreachable!("only a store that moves first looks at what is here, and it gives the look")
     }
     /// What each of `ids` holds, as text, as a move made over them reads
     /// them: one gone, or whose bytes are no text, holds nothing; one that
-    /// cannot be read now holds the move back.
+    /// cannot be read now holds the move back. Asked only of a store that
+    /// moves first, which gives it.
     async fn texts(&self, _ids: &[RecordId]) -> Result<Vec<(RecordId, String)>, Self::Refused> {
-        Ok(Vec::new())
+        unreachable!("only a store that moves first reads what is here, and it gives the read")
     }
     /// The move is being made.
     fn moving(&self) {}
@@ -557,7 +539,11 @@ pub(super) trait Backend {
     /// Take away `ids`, records left beside their tombstones.
     async fn unlink(&self, _ids: &[RecordId]) {}
     /// Make `writes`, and lay how the history is kept as `laid` says.
-    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<Self::Refused>;
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>) -> Made<Self::Refused>;
+    /// Lay how the history is kept as `next` says, and nothing else, as a
+    /// take-up that took nothing notes only what it looked at, over `from`,
+    /// how it was kept as the take-up was worked out ([`Laid::Over`]).
+    async fn write_layout(&self, from: &Layout, next: &Layout) -> Result<(), Self::Refused>;
     /// Store `records`, the move's, and `layout` with them, last: where
     /// each went, in their order ([`Made::placed`]).
     async fn write_move(
@@ -1037,11 +1023,21 @@ async fn take_up<B: Backend>(
         return Err(HeldBack);
     }
     let writes = Writes::of(&change).map_err(|_| HeldBack)?;
-    let laid = Laid::Over {
-        from: layout,
-        next: &next,
+    // A take-up that took nothing makes no change: it notes only what it
+    // looked at.
+    let made = if change.is_empty() {
+        let laid = store.write_layout(layout, &next).await;
+        Made {
+            placed: Vec::new(),
+            saved: laid.map(|()| HistorySaved::Stored { kept: 0 }),
+        }
+    } else {
+        let laid = Laid::Over {
+            from: layout,
+            next: &next,
+        };
+        store.commit(&writes, laid).await
     };
-    let made = store.commit(&writes, laid, By::Store).await;
     noted(store.keys(), &change, &made.placed, made.saved.is_ok());
     match made.saved {
         // Each session where it went, to be read there.
@@ -1166,7 +1162,7 @@ pub(super) async fn apply<B: Backend>(store: &B, change: &HistoryChange) -> Hist
         Ok(writes) => writes,
         Err(err) => return HistorySaved::Failed(err.to_string()),
     };
-    let made = store.commit(&writes, Laid::AsItIs, By::App).await;
+    let made = store.commit(&writes, Laid::AsItIs).await;
     noted(store.keys(), change, &made.placed, made.saved.is_ok());
     made.saved.unwrap_or_else(|refused| refused.saved())
 }
@@ -1261,13 +1257,11 @@ pub(super) async fn deleted_keys<B: Backend>(
 /// any of the app's tries since it found them so
 /// ([`super::Store::still_unread`]): of those not told of before, how many,
 /// each noted as told, where this build may write, so it is told of once
-/// ([`notes::still_unread`]); every one of them, where the store notes
-/// none ([`Backend::NOTES_STILL_UNREAD`]).
+/// ([`notes::still_unread`]). Asked only of a store that notes them: a
+/// browser's database notes none, and tells of every one each time, as
+/// the store's own answer, [`super::Store::still_unread`]'s, has it.
 #[cfg_attr(not(any(feature = "native-runtime", test)), allow(dead_code))]
 pub(super) async fn still_unread<B: Backend>(store: &B, ids: &[RecordId]) -> Vec<HistoryNotice> {
-    if !B::NOTES_STILL_UNREAD {
-        return unread_notices(ids.iter().map(|_| None));
-    }
     let told = store.note(Note::UnreadTold).await;
     let (notices, unread_told) = notes::still_unread(ids, told.as_deref());
     let writable = store.may_write().await;

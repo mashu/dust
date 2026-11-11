@@ -39,8 +39,8 @@ use super::record::{
 };
 use super::record_store::notes::Note;
 use super::record_store::{
-    self, Backend, By, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, NotOpened, Opening,
-    Order, Raw, Refusal, Tombstone, TombstoneRead, TombstonesOf, WholeRead, Writes,
+    self, Backend, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, NotOpened, Opening, Order,
+    Raw, Refusal, Tombstone, TombstoneRead, TombstonesOf, WholeRead, Writes,
 };
 use super::saved::HistorySaved;
 use super::session::{Deleted, SessionKey};
@@ -539,10 +539,6 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
     type Listed = ();
     const ORDER: Order = Order::ReadThenMove;
     const FALLS_BACK: bool = true;
-    /// A record still unread after the app's tries is told of each time:
-    /// the database notes no failure, as a refused read fails the whole
-    /// read.
-    const NOTES_STILL_UNREAD: bool = false;
 
     fn keys(&self) -> &RefCell<KeyCache> {
         &self.0.session_keys
@@ -739,7 +735,6 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
         let history = self.0;
         if note == Note::Told
             && let Some(names) = names
-            && history.writable.get()
             && let Ok(raw) = serde_json::to_string(names)
         {
             let noted = Transaction {
@@ -805,7 +800,7 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
     /// writes the layout again only should the browser have cleared the
     /// database meanwhile. Each record goes under the name the page script
     /// says it went under.
-    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, _by: By) -> Made<Refused> {
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>) -> Made<Refused> {
         let history = self.0;
         let change = writes.change;
         let (layout, next) = match laid {
@@ -873,6 +868,18 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
                 }
             }
         }
+    }
+
+    /// A change that holds nothing else, in one transaction, as a change
+    /// that takes something up writes it.
+    async fn write_layout(&self, from: &Layout, next: &Layout) -> Result<(), Refused> {
+        let change = HistoryChange::default();
+        let writes = Writes {
+            change: &change,
+            forget: Vec::new(),
+        };
+        let laid = Laid::Over { from, next };
+        self.commit(&writes, laid).await.saved.map(|_| ())
     }
 
     /// In one transaction, with how the history is kept, written over the

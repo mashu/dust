@@ -28,7 +28,7 @@ use super::record::{
 use super::record_store::notes::Note;
 use super::record_store::steps::{Steps, There, make_steps};
 use super::record_store::{
-    self, Backend, By, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, Order, Raw, RecordRead,
+    self, Backend, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, Order, Raw, RecordRead,
     Refusal, Tombstone, TombstoneRead, TombstonesOf, Writes, at_once,
 };
 use super::{
@@ -919,7 +919,6 @@ impl Backend for InMem<'_> {
     type Listed = ();
     const ORDER: Order = Order::MoveThenRead;
     const FALLS_BACK: bool = false;
-    const NOTES_STILL_UNREAD: bool = true;
 
     fn keys(&self) -> &RefCell<KeyCache> {
         &self.0.keys
@@ -1046,12 +1045,8 @@ impl Backend for InMem<'_> {
 
     /// Step by step, as the files make it; where it takes something up,
     /// how the history is kept noted once it is made.
-    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<Refused> {
-        let (placed, saved) = if by == By::Store && writes.change.is_empty() {
-            (Vec::new(), HistorySaved::Stored { kept: 0 })
-        } else {
-            self.0.make(writes)
-        };
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>) -> Made<Refused> {
+        let (placed, saved) = self.0.make(writes);
         if saved.kept().is_none() {
             return Made {
                 placed,
@@ -1065,6 +1060,13 @@ impl Backend for InMem<'_> {
             placed,
             saved: Ok(saved),
         }
+    }
+
+    /// Noted, and nothing else: no change to the history to count, or for
+    /// a full store to refuse.
+    async fn write_layout(&self, _from: &Layout, next: &Layout) -> Result<(), Refused> {
+        *self.0.layout.borrow_mut() = Some(next.clone());
+        Ok(())
     }
 
     /// As a change is made, how the history is kept noted last: no record's

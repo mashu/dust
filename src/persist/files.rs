@@ -65,7 +65,7 @@ use super::record::{
 use super::record_store::notes::Note;
 use super::record_store::steps::{Steps, There, make_steps, place};
 use super::record_store::{
-    self, Backend, By, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, Order, Raw, RecordRead,
+    self, Backend, KeyCache, Laid, Legacy, LegacyLook, Listing, Made, Order, Raw, RecordRead,
     Refusal, Tombstone, TombstoneRead, TombstonesOf, Writes, at_once,
 };
 use super::saved::HistorySaved;
@@ -642,6 +642,19 @@ impl HistoryFiles {
         then_and_there(record_store::still_unread(&Disk(self), ids)).unwrap_or_default()
     }
 
+    /// Note `next` as how the history is kept, as a take-up laid it: one
+    /// that could not be written is told of, and what was taken up is
+    /// taken up again at the next look, as it was never noted.
+    fn lay(&self, next: &Layout) {
+        let noted = next
+            .written()
+            .map_err(io::Error::other)
+            .and_then(|raw| write_whole(&self.dir, LAYOUT_FILE, &raw));
+        if let Err(err) = noted {
+            eprintln!("could not note what was taken up of an older build's history: {err}");
+        }
+    }
+
     /// Clear what writes cut short left behind: temporary files no write
     /// still running could own.
     fn clear_temporaries(&self) {
@@ -953,7 +966,6 @@ impl Backend for Disk<'_> {
     type Listed = Packed;
     const ORDER: Order = Order::MoveThenRead;
     const FALLS_BACK: bool = false;
-    const NOTES_STILL_UNREAD: bool = true;
 
     fn keys(&self) -> &RefCell<KeyCache> {
         &self.0.keys
@@ -1137,10 +1149,8 @@ impl Backend for Disk<'_> {
     /// restore of many sessions at once journaled while it runs, so the
     /// next to read the history can say it was cut short; and how the
     /// history is kept written after, where the change is made. What the
-    /// change made is this copy's own: no change for it to take up. An
-    /// empty one this copy makes of its own, as a take-up that only notes
-    /// what it took, makes nothing.
-    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<io::Error> {
+    /// change made is this copy's own: no change for it to take up.
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>) -> Made<io::Error> {
         let change = writes.change;
         let files = self.0;
         let journal = if restores_many(change) {
@@ -1156,30 +1166,20 @@ impl Backend for Disk<'_> {
         } else {
             None
         };
-        let (placed, made) = if by == By::Store && change.is_empty() {
-            (Vec::new(), Ok(()))
-        } else {
-            let before = files.watch.stamps();
-            let tombstones = writes.tombstones();
-            let made = make_steps(&files.folders(), &change.put, &tombstones, &change.unforget);
-            // Made or not, the change is over, and what became of it is said
-            // now: a journal left behind says only that Dust stopped first.
-            if let Some(journal) = journal {
-                end_journal(journal, &files.dir);
-            }
-            files.watch.made(before);
-            made
-        };
+        let before = files.watch.stamps();
+        let tombstones = writes.tombstones();
+        let (placed, made) =
+            make_steps(&files.folders(), &change.put, &tombstones, &change.unforget);
+        // Made or not, the change is over, and what became of it is said
+        // now: a journal left behind says only that Dust stopped first.
+        if let Some(journal) = journal {
+            end_journal(journal, &files.dir);
+        }
+        files.watch.made(before);
         if made.is_ok()
             && let Laid::Over { next, .. } = laid
         {
-            let noted = next
-                .written()
-                .map_err(io::Error::other)
-                .and_then(|raw| write_whole(&files.dir, LAYOUT_FILE, &raw));
-            if let Err(err) = noted {
-                eprintln!("could not note what was taken up of an older build's history: {err}");
-            }
+            files.lay(next);
         }
         Made {
             placed,
@@ -1187,6 +1187,13 @@ impl Backend for Disk<'_> {
                 kept: change.put.len(),
             }),
         }
+    }
+
+    /// `layout.json` alone: no folder of the history is looked at, and
+    /// what could not be written is told of, and taken up again.
+    async fn write_layout(&self, _from: &Layout, next: &Layout) -> io::Result<()> {
+        self.0.lay(next);
+        Ok(())
     }
 
     /// Each record flushed before it takes its name, on as many threads as

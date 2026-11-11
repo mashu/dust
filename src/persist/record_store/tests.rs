@@ -418,7 +418,6 @@ impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
         Order::MoveThenRead
     };
     const FALLS_BACK: bool = READ_FIRST;
-    const NOTES_STILL_UNREAD: bool = !READ_FIRST;
 
     fn keys(&self) -> &RefCell<KeyCache> {
         &self.keys
@@ -613,7 +612,7 @@ impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
         }
     }
 
-    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<Said> {
+    async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>) -> Made<Said> {
         let laid = match laid {
             Laid::AsItIs => "as it is",
             Laid::Over { next, .. } => {
@@ -621,7 +620,7 @@ impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
                 "over"
             }
         };
-        self.call(format!("commit({by:?}, {laid})"));
+        self.call(format!("commit({laid})"));
         if let Some(refused) = self.commits.borrow_mut().pop_front().and_then(Result::err) {
             return Made {
                 placed: Vec::new(),
@@ -644,6 +643,12 @@ impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
                 kept: change.put.len(),
             }),
         }
+    }
+
+    async fn write_layout(&self, _from: &Layout, next: &Layout) -> Result<(), Said> {
+        self.call("write_layout");
+        *self.laid.borrow_mut() = Some(next.clone());
+        Ok(())
     }
 
     async fn write_move(
@@ -800,7 +805,7 @@ fn a_store_that_moves_first_takes_up_after_the_records_reading_the_tombstones_be
             "legacy_deleted",
             "tombstones",
             "gate",
-            "commit(Store, over)",
+            "commit(over)",
             "loaded",
         ])
     );
@@ -862,7 +867,8 @@ fn a_store_that_reads_first_reads_the_records_and_then_moves_over_them() {
     // Moved already, with an older build's change to take up: the history
     // kept whole is read with the look, and the deletions it remembers,
     // before the tombstones and the records, those the move wrote read for
-    // the sessions they hold, as a move notes none.
+    // the sessions they hold, as a move notes none; and, as the session it
+    // holds is here, only what was looked at is noted.
     script.changed.set(true);
     *script.gate.borrow_mut() = Ok(Gate::Open(Box::new(moved_layout())));
     now(listing(&script)).expect("listed");
@@ -876,7 +882,7 @@ fn a_store_that_reads_first_reads_the_records_and_then_moves_over_them() {
             "list",
             "read(listed)",
             "tombstones",
-            "commit(Store, over)",
+            "write_layout",
             "look",
             "list",
             "saw",
@@ -1024,12 +1030,6 @@ fn reads_and_asks_go_by_the_notes_and_the_tombstones_in_order() {
         calls(&["note(UnreadTold)", "gate"]),
         "told of once"
     );
-    let browser = Script::<true>::new(Ok(Gate::Unmoved));
-    assert_eq!(
-        now(still_unread(&browser, &[one.id])),
-        [HistoryNotice::Unread { count: 1 }]
-    );
-    assert_eq!(browser.calls(), Vec::<String>::new(), "notes nothing");
     now(deletions(&script, &[one.id]));
     now(deleted_sessions(&script, &[one.id]));
     now(deleted_keys(&script, vec![]));
@@ -1049,7 +1049,7 @@ fn reads_and_asks_go_by_the_notes_and_the_tombstones_in_order() {
         now(apply(&script, &change)),
         HistorySaved::Stored { kept: 1 }
     );
-    assert_eq!(script.calls(), calls(&["gate", "commit(App, as it is)"]));
+    assert_eq!(script.calls(), calls(&["gate", "commit(as it is)"]));
 }
 
 /// A session finished on day `day`, scored as it reads back.

@@ -1885,9 +1885,12 @@ impl Harness for InBrowser {
         done(self.tab().deleted_keys(keys))
     }
 
-    /// Every one, each time: a browser notes none ([`super::super::Store::still_unread`]).
-    fn still_unread(&self, ids: Vec<RecordId>) -> Vec<HistoryNotice> {
-        record::unread_notices(ids.iter().map(|_| None))
+    /// None asked: a browser notes no record still unread, and tells of
+    /// every one each time, as the store's own answer has it
+    /// ([`super::super::Store::still_unread`]), so the case that asks
+    /// leaves it out.
+    fn still_unread(&self, _ids: Vec<RecordId>) -> Vec<HistoryNotice> {
+        unreachable!("a browser notes no record still unread");
     }
 
     fn changed(&self) -> bool {
