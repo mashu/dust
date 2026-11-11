@@ -376,6 +376,9 @@ impl HistoryFiles {
         // As the folders were before they were read: whatever another copy
         // changes from here on is taken up at the next look. Where they
         // cannot be read, nothing was seen, and the next look reads them.
+        // Noted as seen once they are listed, so that what this read stores
+        // itself, as it finishes a deletion cut short or takes up what an
+        // older build stored, is noted as its own change, none to take up.
         let before = self.watch.stamps();
         let listing = match self.listing_now() {
             Ok(listing) => listing,
@@ -384,17 +387,24 @@ impl HistoryFiles {
                 return load;
             }
         };
-        let mut unlinked = false;
-        let mut live = Vec::with_capacity(listing.records.len());
-        for &id in &listing.records {
-            if listing.gone.contains(&id) {
-                // Deleted, and the record left behind: a deletion cut short.
-                if writable {
-                    unlinked |= fs::remove_file(self.records().join(file_name(id))).is_ok();
-                }
-                continue;
+        self.watch.looked(before);
+        // Deleted, and the record left behind: a deletion cut short, which
+        // this copy finishes, where it may write.
+        let (beside, live): (Vec<RecordId>, Vec<RecordId>) = listing
+            .records
+            .iter()
+            .copied()
+            .partition(|id| listing.gone.contains(id));
+        if writable && !beside.is_empty() {
+            let unlinking = self.watch.stamps();
+            let mut unlinked = false;
+            for id in beside {
+                unlinked |= fs::remove_file(self.records().join(file_name(id))).is_ok();
             }
-            live.push(id);
+            if unlinked {
+                let _ = sync_dir(&self.records());
+            }
+            self.watch.made(unlinking);
         }
         let records = self.records();
         self.progress.reading(Some(live.len() as u64));
@@ -439,9 +449,6 @@ impl HistoryFiles {
             }
         }
         drop(keys);
-        if unlinked {
-            let _ = sync_dir(&self.records());
-        }
         load.notices
             .extend(self.tell(&unread, &load.failed, writable));
         // Nothing is taken up from an older build while a record here
@@ -461,7 +468,6 @@ impl HistoryFiles {
             }
         }
         load.complete = layout.is_some();
-        self.watch.looked(before);
         load
     }
 
@@ -607,16 +613,17 @@ impl HistoryFiles {
     /// read ([`Self::live_keys`]). None where the history cannot be listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
         self.on_its_thread();
-        // As the folders were before they were looked at, the history kept
-        // whole among them: whatever another copy changes from here on is
-        // taken up at the next look.
-        let before = self.watch.stamps();
         if let Ok(Gate::Open(layout)) = self.gate()
             && self.legacy_changed(&layout)
             && let Some(live) = self.live_keys()
         {
             self.import(&layout, &live);
         }
+        // As the folders were before they were looked at, the history kept
+        // whole among them, and once what was taken up of it was stored, as
+        // this copy's own change is none for it to take up: whatever another
+        // copy changes from here on is taken up at the next look.
+        let before = self.watch.stamps();
         let listing = self.listing_now().ok()?;
         self.watch.looked(before);
         let listed: Vec<RecordId> = listing.records.difference(&listing.gone).copied().collect();
@@ -3432,6 +3439,68 @@ mod tests {
         assert_eq!(here.listing(), Some(vec![ours.id, more.id]));
         assert_eq!(here.forgotten(&[theirs.id]), [theirs.id]);
         assert!(!here.changed());
+    }
+
+    /// What a read of the history whole takes up from an older build is no
+    /// change for the copy that read it to take up: it stored it itself.
+    /// The read noted the folders as they were before the take-up wrote,
+    /// so its own records looked like another copy's, and it listed once
+    /// more.
+    #[test]
+    fn what_a_read_takes_up_from_an_older_build_is_no_change_for_it_to_take_up() {
+        let dir = TempDir::new("own-take-up-at-read");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        Files::at(&dir.0).load();
+        keep_whole(&dir, &[old, finished(now + 60_000)]);
+        let files = Files::at(&dir.0);
+        assert_eq!(files.load().sessions.len(), 2, "taken up");
+        assert!(!files.changed(), "its own");
+    }
+
+    /// What a listing takes up from an older build is no change for the
+    /// copy that listed to take up, as the read's is not. It noted the
+    /// folders as they were before the take-up wrote.
+    #[test]
+    fn what_a_listing_takes_up_from_an_older_build_is_no_change_for_it_to_take_up() {
+        let dir = TempDir::new("own-take-up-at-listing");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = Files::at(&dir.0);
+        files.load();
+        keep_whole(&dir, &[old, finished(now + 60_000)]);
+        assert!(files.changed(), "the history kept whole changed");
+        assert_eq!(files.listing().map(|listed| listed.len()), Some(2));
+        assert!(!files.changed(), "its own");
+    }
+
+    /// A deletion cut short that a read of the history whole finishes, its
+    /// record taken away from beside its tombstone, is no change for the
+    /// copy that read it to take up. The read noted the folders as they
+    /// were before it took the record away.
+    #[test]
+    fn a_deletion_a_read_finishes_is_no_change_for_it_to_take_up() {
+        let (dir, files) = history("own-deletion-finished");
+        files.load();
+        let first = finished(1_000);
+        let one = record(&first);
+        files.apply(&put(std::slice::from_ref(&one)));
+        let tombstones = dir.0.join(HISTORY).join(TOMBSTONES);
+        fs::create_dir_all(&tombstones).unwrap();
+        fs::write(
+            tombstones.join(file_name(one.id)),
+            serde_json::to_vec(&Deleted::of(&first, 7)).unwrap(),
+        )
+        .unwrap();
+        let files = Files::at(&dir.0);
+        assert!(files.load().sessions.is_empty());
+        assert!(
+            names(&dir.0.join(HISTORY).join(RECORDS)).is_empty(),
+            "finished"
+        );
+        assert!(!files.changed(), "its own");
     }
 
     /// Have another copy of the app store each of `theirs`, one each time
