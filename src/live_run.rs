@@ -20,11 +20,12 @@ use crate::time::{mono_ms, now_ms};
 /// same way for a session of groups and for a contest run.
 ///
 /// [`step`] calls some of these with what is live borrowed from the app
-/// (`progress`, `progressed`, `so_far`, `as_shown`, `hear`, and the step's
-/// own `first`): they must leave the app alone, borrowing nothing of it,
-/// doing nothing the machine said, handing nothing to it, and showing no
-/// toast. `so_far` changes only its copy of the machine.
-pub(crate) trait RunMachine: Sized {
+/// (`first`, `progress`, `progressed`, `so_far`, `as_shown`, `hear`, and
+/// a step's own `ahead`): they must leave the app alone, borrowing
+/// nothing of it, doing nothing the machine said, handing nothing to it,
+/// and showing no toast. `so_far` changes only its copy of the machine. The
+/// others are called with nothing borrowed.
+pub(crate) trait RunMachine: Sized + 'static {
     /// What it hears: what the user did, or news from its own tasks.
     type Event;
     /// What it says to do.
@@ -54,6 +55,19 @@ pub(crate) trait RunMachine: Sized {
     #[must_use = "the effects are the machine's instructions to the runtime"]
     fn hear(&mut self, event: Self::Event, now: MonoMs) -> Vec<Self::Effect>;
 
+    /// What tells it timer `id` has run out.
+    fn timer_fired(id: u64) -> Self::Event;
+
+    /// What its kind does with `event`, come under `lease`, before the
+    /// machine hears it: `event` to hear now, or none to hear nothing now.
+    fn before(_ctx: AppCtx, _lease: &Lease, event: Self::Event) -> Option<Self::Event> {
+        Some(event)
+    }
+
+    /// What its machine hears at `now` before any event, as that event
+    /// reaches it.
+    fn first(live: &mut LiveRun<Self, Self::Own>, ctx: AppCtx, now: MonoMs) -> Vec<Self::Effect>;
+
     /// Whether it is over, its end said.
     fn over(&self) -> bool;
 
@@ -78,6 +92,12 @@ pub(crate) trait RunMachine: Sized {
     /// the app stop under it. None while it would keep nothing.
     /// `finished_at` is the wall time it says it ended at.
     fn so_far(live: &LiveRun<Self, Self::Own>, now: MonoMs, finished_at: u64) -> Option<SoFar>;
+
+    /// Do what its machine said, `effect`, under `lease`.
+    fn carry_out(ctx: AppCtx, lease: &Lease, effect: Self::Effect);
+
+    /// What its kind does once all its machine said is done.
+    fn effects_done(_ctx: AppCtx) {}
 
     /// What its kind does as it is taken out, the audio given back.
     fn ending(_ctx: AppCtx, _live: &mut LiveRun<Self, Self::Own>) {}
@@ -115,29 +135,43 @@ pub(crate) fn lease<M: RunMachine>(ctx: AppCtx) -> Option<Lease> {
     Some(live.lease.clone())
 }
 
+/// Hand what is live of kind `M` `event`, come under `lease`: whatever its
+/// kind does first ([`RunMachine::before`]), then a step that hears it.
+pub(crate) fn dispatch<M: RunMachine>(ctx: AppCtx, lease: &Lease, event: M::Event) {
+    let Some(event) = M::before(ctx, lease, event) else {
+        return;
+    };
+    step::<M>(ctx, lease, Some(event), |live, now| {
+        Some(M::first(live, ctx, now))
+    });
+}
+
 /// One step of what is live of kind `M`, if what comes under `lease`
-/// reaches it ([`hears`]): `first` hands its machine what comes before
+/// reaches it ([`hears`]): `ahead` hands its machine what comes before
 /// `event` at this moment — typing still waiting, a gap the app was not
 /// running in — or says it has nothing to hear; then the machine hears
 /// `event`, if there is one. What it shows is published if that changed,
 /// and what End would keep goes with its mark, should the app stop under
 /// it, once it gets further, or once what it hears while paused changes
-/// that. Back come what its machine said to do and the lease to do it
-/// under. `first` runs with what is live borrowed ([`RunMachine`]).
+/// that; then what its machine said is done, under its lease. `ahead` runs
+/// with what is live borrowed ([`RunMachine`]).
 pub(crate) fn step<M: RunMachine>(
     ctx: AppCtx,
     lease: &Lease,
     event: Option<M::Event>,
-    first: impl FnOnce(&mut LiveRun<M, M::Own>, MonoMs) -> Option<Vec<M::Effect>>,
-) -> Option<(Lease, Vec<M::Effect>)> {
+    ahead: impl FnOnce(&mut LiveRun<M, M::Own>, MonoMs) -> Option<Vec<M::Effect>>,
+) {
     let mut shown = M::shown(ctx);
     let app = ctx.app();
     let (lease, effects, so_far) = {
         let mut slot = app.session.borrow_mut();
-        let live = slot
+        let Some(live) = slot
             .as_mut()
             .and_then(M::of_mut)
-            .filter(|live| hears(live, lease))?;
+            .filter(|live| hears(live, lease))
+        else {
+            return;
+        };
         let now = MonoMs(mono_ms());
         let finished_at = now_ms();
         let before = live.machine.progress();
@@ -146,7 +180,9 @@ pub(crate) fn step<M: RunMachine>(
         // times of what was heard in it.
         let paused = (event.is_some() && live.stage == Stage::Paused)
             .then(|| M::so_far(live, now, finished_at));
-        let mut effects = first(live, now)?;
+        let Some(mut effects) = ahead(live, now) else {
+            return;
+        };
         if let Some(event) = event {
             effects.extend(live.machine.hear(event, now));
         }
@@ -177,7 +213,25 @@ pub(crate) fn step<M: RunMachine>(
     if let Some((mark, so_far)) = so_far {
         ctx.mark_so_far(&mark, so_far);
     }
-    Some((lease, effects))
+    run_effects::<M>(ctx, &lease, effects);
+}
+
+/// Do what the machine of kind `M` said, under `lease`.
+pub(crate) fn run_effects<M: RunMachine>(ctx: AppCtx, lease: &Lease, effects: Vec<M::Effect>) {
+    for effect in effects {
+        M::carry_out(ctx, lease, effect);
+    }
+    M::effects_done(ctx);
+}
+
+/// Tell the machine of kind `M` its timer `id` ran out, `ms` from now:
+/// one wait for the whole of it. A timer the machine has since forgotten
+/// wakes once, is told so, and is gone; one a pause or an end let go of
+/// with the audio never wakes ([`Lease::after`]).
+pub(crate) fn start_timer<M: RunMachine>(ctx: AppCtx, lease: &Lease, id: u64, ms: u32) {
+    lease.after(ms, move |lease| {
+        dispatch::<M>(ctx, lease, M::timer_fired(id))
+    });
 }
 
 /// What is live under `lease` has paused, and gives the audio back: it is

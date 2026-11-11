@@ -67,6 +67,19 @@ impl RunMachine for Run {
         self.apply(event, now)
     }
 
+    fn timer_fired(id: u64) -> ContestEvent {
+        ContestEvent::TimerFired { id }
+    }
+
+    /// Before a run hears anything, a gap since its screen last ticked,
+    /// longer than any tick takes, is credited as paused, from that tick: a
+    /// process frozen whole — a locked phone — hears nothing until it
+    /// thaws, and then its first news is old.
+    fn first(live: &mut LiveContest, _ctx: AppCtx, now: MonoMs) -> Vec<ContestEffect> {
+        let away = live.away(now, false);
+        away.map_or_else(Vec::new, |at| away_from(live, at, now))
+    }
+
     fn over(&self) -> bool {
         self.is_terminal()
     }
@@ -92,6 +105,37 @@ impl RunMachine for Run {
                 result: ended.result(finished_at, live.started_on.clone()),
                 settings: None,
             })
+    }
+
+    fn carry_out(ctx: AppCtx, lease: &Lease, effect: ContestEffect) {
+        match effect {
+            ContestEffect::PlayTurn(turn) => play_turn(ctx, lease, turn),
+            ContestEffect::StopAudio => lease.stop_sending(),
+            ContestEffect::ReleaseAudio => live_run::give_back::<Self>(ctx, lease),
+            ContestEffect::StartTimer { id, ms } => {
+                live_run::start_timer::<Self>(ctx, lease, id, ms);
+            }
+            ContestEffect::ClearFields => ctx.entry.clear(),
+            ContestEffect::Focus(field) => focus_field(ctx, field),
+            ContestEffect::Announce(text) => announce(ctx, text),
+            ContestEffect::PersistAndShowResults => {
+                live_run::keep::<Self>(ctx);
+            }
+            // A run with no station worked has nothing for any stat: it is
+            // let go, and the results screen says so, with another run a
+            // press away.
+            ContestEffect::ShowNothingKept => {
+                live_run::let_go::<Self>(ctx, Some(Finished::NothingKept));
+            }
+            ContestEffect::AbortToHome => {
+                live_run::let_go::<Self>(ctx, None);
+            }
+        }
+    }
+
+    /// What it holds for a screen reader is said once the air is silent.
+    fn effects_done(ctx: AppCtx) {
+        speak_if_silent(ctx);
     }
 
     /// Its sound has stopped, so what it held for a screen reader is said
@@ -165,19 +209,26 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
             unsaid: Vec::new(),
         },
     })));
-    run_effects(ctx, &lease, effects);
+    live_run::run_effects::<Run>(ctx, &lease, effects);
 }
 
 /// Hand the run something the user did: End run, Discard, the page going
 /// out of sight. Nothing happens when no run is live. Resume claims the
 /// audio first ([`resume_run`]), as a session's does.
+///
+/// What comes under the run's own lease is its to hear while it holds the
+/// audio, and while it is paused, having given the audio back, as a paused
+/// session hears it: what is done to it then, and the news of the send its
+/// pause cut short ([`live_run::hears`]). News under another lease — a run
+/// that has ended, one before it — is dropped. A timer never comes to a
+/// paused run: the lease it was armed under drops it ([`Lease::after`]).
 pub fn send_run_event(ctx: AppCtx, event: ContestEvent) {
     if event == ContestEvent::Resume {
         resume_run(ctx);
         return;
     }
     if let Some(lease) = live_run::lease::<Run>(ctx) {
-        dispatch(ctx, &lease, event);
+        live_run::dispatch::<Run>(ctx, &lease, event);
     }
 }
 
@@ -191,7 +242,7 @@ pub fn press_key(ctx: AppCtx, key: OpKey) {
     };
     lease.wake();
     let fields = Box::new(ctx.entry.snapshot());
-    dispatch(ctx, &lease, ContestEvent::Key { key, fields });
+    live_run::dispatch::<Run>(ctx, &lease, ContestEvent::Key { key, fields });
 }
 
 /// − / +: your speed, moved by `delta` WPM from your next message on, and
@@ -203,7 +254,7 @@ pub fn change_speed(ctx: AppCtx, delta: i32) {
         return;
     };
     lease.wake();
-    dispatch(ctx, &lease, ContestEvent::Speed { delta });
+    live_run::dispatch::<Run>(ctx, &lease, ContestEvent::Speed { delta });
     let moved = ctx.contest.peek().as_ref().map(|view| view.my_wpm);
     if let Some(wpm) = moved {
         // Whole already: − / + move it from the whole speed nearest it.
@@ -250,7 +301,7 @@ pub fn resume_run(ctx: AppCtx) {
         live.lease = lease.clone();
         live.stage = running;
     }
-    dispatch(ctx, &lease, ContestEvent::Resume);
+    live_run::dispatch::<Run>(ctx, &lease, ContestEvent::Resume);
     // The paused page is shorter, so a phone scrolled down to Pause is left
     // part way down it, the run bar and the fields above the screen's top:
     // the run carries on from its top, as every screen opens. Pausing
@@ -265,13 +316,10 @@ pub fn tick(ctx: AppCtx) {
     let Some(lease) = live_run::lease::<Run>(ctx) else {
         return;
     };
-    let away = live_run::step::<Run>(ctx, &lease, None, |live, now| {
+    live_run::step::<Run>(ctx, &lease, None, |live, now| {
         let at = live.away(now, true)?;
         Some(away_from(live, at, now))
     });
-    if let Some((lease, effects)) = away {
-        run_effects(ctx, &lease, effects);
-    }
 }
 
 /// The run paused from `at`, when it was last seen before a gap the app was
@@ -279,63 +327,6 @@ pub fn tick(ctx: AppCtx) {
 fn away_from(live: &mut LiveContest, at: MonoMs, now: MonoMs) -> Vec<ContestEffect> {
     let why = PauseWhy::Hidden;
     live.machine.apply(ContestEvent::Pause { why, at }, now)
-}
-
-/// Let the machine decide what `event` means, then do what it says: what
-/// the user did, and news from the run's own tasks, a timer, a send. What
-/// comes under the run's own lease is its to hear while it holds the audio,
-/// and while it is paused, having given the audio back, as a paused session
-/// hears it: what is done to it then, and the news of the send its pause
-/// cut short ([`live_run::hears`]). News under another lease — a run that
-/// has ended, one before it — is dropped. A timer never comes to a paused
-/// run: the lease it was armed under drops it ([`Lease::after`]).
-///
-/// Before anything is heard, a gap since the run screen last ticked longer
-/// than any tick takes is credited as paused, from that tick: a process
-/// frozen whole — a locked phone — hears nothing until it thaws, and then
-/// its first news is old.
-fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
-    let heard = live_run::step::<Run>(ctx, lease, Some(event), |live, now| {
-        let away = live.away(now, false);
-        Some(away.map_or_else(Vec::new, |at| away_from(live, at, now)))
-    });
-    if let Some((lease, effects)) = heard {
-        run_effects(ctx, &lease, effects);
-    }
-}
-
-fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
-    for effect in effects {
-        match effect {
-            ContestEffect::PlayTurn(turn) => play_turn(ctx, lease, turn),
-            ContestEffect::StopAudio => lease.stop_sending(),
-            ContestEffect::ReleaseAudio => live_run::give_back::<Run>(ctx, lease),
-            ContestEffect::StartTimer { id, ms } => {
-                // One wait for the whole of it. A timer the machine has since
-                // forgotten wakes once, is told so, and is gone; one a pause
-                // let go of with the audio never wakes.
-                lease.after(ms, move |lease| {
-                    dispatch(ctx, lease, ContestEvent::TimerFired { id });
-                });
-            }
-            ContestEffect::ClearFields => ctx.entry.clear(),
-            ContestEffect::Focus(field) => focus_field(ctx, field),
-            ContestEffect::Announce(text) => announce(ctx, text),
-            ContestEffect::PersistAndShowResults => {
-                live_run::keep::<Run>(ctx);
-            }
-            // A run with no station worked has nothing for any stat: it is
-            // let go, and the results screen says so, with another run a
-            // press away.
-            ContestEffect::ShowNothingKept => {
-                live_run::let_go::<Run>(ctx, Some(Finished::NothingKept));
-            }
-            ContestEffect::AbortToHome => {
-                live_run::let_go::<Run>(ctx, None);
-            }
-        }
-    }
-    speak_if_silent(ctx);
 }
 
 /// Hold `text` for a screen reader until the air is silent.
@@ -401,7 +392,7 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     let Some(transcript) = turn.transcript() else {
         // A turn with nothing in it is over as soon as it begins; the
         // machine never plays one.
-        dispatch(ctx, &lease, ContestEvent::TurnEnded { id });
+        live_run::dispatch::<Run>(ctx, &lease, ContestEvent::TurnEnded { id });
         return;
     };
     let plan = plan_turn(&turn, &settings);
@@ -436,7 +427,7 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
                 },
                 SendNews::HeldUp => ContestEvent::TurnHeldUp { id },
             };
-            dispatch(ctx, &heard, event);
+            live_run::dispatch::<Run>(ctx, &heard, event);
         };
         let event = match lease
             .send_planned(asked, &plan, &transcript, &settings, starts_at, news)
@@ -450,7 +441,7 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
                 ContestEvent::TurnFailed { id }
             }
         };
-        dispatch(ctx, &lease, event);
+        live_run::dispatch::<Run>(ctx, &lease, event);
     });
 }
 
@@ -493,6 +484,11 @@ mod tests {
     use crate::time::POLL_MS;
     use cw_core::band::BandKey;
     use cw_core::{CharSetMode, ContestView, MONITOR_LEVEL, plan_morse_playback_for};
+
+    /// Hand the run `event`, come under `lease`.
+    fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
+        live_run::dispatch::<Run>(ctx, lease, event);
+    }
 
     fn view(h: &Harness) -> Option<ContestView> {
         h.ctx.contest.peek().clone()

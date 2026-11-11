@@ -71,6 +71,58 @@ impl RunMachine for Groups {
         self.apply(event, now)
     }
 
+    fn timer_fired(id: u64) -> SessionEvent {
+        SessionEvent::TimerFired { id }
+    }
+
+    /// News that waited out a gap the app was not running in finds the
+    /// session paused from the start of the gap ([`pause_if_away`]). Then
+    /// an event that closes the answer finishes what is entered first, or
+    /// asks again shortly while a letter is still being keyed.
+    fn before(ctx: AppCtx, lease: &Lease, event: SessionEvent) -> Option<SessionEvent> {
+        pause_if_away(ctx, lease);
+        let closes = ctx
+            .app()
+            .session
+            .borrow()
+            .as_ref()
+            .and_then(Self::of)
+            .filter(|live| live_run::hears(live, lease))
+            .and_then(|live| live.machine.closes_answer(&event));
+        match closes {
+            // What is entered in full by the deadline is part of the answer,
+            // whatever is still settling. Finishing it can hand the session
+            // an answer of its own, so it comes before the session is
+            // borrowed.
+            Some(AnswerClose::Deadline) => ctx.answer.finish(),
+            // Auto-confirm waits for the answer to sit still, and one with a
+            // letter still being keyed into it has not: ask again shortly.
+            // The letter, once in, lengthens the answer and calls the
+            // confirm off. The answer window, likewise, closes only an
+            // answer nobody has begun, and a letter being keyed is one
+            // begun: once it is in, the window leaves the answer to its
+            // owner.
+            Some(AnswerClose::Settled | AnswerClose::Unbegun) if ctx.answer.entry_open() => {
+                lease.after(ENTRY_RECHECK_MS, move |lease| {
+                    live_run::dispatch::<Self>(ctx, lease, event);
+                });
+                return None;
+            }
+            // A letter keyed in full and not in the box yet begins the
+            // answer too, once it is in.
+            Some(AnswerClose::Unbegun) => ctx.answer.finish(),
+            Some(AnswerClose::Settled) | None => {}
+        }
+        Some(event)
+    }
+
+    /// Typing still waiting out the box's pause came before the event, so
+    /// the machine hears it first.
+    fn first(live: &mut LiveSession, ctx: AppCtx, now: MonoMs) -> Vec<SessionEffect> {
+        let typed = ctx.answer.take();
+        typed.map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), now))
+    }
+
     fn over(&self) -> bool {
         self.is_terminal()
     }
@@ -116,6 +168,23 @@ impl RunMachine for Groups {
         let run = store.load_auto_counters(&CountersKey::of(session.settings()));
         let done = complete_session(session, run, now_ms(), live.started_on.clone());
         (done.result, (done.counters, done.change))
+    }
+
+    fn carry_out(ctx: AppCtx, lease: &Lease, effect: SessionEffect) {
+        match effect {
+            SessionEffect::StopAudio => lease.stop_sending(),
+            SessionEffect::ReleaseAudio => live_run::give_back::<Self>(ctx, lease),
+            SessionEffect::Play { index, text } => play(ctx, lease, index, text),
+            SessionEffect::StartTimer { id, ms } => {
+                live_run::start_timer::<Self>(ctx, lease, id, ms);
+            }
+            SessionEffect::PersistAndShowResults => {
+                live_run::keep::<Self>(ctx);
+            }
+            SessionEffect::AbortToHome => {
+                live_run::let_go::<Self>(ctx, None);
+            }
+        }
     }
 
     /// Its level's run stored, and the level moved if the run earned it.
@@ -239,7 +308,7 @@ pub fn start_session(ctx: AppCtx) {
         },
     })));
     beat(ctx, lease.clone());
-    run_effects(ctx, &lease, effects);
+    live_run::run_effects::<Groups>(ctx, &lease, effects);
 }
 
 /// While `lease` holds the audio, say every [`SEEN_EVERY_MS`] that the app
@@ -269,7 +338,7 @@ fn beat(ctx: AppCtx, lease: Lease) {
 /// pauses the session, and they find it paused. Typing still waiting out
 /// the box's pause came before the gap, so the session hears it first.
 fn pause_if_away(ctx: AppCtx, lease: &Lease) {
-    let away = live_run::step::<Groups>(ctx, lease, None, |live, now| {
+    live_run::step::<Groups>(ctx, lease, None, |live, now| {
         let seen = live.away(now, true)?;
         if live.machine.session().paused() {
             return None;
@@ -281,9 +350,6 @@ fn pause_if_away(ctx: AppCtx, lease: &Lease) {
         effects.extend(live.machine.apply(SessionEvent::Pause, seen));
         Some(effects)
     });
-    if let Some((lease, effects)) = away {
-        run_effects(ctx, &lease, effects);
-    }
 }
 
 /// Carry on after a pause. The audio a pause gave back is claimed afresh
@@ -309,20 +375,26 @@ pub fn resume_session(ctx: AppCtx) {
         live.lease = lease.clone();
         live.stage = running;
     }
-    dispatch(ctx, &lease, SessionEvent::Resume);
+    live_run::dispatch::<Groups>(ctx, &lease, SessionEvent::Resume);
     beat(ctx, lease);
 }
 
 /// Hand the running session something the user did. Nothing happens when
 /// no session is running. Resume claims the audio first
 /// ([`resume_session`]).
+///
+/// What comes under a session's lease is its to hear: an event from a
+/// session that has ended, or from one before the session now running, is
+/// dropped rather than handed to a machine it means nothing to. A paused
+/// session has given its audio back, and still hears what is done to it
+/// ([`live_run::hears`]).
 pub fn send_event(ctx: AppCtx, event: SessionEvent) {
     if event == SessionEvent::Resume {
         resume_session(ctx);
         return;
     }
     if let Some(lease) = live_run::lease::<Groups>(ctx) {
-        dispatch(ctx, &lease, event);
+        live_run::dispatch::<Groups>(ctx, &lease, event);
     }
 }
 
@@ -373,83 +445,6 @@ pub fn abort_run(ctx: AppCtx) {
     }
 }
 
-/// Let the machine decide what `event` means, then do what it says.
-///
-/// `lease` is the session the event belongs to: an event from a session
-/// that has ended, or from one before the session now running, is dropped
-/// rather than handed to a machine it means nothing to. A paused session
-/// has given its audio back, and still hears what is done to it.
-///
-/// News that waited out a gap the app was not running in finds the session
-/// paused from the start of the gap ([`pause_if_away`]).
-fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
-    pause_if_away(ctx, lease);
-    let closes = ctx
-        .app()
-        .session
-        .borrow()
-        .as_ref()
-        .and_then(Groups::of)
-        .and_then(|live| {
-            live_run::hears(live, lease)
-                .then(|| live.machine.closes_answer(&event))
-                .flatten()
-        });
-    match closes {
-        // What is entered in full by the deadline is part of the answer,
-        // whatever is still settling. Finishing it can hand the session an
-        // answer of its own, so it comes before the session is borrowed.
-        Some(AnswerClose::Deadline) => ctx.answer.finish(),
-        // Auto-confirm waits for the answer to sit still, and one with a
-        // letter still being keyed into it has not: ask again shortly. The
-        // letter, once in, lengthens the answer and calls the confirm off.
-        // The answer window, likewise, closes only an answer nobody has
-        // begun, and a letter being keyed is one begun: once it is in, the
-        // window leaves the answer to its owner.
-        Some(AnswerClose::Settled | AnswerClose::Unbegun) if ctx.answer.entry_open() => {
-            lease.after(ENTRY_RECHECK_MS, move |lease| dispatch(ctx, lease, event));
-            return;
-        }
-        // A letter keyed in full and not in the box yet begins the answer
-        // too, once it is in.
-        Some(AnswerClose::Unbegun) => ctx.answer.finish(),
-        Some(AnswerClose::Settled) | None => {}
-    }
-    // Typing still waiting out the box's pause came before this event, so
-    // the machine hears it first.
-    let heard = live_run::step::<Groups>(ctx, lease, Some(event), |live, now| {
-        let typed = ctx.answer.take();
-        Some(typed.map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), now)))
-    });
-    if let Some((lease, effects)) = heard {
-        run_effects(ctx, &lease, effects);
-    }
-}
-
-/// Do what the machine said.
-fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
-    for effect in effects {
-        match effect {
-            SessionEffect::StopAudio => lease.stop_sending(),
-            SessionEffect::ReleaseAudio => live_run::give_back::<Groups>(ctx, lease),
-            SessionEffect::Play { index, text } => play(ctx, lease, index, text),
-            SessionEffect::StartTimer { id, ms } => {
-                // One wait for the whole of it. A timer the machine has since
-                // forgotten wakes once, is told so, and is gone.
-                lease.after(ms, move |lease| {
-                    dispatch(ctx, lease, SessionEvent::TimerFired { id });
-                });
-            }
-            SessionEffect::PersistAndShowResults => {
-                live_run::keep::<Groups>(ctx);
-            }
-            SessionEffect::AbortToHome => {
-                live_run::let_go::<Groups>(ctx, None);
-            }
-        }
-    }
-}
-
 /// Send group `index`, and tell the machine how it went.
 fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     // Every group is built from the settings the session started with, not
@@ -491,7 +486,7 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
                 },
                 SendNews::HeldUp => SessionEvent::PlaybackHeldUp { index },
             };
-            dispatch(ctx, &lease, event);
+            live_run::dispatch::<Groups>(ctx, &lease, event);
         };
         let event = match lease.send(&transmission, &settings, news).await {
             Ok(sent) => SessionEvent::PlaybackEnded {
@@ -508,7 +503,7 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
                 SessionEvent::PlaybackStopped { index }
             }
         };
-        dispatch(ctx, &lease, event);
+        live_run::dispatch::<Groups>(ctx, &lease, event);
     });
 }
 
@@ -536,6 +531,16 @@ mod tests {
     /// Whether there was one.
     fn finish_session(ctx: AppCtx) -> bool {
         live_run::keep::<Groups>(ctx)
+    }
+
+    /// Hand the session `event`, come under `lease`.
+    fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
+        live_run::dispatch::<Groups>(ctx, lease, event);
+    }
+
+    /// Do what the machine said, under `lease`.
+    fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
+        live_run::run_effects::<Groups>(ctx, lease, effects);
     }
 
     /// A session kept has the prior the next one starts from built once
