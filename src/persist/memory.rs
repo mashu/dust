@@ -129,6 +129,10 @@ pub struct MemoryStore {
     /// it stood then, as an older build's write to it is a change too.
     changes: Cell<u64>,
     seen: Cell<(u64, Option<Fingerprint>)>,
+    /// What an older build changed could not be taken up at the last look,
+    /// as a store that takes no change takes none: still to take up, as the
+    /// files and a browser's database leave it, until a look takes it up.
+    held_back: Cell<bool>,
     /// What reads set aside, as they could not read it, not yet told of.
     pub set_aside: RefCell<Vec<SetAside>>,
     last_backup: Cell<Option<u64>>,
@@ -862,12 +866,13 @@ impl Store for MemoryStore {
     /// Nothing is noted: a change is told of each time it is asked, until
     /// a read or a listing of the history takes it up, as the files and a
     /// browser's database tell of one, so one whose look could not list
-    /// it is told of again.
+    /// it is told of again, as is one an older build made that a look could
+    /// not take up ([`Self::held_back`]).
     fn history_changed(&self) -> bool {
         if let Some(page) = &self.page {
             return page.changed();
         }
-        self.seen.get() != self.looking()
+        self.held_back.get() || self.seen.get() != self.looking()
     }
 
     fn history_news(&self) -> Option<Pending<()>> {
@@ -1412,8 +1417,10 @@ impl MemoryStore {
     /// Take up what an older build stored in, or deleted from, the history
     /// kept whole since it was last taken up. `reading` says the history is
     /// being read whole: nothing is taken up then while a record cannot be
-    /// read, as the files' read takes nothing up while one failed.
+    /// read, as the files' read takes nothing up while one failed. What the
+    /// store takes no change for is still to take up ([`Self::held_back`]).
     fn import(&self, reading: bool) {
+        self.held_back.set(false);
         let Some(layout) = self.layout.borrow().clone() else {
             return;
         };
@@ -1476,6 +1483,8 @@ impl MemoryStore {
         };
         if change.is_empty() || self.make(&change).kept().is_some() {
             *self.layout.borrow_mut() = Some(next);
+        } else {
+            self.held_back.set(true);
         }
     }
 }
@@ -1992,6 +2001,37 @@ mod tests {
         assert_eq!(
             now(store.history_listing()).map(|listed| listed.len()),
             Some(2)
+        );
+        assert!(!store.history_changed(), "taken up");
+    }
+
+    /// What an older build stored that could not be taken up just then, as a
+    /// full store takes no change, is still to take up: the history changed,
+    /// as the app is told, until a look takes it up, as the files and a
+    /// browser's database tell of it. It was noted as seen at the look that
+    /// could not take it up, so the app did not look again.
+    #[test]
+    fn a_take_up_the_store_could_not_make_is_still_to_take_up() {
+        let store = MemoryStore::default();
+        let now_ms = crate::time::now_ms();
+        let first = finished(now_ms - 9 * DAY);
+        store.keep_whole(std::slice::from_ref(&first));
+        store.load_history();
+        store.keep_whole(&[first, finished(now_ms + 60_000)]);
+        store.full.set(true);
+        assert_eq!(
+            now(store.history_listing()).map(|listed| listed.len()),
+            Some(1),
+            "not taken up"
+        );
+        assert!(store.history_changed(), "still to take up");
+        assert_eq!(store.load_history().sessions.len(), 1, "nor as it is read");
+        assert!(store.history_changed(), "still to take up");
+        store.full.set(false);
+        assert_eq!(
+            now(store.history_listing()).map(|listed| listed.len()),
+            Some(2),
+            "taken up"
         );
         assert!(!store.history_changed(), "taken up");
     }

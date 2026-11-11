@@ -1015,7 +1015,11 @@ beside it, and is left as it is when the older build deletes that session.
 While a record here cannot be read at all for now, or a pack of them opened,
 or a tombstone read, nothing is taken up: it may be the session, or say it
 was deleted, and the take-up waits for the next look at which every record
-and tombstone reads. A move made again over the records, with sessions to
+and tombstone reads. A take-up held back by a tombstone, or by the history
+kept whole, that cannot be read, or one whose sessions cannot be stored just
+then, leaves the history counted as changed until a look takes it up, so the
+app looks again as a screen that shows the history opens, as it does in a
+browser. A move made again over the records, with sessions to
 move, waits, as one that cannot be made yet does, while a tombstone here, or
 a record the move would look at, cannot be read: such a record may hold a
 session the move would otherwise write a second time. One with nothing to

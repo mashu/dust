@@ -209,6 +209,10 @@ struct Stamps {
     legacy: Option<Fingerprint>,
 }
 
+/// A take-up that could not be made just now ([`HistoryFiles::import`]):
+/// what an older build changed is still to take up.
+struct HeldBack;
+
 /// What the history's folders hold.
 struct Listing {
     /// Every record, loose or packed, in order: one in a pack that could
@@ -463,8 +467,10 @@ impl HistoryFiles {
             for (id, key) in &load.later {
                 live.entry(key.clone()).or_default().push(*id);
             }
-            if let Some(change) = self.import(layout, &live) {
-                taken_up(&mut load.sessions, &change);
+            match self.import(layout, &live) {
+                Ok(Some(change)) => taken_up(&mut load.sessions, &change),
+                Ok(None) => {}
+                Err(HeldBack) => self.watch.unsee(),
             }
         }
         load.complete = layout.is_some();
@@ -613,19 +619,27 @@ impl HistoryFiles {
     /// read ([`Self::live_keys`]). None where the history cannot be listed.
     pub(super) fn listing(&self) -> Option<Vec<RecordId>> {
         self.on_its_thread();
+        let mut held_back = false;
         if let Ok(Gate::Open(layout)) = self.gate()
             && self.legacy_changed(&layout)
             && let Some(live) = self.live_keys()
         {
-            self.import(&layout, &live);
+            held_back = self.import(&layout, &live).is_err();
         }
         // As the folders were before they were looked at, the history kept
         // whole among them, and once what was taken up of it was stored, as
         // this copy's own change is none for it to take up: whatever another
-        // copy changes from here on is taken up at the next look.
+        // copy changes from here on is taken up at the next look. What was
+        // held back is still to take up.
         let before = self.watch.stamps();
-        let listing = self.listing_now().ok()?;
-        self.watch.looked(before);
+        let listing = self.listing_now();
+        if listing.is_ok() {
+            self.watch.looked(before);
+        }
+        if held_back {
+            self.watch.unsee();
+        }
+        let listing = listing.ok()?;
         let listed: Vec<RecordId> = listing.records.difference(&listing.gone).copied().collect();
         // Of what this build noted of records, those gone since: a listing
         // that skipped a pack it could not open does not say which are.
@@ -1093,8 +1107,10 @@ impl HistoryFiles {
     /// Take up what an older build stored in, or deleted from, the history
     /// kept whole since it was last taken up, `live` being every record
     /// here by key ([`legacy::imported`]), and hand back what was made of
-    /// it. Nothing, where nothing changed there, or what changed cannot be
-    /// read or made now: it is tried again the next time.
+    /// it: nothing, where nothing changed there. Held back where what
+    /// changed, or a tombstone here, cannot be read now, or the change
+    /// made: it is still to take up, as the caller notes, and the next look
+    /// tries again ([`Watch::unsee`]).
     ///
     /// It is no restore, and is not journaled: what was taken up is noted
     /// only once it is stored, so a take-up cut short is made again by the
@@ -1103,9 +1119,9 @@ impl HistoryFiles {
         &self,
         layout: &Layout,
         live: &HashMap<SessionKey, Vec<RecordId>>,
-    ) -> Option<HistoryChange> {
+    ) -> Result<Option<HistoryChange>, HeldBack> {
         if !self.legacy_changed(layout) {
-            return None;
+            return Ok(None);
         }
         let (sessions, fingerprint) = match read_with_fingerprint(&self.root.join(SESSIONS)) {
             Ok(Some((raw, fingerprint))) => {
@@ -1118,7 +1134,7 @@ impl HistoryFiles {
             Ok(None) => (Vec::new(), None),
             Err(err) => {
                 eprintln!("could not read the history an older build keeps: {err}");
-                return None;
+                return Err(HeldBack);
             }
         };
         let deleted = legacy_deleted(&self.root);
@@ -1128,13 +1144,16 @@ impl HistoryFiles {
             Ok(gone) => gone,
             Err(err) => {
                 eprintln!("could not read what was deleted here: {err}");
-                return None;
+                return Err(HeldBack);
             }
         };
-        let (change, next) =
-            legacy::imported(layout, fingerprint, &sessions, &deleted, live, &gone)?;
+        let Some((change, next)) =
+            legacy::imported(layout, fingerprint, &sessions, &deleted, live, &gone)
+        else {
+            return Ok(None);
+        };
         if !change.is_empty() && self.apply(&change).kept().is_none() {
-            return None;
+            return Err(HeldBack);
         }
         let noted = next
             .written()
@@ -1143,7 +1162,7 @@ impl HistoryFiles {
         if let Err(err) = noted {
             eprintln!("could not note what was taken up of an older build's history: {err}");
         }
-        Some(change)
+        Ok(Some(change))
     }
 
     /// Of `moved`, the records a move makes, those to write: all of them
@@ -1522,7 +1541,8 @@ impl Watch {
     /// the history kept whole. Nothing is noted: a change is told of each
     /// time it is asked, until a look that lists the history takes it up
     /// ([`Self::looked`]), so one whose look could not list it is told of
-    /// again.
+    /// again, as is one an older build made that a look could not take up
+    /// ([`Self::unsee`]).
     pub(super) fn changed(&self) -> bool {
         let now = self.stamps();
         *self.seen() != Some(now)
@@ -1533,6 +1553,15 @@ impl Watch {
     /// stored while this one read, is still to be taken up.
     fn looked(&self, before: Stamps) {
         *self.seen() = Some(before);
+    }
+
+    /// Note nothing as seen, as a look that held back the take-up of what an
+    /// older build changed leaves it ([`HistoryFiles::import`]): it is still
+    /// to take up, and the next look tries again, though the folders, and
+    /// the history kept whole, stay as they are, as a tombstone held open
+    /// reads again without its folder changing.
+    fn unsee(&self) {
+        *self.seen() = None;
     }
 
     /// Note the folders as this copy's own change left them, `before` being
@@ -3242,6 +3271,100 @@ mod tests {
         assert_eq!(files.listing(), Some(vec![moved]));
     }
 
+    /// A take-up held back while a tombstone here cannot be read, as one
+    /// held open cannot be, leaves what the older build stored to take up,
+    /// at a listing and as the history is read: the history has changed, as
+    /// the app is told, though no folder of it changes as the tombstone
+    /// reads again, and the next look takes it up. Noted as seen by the look
+    /// that held it back, it stayed out until the next launch, or another
+    /// change.
+    #[cfg(unix)]
+    #[test]
+    fn a_take_up_held_back_by_a_tombstone_that_cannot_be_read_is_still_to_take_up() {
+        let dir = TempDir::new("held-back-by-a-tombstone");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = Files::at(&dir.0);
+        let read = files.load();
+        let [(moved, _)] = read.sessions[..] else {
+            panic!("moved: {:?}", read.sessions);
+        };
+        // One deleted here, whose tombstone then cannot be read: a link to
+        // a folder elsewhere, a file again later, the tombstones' folder
+        // left as it was.
+        let gone = finished(now - 5 * DAY);
+        let one = record(&gone);
+        files.apply(&put(std::slice::from_ref(&one)));
+        files.apply(&forget(&[(&one, &gone)]));
+        let tombstone = dir.0.join(HISTORY).join(TOMBSTONES).join(file_name(one.id));
+        let held = fs::read(&tombstone).unwrap();
+        let target = dir.0.join("held-open");
+        fs::create_dir(&target).unwrap();
+        fs::remove_file(&tombstone).unwrap();
+        std::os::unix::fs::symlink(&target, &tombstone).unwrap();
+        // An older build stores a session of its own since.
+        keep_whole(&dir, &[old, finished(now + 60_000)]);
+        assert!(files.changed());
+        assert_eq!(files.listing(), Some(vec![moved]), "held back");
+        assert!(files.changed(), "still to take up");
+        let other = Files::at(&dir.0);
+        assert_eq!(ids(&other.load()), [moved], "held back as it is read");
+        assert!(other.changed(), "still to take up");
+        fs::remove_dir(&target).unwrap();
+        fs::write(&target, held).unwrap();
+        assert!(files.changed() && other.changed());
+        assert_eq!(
+            files.listing().map(|listed| listed.len()),
+            Some(2),
+            "taken up"
+        );
+        assert!(!files.changed(), "taken up");
+        assert_eq!(other.listing().map(|listed| listed.len()), Some(2));
+        assert!(!other.changed());
+    }
+
+    /// A take-up whose change cannot be made just then, as where something
+    /// stands for a moment in the place its record goes, leaves what the
+    /// older build stored to take up, as one held back does: the history
+    /// has changed, as the app is told, and the next look takes it up.
+    /// Noted as seen, it stayed out until another change, or the next
+    /// launch.
+    #[cfg(unix)]
+    #[test]
+    fn a_take_up_that_cannot_be_made_now_is_still_to_take_up() {
+        let dir = TempDir::new("take-up-not-made");
+        let now = crate::time::now_ms();
+        let old = finished(now - 10 * DAY);
+        keep_whole(&dir, std::slice::from_ref(&old));
+        let files = Files::at(&dir.0);
+        files.load();
+        let newer = finished(now + 60_000);
+        keep_whole(&dir, &[old, newer.clone()]);
+        // Its place is taken once the history is listed for the take-up.
+        let place = Record::of(&newer, |json| RecordId::placed(newer.timestamp, json))
+            .expect("a record")
+            .id;
+        let path = dir.0.join(HISTORY).join(RECORDS).join(file_name(place));
+        let standing = path.clone();
+        let mut looks = 0;
+        files.meanwhile(move || {
+            looks += 1;
+            if looks == 3 {
+                fs::create_dir(&standing).unwrap();
+            }
+        });
+        files.listing();
+        assert!(files.changed(), "still to take up");
+        fs::remove_dir(&path).unwrap();
+        assert_eq!(
+            files.listing().map(|listed| listed.len()),
+            Some(2),
+            "taken up"
+        );
+        assert!(!files.changed(), "taken up");
+    }
+
     /// Which records were deleted by hand comes with when each was, as its
     /// tombstone says, none for one that does not say; and which session
     /// each was, where its tombstone says. On every platform, as the
@@ -3757,7 +3880,10 @@ mod tests {
         let in_the_way = change.put[1].id;
         let records = dir.0.join(HISTORY).join(RECORDS);
         fs::create_dir_all(records.join(file_name(in_the_way))).unwrap();
-        assert_eq!(files.import(&layout, &live), None, "tried again later");
+        assert!(
+            files.import(&layout, &live).is_err(),
+            "held back, to be tried again"
+        );
         assert!(journals(&dir).is_empty(), "{:?}", journals(&dir));
         fs::remove_dir(records.join(file_name(in_the_way))).unwrap();
         let read = HistoryFiles::at(&dir.0).load();
@@ -5121,6 +5247,10 @@ mod tests {
         a_session_whose_record_here_is_damaged_is_taken_up_from_an_older_build_beside_it,
         #[cfg(unix)]
         a_session_deleted_here_comes_back_from_no_older_build_while_its_tombstone_cannot_be_read,
+        #[cfg(unix)]
+        a_take_up_held_back_by_a_tombstone_that_cannot_be_read_is_still_to_take_up,
+        #[cfg(unix)]
+        a_take_up_that_cannot_be_made_now_is_still_to_take_up,
         a_deletion_an_older_build_made_after_the_move_is_honoured,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
