@@ -1192,15 +1192,18 @@ impl Backend for Disk<'_> {
     /// Each record flushed before it takes its name, on as many threads as
     /// it takes ([`place_each`]), all of them made durable, and the layout
     /// written last.
-    async fn write_move(&self, records: &[Record], layout: &Layout) -> io::Result<()> {
+    async fn write_move(
+        &self,
+        records: &[Record],
+        layout: &Layout,
+    ) -> io::Result<Vec<Option<RecordId>>> {
         let files = self.0;
         files.progress.moving(Some(records.len() as u64));
-        place_each(&files.folders(), records, &files.progress)?;
+        let placed = place_each(&files.folders(), records, &files.progress)?;
         sync_if_there(&files.records())?;
-        layout
-            .written()
-            .map_err(io::Error::other)
-            .and_then(|raw| write_whole(&files.dir, LAYOUT_FILE, &raw))
+        let raw = layout.written().map_err(io::Error::other)?;
+        write_whole(&files.dir, LAYOUT_FILE, &raw)?;
+        Ok(placed.into_iter().map(Some).collect())
     }
 
     fn look(&self) -> Stamps {
@@ -1330,11 +1333,17 @@ impl Steps for Folders<'_> {
 /// cut short leaves every record whole or not there at all, in whatever
 /// order they were stored, and is made again to the same records before
 /// its layout is written. Each record has a place of its own, so no two
-/// parts ever reach for the same name.
-fn place_each(folders: &Folders, records: &[Record], progress: &LoadProgress) -> io::Result<()> {
-    let one = |record: &Record| place(folders, record).map(|_| progress.step());
+/// parts ever reach for the same name. Where each went, in their order:
+/// under its own name, or one past it that other bytes left free.
+fn place_each(
+    folders: &Folders,
+    records: &[Record],
+    progress: &LoadProgress,
+) -> io::Result<Vec<RecordId>> {
+    let one = |record: &Record| place(folders, record).inspect(|_| progress.step());
+    let part_of = |records: &[Record]| records.iter().map(one).collect::<io::Result<Vec<_>>>();
     if records.len() < 2 {
-        return records.iter().try_for_each(one);
+        return part_of(records);
     }
     let part = records.len().div_ceil(WRITERS);
     thread::scope(|scope| {
@@ -1343,18 +1352,21 @@ fn place_each(folders: &Folders, records: &[Record], progress: &LoadProgress) ->
             .map(|records| {
                 let started = thread::Builder::new()
                     .name("dust-history-write".into())
-                    .spawn_scoped(scope, move || records.iter().try_for_each(one));
+                    .spawn_scoped(scope, move || part_of(records));
                 (records, started)
             })
             .collect();
         // A part whose thread would not start, or stopped short, is stored
         // here instead: what it stored already is found stored.
-        placing.into_iter().try_for_each(|(records, started)| {
-            started
+        let mut placed = Vec::with_capacity(records.len());
+        for (records, started) in placing {
+            let part = started
                 .ok()
                 .and_then(|writer| writer.join().ok())
-                .unwrap_or_else(|| records.iter().try_for_each(one))
-        })
+                .unwrap_or_else(|| part_of(records));
+            placed.extend(part?);
+        }
+        Ok(placed)
     })
 }
 
@@ -4284,6 +4296,51 @@ mod tests {
         .unwrap();
         assert_eq!(held, after);
         assert_eq!(stamps(&Files::at(&dir.0).load()), [first.timestamp]);
+    }
+
+    /// A session an older build stored, taken up where other bytes have the
+    /// name the take-up gives it, goes under the next name, and is read
+    /// there: the load holds it there, beside what holds its own name, and
+    /// an older build's deletion of it deletes that record and not the
+    /// other.
+    #[test]
+    fn a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went() {
+        let dir = TempDir::new("taken-up-under-the-next-name");
+        let now = crate::time::now_ms();
+        let before = [finished(now - 30 * DAY), finished(now - 20 * DAY)];
+        keep_whole(&dir, &before);
+        let files = Files::at(&dir.0);
+        files.load();
+        let since = finished(now - 10 * DAY);
+        let asked = Record::of(&since, |json| RecordId::placed(since.timestamp, json))
+            .expect("a record")
+            .id;
+        let other = serde_json::to_vec(&finished(now - 5 * DAY)).unwrap();
+        let records = dir.0.join(HISTORY).join(RECORDS);
+        fs::write(records.join(file_name(asked)), &other).unwrap();
+        keep_whole(&dir, &[before[0].clone(), before[1].clone(), since.clone()]);
+        let load = files.load();
+        let went = asked.bumped();
+        assert!(
+            load.sessions.contains(&(went, since.clone())),
+            "where it went: {:?}",
+            load.sessions
+        );
+        assert!(
+            load.sessions.iter().any(|(id, _)| *id == asked),
+            "beside the other bytes"
+        );
+        // The older build deletes it.
+        keep_whole(&dir, &before);
+        let deleted = Deleted::of(&since, now);
+        fs::write(dir.0.join(DELETED), serde_json::to_vec(&[deleted]).unwrap()).unwrap();
+        let listed = files.listing().expect("listed");
+        assert!(
+            listed.contains(&asked) && !listed.contains(&went),
+            "{listed:?}"
+        );
+        assert_eq!(fs::read(records.join(file_name(asked))).unwrap(), other);
+        assert_eq!(files.forgotten(&[asked, went]), [went]);
     }
 
     /// Two deletions of one session an older build remembers, as two of its

@@ -194,8 +194,9 @@ pub(super) trait Glue {
     /// whose name other bytes have goes under the next name), and a
     /// tombstone held already stays as it is. A layout a newer Dust wrote,
     /// or one that does not read, lets nothing be written but a layout over
-    /// it. Once made, it is told to every other tab.
-    fn apply(&self, writes: Transaction) -> Pending<Result<(), Refused>>;
+    /// it. Once made, it is told to every other tab. The name each record
+    /// went under, in order: none for one left deleted.
+    fn apply(&self, writes: Transaction) -> Pending<Result<Vec<Option<String>>, Refused>>;
     /// The stamp the last change any tab made left, which changes with
     /// every change: none where none has.
     fn stamp(&self) -> Option<String>;
@@ -429,16 +430,20 @@ impl<G: Glue, S: Aside> BrowserHistory<G, S> {
 
     /// Make `writes`, and note the stamp they leave as seen, where no other
     /// tab left one since this copy last looked: a change of its own is no
-    /// change for it to take up.
-    async fn write(&self, writes: Transaction) -> Result<(), Refused> {
+    /// change for it to take up. Where each record went, in order: none for
+    /// one left deleted.
+    async fn write(&self, writes: Transaction) -> Result<Vec<Option<RecordId>>, Refused> {
         let before = self.glue.stamp();
-        self.glue.apply(writes).await?;
+        let names = self.glue.apply(writes).await?;
         if let Some((stamp, _)) = self.seen.borrow_mut().as_mut()
             && *stamp == before
         {
             *stamp = self.glue.stamp();
         }
-        Ok(())
+        Ok(names
+            .iter()
+            .map(|name| name.as_deref().and_then(RecordId::parse))
+            .collect())
     }
 
     /// Whether the history kept whole is no longer the length it was when
@@ -797,8 +802,8 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
     /// it, where the change takes something up: two tabs taking it up at
     /// once take it up once ([`Refused::Raced`]). Any other change writes
     /// the layout again only should the browser have cleared the database
-    /// meanwhile. Each record goes under the name asked, as far as this
-    /// copy knows.
+    /// meanwhile. Each record goes under the name the page script says it
+    /// went under.
     async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, _by: By) -> Made<Refused> {
         let history = self.0;
         let change = writes.change;
@@ -831,12 +836,12 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
             meta: Vec::new(),
         };
         match history.write(transaction).await {
-            Ok(()) => {
+            Ok(placed) => {
                 if let Some(next) = next {
                     history.layout.replace(Some(next));
                 }
                 Made {
-                    placed: change.put.iter().map(|record| Some(record.id)).collect(),
+                    placed,
                     saved: Ok(HistorySaved::Stored {
                         kept: change.put.len(),
                     }),
@@ -858,7 +863,11 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
     /// layout the database held as it was opened, which is set aside beside
     /// it where there was one: a move cut short is no move, and two tabs
     /// making it at once make it once.
-    async fn write_move(&self, records: &[Record], layout: &Layout) -> Result<(), Refused> {
+    async fn write_move(
+        &self,
+        records: &[Record],
+        layout: &Layout,
+    ) -> Result<Vec<Option<RecordId>>, Refused> {
         let history = self.0;
         let Some(written) = layout_text(layout) else {
             return Err(Refused::Failed(UNWRITTEN.into()));
@@ -878,9 +887,9 @@ impl<G: Glue, S: Aside> Backend for InDb<'_, G, S> {
             meta,
             ..Transaction::default()
         };
-        history.write(transaction).await?;
+        let placed = history.write(transaction).await?;
         history.layout.replace(Some((layout.clone(), written)));
-        Ok(())
+        Ok(placed)
     }
 
     async fn raced(&self) {
@@ -1132,12 +1141,9 @@ mod script {
             })
         }
 
-        fn apply(&self, writes: Transaction) -> Pending<Result<(), Refused>> {
+        fn apply(&self, writes: Transaction) -> Pending<Result<Vec<Option<String>>, Refused>> {
             let glue = self.0.clone();
-            Box::pin(async move {
-                asked(glue, "apply", vec![change(&writes)]).await?;
-                Ok(())
-            })
+            Box::pin(async move { Ok(texts(&asked(glue, "apply", vec![change(&writes)]).await?)) })
         }
 
         fn stamp(&self) -> Option<String> {

@@ -270,8 +270,9 @@ const lastOf = (requests, then) => {
 // Store `json` as the record `key`, unless it was deleted by hand and the
 // change does not undo that; where other bytes have that name already, under
 // the next free one. No record is ever written over. `placed` is called once
-// it is settled, asked to be added, there already, or kept out; not where
-// no name was free, as nothing of the change is made then.
+// it is settled, with the name it was asked to be added under or is there
+// under already, or null where it was kept out; not where no name was free,
+// as nothing of the change is made then.
 const place = (stores, key, json, undoing, said, placed) => {
   const store = (name, bumps) => {
     const there = stores.sessions.get(name);
@@ -288,7 +289,7 @@ const place = (stores, key, json, undoing, said, placed) => {
         said.refuse("failed", `no name was free for the session stored as ${key}`);
         return;
       }
-      placed();
+      placed(name);
     };
   };
   if (undoing) {
@@ -300,7 +301,7 @@ const place = (stores, key, json, undoing, said, placed) => {
     if (gone.result === 0) {
       store(key, 0);
     } else {
-      placed();
+      placed(null);
     }
   };
 };
@@ -431,6 +432,9 @@ return {
   // otherwise nothing of the change is made, as another tab moved the
   // history first. A layout held that a newer Dust wrote, or that does not
   // read, lets nothing be written, but a layout over it.
+  //
+  // Answers the name each record of `put` went under, in order: its own,
+  // one past it where other bytes held that, or null where it was kept out.
   apply: (change) => {
     if (readOnly) {
       return Promise.resolve(refusal("newer", "a newer Dust keeps the history here"));
@@ -485,15 +489,20 @@ return {
               stores.sessions.delete(key);
             }
           };
+          // The name each record went under, in order: null for one kept
+          // out, as deleted.
+          const names = change.put.map(() => null);
+          said.answer(names);
           let unsettled = change.put.length;
-          for (const [key, json] of change.put) {
-            place(stores, key, json, undone.has(key), said, () => {
+          change.put.forEach(([key, json], at) => {
+            place(stores, key, json, undone.has(key), said, (name) => {
+              names[at] = name;
               unsettled -= 1;
               if (unsettled === 0) {
                 forget();
               }
             });
-          }
+          });
           if (change.put.length === 0) {
             forget();
           }

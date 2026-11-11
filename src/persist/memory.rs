@@ -1622,6 +1622,55 @@ mod tests {
         }
     }
 
+    /// A session an older build stored, taken up where other bytes have the
+    /// name the take-up gives it, goes under the next name, and is read
+    /// there, as on the files and in a browser: the load holds it there,
+    /// beside what holds its own name, and an older build's deletion of it
+    /// deletes that record and not the other.
+    #[test]
+    fn a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went() {
+        let store = MemoryStore::default();
+        let at = crate::time::now_ms();
+        let before = [finished(at - 30 * DAY), finished(at - 20 * DAY)];
+        store.keep_whole(&before);
+        store.load_history();
+        let since = finished(at - 10 * DAY);
+        let asked = Record::of(&since, |json| RecordId::placed(since.timestamp, json))
+            .expect("a record")
+            .id;
+        let other = serde_json::to_string(&finished(at - 5 * DAY)).unwrap();
+        store.records.borrow_mut().insert(
+            asked,
+            Held {
+                json: other.clone(),
+                whole: None,
+            },
+        );
+        store.keep_whole(&[before[0].clone(), before[1].clone(), since.clone()]);
+        let load = store.load_history();
+        let went = asked.bumped();
+        assert!(
+            load.sessions.contains(&(went, since.clone())),
+            "where it went: {:?}",
+            load.sessions
+        );
+        assert!(
+            load.sessions.iter().any(|(id, _)| *id == asked),
+            "beside the other bytes"
+        );
+        // The older build deletes it.
+        store.keep_whole(&before);
+        *store.legacy_deleted.borrow_mut() = vec![Deleted::of(&since, at)];
+        let listed = now(store.history_listing()).expect("listed");
+        assert!(
+            listed.contains(&asked) && !listed.contains(&went),
+            "{listed:?}"
+        );
+        assert_eq!(store.record(asked), Some(other));
+        assert_eq!(store.tombstone(asked), None);
+        assert!(store.tombstone(went).is_some());
+    }
+
     /// A session put back whose record is there still, as one a sync took
     /// back from the drive in the meantime, is back as it is stored, under
     /// its own name, as the files and a browser's database keep it: one

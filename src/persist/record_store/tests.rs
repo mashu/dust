@@ -642,7 +642,11 @@ impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
         }
     }
 
-    async fn write_move(&self, records: &[Record], _layout: &Layout) -> Result<(), Said> {
+    async fn write_move(
+        &self,
+        records: &[Record],
+        _layout: &Layout,
+    ) -> Result<Vec<Option<RecordId>>, Said> {
         self.call(format!("write_move({})", records.len()));
         if let Some(refused) = self.moves.borrow_mut().pop_front().and_then(Result::err) {
             return Err(refused);
@@ -650,7 +654,7 @@ impl<const READ_FIRST: bool> Backend for Script<READ_FIRST> {
         for record in records {
             self.hold(record.id, &record.json);
         }
-        Ok(())
+        Ok(records.iter().map(|record| Some(record.id)).collect())
     }
 
     async fn raced(&self) {

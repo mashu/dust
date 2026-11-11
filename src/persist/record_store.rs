@@ -546,8 +546,13 @@ pub(super) trait Backend {
     async fn unlink(&self, _ids: &[RecordId]) {}
     /// Make `writes`, and lay how the history is kept as `laid` says.
     async fn commit(&self, writes: &Writes<'_>, laid: Laid<'_>, by: By) -> Made<Self::Refused>;
-    /// Store `records`, the move's, and `layout` with them, last.
-    async fn write_move(&self, records: &[Record], layout: &Layout) -> Result<(), Self::Refused>;
+    /// Store `records`, the move's, and `layout` with them, last: where
+    /// each went, in their order ([`Made::placed`]).
+    async fn write_move(
+        &self,
+        records: &[Record],
+        layout: &Layout,
+    ) -> Result<Vec<Option<RecordId>>, Self::Refused>;
     /// Another copy changed how the history is kept first.
     async fn raced(&self) {}
     /// What a look at the store sees now.
@@ -559,6 +564,21 @@ pub(super) trait Backend {
     fn held_back(&self) {}
     /// The history read, before it is handed over.
     fn loaded(&self, _load: &mut HistoryLoad) {}
+}
+
+/// `records` under the names they went under, as `placed` says, in their
+/// order ([`Made::placed`]): one left deleted is none of them.
+fn as_placed(records: &[Record], placed: &[Option<RecordId>]) -> Vec<Record> {
+    records
+        .iter()
+        .zip(placed)
+        .filter_map(|(record, id)| {
+            Some(Record {
+                id: (*id)?,
+                json: record.json.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Note what `change`, as `placed` says its records went, made: the key of
@@ -865,7 +885,7 @@ async fn move_in<B: Backend>(
     };
     let records = here.not_moved_yet(records);
     match store.write_move(&records, &layout).await {
-        Ok(()) => Ok(Some((layout, records))),
+        Ok(placed) => Ok(Some((layout, as_placed(&records, &placed)))),
         Err(refused) if refused.raced() => Err(Moving::Raced(refused.words())),
         Err(refused) if B::FALLS_BACK => Err(Moving::Refused(refused.words())),
         Err(refused) => {
@@ -1008,7 +1028,11 @@ async fn take_up<B: Backend>(
     let made = store.commit(&writes, Laid::Over(&next), By::Store).await;
     noted(store.keys(), &change, &made.placed, made.saved.is_ok());
     match made.saved {
-        Ok(_) => Ok(Some(change)),
+        // Each session where it went, to be read there.
+        Ok(_) => Ok(Some(HistoryChange {
+            put: as_placed(&change.put, &made.placed),
+            ..change
+        })),
         Err(refused) => {
             if refused.raced() {
                 store.raced().await;

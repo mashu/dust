@@ -173,9 +173,10 @@ impl Fake {
         }
     }
 
-    /// Make `writes` on `shelves`, as the page script makes them; what is
-    /// made of a change refused is put back by the caller.
-    fn make(shelves: &mut Shelves, writes: Transaction) -> Result<(), Refused> {
+    /// Make `writes` on `shelves`, as the page script makes them, and say
+    /// where each record went; what is made of a change refused is put back
+    /// by the caller.
+    fn make(shelves: &mut Shelves, writes: Transaction) -> Result<Vec<Option<String>>, Refused> {
         let held = shelves.meta.get("layout").cloned();
         let over = matches!(writes.layout, Some(LayoutWrite::Over { .. }));
         if let Some(LayoutWrite::Over { expect, .. }) = &writes.layout
@@ -210,7 +211,7 @@ impl Fake {
             .map(|(name, held)| (id(name), held.as_str()))
             .collect();
         let unforget: Vec<RecordId> = writes.unforget.iter().map(id).collect();
-        let (_, made) = make_steps(
+        let (placed, made) = make_steps(
             &Making(RefCell::new(&mut *shelves)),
             &put,
             &forget,
@@ -232,7 +233,10 @@ impl Fake {
         if wrote {
             shelves.changes += 1;
         }
-        Ok(())
+        Ok(placed
+            .into_iter()
+            .map(|id| id.map(RecordId::name))
+            .collect())
     }
 }
 
@@ -383,7 +387,7 @@ impl Glue for Fake {
         }))
     }
 
-    fn apply(&self, writes: Transaction) -> Pending<Result<(), Refused>> {
+    fn apply(&self, writes: Transaction) -> Pending<Result<Vec<Option<String>>, Refused>> {
         let mut shelves = self.shelves();
         if let Some(first) = shelves.first.take() {
             first(&mut shelves);
@@ -1645,4 +1649,69 @@ fn a_change_an_older_build_looked_at_first_is_taken_up_in_a_browser_where_it_mad
         3,
         "taken up as the page opens"
     );
+}
+
+/// A session an older build stored, taken up where other bytes have the
+/// name the take-up gives it, goes under the next name, and is known by
+/// that name: the load holds it there, beside what holds its own name, and
+/// an older build's deletion of it, taken up by the same tab, deletes that
+/// record and not the other.
+#[test]
+fn a_session_taken_up_under_a_name_other_bytes_have_is_known_by_the_name_it_went_under() {
+    let before = [ago(30), ago(20)];
+    let page = Page::holding(&before);
+    let fake = Fake::on(&page);
+    opened(&fake).load();
+    let since = ago(10);
+    let asked = Record::of(&since, |json| RecordId::placed(since.timestamp, json))
+        .expect("a record")
+        .id;
+    let other = ago(5);
+    let held = serde_json::to_string(&other).expect("JSON");
+    fake.shelves().sessions.insert(asked.name(), held.clone());
+    page.keep(&[before[0].clone(), before[1].clone(), since.clone()]);
+    let tab = opened(&fake);
+    let load = tab.load();
+    let went = asked.bumped();
+    assert!(
+        load.sessions.contains(&(went, since.clone())),
+        "where it went: {:?}",
+        load.sessions
+    );
+    assert!(
+        load.sessions.iter().any(|(id, _)| *id == asked),
+        "beside the other bytes"
+    );
+    // The older build deletes it.
+    page.keep(&before);
+    page.deleted(&[Deleted::of(&since, crate::time::now_ms() + 1)]);
+    let listed = done(tab.listing()).expect("listed");
+    assert!(
+        listed.contains(&asked) && !listed.contains(&went),
+        "{listed:?}"
+    );
+    assert_eq!(fake.records().get(&asked), Some(&held));
+    assert_eq!(done(tab.forgotten(vec![asked, went])), [went]);
+}
+
+/// A move made again over a record whose name other bytes have stores
+/// the session under the next name, and the load holds it there.
+#[test]
+fn a_session_moved_under_a_name_other_bytes_have_is_read_where_it_went() {
+    let held = [ago(30), ago(20)];
+    let page = Page::holding(&held);
+    let fake = Fake::on(&page);
+    let moved = record::records_for_blob(&held);
+    let other = serde_json::to_string(&ago(5)).expect("JSON");
+    fake.shelves()
+        .sessions
+        .insert(moved[1].id.name(), other.clone());
+    let load = opened(&fake).load();
+    let went = moved[1].id.bumped();
+    assert!(
+        load.sessions.contains(&(went, held[1].clone())),
+        "where it went: {:?}",
+        load.sessions
+    );
+    assert_eq!(fake.records().get(&moved[1].id), Some(&other));
 }

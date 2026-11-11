@@ -61,7 +61,10 @@ dioxus.send(fakeIdb.contents("dust_history", "meta"));"#,
     ) else {
         return;
     };
-    assert_eq!(sent[0], json!({ "ok": null }));
+    assert_eq!(
+        sent[0],
+        json!({ "ok": ["00000000000000000001-0000000000000001", "00000000000000000002-0000000000000001"] })
+    );
     assert_eq!(sent[1], json!(1), "one transaction");
     assert_eq!(sent[2]["why"], "failed");
     assert!(
@@ -99,7 +102,10 @@ dioxus.send(Object.keys(fakeIdb.contents("dust_history", "sessions")));"#,
     };
     assert_eq!(sent[0]["why"], "full");
     assert_eq!(sent[1], json!({}));
-    assert_eq!(sent[2], json!({ "ok": null }));
+    assert_eq!(
+        sent[2],
+        json!({ "ok": ["00000000000000000001-0000000000000001"] })
+    );
     assert_eq!(sent[3], json!(["00000000000000000001-0000000000000001"]));
 }
 
@@ -173,7 +179,8 @@ dioxus.send((await one.head()).ok.layout);"#,
         return;
     };
     let answers = sent[0].as_array().expect("both answered");
-    assert!(answers.contains(&json!({ "ok": null })), "{answers:?}");
+    let moved = json!({ "ok": ["00000000000000000001-0000000000000001", "00000000000000000002-0000000000000001"] });
+    assert!(answers.contains(&moved), "{answers:?}");
     assert!(
         answers.iter().any(|answer| answer["why"] == "raced"),
         "{answers:?}"
@@ -279,7 +286,10 @@ dioxus.send((await other.head()).ok.layout);"#,
     };
     assert_eq!(sent[0], json!(1), "the app is told to look again");
     assert_eq!(sent[1], json!({ "ok": { "sessions": [], "deleted": [] } }));
-    assert_eq!(sent[2], json!({ "ok": null }));
+    assert_eq!(
+        sent[2],
+        json!({ "ok": ["00000000000000000001-0000000000000001", "00000000000000000002-0000000000000001"] })
+    );
     assert_eq!(
         sent[3]["ok"]["sessions"],
         json!([
@@ -340,7 +350,8 @@ dioxus.send(fakeIdb.contents("dust_history", "deleted"));"#,
 
 /// A change's deletions are made after its records, as the files make
 /// them, however each record went: added, there already, kept out as one
-/// deleted, or moved to the next name. A change that stores a record and
+/// deleted, or moved to the next name, as the change's answer says, name by
+/// name. A change that stores a record and
 /// deletes it leaves no record of it, and its tombstone. The deletion was
 /// asked for at once, and the record, added once the answers it waited on
 /// came, stayed beside its tombstone.
@@ -364,7 +375,12 @@ dioxus.send(fakeIdb.contents("dust_history", "sessions"));"#,
     ) else {
         return;
     };
-    assert_eq!(sent[0], json!({ "ok": null }));
+    // Where each went: added, there already, moved to the next name, or
+    // kept out as one deleted.
+    assert_eq!(
+        sent[0],
+        json!({ "ok": ["00000000000000000001-0000000000000001", "00000000000000000003-0000000000000001", "00000000000000000004-0000000000000002", null] })
+    );
     assert_eq!(
         sent[1],
         json!({
@@ -381,7 +397,7 @@ dioxus.send(fakeIdb.contents("dust_history", "sessions"));"#,
             "00000000000000000005-0000000000000001": "old",
         })
     );
-    assert_eq!(sent[3], json!({ "ok": null }));
+    assert_eq!(sent[3], json!({ "ok": [] }));
     assert_eq!(
         sent[4],
         json!({
@@ -436,8 +452,15 @@ dioxus.send(Object.keys(fakeIdb.contents("dust_history", "sessions")));"#,
     };
     assert_eq!(sent[0]["why"], "newer");
     assert_eq!(sent[1]["why"], "unread");
-    assert_eq!(sent[2], json!({ "ok": null }));
-    assert_eq!(sent[3], json!({ "ok": null }));
+    assert_eq!(
+        sent[2],
+        json!({ "ok": ["00000000000000000001-0000000000000001"] })
+    );
+    assert_eq!(
+        sent[3],
+        json!({ "ok": ["00000000000000000001-0000000000000001"] }),
+        "there already"
+    );
     assert_eq!(sent[4], json!(["00000000000000000001-0000000000000001"]));
 }
 
@@ -585,10 +608,11 @@ fn case(seed: u64) -> Case {
     }
 }
 
-/// What a store that makes the change step by step holds after it: none
-/// where it refuses it, and so keeps nothing of it, as the database keeps
+/// What a store that makes the change step by step holds after it, and
+/// where each record went, by name, none for one left deleted: none where
+/// it refuses the change, and so keeps nothing of it, as the database keeps
 /// nothing of a change it refuses.
-fn made_steps(case: &Case) -> Option<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+fn made_steps(case: &Case) -> Option<(Stores, Vec<Option<String>>)> {
     let mut shelves = Shelves::default();
     shelves.sessions = case.sessions.clone();
     shelves.deleted = case.deleted.clone();
@@ -597,14 +621,22 @@ fn made_steps(case: &Case) -> Option<(BTreeMap<String, String>, BTreeMap<String,
         .iter()
         .map(|(id, held)| (*id, held.as_str()))
         .collect();
-    let (_, made) = make_steps(
+    let (placed, made) = make_steps(
         &Making(RefCell::new(&mut shelves)),
         &case.put,
         &forget,
         &case.unforget,
     );
-    made.ok().map(|()| (shelves.sessions, shelves.deleted))
+    let names = placed
+        .into_iter()
+        .map(|id| id.map(RecordId::name))
+        .collect();
+    made.ok()
+        .map(|()| ((shelves.sessions, shelves.deleted), names))
 }
+
+/// What the records and the tombstones of a database hold, by name.
+type Stores = (BTreeMap<String, String>, BTreeMap<String, String>);
 
 /// The page script makes a change as every other store makes it, step by
 /// step ([`make_steps`]): deletions undone, then the records, each left out
@@ -614,7 +646,8 @@ fn made_steps(case: &Case) -> Option<(BTreeMap<String, String>, BTreeMap<String,
 /// held already kept as it is. On seeded changes over records stored, held
 /// by other bytes under as many names as a record is tried under and one
 /// more, deleted or not, what the database holds after each, or that it
-/// refused it, is what those steps make of it.
+/// refused it, is what those steps make of it, and so is where it says
+/// each record went.
 #[test]
 fn the_page_script_makes_a_change_as_every_other_store_makes_it() {
     const CASES: u64 = 2_000;
@@ -647,6 +680,7 @@ for (const asked of cases) {{
   const answer = await tab.apply(change({{ put: asked.put, forget: asked.forget, unforget: asked.unforget }}));
   dioxus.send({{
     made: answer.why === undefined,
+    names: answer.ok === undefined ? null : answer.ok,
     sessions: fakeIdb.contents("dust_history", "sessions"),
     deleted: fakeIdb.contents("dust_history", "deleted"),
   }});
@@ -667,9 +701,10 @@ for (const asked of cases) {{
     for (seed, (case, sent)) in cases.iter().zip(&sent).enumerate() {
         let after = (held(&sent["sessions"]), held(&sent["deleted"]));
         match made_steps(case) {
-            Some(made) => {
+            Some((made, names)) => {
                 assert_eq!(sent["made"], json!(true), "case {seed}: {sent}");
                 assert_eq!(after, made, "case {seed}");
+                assert_eq!(sent["names"], json!(names), "case {seed}: where each went");
             }
             None => {
                 refused += 1;
