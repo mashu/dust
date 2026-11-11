@@ -1759,6 +1759,9 @@ impl InBrowser {
 }
 
 impl Harness for InBrowser {
+    /// A tab keeps how the history is kept as it last read or wrote it.
+    const LOOK_MAY_RACE: bool = true;
+
     fn holding(whole: &[SessionResult]) -> Self {
         let page = if whole.is_empty() {
             Page::default()

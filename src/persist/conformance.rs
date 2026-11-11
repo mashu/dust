@@ -17,6 +17,12 @@ use super::session::{Deleted, SessionKey};
 
 /// A store under test, as every case reaches it.
 pub(crate) trait Harness {
+    /// Whether a look may find how the history is kept changed under it
+    /// since this copy last read it, as a browser's tab does where another
+    /// tab, or an older build's, wrote it: such a look is refused as raced,
+    /// and the next takes the change up. The files and the test store read
+    /// it at every look, and take a change up at the first.
+    const LOOK_MAY_RACE: bool = false;
     /// A store that holds no history yet, beside the history an older
     /// build keeps whole, holding `whole`.
     fn holding(whole: &[SessionResult]) -> Self;
@@ -470,14 +476,19 @@ pub(crate) fn a_change_an_older_build_looked_at_first_is_taken_up<H: Harness>() 
         let later = ago(9);
         store.keep_whole(&[whole[0].clone(), whole[1].clone(), since, later]);
         store.as_an_older_build_looks(made_the_move);
-        // A browser's look finds the layout changed under it, as by another
-        // tab, and leaves the take-up to the next, which the app makes as
-        // the store says the history changed.
+        assert!(store.changed(), "an older build wrote, {made_the_move}");
         let listed = store.listing().map(|listed| listed.len());
-        assert!(
-            listed == Some(4) || store.changed(),
-            "taken up, or still to take up: {listed:?}, {made_the_move}"
-        );
+        if H::LOOK_MAY_RACE {
+            // A browser's look finds the layout changed under it, as by
+            // another tab, and leaves the take-up to the next, which the
+            // app makes as the store says the history changed.
+            assert!(
+                listed == Some(4) || store.changed(),
+                "taken up, or still to take up: {listed:?}, {made_the_move}"
+            );
+        } else {
+            assert_eq!(listed, Some(4), "taken up as it is listed, {made_the_move}");
+        }
         assert_eq!(
             store.listing().map(|listed| listed.len()),
             Some(4),
