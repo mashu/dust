@@ -2132,6 +2132,26 @@ mod tests {
         assert_eq!(files.load().sessions.len(), 2, "and both kept");
     }
 
+    /// The page script a browser's history goes through writes only to the
+    /// layouts this build writes to, and tries a record under as many names
+    /// past its own as the files do, where other bytes have its name: each
+    /// says so in a constant of its own, which nothing else ties to this
+    /// build's (`legacy::COMPATIBLE`, `BUMPS`).
+    #[test]
+    fn the_page_script_writes_to_the_layouts_and_tries_the_names_this_build_does() {
+        let said = |name: &str| -> u64 {
+            let line = crate::persist::idb::IDB_JS
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("const {name} = ")))
+                .unwrap_or_else(|| panic!("the page script sets no {name}"));
+            line.strip_suffix(';')
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(|| panic!("the page script sets {name} = {line}"))
+        };
+        assert_eq!(said("COMPATIBLE"), legacy::COMPATIBLE);
+        assert_eq!(said("BUMPS"), BUMPS);
+    }
+
     /// The move from a history kept whole, and the read of the records it
     /// made, each say how far they have come as they go, for the boot screen
     /// to say: so many sessions moved of so many, then so many records read
