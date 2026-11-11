@@ -23,6 +23,10 @@ pub async fn sleep_ms(ms: u32) {
 }
 
 pub fn now_ms() -> u64 {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    if let Some(now) = PINNED_NOW.with(std::cell::Cell::get) {
+        return now;
+    }
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
@@ -185,6 +189,18 @@ std::thread_local! {
     /// While a test has pinned its seeds, the seed pinned, and the state the
     /// next is drawn from.
     static PINNED_SEEDS: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+    /// While a test has pinned the wall clock, what it reads.
+    static PINNED_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pin the wall clock [`now_ms`] reads on this thread at `now`, or, with
+/// none, let it run again, as [`pin_seeds`] pins the seeds: two runs of one
+/// sequence, against two copies of the code, stamp alike what each stores,
+/// as when the history is moved, whenever each runs. Only tests can: the app
+/// always reads the clock.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub fn pin_now_ms(now: Option<u64>) {
+    PINNED_NOW.with(|pinned| pinned.set(now));
 }
 
 /// Pin every seed [`seed_rng`] hands out on this thread to the sequence
@@ -306,6 +322,25 @@ mod tests {
         let seeds = draw(7);
         assert_ne!(seeds[0], seeds[1], "a sequence, not one seed again");
         assert!(!seeds.contains(&super::seed_rng()), "fresh once unpinned");
+    }
+
+    /// A pinned wall clock reads what it was pinned at, however long the
+    /// test takes, on the thread that pinned it alone; unpinned, it runs on
+    /// from where it is.
+    #[test]
+    fn a_pinned_wall_clock_stands_still_where_it_was_pinned() {
+        let before = super::now_ms();
+        super::pin_now_ms(Some(42));
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_eq!(super::now_ms(), 42);
+        assert_eq!(super::now_ms(), 42, "still");
+        let elsewhere = std::thread::spawn(super::now_ms).join().unwrap();
+        assert!(elsewhere >= before, "another thread's runs: {elsewhere}");
+        super::pin_now_ms(Some(before + 1_000));
+        assert_eq!(super::now_ms(), before + 1_000, "pinned again");
+        super::pin_now_ms(None);
+        let after = super::now_ms();
+        assert!(after >= before && after < before + 1_000, "{after}");
     }
 
     /// While the seeds are pinned, the seed pinned is known, however many
