@@ -977,6 +977,50 @@ mod tests {
         });
     }
 
+    /// Typing still waiting out the box's pause as a gap is found came
+    /// before the gap: the session hears it before it pauses, so the group
+    /// the pause cut holds it, and the mark keeps that group as typed,
+    /// untimed and saying it was paused, as End then keeps it. Found by the
+    /// heartbeat, with nothing due to hand the typing over first.
+    #[test]
+    fn typing_waiting_as_a_gap_is_found_stays_with_the_group_the_pause_cut() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 0.0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            h.ctx.answer.hold(0, "K".into(), Some(MonoMs(mono_ms())));
+            // Held back: the clock runs on, and nothing is polled.
+            tokio::time::advance(std::time::Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+            h.pump();
+            assert!(
+                matches!(h.phase(), Some(SessionPhase::Paused { index: 0, .. })),
+                "{:?}",
+                h.phase()
+            );
+            assert_eq!(input_of(&h, 0).as_deref(), Some("K"), "the typing was lost");
+            // What was typed into each group kept, and how the first is timed.
+            let cut = |result: &SessionResult| {
+                let typed: Vec<String> = result.groups.iter().map(|g| g.received.clone()).collect();
+                let timing = result.group_timings.first();
+                (typed, timing.map(|t| (t.char_times.is_some(), t.untimed)))
+            };
+            let paused = (
+                vec!["K".to_string()],
+                Some((false, Some(cw_core::Untimed::Paused))),
+            );
+            let marked = h.store.open().and_then(|open| open.so_far);
+            let marked = marked.expect("the group the pause cut is marked").result;
+            assert_eq!(cut(&marked), paused, "marked");
+            h.send(SessionEvent::FinishNow);
+            let kept = h.ctx.result.peek().clone().and_then(Finished::kept);
+            let kept = kept.expect("End keeps the group begun");
+            assert_eq!(cut(&kept), paused, "kept by End");
+        });
+    }
+
     /// A session that runs on, with nothing held back, never pauses
     /// itself, however long it waits on a send: its heartbeat goes on
     /// under it.
