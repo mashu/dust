@@ -22,12 +22,21 @@ use crate::time::{local_date_string, mono_ms, now_ms};
 /// its life.
 ///
 /// Some are called with what is live borrowed from the app — `first`,
-/// `hear`, `as_shown`, `progress`, `progressed` and `so_far` by [`step`],
-/// as a step's own `ahead` is, `so_far` by [`give_back`] too, and `sound`
-/// by [`resume`] — and must leave the app alone: borrow nothing of it, do
-/// nothing the machine said, hand it nothing, and show no toast. `so_far`
-/// changes only its copy of the machine. The rest are called with nothing
-/// borrowed.
+/// `hear`, `over`, `as_shown`, `progress`, `progressed` and `so_far` by
+/// [`step`], as a step's own `ahead` is, `so_far` by [`give_back`] too,
+/// and `sound` by [`resume`] — and must not reach what is live through the
+/// app (`app.session`), do what a machine said or dispatch anything, show
+/// a toast, or have the answer box finish what is entered
+/// ([`AnswerOutbox::finish`], which can hand the session an answer from
+/// inside). Taking the typing that waits in the box
+/// ([`AnswerOutbox::take`]), which calls nothing back, they may, as a
+/// session's `first` and its away step do. `so_far` changes only its copy
+/// of the machine. `of`, `of_mut` and `unboxed` are handed the app's slot,
+/// or what is taken out of it, while it is borrowed; the rest are called
+/// with nothing borrowed.
+///
+/// [`AnswerOutbox::finish`]: crate::state::AnswerOutbox::finish
+/// [`AnswerOutbox::take`]: crate::state::AnswerOutbox::take
 pub(crate) trait RunMachine: Sized + 'static {
     /// What it hears: what the user did, or news from its own tasks.
     type Event: PartialEq;
