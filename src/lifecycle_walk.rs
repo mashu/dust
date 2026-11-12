@@ -13,6 +13,8 @@
 //!   so: Running while it holds the audio, Paused while it shows paused;
 //! - while it is paused, its mark holds what End would keep were it pressed
 //!   then, so that the app stopping keeps that;
+//! - a group, or a run's copy, that says why it holds no times — paused,
+//!   held up, sent again — holds none, in the history and in the mark;
 //! - the history only grows, and a session stored stays as it was stored.
 //!
 //! The walks held what the lifecycle did, line for line, while it was
@@ -86,9 +88,10 @@ impl Kind {
     }
 
     /// Seeds past the first [`SUITE_SEEDS`] that the suite walks too, as
-    /// they reach what those never do: contest 1940 a pause cutting short
-    /// the turn a copy was heard in, and 1582 a turn told of as held up
-    /// only after the pause.
+    /// they reach what those never do, for the check that a copy saying
+    /// why it is untimed holds no times ([`Walk::check_timing`]) to check:
+    /// contest 1940 a pause cutting short the turn a copy was heard in, and
+    /// 1582 a turn told of as held up only after the pause.
     fn further(self) -> &'static [u64] {
         match self {
             Self::Groups => &[],
@@ -665,6 +668,7 @@ impl Walk {
             );
         }
         self.check_mark(&at);
+        self.check_timing(&at);
         let stored: Vec<String> = self
             .h
             .store
@@ -680,6 +684,28 @@ impl Walk {
             left.remove(at_now);
         }
         self.stored = stored;
+    }
+
+    /// A group, or a run's copy, that says why it holds no times holds
+    /// none: the owner's rule for a turn a pause cut short or a send gone
+    /// wrong, in the history, in the mark, and in what the mark holds for
+    /// the store to take.
+    fn check_timing(&self, at: &str) {
+        let mut kept = self.h.store.load_sessions();
+        if let Some(open) = self.h.store.open() {
+            kept.extend(open.so_far.map(|so_far| so_far.result));
+            kept.extend(open.unstored);
+        }
+        for result in &kept {
+            for (group, timing) in result.groups.iter().zip(&result.group_timings) {
+                assert!(
+                    timing.untimed.is_none() || timing.char_times.is_none(),
+                    "{at}: {} says why it is untimed, {:?}, and holds times",
+                    group.sent,
+                    timing.untimed
+                );
+            }
+        }
     }
 
     /// While what is live is paused, its mark holds what End would keep
