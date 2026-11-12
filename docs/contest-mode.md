@@ -758,8 +758,8 @@ pub enum OpKey { Esm, Cq, Exchange, Tu, MyCall, HisCall, HisCallAndExchange,
 The machine needs the fields only at a key press. The runtime maps
 `Err(AudioError::Cancelled)` to `TurnCancelled` and any other error to
 `TurnFailed` (the run's `sent`, `src/contest_runtime.rs`), where a group
-session's hears either as its send stopped (`src/session_runtime.rs`). The effects are
-`PlayTurn(Turn)`, `StopAudio`, `ReleaseAudio`, `StartTimer{id, ms}`,
+session hears either as its send stopped (`src/session_runtime.rs`). The
+effects are `PlayTurn(Turn)`, `StopAudio`, `ReleaseAudio`, `StartTimer{id, ms}`,
 `ClearFields`, `Focus(EntryField)`, `Announce(text)`, `PersistAndShowResults`,
 `ShowNothingKept` and `AbortToHome`. Every apply that emits `StopAudio` or
 `ReleaseAudio` also sets `air = Silent`.
@@ -3770,9 +3770,11 @@ or paddle letters, Wipe and `clear()`. Every key and message button goes
 through one entry point, `press_key`, which calls `paddle.finish_letter()`
 (lent by the run screen through `ContestEntry::use_letters`, as
 `AnswerOutbox::use_entry` lends it), `lease.wake()` and
-`entry.snapshot()`, then dispatches `Key`. `run_effects` handles
-`ClearFields` and `Focus` through `ctx.entry` and the focus script
-(`focus_end_script`, `page.rs`, beside the group boxes' `focus_script`);
+`entry.snapshot()`, then dispatches `Key`. The run's `carry_out`
+(`src/contest_runtime.rs`, called by `live_run::run_effects`,
+`src/live_run.rs`) handles `ClearFields` and `Focus` through `ctx.entry`
+and the focus script (`focus_end_script`, `page.rs`, beside the group
+boxes' `focus_script`);
 `Announce` sets
 `ctx.announced` once nothing is on the air, held until then; the one
 polite region that speaks it sits in the app's frame, so what the run
