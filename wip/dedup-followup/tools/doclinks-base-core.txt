@@ -1,0 +1,4 @@
+      1 warning: `esm` is both a function and a module
+      1 warning: unresolved link to `LID_EARLY`
+      1 warning: unresolved link to `LID_FUMBLES`
+      1 |         ^^^ ambiguous link

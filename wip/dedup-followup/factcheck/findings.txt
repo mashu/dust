@@ -1,0 +1,688 @@
+
+######## critic: 76 claims, 12 problems
+NOTES: I checked §9.2 (draft lines 1043 to 1101) against git and the workflow record /tmp/claude-0/-home-user-dust/e07ea342-050f-502a-b473-6fa881d75cc0/scratchpad/dedup/store-result.json. I edited nothing and built nothing.
+
+These claims hold:
+- **Commits:** all 54 commits of 2207d65..aa6af38 exist in the order and with the roles §9.2 gives. e401d80..de8dd8d is exactly 22 commits, and every one of their messages says its test failed before the fix.
+- **Prefix counts:** by subject prefix there are 8 'History files:', 5 'Browser history:', 3 'History:' and 6 'Test store:' fixes. Only the meaning of the split needs fixing (line 1059).
+- **First review (r1):** 7 problems, 1 medium, and the medium's description matches. The medium was fixed by 1073fc9 and 04236c7, as the record says; 04236c7 is a follow-up the review did not raise.
+- **Second review (r2):** 11 problems across three reviewers (3 + 3 + 5), two medium: the browser's compare-and-swap (4834961) and the conformance suite (a8f452b).
+- **Differential table:** every figure matches the messages of 95e0361, 4834961 and c01c5a9. The counts sum to 80,000, 80,000 and 160,000 steps once each message's omitted items are added: the browser's 2,427 loads handed over and 2,401 looks for a change, and the test store's 4,852 looks for a change.
+- **Differentials, mutations and declarations:** each failed on mutations and was deleted with the pasted copy. The four declared items (N3e, D16, the tombstone c96678b pins, and the test store's two) match their commits.
+- **The core at 984d718:** `Backend` is at record_store.rs:449, with async fns and no Send. `Disk` is at files.rs:943 ('on the worker's thread ... ready as it is first polled'), `InDb` at idb.rs:534 and `InMem` at memory.rs:898. `notes` and `steps` exist, the page test compares idb.js with `make_steps`, and idb.js:465 holds the compare-and-swap.
+- **Conformance at 984d718:** 13 cases. files.rs:4848 runs 13. idb/tests.rs:1872 runs 12, leaving out records_still_unread_are_told_of_once. memory.rs:2530 runs 10, leaving out the no-session tombstone and two-copies cases, each named in a comment.
+- **Review bullets:** they match their commits. That covers 0072574; ae466da (4,000 records of some 25 kB, 100 MB, READ_PART = 256 at record_store.rs:253); 78ec02d; b8ab8c5; b4d5a71 (three places, two, the gate check twice, four defaults now unreachable!); 890c8ae; 5d03f77; 73b383c; 9344052; and aa6af38's LOOK_MAY_RACE.
+
+Old §7.7 wording carried over into the draft: the sentence at line 1080 ('fixed test first, or pinned') and the 0661bd4 citation at line 1094 were already in the old §7.7, which had been fact-checked. Both are still imprecise, as reported above.
+
+--- [1] critic L1060 WRONG
+TEXT: A review of them found seven problems, one medium: a move made over records stored a session a second time when the record that held it could not be read just then. All seven were fixed in that range, the medium one by `1073fc9` and `04236c7`. Two of the seven were left untested by a fix, and `5af6787` and `1c6f0db` pin them.
+PROBLEM: Three faults. (1) The review did not cover the 22 fixes. It covered the 3 pins and the first 15 fixes, and 7 of the 22 answer it. (2) Only five of the seven problems were fixed in e401d80..de8dd8d. The other two were coverage gaps, and 5af6787 and 1c6f0db pin them; both commits come after de8dd8d. So 'All seven were fixed in that range' is false. (3) One of the two gaps was left by a pin (33a43ef), not by a fix.
+EVIDENCE: store-result.json r1[0].checked: 'I reviewed 2207d65..wip/dedup-store, a56788e, 18 commits'. Reviewer 0 found 4 problems (1 medium, 3 low) and reviewer 1 found 3 (all low). fix1.steps maps them: P1 to '1073fc9, 04236c7', P2 to e57f304, P3 to 6f8460c, P4 to 2af25aa and P5 to '0e222e3, de8dd8d', all in range. P6 is '(low, 54a897a ...): no browser test covers e401d80's check' and goes to 5af6787. P7 is '(low, 33a43ef ...): nothing pins the page script's own read of meta told' and goes to 1c6f0db. Both are marked 'Confirmed as a coverage gap. Test only'. In git log --reverse 2207d65..aa6af38, de8dd8d is #25 and 5af6787 and 1c6f0db are #26 and #27. 1c6f0db's subject: 'fixes 33a43ef's pin holding only idb.rs's write of it'.
+FIX: A review of the pins and the first 15 fixes (to `a56788e`) found seven problems, one medium: a move made over records stored a session a second time when the record that held it could not be read just then. The last seven of the 22 fixes answer five of them, the medium one `1073fc9` and `04236c7`. The other two were gaps in the tests: no browser test held `e401d80`'s look at the tombstones by name, and nothing held the page script's read of the note `33a43ef` pinned. `5af6787` and `1c6f0db` pin them.
+
+--- [2] critic L1059 IMPRECISE
+TEXT: 8 in the files, 5 in a browser, 3 in both, and 6 in the test store
+PROBLEM: These counts follow the subject prefixes ('History files:' 8, 'Browser history:' 5, 'History:' 3, 'Test store:' 6), not where each fault was. The three 'History:' commits change legacy.rs, which every store shares. One of them, e401d80, says its fault was not reached in a browser, so it was not wrong 'in both'. Also, 6f8460c is counted under the files, but it fixed the test store as well.
+EVIDENCE: git show --stat: e401d80 touches only src/persist/legacy.rs and files.rs tests. Its message: 'A browser never holds a record beside its tombstone, so it was not reached there.' 0642e2f and 6563c5c also change legacy.rs. 6563c5c says the fault differed by order ('the files ... kept the first tombstone of a change, the page script the last'), and 0642e2f says 'in a browser too', with the files in the case where sessions.json does not read. 6f8460c ('History files:') adds 46 lines to src/persist/memory.rs: 'MemoryStore holds a take-up the store had no room for as still to take up the same way (held_back)'. Its test persist::memory::tests::a_take_up_the_store_could_not_make_is_still_to_take_up 'failed before the fix'.
+FIX: 8 in the files (`6f8460c` in the test store too), 5 in a browser, 6 in the test store, and 3 in `legacy.rs`, which the stores share (`e401d80`, `0642e2f`, `6563c5c`; `e401d80`'s fault was reached on the files alone)
+
+--- [3] critic L1058 IMPRECISE
+TEXT: Three commits pinned what the copies had to agree on (`1282a11`, `97e34cb`, `33a43ef`).
+PROBLEM: Only 1282a11 ties two copies to each other: idb.js's COMPATIBLE and BUMPS to the Rust ones. 33a43ef pins the names that builds read the notes by, against a rename. 97e34cb pins nothing in the stores. It is a test helper that lets a test pin the wall clock, so that the differentials could run one sequence twice and get the same result.
+EVIDENCE: git log -1 97e34cb: 'Time: a test can pin the wall clock now_ms reads on its thread, as it pins the seeds (fixes a test having no way to run one sequence twice and have the move's migratedAt, takenThrough and the takenLegacy gate come out alike)'. 33a43ef: 'the notes of what was told keep the names builds read them by ... 0.16.4 to 0.16.9 go by told.json and meta told'. 1282a11: 'fixes nothing tying idb.js's own copies of them to the Rust ones'. store-plan-main.md, 'Phase 0: pins (no behaviour change)', 0.2: 'The differentials need it so that migratedAt, takenThrough and the takenLegacy gate agree between old and new code'.
+FIX: Three commits came first and changed no behaviour: `1282a11` holds idb.js's COMPATIBLE and BUMPS to the Rust ones, `33a43ef` holds the notes of what was told to the names builds read them by, and `97e34cb` lets a test pin the wall clock, so that one sequence can be run twice alike.
+
+--- [4] critic L1080 IMPRECISE
+TEXT: The differentials drew their steps from one tab and one copy at a time, so they could not find most of these.
+PROBLEM: The 'so' gives the wrong reason. The differentials did include another copy's and another tab's steps; what they never did was overlap two operations of one tab. Nine of the eleven problems are places where old and new code answer alike (docs, tests, memory use, code written twice, behaviour that was the same before and after), so no old-against-new differential could find them, whatever its steps. Only two changed what a store keeps: the browser's take-up, which needs two looks of one tab at once, and a record that one change names twice.
+EVIDENCE: 95e0361: '2,000 seeded sequences of 40 steps by this copy, another copy, an older build ...'. 4834961: 'by this tab, another tab of the same code, another tab's writes made just before or after a read or a change here'. In r2, reviewer 1's verdict on 061bfea says the CAS change was 'not seen by a differential that never overlapped two operations of one tab'. In r2 the other nine are: ae466da (peak memory), 890c8ae and 3b7f853/4f8d642 (docs), 1f8fedb and 5d03f77/c6df3c8/0661bd4 (tests), 78ec02d ('the outcomes were equal only because imported has its own gate'), b4d5a71 ('No behaviour changes'), and 73b383c ('not a regression (1c6f0db behaves the same)'). The other behaviour change is R1.2/c96678b ('4834961 changed it').
+FIX: Nine were places where the old code and the new answer alike (docs, tests, memory, code written twice, and what a store did alike before and after), which no differential of the one against the other can find. Of the two that changed what a store keeps, one needed two looks of one tab at once, which the differentials, taking one step at a time, never made; the other was a change that names a record twice (`c96678b`, above).
+
+--- [5] critic L1078 IMPRECISE
+TEXT: What every store must do with the history is a suite of 13 cases (`persist::conformance`, from `a8f452b`). The files run all 13, a browser 12 and the test store 10
+PROBLEM: This sits under 'Two more pieces came with the switch', but the suite that came with the switch had 8 cases: the files ran 8, a browser 7 and the test store 8. It reached 13, 12 and 10 only through the review's fixes, and those come later in the section.
+EVIDENCE: Counted `pub(crate) fn` cases in conformance.rs, and the names in each conformance_tests! list in files.rs, idb/tests.rs and memory.rs. a8f452b: cases=8 files=8 browser=7 test=8. 061bfea: the same. 1f8fedb: 9/9/8/9. 5d03f77: 10/10/9/9. c6df3c8: 13/13/12/10. 984d718: 13/13/12/10. The core record for 2.11 says: 'a Harness trait and 8 cases. They generate 23 tests: 8 on the files, 7 on the browser and 8 on the test store.'
+FIX: What every store must do with the history is a suite of cases (`persist::conformance`): 8 when `a8f452b` wrote it, and 13 once the review's fixes added five (`1f8fedb`, `5d03f77`, `c6df3c8`). The files run all 13, a browser 12 and the test store 10
+
+--- [6] critic L1080 IMPRECISE
+TEXT: Each was fixed test first, or pinned where it was a doc's or a test's:
+PROBLEM: Three of the eleven were neither fixed test first nor pinned. The code written twice was refactored (b4d5a71) with no behaviour change and no failing test. This report's three false claims (3b7f853) and the suite doc's 'tested once' claim (4f8d642) were corrected in the text alone.
+EVIDENCE: b4d5a71: 'No behaviour changes: every store writes and reads as before ... the persist tests pass before and after.' fix2 step 3 (a8f452b doc claim), commits '4f8d642, 3b7f853', test 'Doc only'. fix2 step 11 (061bfea's three false claims), commit 3b7f853, test 'Doc only'. git show --stat 3b7f853 touches only docs/code-review.md, and 4f8d642 says 'Doc only'.
+FIX: Each that changed what a store does was fixed test first; each in a doc or a test was pinned or corrected; and the code written twice was put in one place, with no change to what any store does:
+
+--- [7] critic L1097 IMPRECISE
+TEXT: Three more commits came after the review:
+PROBLEM: 9344052 and 4f8d642 were among the review's fixes, not commits after them. They came after 3b7f853 had written the review into §7.7. 4f8d642 answers one of the eleven (a8f452b's doc claim). Only aa6af38 came after the last check.
+EVIDENCE: fix2.steps[2] (a8f452b doc claim): commits '4f8d642, 3b7f853 ...'. fix2.steps[6]: commits '5d03f77, c6df3c8, 0661bd4, 9344052'. fix2.deviations: 'docs/code-review.md was edited once (3b7f853), but two small commits follow it: 9344052 ... and 4f8d642'. The gate verdict: 'no production regressions in the 15 commits (061bfea..4f8d642)'. Commit times: 3b7f853 20:53, 9344052 21:00, 4f8d642 21:23, aa6af38 22:05.
+FIX: Three commits came after `3b7f853` wrote the review into §7.7: two more of the review's fixes, and one that a last check of them asked for:
+
+--- [8] critic L1099 IMPRECISE
+TEXT: `4f8d642` says in the suite's own doc which cases it holds once and what each store's own tests keep.
+PROBLEM: The new doc lists no cases. It says that each case is written once for all the stores, and that each store's own tests hold what its protocol adds. Before, the doc said all of it was 'tested once for all of them'.
+EVIDENCE: git show 4f8d642, src/persist/conformance.rs: '-//! What every store must do with the history, tested once for all of them:' becomes '+//! What every store must do with the history, each case written once for' / '+//! all of them: ...' / '+//! What a store's protocol adds, its bytes on a disk, its packs and' / '+//! journals, its pages and transactions, its own tests hold.' The message: 'Doc only: the suite runs as before, 35 cases over the three stores.'
+FIX: `4f8d642` says in the suite's own doc that each case is written once for every store, and that what a store's protocol adds is held by its own tests, where the doc had said all of it was tested once for all of them.
+
+--- [9] critic L1100 IMPRECISE
+TEXT: `aa6af38` holds the files and the test store to the first listing again
+PROBLEM: 'Again' holds only for the files: c6df3c8 deleted the files' own test that required the first listing. No test had held the test store to it before. c6df3c8 was the first to run this case on the test store.
+EVIDENCE: c6df3c8's message: 'The test store, one copy's, leaves the first two out by name, and runs the third, which no test of it ran before.' fix2.steps[6]: 'an older build's look at takenLegacy (now also run on the test store)'. The gate names only the files' and the browser's deleted tests. In aa6af38's diff, the else branch of `if H::LOOK_MAY_RACE` asserts `listed == Some(4)` for every store but the browser.
+FIX: `aa6af38` holds the files to the first listing again, and the test store too, which no test had held to it before
+
+--- [10] critic L1062 IMPRECISE
+TEXT: and the two were compared bit for bit
+PROBLEM: The comparisons were exact with stated exceptions. On the files, set-aside names were compared without the second they were made in. On the test store, a missing note and '[]' were taken as equal, and the generator never combined page_room with an older build, to keep the declared drifts out.
+EVIDENCE: 95e0361: 'found every answer, notice, set-aside and file's bytes the same ...; set-aside names are compared without the second they were made in.' c01c5a9: 'no store but the test store lets records go for room, and the differential keeps the two apart.' store-result.json core.deviations item 6: 'the comparison treats None and "[]" as equal'. 4834961: 'every answer, notice and set-aside, and all both stores held, the same'.
+FIX: and every answer, notice and set-aside, and all that the two stores held, were compared, but for the second in a set-aside's name on the files and what each declared:
+
+--- [11] critic L1094 IMPRECISE
+TEXT: two copies; an older build's look; and the app's own change under the next name (`1f8fedb`, `c6df3c8`, `0661bd4`)
+PROBLEM: 0661bd4 does not add any of the three items listed. It adds a deletion that an older build made before the move to an existing case, and deletes the files' near copy of that case. 1f8fedb is the app's own change under the next name, and c6df3c8 is two copies and an older build's look.
+EVIDENCE: 0661bd4: 'a deletion an older build made before the move is held to every store's rules, and no store's own test bears the name of a case it is not ... The case now holds that too, on the files, in a browser and in the test store, and the files' copy goes'. c6df3c8: 'two copies on one store, and an older build's look at the history before this build's'. 1f8fedb: 'a session the app stores where other bytes have its name is known by the name it went under'.
+FIX: two copies and an older build's look (`c6df3c8`); a deletion an older build made before the move (`0661bd4`); and the app's own change under the next name (`1f8fedb`)
+
+--- [12] critic L1077 IMPRECISE
+TEXT: `9e39026` fixed a bug the copies shared
+PROBLEM: The bug was in the files and in a browser, through the core they already shared at 9e39026. The test store did not have it: its twin test passed before and after. ('The copies' reads as all three.)
+EVIDENCE: 9e39026's message: 'Tests, each seen to fail before on the files and in a browser ... the test store, which read its history after its take-up, passes as before.' store-result.json core.steps[8]: 'Three tests failed on the code before. On the files ... In the browser ... A test-store twin passes both before and after.' git show 9e39026 -- src/persist/memory.rs adds only a test.
+FIX: `9e39026` fixed a bug the files and a browser shared (the test store's twin test passed before it as after)
+
+
+######## critic: 85 claims, 15 problems
+NOTES: The draft changed while I was checking it. It went from 1,280 to 1,282 lines, last modified at 04:49:49 UTC, and the growth figures and §9.1's sketch parenthesis changed. Everything above is checked against the current text, which has stayed the same since 04:49.
+
+Checked and found right:
+- **Counts.** The 22 store fixes are e401d80..de8dd8d, all of which change non-test code: 15 first fixes, then 1073fc9, 04236c7, e57f304, 6f8460c, 2af25aa, 0e222e3 and de8dd8d from the review round. The pins 1282a11, 97e34cb (gated by cfg(test)), 33a43ef, 5af6787 and 1c6f0db are tests only. The 9 runtime fixes are a1a7e90, f954ac7, 97c816e, ef88e31, 88ac261, c654e9d, 5d20794, 13b94bf and 457b4a7. One nuance: 04236c7 is a follow-up the review did not raise; it fixes a regression from 0dac6c7 and 1073fc9.
+- **Walks.** The 4,000 seeded walks are 2,000 per kind at each step S3–S11, as each message from b67c9f8 to ffa0d14 says.
+- **Growth figures.** All match the current §9.4: 1,872 and 1,011, 2.1%, 9.9%, 26%.
+- **Code at 984d718.**
+  - `Stage { Running, Paused, Ending }` and `LiveRun<M, O>` are in state/live.rs at lines 82 and 35.
+  - `RunMachine` is at live_run.rs:40, and the claim is written once at live_run.rs:197.
+  - `Backend` is at record_store.rs:449. There are three Store impls with three Backend views (Disk, InDb, InMem).
+  - `AWAY_GAP_MS`, `SEEN_EVERY_MS` (250) and `Lease::after` exist.
+  - A run is still seen by ui/contest.rs:133 `use_ticks`, and a session by its heartbeat (session_runtime.rs:347-355), so "the heartbeat is still not shared" holds.
+  - `Store` is unsplit, at 45 methods.
+- **History and docs.** §7.7 was written at 061bfea and revised at 3b7f853. 58133f1 and 984d718 are the merges. §2.3's first two rows are the two pieces.
+- **§9.1.** The design descriptions match store-plan(-main).md and the verdict in runtime-plan.md ("leaves two runtimes with parallel start, dispatch, effects, play and keep code"). The four invariants are quoted exactly.
+
+Observed but not listed as a problem:
+- Line 1015's "on the same branch": the work was on wip/dedup-store and wip/dedup-runtime, merged into claude/admiring-rubin-6z9yr6. §7's header uses the phrase the same way, but §8 just before names its own work branch, so readers may misread it.
+
+--- [13] critic L54 WRONG
+TEXT: Each step of the moves was shown to change nothing, by differentials of old code against new and by 4,000 seeded walks.
+PROBLEM: This holds for the lifecycle but not for the stores. Each store switch declared changes in behaviour, and the review found more that the switches made and the differentials did not catch. The first move step, caa07a9, had no differential at all.
+EVIDENCE: Declared changes in the commit messages: 54420dc says "Declared, and generated by none of them: the test store and the stand-in are now bounded at BUMPS ...; a tombstone that cannot be written down fails the files' change". 95e0361 says "Declared: still_unread takes damaged-told.json as there where it reads". 4834961 says "Declared, as at 2.3 and 2.4: a tombstone that cannot be written down fails the change, where the browser wrote \"{}\" ...". c01c5a9 says "Declared ...: ... the test store writes its note of damage, empty".
+Changes the review found (git log -1 --format=%B): 0072574 "fixes 4834961 writing one look's take-up over another's of the same tab ... Before 4834961 the browser's take-up held the layout it began from ... InDb::commit took the text from the tab's cache". ae466da "fixes 95e0361 holding every such record's text at once". 78ec02d and b8ab8c5 fix c01c5a9 ("so the test store took up what an older build stored while such a record could not be read"). c96678b "fixes 4834961's change of what a browser keeps going unpinned".
+caa07a9's message says only "Nothing a store does changes"; store-result.json core step 2.1 adds "The existing suites pass unchanged", with no differential.
+By contrast, each of b67c9f8..ffa0d14 says "2,000 walks a kind taken by hand ... are line for line as before".
+FIX: Each step of the moves was checked against the old code: the lifecycle's by 4,000 seeded walks, in which no line changed, and the stores' switches by differentials of old code against new, equal but for the cases each declared; a review then found changes in the stores that the differentials had not, each fixed or pinned since (§9.2).
+
+--- [14] critic L1023 WRONG
+TEXT: each shown to change nothing
+PROBLEM: This is the same overclaim as in the Summary. The store switches changed behaviour: they declared some changes, and the review found others (a browser's take-up, the test store's look and move, and which tombstone a browser keeps). caa07a9 was checked by the existing suites, not by a differential.
+EVIDENCE: 0072574: "fixes 4834961 writing one look's take-up over another's of the same tab". 78ec02d and b8ab8c5: "fixes c01c5a9's ...". c96678b: "fixes 4834961's change of what a browser keeps going unpinned". The "Declared" clauses are in the messages of 54420dc, 95e0361, 4834961 and c01c5a9. The draft's own §9.2 (line 1070) says "Each declared where old and new still differ".
+FIX: 3. The code was moved in steps, each checked against the old code: the stores' switches by differentials that ran the old code beside the new, equal but for the cases each declared, and the lifecycle by 4,000 seeded walks compared line by line, in which no line changed.
+
+--- [15] critic L54 WRONG
+TEXT: Before any code moved, every difference between the copies was pinned
+PROBLEM: In the stores, not every difference was pinned before the move. The plan put a class of differences it judged unreachable aside for the switches, which declared them instead of pinning them first. One of them, which tombstone a browser keeps when a change deletes a record twice, went unpinned until after the review.
+EVIDENCE: store-plan-main.md:501-505, under "Unified, declared, cannot be reached": "D16: Writes::of fails the change. D35's two pack cases (2.5) ... A repeated forget id keeps the first tombstone in a browser too (2.3). N3e ...".
+54420dc: "Declared, and generated by none of them".
+c96678b (after the review): "fixes 4834961's change of what a browser keeps going unpinned, and its message saying idb.js kept the first".
+The 22 and 9 counts themselves check out: commit by commit, e401d80..de8dd8d is 22 commits, and each changes non-test code in files.rs, idb.rs, idb.js, legacy.rs or memory.rs's store. That is 15 first fixes plus 7 from the review round. In the runtimes, a1a7e90, f954ac7, 97c816e, ef88e31, 88ac261, c654e9d, 5d20794, 13b94bf and 457b4a7 change production code. dc661df, 865958b, c0b29fa and cc90b44 change only tests and walks, and 06c581d only docs.
+FIX: Before any code moved, the differences between the copies were pinned, but for a few in the stores judged unreachable, which the switches declared, and each one that was a defect was fixed test first: 22 in the stores and 9 in the runtimes, counting those that answered reviews of the first fixes.
+
+--- [16] critic L1021 WRONG
+TEXT: The differences between the copies were mapped, and tests pinned them.
+PROBLEM: For the stores, tests did not pin every mapped difference before the move. D16, D35, the repeated forget id and N3e were left to the switches and declared there. The repeated forget id was pinned only after the review, by c96678b.
+EVIDENCE: store-plan-main.md:501-505 ("Unified, declared, cannot be reached"). 54420dc: "Declared, and generated by none of them". 95e0361's and 4834961's "Declared" clauses. c96678b: "fixes 4834961's change of what a browser keeps going unpinned". In the runtimes, dc661df does pin each difference ("tests pin each way the two differ").
+FIX: 1. The differences between the copies were mapped and pinned by tests, but for a few in the stores judged unreachable: those were left to the switches, which declared them, and one was pinned only after the review (`c96678b`).
+
+--- [17] critic L1035 IMPRECISE
+TEXT: "I would implement the generic lifecycle. The additional 8–10% code is a reasonable trade-off."
+PROBLEM: The quotation ends the owner's sentence where it actually goes on: "...is a reasonable trade-off if it provides:", followed by six conditions. Putting a full stop inside the quote turns a conditional acceptance into an unconditional one.
+EVIDENCE: The owner's words: "I would implement the generic lifecycle. The additional 8–10% code is a reasonable trade-off if it provides: * Consistent initialization and termination. * Predictable state transitions. * Centralized error handling. * Better reproducibility of application runs. * Easier testing and debugging. * Separation between application logic and execution management."
+FIX: The owner took the first: "I would implement the generic lifecycle. The additional 8–10% code is a reasonable trade-off if it provides" consistent initialization and termination, predictable state transitions, centralized error handling, better reproducibility of application runs, easier testing and debugging, and separation between application logic and execution management.
+
+--- [18] critic L1022 IMPRECISE
+TEXT: Each difference that was a defect was fixed, test first, in the copy that had it, before any code moved.
+PROBLEM: One known defect where the copies differ was left. The files' move made again still reads the tombstones only once, so it keeps the races with another copy's deletion or Undo. In a browser's move, 2ec6e8e and 0e222e3 closed those races. The fix stage recorded this as left for a fix commit before step 2.1, and none was made. Line 54's "each one that was a defect was fixed test first" makes the same claim. I traced this by reading the code, not by running a test.
+EVIDENCE: store-result.json fix1, problem 5 notes: "(2) The move made again (not_moved_yet) still reads tombstones only before the records it reads, so it keeps both the deletion race and the Undo race. Neither was raised by the reviewers; both are left for a fix commit before step 2.1."
+git log 2207d65..aa6af38: the only commits between de8dd8d and caa07a9 are 5af6787 and 1c6f0db, both tests only.
+At 984d718: files.rs:967 and memory.rs:920 are `Order::MoveThenRead`, which takes record_store.rs:903 `here_of`. That function lists with `here()`, reads the tombstones once (`store.tombstones()`, :911), then reads the texts (`.texts(&elsewhere)`, :919).
+A browser's ReadThenMove path reads the tombstones again after the records (:711, "Read again after the records") and takes the union of both reads by key.
+Neither docs/platforms.md nor the draft states this.
+FIX: 2. Each difference that was a defect was fixed, test first, in the copy that had it, before any code moved, but one: the files' move made again reads the tombstones once, after listing the records and before reading them, so it keeps the races with another copy's deletion or Undo that `2ec6e8e` and `0e222e3` closed in a browser's move.
+
+--- [19] critic L583 IMPRECISE
+TEXT: a suite of 13 cases that every store runs
+PROBLEM: Only the files run all 13 cases. A browser runs 12 and the test store 10. The commit 3b7f853 corrected this same overclaim in the earlier account ("that what every store must do was tested once on all three").
+EVIDENCE: `git grep -n 'conformance_tests!(' 984d718 -- src`: files.rs:4848 lists all 13 cases. idb/tests.rs:1872 lists 12, without records_still_unread_are_told_of_once. memory.rs:2530 lists 10, without a_tombstone_that_names_no_session_still_deletes_its_record, two_copies_take_up_each_others_changes and a_change_another_copy_made_first_is_taken_up_after_ones_own. The draft's §9.2 (line 1079) says the same.
+FIX: a suite of 13 cases that every store runs, but for those it cannot hold: the files run all 13, a browser 12 and the test store 10 (§9.2)
+
+--- [20] critic L54 IMPRECISE
+TEXT: within the 8–10% the owner accepted
+PROBLEM: The 9.9% matches §9.4, but its base is 877 code lines, which includes the 63 that the first fixes added. The owner's 8–10% was reckoned on 814 lines (a sketch going from 814 to 880–900). On that base, the consolidation's 87 added lines are 10.7%. The final plan also counted the first fixes (S1) in the total held against the owner's 8–10%, and on that count the growth is 18.4% (§9.4 line 1207).
+EVIDENCE: runtime-plan.md:345: "By the sketch, without docs, code lines go from 814 to about 880-900, an increase of 8 to 10%."
+runtime-plan-main.md:510: "The owner allowed 8 to 10%. The consolidation alone lands at 8.4%; the stage and S1 take the total to about 11%."
+Draft §9.4 lines 1206-1207: 877 → 964 (+9.9%); 814 at ab0cbf7 → +150 (+18.4%).
+964 − 877 = 87, and 87 / 814 = 10.7%.
+FIX: Through the consolidation, the lifecycle's own files grew by 87 code lines: 9.9% of the 877 they held after the fixes that came first, or 10.7% of the 814 the owner's 8–10% was reckoned on; by 26% with their doc comments (§9.4).
+
+--- [21] critic L1030 IMPRECISE
+TEXT: with three things from the first: its stateless core, its exactness notes and its order tests
+PROBLEM: The plan's verdict grafts four things from design A, not three. It also takes the fixes A found that B had missed: E1, made as abe9586, and E2, made as 66e652f.
+EVIDENCE: store-plan-main.md:34 (and store-plan.md:52): "Verdict: take B as the base, and graft in A's stateless core, its exactness notes, the fixes it found and its order tests."
+store-plan-main.md:55: "4. E1 and E2, which B missed, are fixed first."
+store-result.json div: "1.8 E1" is abe9586 and "1.14 E2" is 66e652f.
+FIX: The second was taken, with four things from the first: its stateless core, its exactness notes, the two fixes it found that the second had missed, and its order tests (scripted backends that log every call).
+
+--- [22] critic L54 IMPRECISE
+TEXT: it holds the owner's four invariants for a turn a pause interrupts
+PROBLEM: Only two of the owner's four invariants are about an interrupted turn. One is about completed turns keeping their timing, and one is about resuming a paused run without corrupting earlier records.
+EVIDENCE: The owner's words: "Completed turns have timing information. Interrupted turns have no timing information. Interrupted turns remain in the execution history. A paused run can be resumed without corrupting previous records."
+FIX: it holds the owner's four invariants for a pause: completed turns keep their times, interrupted ones keep none and stay in the history, and a paused run can be resumed without corrupting previous records
+
+--- [23] critic L1033 IMPRECISE
+TEXT: (a sketch of it was 22 code lines shorter)
+PROBLEM: The judge verified 23 code lines shorter (814 to 791). The figure 22 comes from design B's own rounded prose; B's own table also gives −23.
+EVIDENCE: runtime-plan.md:46: "Code lines go from 814 to 791, which I verified."
+runtime-design-B.md:470 (table): "814 → ~791 (−23)".
+runtime-design-B.md:15 (prose): "about 792 (−22)".
+FIX: (a sketch of it was 23 code lines shorter, 791 against 814)
+
+--- [24] critic L584 IMPRECISE
+TEXT: after the runtimes' differences were fixed
+PROBLEM: Not all of the runtimes' differences were fixed: §9.3 says one stays, by the owner's rule. Only the differences that were defects were fixed.
+EVIDENCE: Draft line 1128: "One difference stays, by the owner's rule. A run keeps no times from a turn that a pause cut short, not even a copy keyed in full before the pause. A session keeps timed a group answered in full before a pause that cut its send (`06c581d`)." 06c581d changes docs and doc comments only (no code lines).
+FIX: after the differences between the runtimes that were defects were fixed (one stays, by the owner's rule)
+
+--- [25] critic L583 IMPRECISE
+TEXT: after the copies' differences were fixed
+PROBLEM: Some differences between the copies were not fixed before the switch. The switches resolved and declared them, and the protocol differences stay by design.
+EVIDENCE: The "Declared" clauses in the messages of 54420dc, 95e0361, 4834961 and c01c5a9. store-plan-main.md:501 ("Unified, declared, cannot be reached"). Draft line 1070: "Each declared where old and new still differ".
+FIX: after the differences between the copies that were defects were fixed
+
+--- [26] critic L440 IMPRECISE
+TEXT: *Done but for the split of `Store` (§9.2).*
+PROBLEM: Item 9 asks for a core generic over a small backend trait, close to idb's Glue. The `Backend` trait is three times Glue's size, so the item is done except for the split only if "small" is dropped. The other part the note names does hold: Store is unsplit, at 45 methods.
+EVIDENCE: `git show 984d718:src/persist/record_store.rs`: the trait at lines 449-565 has 3 types (Refused, Look, Listed), 2 consts (ORDER, FALLS_BACK) and 30 fns, 24 of them async.
+idb.rs:175 `trait Glue` has 11 fns (head, page, tombstones, list, read, tombstones_of, apply, stamp, news, next_news, legacy_len).
+persist/mod.rs:65 `pub trait Store` has 45 methods at both 2207d65 and 984d718.
+FIX: *Done but for the split of `Store` (§9.2); and the backend trait is not small: 30 methods and 5 associated items, where `Glue` has 11 methods.*
+
+--- [27] critic L1015 IMPRECISE
+TEXT: §7.4 had shared small parts of each and left the rest, for the reasons it gives.
+PROBLEM: The reasons §7.4 gave at 2207d65 for leaving the store's core are no longer in it. Its "Left, and why" column for the store now describes what stays behind the trait. Only the lifecycle's reasons survive, in §7.4's liveness note and in §7.6 item 8.
+EVIDENCE: `git show 2207d65:docs/code-review.md`, line 581: "A generic core over a backend trait: the two stores' protocols differ ...". Line 582: "it needs about ten hook methods, so it moves the code behind a trait rather than removing it. Unifying liveness changes behaviour ...". Line 633: "A single record-store core needs the two stores' protocols redesigned first."
+The draft's line 583 "Left" column reads "The protocols stay each store's own, behind the trait ...".
+FIX: §7.4 had shared small parts of each and left the rest: the stores' protocols differed, and a `RunMachine` trait would move the lifecycle's code behind hooks rather than remove it, while one heartbeat for both would change when a run pauses.
+
+
+######## critic: 105 claims, 13 problems
+NOTES: I checked §9.3 (lines 1103-1178) against git at 984d718. The 13 problems found are listed most serious first: one wrong (line 1170), the rest imprecise. Everything else checked out, as follows.
+
+Commits
+- All 33 commits in ab0cbf7..6a424c6 exist in the stated order.
+- The six divergence fixes match their messages and diffs, and each was test-first.
+- The 13b94bf, 457b4a7, 5d20794, cc90b44, 865958b, c0b29fa and 06c581d descriptions match.
+- The nine steps b67c9f8..ffa0d14 match in number, order and labels (step 2 aside).
+- fec64e7 did remove contest_runtime's own run_effects: present at fec64e7^ (:307), gone at fec64e7.
+- 1d6fb74, a4fc719, c4f3e9d and 6a424c6 are described correctly, and so is the rejection of removing Stage::Ending.
+- git log f2e0714..6a424c6 gives the eight fixes.
+
+What exists at 984d718
+- LiveRun<M, O>'s fields match: machine, lease, stage, seen, started_on, mark, own (src/state/live.rs:35-50). LiveSession and LiveContest are type aliases of it.
+- Stage's three moves and hears match the code exactly (:82-126).
+- RunMachine has 33 items: 7 types, 2 consts, 24 fns, 6 with default bodies. I counted them with a script over src/live_run.rs:40-152. It is implemented by Groups (session_runtime.rs:41) and Run (contest_runtime.rs:36).
+- live_run has step, dispatch, run_effects, start_timer, play, claim (used by take_audio for both starts, and by resume), give_back, end, keep, let_go and go_live.
+- SEEN_EVERY_MS is 250, used by the heartbeat (session_runtime.rs:355), the screen's tick (ui/contest.rs:137) and the walks (lifecycle_walk.rs:65).
+- The walk checks exist as described: stage, screen, history only grows, check_mark, check_timing, check_cut_kept.
+- Every named test exists and tests what is said. The two tests named for invariant 1 also hold the new conditions in my fix.
+
+0.16.9 and §7.4
+- ef0ab8f has no tag and its Cargo.toml says 0.16.9. Its Untimed {HeldUp, SentAgain, Paused} is serde camelCase on a lenient `untimed` field (session.rs:151, :1014), so it reads paused, heldUp and sentAgain.
+- The §7.4 cross-reference matches line 584.
+
+Claims git cannot settle
+- The walks compared line by line at each step, and the 8,000-walk check comparing f2e0714 with 6a424c6: these agree with the commit messages and with the records' core and gate stages, but I could not confirm them from git alone.
+- The review counts and severities match the records exactly (r1: 1 high, 4 medium, 4 low; r2: 3 medium, 8 low). My two count findings are only about duplicate reports.
+
+Not raised as problems
+- The section never introduces 3307d10 (contest-mode docs) or f2e0714 (the trait's items reordered and its doc). Yet the second review covered them, a4fc719 and c4f3e9d fix their text, and line 1178 names \"f2e0714's build\" as the baseline. A sentence after the nine steps would close the gap, for example: \"Two more commits followed: 3307d10 brought docs/contest-mode.md up to date, and f2e0714 put RunMachine's 33 items in the order of a run's life.\"
+- Line 1162 says a session is seen by its heartbeat. That is true, but src/state/live.rs:40-42 adds that it is seen from its start and by everything it hears, while a run is seen from its first tick by ticks alone. Those differences stay as well.
+- \"Written three times in all\" (line 1113) repeats 35dd3fa's own subject; nothing in git contradicts it.
+
+--- [28] critic L1170 WRONG
+TEXT: Nor did anything pin the owner's rules for a cut turn.
+PROBLEM: Tests already pinned the owner's cut-turn rules, case by case. What ffa0d14 left unchecked was the walks: once the kept hashes went, the walks checked nothing of these rules. This is not like the two away rules in the sentence before, which really were pinned by nothing.
+EVIDENCE: 97a77d5 subject: "fixes ffa0d14 leaving the walks checking nothing of the owner's rule that a turn cut short or gone wrong keeps no times". 25ef0bd subject: "fixes ffa0d14 leaving the walks checking nothing of the owner's rule that an interrupted turn stays in the history". Reviewer 1 of r2 (medium) said the same: "no check in the walks covers ...". `git grep -n 'fn <name>' f2e0714` finds these tests still there after ffa0d14: crates/cw-core/src/contest/machine.rs:14484 nothing_heard_in_a_turn_a_pause_cut_short_is_timed (asserts (None, Some(Paused))); crates/cw-core/src/machine.rs:1373 ending_a_session_paused_part_way_through_a_send_keeps_the_group_untimed; src/session_runtime.rs:2878 ending_a_session_paused_mid_group_keeps_the_group_begun; src/contest_runtime.rs:1579 ending_a_run_paused_mid_qso_keeps_that_qso_as_lost; src/session_runtime.rs:3016 a_session_the_app_stops_under_while_paused_keeps_the_group_the_pause_cut. For the away rules, by contrast, a8f8ca2 says "only the walks' kept hashes pinned that order" and 462e2ee says "only the walks' kept hashes pinned that".
+FIX: Nor did the walks check anything of the owner's rules for a cut turn, which only tests of single cases still held.
+
+--- [29] critic L1167 IMPRECISE
+TEXT: End while paused keeps the group or the QSO the pause cut.
+PROBLEM: End keeps the cut group only if its answer was begun. A group nobody began is dropped. The walk check named at the end of this bullet (25ef0bd) has the same condition, which the draft leaves out too.
+EVIDENCE: src/session_runtime.rs:2977-2981 at 984d718, the doc of ending_a_session_paused_mid_group_keeps_the_group_begun: "a session ended while paused with its group's answer begun keeps that group as it stood ...; a group nobody began is not kept." src/lifecycle_walk.rs:726, check_cut_kept, applies only to `.filter(|group| !group.input().is_empty() && !group.confirmed())`. The module doc at :18 says "the group a session's pause cut, its answer begun, stays in the history". For the run, src/contest_runtime.rs:1577: "a run ended while paused with a QSO open keeps that QSO, as lost".
+FIX: End while paused keeps the group the pause cut, if its answer was begun (a group nobody began is not kept), and the QSO the pause cut, as lost. The last sentence then reads: The walks check that the mark holds the cut group last, as typed, while the session is paused with its answer begun (`25ef0bd`).
+
+--- [30] critic L1165 IMPRECISE
+TEXT: A group answered in full keeps its characters' times, even if a pause comes after it. So does a copy keyed in a turn that played out
+PROBLEM: This says more than the code does, in two ways. First, a group answered in full loses its times when news of its send says it was held up or sent again, even after a pause; the same goes for the copies of a turn told of as held up. Second, a copy in a turn that played out keeps its times only if it was keyed along that turn: a copy keyed wholly after the pause is untimed and says paused.
+EVIDENCE: src/session_runtime.rs:2830-2837 at 984d718, the doc of a_paused_session_hears_the_news_of_its_own_sends: "the news that the send of a group answered along it was held up on its way untimes that group, saying so". a1a7e90: "a copy timed from such a turn [held up, skipped or retried] is kept with no times and that reason". crates/cw-core/src/contest/machine.rs:14695-14703, a_copy_keyed_only_after_a_pause_says_paused: "A call heard whole in a turn that played out, every key of its copy after a pause, has no time". a_turn_that_played_out_before_a_pause_keeps_its_times (:14553) keys along the turn before the pause. The plan's rule 1 reads: "A completed turn whose sound went out as planned keeps its timing".
+FIX: A group answered in full keeps its characters' times, even if a pause comes after it, and so does a copy keyed along a turn that played out before the pause, unless news of the send says it was held up or sent again (the second case of `ending_a_session_paused_part_way_through_a_send_keeps_the_group_untimed`, and `a_turn_that_played_out_before_a_pause_keeps_its_times`).
+
+--- [31] critic L1166 IMPRECISE
+TEXT: The walks check this after every action, in the history and in the mark (`97a77d5`).
+PROBLEM: The walk check tests one direction only: a group or copy that says why it is untimed holds no times. It does not check that a group or copy cut by a pause, a held-up send or a resend says why. "This" reads as both.
+EVIDENCE: src/lifecycle_walk.rs:697-713 at 984d718, check_timing, asserts only `timing.untimed.is_none() || timing.char_times.is_none()`, over the stored sessions, the mark's so_far and the mark's unstored sessions. 97a77d5's subject: "a group or a run's copy that says why it holds no times holds none".
+FIX: After every action the walks check, in the history and in the mark, that a group or copy that says why it is untimed holds no times (`97a77d5`).
+
+--- [32] critic L1121 IMPRECISE
+TEXT: *Was:* the run carried on under the lease its pause gave back.
+PROBLEM: This reads as a defect that happened. It was a latent path: no screen ever sent Resume to a run as an event, so no user could reach it. The commit itself says "would carry on".
+EVIDENCE: c654e9d subject: "(fixes a Resume that would carry on under the lease its pause gave back)". Its body: "No screen sends Resume this way, the Resume button calling resume_run, so this path cannot be reached from the UI and nothing a user does changes". `git grep -n send_run_event c654e9d^ -- src` shows the only callers send FinishNow and Abort (src/session_runtime.rs:309, :345).
+FIX: *Was:* such a Resume would have carried on under the lease its pause gave back; no screen sends Resume that way, so no user met it.
+
+--- [33] critic L1106 IMPRECISE
+TEXT: a start and the live record;
+PROBLEM: The two live records were not in the runtimes. LiveSession and LiveContest were two structs side by side in src/state/live.rs. Each runtime held only the start that built its own record.
+EVIDENCE: `git grep -n 'struct LiveSession\|struct LiveContest' 06c581d -- src` gives src/state/live.rs:23 and :42. The struct literals are in the starts: src/session_runtime.rs:188-195 (`LiveSession { ... last_seen: now ...}`) and src/contest_runtime.rs:72-80 (`LiveContest { ... last_tick: None ...}`). b67c9f8, which "fixes the live record ... written twice", rewrote src/state/live.rs (+227).
+FIX: a start, building its kind's live record (the two record types themselves, `LiveSession` and `LiveContest`, sat side by side in `state/live.rs`);
+
+--- [34] critic L1115 IMPRECISE
+TEXT: `dc661df` pinned each way the two differed
+PROBLEM: The commit's subject says this, but its body narrows it to five differences, one of them on the groups' side only. The latent Resume difference got its test only in c654e9d, written to fail. The away pause's stamping was visible to neither dc661df's new tests nor its walk hashes.
+EVIDENCE: dc661df body: "New tests pin differences 1, 2, 3 and 6, the groups' side of 5, and the owner's rules where they hold already". c654e9d: resume_sent_as_an_event_claims_the_audio_first "failed on the code before". cc90b44: applying the away pause "at the moment it is found rather than from when the app was last seen ... passed all 200 hashes before".
+FIX: `dc661df` pinned five of the ways the two differed, one only on the groups' side, and each of the owner's rules that already held, with tests and with seeded walks of both kinds.
+
+--- [35] critic L1123 IMPRECISE
+TEXT: A review of these found nine problems, one high
+PROBLEM: Nine is the number of reports from two reviewers. Three of them are one defect, the stale mark, which both reviewers found, so there are seven distinct problems. The draft's own list accounts for seven: the high one, three bullets (one naming three walk problems) and the difference that stays.
+EVIDENCE: runtime-result.json r1: reviewer 0 reported 5 (high: ef88e31 and 88ac261, the stale mark; medium: hashes; medium: page never hidden; low: training screen; low: paused-run taps). Reviewer 1 reported 4 (medium: f954ac7, copy with no reason; medium: ef88e31, the session's mark stale; low: 88ac261, the run's mark stale; low: f954ac7, the two kinds differ). fix1 steps 7 and 8: "Same defect as step 1", all fixed by 5d20794.
+FIX: Two reviewers of these found nine problems, seven of them distinct, one high, which both found: the mark a pause wrote went stale as the paused session or run heard the news of its own sends, so the app stopping while paused kept times from a send it knew was held up.
+
+--- [36] critic L1170 IMPRECISE
+TEXT: found eleven problems, three medium
+PROBLEM: Eleven is the number of reports from three reviewers. Four repeat another's find: the trait's doc paragraph was reported three times, and the typing rule and the walks' cut-turn checks twice each. That leaves seven distinct problems, which the paragraph and its list do describe.
+EVIDENCE: runtime-result.json r2: reviewers with 3, 3 and 5 problems (3 medium, 8 low). fix2: "findings 3, 5 and 10 concern one doc paragraph and share a4fc719". Finding 7 "is the same test as finding 1(a)". Finding 8 "shares 97a77d5 with finding 4".
+FIX: **The review** of the consolidation, by three reviewers, found eleven problems, seven of them distinct, three medium.
+
+--- [37] critic L1168 IMPRECISE
+TEXT: Resume claims the audio afresh, only from `Paused`, before the machine hears it (`c654e9d`, `Stage::claimed`).
+PROBLEM: The section claims to say "what holds each" invariant. Here it names none of the tests that pin this rule's substance: that a pause and Resume change no earlier group or QSO. The walk checks it does name (the history only grows, the stage check) do not compare what came before the pause with what follows Resume.
+EVIDENCE: src/session_runtime.rs:3006-3012 at 984d718: resuming_a_session_changes_no_group_answered_before_its_pause, "The owner's fourth rule: a pause and Resume change no group answered before the pause, field for field and time for time ... paused by Back, by the page going out of sight, or by a gap". src/contest_runtime.rs:1594-1601 has the same for a QSO. Both were added by dc661df ("rule 4 for both kinds paused by Back, the page hidden and a gap away").
+FIX: Insert before this sentence: A pause and Resume change no group answered or QSO logged before the pause, field for field and time for time, whether Back, the page hidden or a gap away paused it (`resuming_a_session_changes_no_group_answered_before_its_pause`, `resuming_a_run_changes_no_qso_logged_before_its_pause`).
+
+--- [38] critic L1126 IMPRECISE
+TEXT: the walks hashed only each group's timing class
+PROBLEM: The hashed line held much more: the screen, the audio, the phase, the view and the log. Of a stored session it also held the accuracy and each group's sent and taken text. What it lacked was the score, the sends and the times.
+EVIDENCE: At dc661df, src/lifecycle_walk.rs:785-792: `format!("{:.3} [{}]", result.accuracy, ...)` with each group written as `"{}>{}:{}", group.sent, group.received, timed(timing)`. The line itself is built in record() at :643-703. cc90b44 subject: "the walks' hashes seeing only each group's timing class and the accuracy, so that a change to any other value stored passed them".
+FIX: the walks' hashes saw of a session stored only its accuracy and each group's text and timing class, the walks never checked the training screen, and they typed into a paused run (`cc90b44`, `865958b`, `c0b29fa`).
+
+--- [39] critic L1132 IMPRECISE
+TEXT: 2. the stage;
+PROBLEM: 1112f37 also made the give-back and the take-out one function each. No other step in the list claims them, and "What was written twice" lists the give-back, so the list leaves it unplaced.
+EVIDENCE: 1112f37 subject: "a live run's stage says what reaches it and moves by one rule, and one function each gives its audio back and takes it out (fixes the acceptance rule, the lease lookups, the give-back and the take-out written apart)". src/live_run.rs:417 give_back and :444 end at 984d718.
+FIX: 2. the stage, with one give-back and one take-out;
+
+--- [40] critic L1141 IMPRECISE
+TEXT: Where a step added a rule (the gap rule, the stage check, the marks test), a mutation of it stood in, and was seen to fail the tests that hold it.
+PROBLEM: Only the gap rule was itself mutated. For the stage check and the marks test, which are checks rather than rules, the mutation was to give_back, the code they guard.
+EVIDENCE: b67c9f8: "both fail with the rule made to see a run only when told". 1112f37: the walks' stage check "fails at once with give_back left not moving the stage". ffa0d14: "The marks test fails with give_back left not marking."
+FIX: Where a step added a rule or a check (the gap rule, the walks' stage check, the marks test), a mutation stood in: the gap rule made to see a run only when told, and `give_back` left not moving the stage or not writing the mark, each seen to fail the tests that hold it.
+
+
+######## critic: 68 claims, 4 problems
+NOTES: Short version: every growth figure, percentage, table row and test-code figure in my part checks out against my own count. The only errors are two pairs of absolute figures (line 1194 and line 1198), and the wording "with doc comments" (lines 1206 and 54).
+
+COUNTER. With no flag, prodcount.py drops only #[cfg(test)] mod blocks. The draft's numbers match the --any-item mode instead (ab0cbf7 89,509/62,780 and 984d718 91,381/63,791; with no flag it would be 90,778/63,821 and 92,694/64,867). Even --any-item does not quite count what line 1182 says: it treats as test code 195 production lines (148 code) that follow three #[cfg(test)] fields and three field initialisers, and it counts as production 56 lines (46 code) of #[cfg(all(windows, test))] functions in acl.rs. It finds every test-only file: a module-tree walk reaches every .rs file at all nine revisions, and both counts find the same 32 test-only files at 984d718. soak.rs's #![cfg(test)] is also declared #[cfg(test)] mod soak. The net error is a constant -139 lines (-102 code) at every revision measured, so every delta, including the test-code growth, is exact. Only the totals on line 1194 (+139/+102) and the store files on line 1198 (+12 code at each end) change.
+
+CONFIRMED, by my own count:
+- Table rows:
+  - 2207d65..1c6f0db: +176/+99.
+  - 1c6f0db..061bfea: +1,082/+640.
+  - 061bfea..aa6af38: +44/+21.
+  - ab0cbf7..06c581d: app +91/+63, cw-core +154/+96.
+  - 06c581d..6a424c6: +325/+92, app only.
+  - Both: +1,872/+1,011 (app +1,718/+915, cw-core +154/+96).
+- The rows add up to Both: 176+1,082+44+91+154+325 = 1,872 and 99+640+21+63+96+92 = 1,011. git confirms it: `git diff --numstat ab0cbf7 58133f1` is identical to `git diff --numstat 2207d65 aa6af38`, and `git diff --numstat 58133f1 984d718` is identical to `git diff --numstat ab0cbf7 6a424c6`. The CI fix 2207d65..ab0cbf7 (+13/+10, src/sync/auth/desktop.rs) is at both ends of Both, so the store rows measured from 2207d65 still add up.
+- 2.1% and 1.6% hold on either base. "Neither made the code shorter" (line 1026) holds: store +1,302/+760, lifecycle +570/+251. So do the "longer" claims of §7.4 and §7.6.
+- Store core at aa6af38: 1,132 = 890 + 159 + 83.
+- idb.js, by my own JS lexer, cross-checked by grep (the file has no block comments): 521/392 lines/code at 2207d65, 542/408 at 1c6f0db, 551/411 at 061bfea, 557/411 at aa6af38. So 542 to 557 (408 to 411) is right for 1c6f0db to aa6af38. The store's first stage also grew it, 521 to 542 (392 to 408), which neither the table nor line 1200 counts.
+- Lifecycle files:
+  - ab0cbf7: 401 + 388 + 25 = 814 code lines.
+  - 06c581d: 435 + 417 + 25 = 877 (the two runtimes 852).
+  - 6a424c6: 301 + 293 + 310 + 60 = 964. The runtimes go to 594 (-258); state/live.rs is +35, 34 of them for Stage, LiveRun::away and SEEN_EVERY_MS.
+  - Growth: 87/877 = 9.9%; from 814 it is 150 = 18.4%. At f2e0714 it was 963.
+  - Without doc comments: 877 to 964 (+9.9%). Code plus doc comments: 1,086 to 1,355 (+24.8%). All lines: 1,239 to 1,561 (+26.0%).
+- Test lines (all .rs lines minus production; the all-line totals are cross-checked with git show | wc -l):
+  - App: 66,902 to 70,971 (+4,069) over 2207d65..aa6af38, and 66,937 to 69,736 (+2,799) over ab0cbf7..6a424c6, a sum of 6,868.
+  - cw-core: +0 from the store, +477 from the lifecycle (50,358 to 50,835).
+
+JUDGEMENT CALLS, not listed as problems:
+- The 8–10%: the plans estimated it against 814 (runtime-plan.md:345; the table "Against 814" in runtime-plan-main.md:498-510). On that base the consolidation's 87 lines are 10.7%. The draft states its own base (877) and also gives the 18.4%.
+- Line 1033's "22 code lines shorter" is backed by runtime-design-B.md:15 ("about 792 (−22)"). My recount of scratchpad/lifecycle-b/ gives 814 to 791 (-23).
+- Line 7 is old text. At ef0ab8f my count is 79,284 production lines (44,004 app, 35,280 cw-core) and 93,589 test lines, so its "34k" is nearer 35k.
+
+My tools and outputs (my_<rev>.txt, pcany_<rev>.tsv) are in /tmp/claude-0/-home-user-dust/e07ea342-050f-502a-b473-6fa881d75cc0/scratchpad/fc94/.
+
+--- [41] critic L1194 WRONG
+TEXT: The two crates' production code went from 89,509 lines (62,780 of them code) to 91,381 (63,791)
+PROBLEM: These totals don't follow the definition on line 1182. Under that definition each end is 139 lines (102 code lines) higher. The draft's figures come from prodcount.py run with --any-item. That mode has two defects. First, after a #[cfg(test)] struct field or field initialiser it keeps going into the next production item. Second, it misses #[cfg(all(windows, test))]. The misclassified regions are identical at every revision measured, so every delta and percentage in the draft still holds. Only the absolute totals here and on line 1198 change.
+EVIDENCE: Draft figures match --any-item mode only: `prodcount.py ab0cbf7 --any-item src crates/cw-core/src` gives TOTAL 89509 62780, and at 984d718 gives 91381 63791. Default mode gives 90778/63821 and 92694/64867.
+
+Defect 1: item_end (prodcount.py:49-61) tracks only ( and [, and stops at the first depth-0 ';' or '{...}'. A field's ',' or the enclosing '}' does not end the item. Extents it gives at 984d718:
+- crates/cw-core/src/contest/bot.rs:45-194. The field `effects` swallows the rest of `struct Runtime` and the whole `impl<S: CallSource> Runtime<S>`, which closes at :194.
+- crates/cw-core/src/band/mod.rs:128-145. `pub held` swallows `pub input` and `struct Receiver`.
+- crates/cw-core/src/band/mod.rs:242-256. `held: self.agc.held()` swallows `set_rf_gain`.
+- src/persist/files.rs:193-208. `elsewhere` swallows `struct Watch`.
+- src/persist/files.rs:279-288. The initialiser swallows `fn size`.
+Total: 195 production lines (148 code) counted as test.
+
+Defect 2: the pattern #\[cfg\((all\()?test\b (prodcount.py:75) misses #[cfg(all(windows, test))] at src/persist/acl.rs:209 and :257 (`access_list`, `the_users_alone`). Those are 56 lines (46 code) compiled for tests alone but counted as production.
+
+My own counter (scratchpad/fc94/tools/mycount.py) walks the module tree from src/main.rs and crates/cw-core/src/lib.rs, evaluates cfg predicates and ends items by grammar. At 2207d65, 1c6f0db, 061bfea, aa6af38, 58133f1, ab0cbf7, 06c581d, 6a424c6 and 984d718 it agrees with the tool on every file except these four. It differs on them by the same amount each time: band/mod.rs +29/+16, bot.rs +144/+120, files.rs +22/+12, acl.rs -56/-46 (lines/code).
+
+Result: ab0cbf7 has 89,648 lines (app 52,616 + cw-core 37,032), 62,882 of them code. 984d718 has 91,520 (54,334 + 37,186), 63,893 code. The deltas are unchanged: +1,872 and +1,011. 1,872/89,648 = 2.09%; 1,011/62,882 = 1.61%.
+FIX: The two crates' production code went from 89,648 lines (62,882 of them code) to 91,520 (63,893): 2.1% more lines, and 1.6% more code lines.
+
+--- [42] critic L1198 WRONG
+TEXT: `files.rs` and `idb.rs` held 2,253 code lines before the consolidation, and hold 1,781 after the review (−472).
+PROBLEM: Both absolute figures are 12 code lines low, because of the counter's #[cfg(test)]-field defect in files.rs. The difference of -472 is right.
+EVIDENCE: The tool gives:
+- 1c6f0db: files.rs 1,296 + idb.rs 957 = 2,253 code lines.
+- aa6af38: 956 + 825 = 1,781.
+
+files.rs has a #[cfg(test)] field `elsewhere` (1c6f0db files.rs:185-186; aa6af38 :193-194) and a #[cfg(test)] initialiser for it (:284-285 and :279-280). The tool's extents run on to :200 and :293 at 1c6f0db, and to :208 and :288 at aa6af38. That takes the struct's closing brace, `struct Watch` and `fn size` as test code: 22 lines, 12 of them code.
+
+My counter gives files.rs 1,308 and 968, idb.rs 957 and 825: 2,265 and 1,793, so -472 holds. record_store.rs 890 + notes.rs 159 + steps.rs 83 = 1,132 also checks.
+FIX: `files.rs` and `idb.rs` held 2,265 code lines before the consolidation, and hold 1,793 after the review (−472).
+
+--- [43] critic L1206 IMPRECISE
+TEXT: With doc comments, they grew from 1,239 lines to 1,561 (+26%).
+PROBLEM: 1,239 and 1,561 count every production line of the four files, blank lines and ordinary comments included, not code plus doc comments. Code plus doc-comment lines grew 24.8%.
+EVIDENCE: prodcount.py --any-item and my counter agree on src/session_runtime.rs, src/contest_runtime.rs, src/live_run.rs and src/state/live.rs:
+- 06c581d: 618+561+0+60 = 1,239 lines; 435+417+0+25 = 877 code; 103+76+0+30 = 209 doc.
+- 6a424c6: 477+442+501+141 = 1,561 lines; 301+293+310+60 = 964 code; 106+88+133+64 = 391 doc.
+
+So 1,239 = 877 code + 209 doc + 153 blank or plain-comment lines, and 1,561 = 964 + 391 + 206. Code plus doc: 1,086 -> 1,355, which is +269 (+24.8%). All lines: +322, 322/1,239 = 26.0%.
+FIX: In all their lines, comments and blank lines included, they grew from 1,239 to 1,561 (+26%); in code and doc-comment lines, from 1,086 to 1,355 (+25%).
+
+--- [44] critic L54 IMPRECISE
+TEXT: and by 26% with their doc comments (§9.4)
+PROBLEM: Same issue as line 1206. The 26% is growth in all lines of the four files, including blank and plain-comment lines. With doc comments only (code plus doc-comment lines) the growth is 24.8%.
+EVIDENCE: See line 1206. Code plus doc: 1,086 at 06c581d -> 1,355 at 6a424c6 (+24.8%). All lines: 1,239 -> 1,561 (+26.0%).
+FIX: and by 26% in all their lines, comments and blank lines included (§9.4)
+
+
+######## critic: 190 claims, 10 problems
+NOTES: Problems are in line order. The most substantive are line 54 (every difference pinned before any code moved), line 583 (13 cases that every store runs), line 1079 (13 cases from a8f452b), line 1115 (dc661df) and line 1225 (35dd3fa). The rest are small.
+
+Verified, no problem found:
+
+- **Commit hashes.** Every backticked hash in the named lines exists and is unambiguous, and sits in the range the text gives it. Store range 2207d65..aa6af38 has 54 commits, 44 of them named; lifecycle range ab0cbf7..6a424c6 has 33, 30 named. 94a72ea, 87e9c93, 6c2ca6a and cf2a5e6 fall in §7's a50e8eb..77830c6. 2207d65, ab0cbf7, 58133f1 and 984d718 are first-parent merges; 58133f1 = ab0cbf7 + aa6af38, and 984d718 = 58133f1 + 6a424c6.
+- **§9.4 ranges.** All valid. Their sums give +1,872 / +1,011, matching ab0cbf7..984d718.
+- **Group counts.** e401d80..a56788e is 15 fixes and 1073fc9..de8dd8d is 7. The 22 split 8 files / 5 browser / 3 shared / 6 test store by subject. Six runtime fixes run a1a7e90..c654e9d; nine steps run b67c9f8..ffa0d14 and match the 9 listed items; the gate's eight fixes are a8f8ca2..6a424c6.
+- **Commit descriptions.** Every description in §9.2 and §9.3 matches its message, apart from those flagged. Differential counts in the §9.2 table match 95e0361, 4834961 and c01c5a9. Declared differences match N3e, D16 and c01c5a9's two.
+- **Review counts.** Store r1: 7 problems, 1 medium; r2: 11, 2 medium. Runtime r1: 9, 1 high; r2: 11, 3 medium. Gate claims match the gate records.
+- **§ references.** All resolve. Nothing cites §9.5. §7.7 is named only historically (lines 1017, 1228); it exists at 061bfea, 3b7f853, 58133f1 and 984d718, and 58133f1's message says "docs/code-review.md §7.7 gives the account".
+- **Names at 984d718.**
+  - Persistence: persist::record_store, Backend (async fns, no Send bound), Disk, InDb, InMem, record_store::notes and ::steps, HistoryFiles::still_unread, persist::conformance, and the page differential using make_steps.
+  - Lifecycle: state::live::LiveRun<M,O>, its fields, GroupsOwn, RunOwn, LiveSession, LiveContest, Stage::{Running,Paused,Ending}, gave_back, claimed, ending, hears, LiveRun::away, AWAY_GAP_MS, SEEN_EVERY_MS = 250, live_run's functions, end, hold_run, write_mark, mark_so_far, Lease::after.
+  - RunMachine has 33 items: 7 types, 2 consts, 24 fns, 6 with default bodies. SEEN_EVERY_MS is used by the heartbeat (session_runtime.rs:355) and the run screen (ui/contest.rs:137).
+  - Tests exist as named: ending_a_session_paused_part_way_through_a_send_keeps_the_group_untimed (cw-core machine.rs:1373, whose second case is the full answer) and a_turn_that_played_out_before_a_pause_keeps_its_times (contest/machine.rs:14553).
+  - paused, heldUp and sentAgain are camelCase variants of Untimed at ef0ab8f.
+  - Store still has 45 methods.
+- **0642e2f correction: true.** In its idb test (src/persist/idb/tests.rs at 0642e2f), the taken_through == Some(0) assertion ("nothing cut off") comes before the listing ("taken up"). Before the fix, a browser passed fingerprint.is_some(), which is true because dust_sessions stays in place. taken_through therefore fell back to `now` (legacy.rs:647 at e401d80), so that assertion fails first. Once it is set aside, the ago(2) session is cut off and the listing takes nothing up. The store record (div 1.2) says the same. "Fails first" follows the report's own test-first usage.
+- **4834961 correction: true.** 4834961 does not touch idb.js (`git diff 95e0361 4834961 -- src/persist/idb.js` is empty). Its forget() (idb.js:477-487 at 95e0361) asks count(key) for every tombstone before any put, so the last tombstone wins. idb.rs's writes_of (95e0361:1012-1025) passed every deletion through. Writes::of (record_store.rs:366-374) keeps the first, and c96678b pins both halves.
+- **f2e0714 correction.** The message does say "every check passes as before". "Only fmt and clippy had run" rests on runtime-result.json core.deviations #8 alone; git cannot show it. Log times support "after": f2e0714 was committed at 22:43:42Z, and /home/user/wt/logs/dr-final2.* run from 22:43:49 to 22:59:58Z.
+- **Grouping of 04236c7.** The text has 1073fc9 and 04236c7 answering the medium problem, following the workflow's own record, although 04236c7 was a follow-up that the review did not raise.
+- **Not checkable.** The owner's quotation in §9.1 cannot be checked in git.
+
+--- [45] critic L54 IMPRECISE
+TEXT: Before any code moved, every difference between the copies was pinned
+PROBLEM: Not every difference was pinned before code moved. The stores differed on a record that one change names twice: the files kept its first tombstone and idb.js its last. Nothing pinned that difference before the browser's switch, and 4834961 misdeclared it; c96678b pinned it only afterwards. On the runtimes' side, dc661df's new tests pin only some of the differences.
+EVIDENCE: `git log -1 --format=%B 6563c5c`: "The files and the test stores kept the first tombstone of a change, the page script the last" (6563c5c fixed this only for an older build's take-up). `git log -1 --format=%B c96678b`: "fixes 4834961's change of what a browser keeps going unpinned". c96678b is commit 50 of `git log --reverse 2207d65..aa6af38` and 4834961 is commit 34. `git log -1 --format=%B dc661df`: "New tests pin differences 1, 2, 3 and 6, the groups' side of 5".
+FIX: Before any code moved, the differences found between the copies were pinned, and each one that was a defect was fixed test first: 22 in the stores and 9 in the runtimes, counting those that answered reviews of the first fixes. The few found as each store was switched were declared then, or pinned since, and each is unreachable or the test store's own (§9.2).
+
+--- [46] critic L583 IMPRECISE
+TEXT: and a suite of 13 cases that every store runs (§9.2)
+PROBLEM: Every store runs the suite, but only the files run all 13 cases: a browser runs 12 and the test store 10. 3b7f853 had already corrected this same overclaim in 061bfea.
+EVIDENCE: At 984d718, `git grep -n 'conformance_tests!' 984d718 -- src` and reading each list: src/persist/files.rs:4848 lists 13 cases; src/persist/idb/tests.rs:1872 lists 12 and leaves out records_still_unread_are_told_of_once; src/persist/memory.rs:2530 lists 10 and leaves out a_tombstone_that_names_no_session_still_deletes_its_record, two_copies_take_up_each_others_changes and a_change_another_copy_made_first_is_taken_up_after_ones_own. 3b7f853's message says it fixes 061bfea's claim "that what every store must do was tested once on all three". §9.2 (line 1079) itself gives 13/12/10.
+FIX: and a suite of 13 cases, all run on the files, 12 of them in a browser and 10 on the test store (§9.2)
+
+--- [47] critic L1058 IMPRECISE
+TEXT: Three commits pinned what the copies had to agree on (`1282a11`, `97e34cb`, `33a43ef`).
+PROBLEM: 97e34cb pins nothing that the copies agree on. It adds time::pin_now_ms, a test helper that holds the wall clock still so that a sequence can be run twice alike. Its only test is the helper's own.
+EVIDENCE: `git log -1 --format=%B 97e34cb`: "Time: a test can pin the wall clock now_ms reads on its thread ... (fixes a test having no way to run one sequence twice and have the move's migratedAt, takenThrough and the takenLegacy gate come out alike) ... it is the new helper's own test". 1282a11 and 33a43ef are pins (their messages say "A pin, so it passes" and "Pins, so they pass"). store-result.json div.steps labels 1282a11 and 33a43ef "0.1 Pin" and "0.3 Pin", but 97e34cb "0.2 time::pin_now_ms".
+FIX: Two commits pinned what the copies had to agree on (`1282a11`, `33a43ef`), and one let a test pin the wall clock, so that a sequence runs twice alike (`97e34cb`).
+
+--- [48] critic L1063 IMPRECISE
+TEXT: and the two were compared bit for bit:
+PROBLEM: Not quite bit for bit. The files' differential left out the second in each set-aside name, and the other two compared answers and what both stores held.
+EVIDENCE: `git log -1 --format=%B 95e0361`: "found every answer, notice, set-aside and file's bytes the same ... set-aside names are compared without the second they were made in". 4834961: "every answer, notice and set-aside, and all both stores held, the same". c01c5a9: "found every answer and all both held the same".
+FIX: and everything the two answered and held was compared and found the same (on the files, set-aside names without the second they were made in):
+
+--- [49] critic L1079 IMPRECISE
+TEXT: What every store must do with the history is a suite of 13 cases (`persist::conformance`, from `a8f452b`).
+PROBLEM: This sits under "Two more pieces came with the switch", but only 8 cases came with the switch, in a8f452b. The review's cases brought the count to 13, as line 1095 itself says.
+EVIDENCE: Cases counted with `git show <c>:src/persist/conformance.rs | grep -c '^pub(crate) fn [a-z_]*<H: Harness>\|^pub(crate) fn [a-z_]*<$'`: a8f452b 8, 1f8fedb 9, 5d03f77 10, c6df3c8 13, 984d718 13. a8f452b's message: "The files run all eight on a folder of their own, the browser seven on the Fake, ... and the test store all eight."
+FIX: What every store must do with the history became a suite of cases (`persist::conformance`, `a8f452b`): eight then, and 13 once the review's cases were added (`1f8fedb`, `5d03f77`, `c6df3c8`).
+
+--- [50] critic L1115 IMPRECISE
+TEXT: `dc661df` pinned each way the two differed, and each of the owner's rules that already held, with tests and with seeded walks of both kinds.
+PROBLEM: This repeats dc661df's subject line, but its body is narrower: the new tests pin differences 1, 2, 3 and 6 and the groups' side of 5. The plan left difference 4 and differences 8 to 19 to tests already there. The remaining differences (7, the run's side of 5, 20 and 21) were pinned by the fixes' own tests.
+EVIDENCE: `git log -1 --format=%B dc661df`: "New tests pin differences 1, 2, 3 and 6, the groups' side of 5, and the owner's rules where they hold already". In scratchpad/dedup/runtime-plan-main.md: :822 "D4: S:1009 and C:1218, as they are"; :828 "D7: resume_sent_as_an_event_claims_the_audio_first ... It fails at S0" (that is c654e9d's test); :829 "D8 to D19: the existing tests"; :831 "D20 and D21 are covered by S1d's tests and the walker".
+FIX: `dc661df` pinned, with seeded walks of both kinds, what a session and a run do after every action. Its new tests pinned differences 1, 2, 3 and 6 of the plan and the groups' side of 5 (the rest were held by tests already there, or by the fixes' own tests), and each of the owner's rules that already held.
+
+--- [51] critic L1121 IMPRECISE
+TEXT: *Was:* the run carried on under the lease its pause gave back.
+PROBLEM: Written as though users met this behaviour. In fact the path could not be reached from the UI, because no screen sends Resume as an event.
+EVIDENCE: `git log -1 --format=%B c654e9d`: "(fixes a Resume that would carry on under the lease its pause gave back)" and "No screen sends Resume this way, the Resume button calling resume_run, so this path cannot be reached from the UI and nothing a user does changes".
+FIX: *Was:* it would have carried on under the lease its pause gave back; no screen sends Resume that way, so no user could reach it.
+
+--- [52] critic L1126 IMPRECISE
+TEXT: the walks hashed only each group's timing class
+PROBLEM: The walks also hashed the accuracy.
+EVIDENCE: cc90b44's subject: "fixes the walks' hashes seeing only each group's timing class and the accuracy". runtime-result.json r1[0], the medium problem on dc661df: "timing class (t/p/h/s/-) plus the accuracy to 3 decimals".
+FIX: the walks hashed only each group's timing class and the accuracy
+
+--- [53] critic L1225 IMPRECISE
+TEXT: `35dd3fa` says a signal's readers see a write only once the call returns. What matters, and holds, is that `write_mark` and `mark_so_far` read neither signal.
+PROBLEM: The message is quoted truly, but the correction never says what is wrong with it. The claim is false: a Dioxus signal's set takes effect at once, so a read later in the same call sees the new value. Only the scopes subscribed to the signal run again later. The second sentence does hold.
+EVIDENCE: Cargo.lock:1550-1551 pins dioxus-signals 0.7.10. In ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/dioxus-signals-0.7.10, src/write.rs:345-350 is `fn set(&mut self, value) { *self.write() = value; }`, and src/signal.rs:528-540 shows the write guard's Drop only calling update_subscribers, which marks them dirty. At 35dd3fa, src/state.rs:413-486: mark_so_far reads self.mark, and write_mark reads self.sessions and self.cut_off_carried and sets self.mark. Neither touches `contest` (state.rs:188) or `auto_message` (:195), which are the signals the keep now clears after the mark (live_run.rs:233-248 at 35dd3fa).
+FIX: `35dd3fa` says a signal's readers see a write only once the call returns. They see it at once: a set changes the value as it is made, and only what is subscribed to the signal runs again later. What makes the moved order safe, and holds, is that `write_mark` and `mark_so_far` read neither signal.
+
+--- [54] critic L1226 IMPRECISE
+TEXT: but they still read fields such as `own`, `lease` and `stage` (in `hold_run`).
+PROBLEM: The substance is true, but the parenthesis reads as though hold_run reads all three fields. hold_run reads only `stage`; `own` and `lease` are read elsewhere in the runtimes, as are `machine` and `started_on`.
+EVIDENCE: At 5d134e2: src/session_runtime.rs:423-438 (hold_run) reads only live.stage, and :266 reads self.own.stations in transmission. src/contest_runtime.rs reads live.own.sound in Run::sound (:84), live.own.unsaid at :200, :332 and :354, and live.lease.is(lease) with live.own.sound in play_turn (:381-382). live.machine is read throughout both files. The same reads remain at 984d718 (session_runtime.rs:271, :431-432; contest_runtime.rs:89, :205, :337, :359, :386-387).
+FIX: They no longer build it or name the preview, but they still read its fields: `machine` and `own` in both, `lease` in the run's `play_turn`, and `stage` in `hold_run`.
+
+
+######## critic: 150 claims, 28 problems
+NOTES: I read the whole new text against docs/code-review.md at 984d718, both workflow records (every stage), and the plans and maps in scratchpad/dedup. I checked these against git (commit subjects and bodies) and against the code at 984d718. Nothing was built or run with cargo, and §9.5 was skipped.
+
+What holds:
+- **Review counts:** store r1 had 7 problems (1 medium); store r2 had 11 (2 medium); runtime r2 had 11 (3 medium).
+- **Fix counts:** 15 + 7 = 22 store fixes, split 8 files / 5 browser / 3 shared / 6 test store by subject prefix; 6 + 3 runtime behaviour fixes.
+- **Trait and type facts:** RunMachine has 7 types, 2 consts and 24 fns, with 6 defaults. Stage moves and `hears` are as described. LiveRun's fields and the 13/12/10 conformance cases are as described.
+- **§9.4 line counts:** I recounted them with my own counter, which follows the draft's definition (/tmp/claude-0/-home-user-dust/e07ea342-050f-502a-b473-6fa881d75cc0/scratchpad/s9check/prodcount.py). It reproduces every table delta exactly (176/99, 1,082/640, 44/21, 91/63, 154/96, 325/92, 1,872/1,011) and all the lifecycle figures (814, 877, 964, 1,239, 1,561, 852 to 594, 310, +35). It also matches idb.js (542 to 557 lines, 408 to 411 code lines) and the core's split (890/159/83).
+- **Crate totals:** the absolute totals (89,509/62,780) come from another counter (scratchpad/fc94/pcany_*.tsv). My totals differ from it by a constant 139 lines / 102 code lines at both ends, so the percentages are unchanged. That counter keeps some test-only items as production (for example the `#[cfg(all(windows, test))]` items in persist/acl.rs), so the absolute totals do not quite follow the stated definition.
+
+What the owner most needs and the draft leaves out or overstates:
+- **The stores' moves did change behaviour,** and §9.2 itself says so.
+- **The owner's invariants hold only under the plan's narrow readings.** Answer time is kept and scored. A cut group with nothing typed is dropped. Two timing differences between the kinds remain, and the plan left them to the owner.
+- **The 9.9% figure depends on a changed base.** Measured from the base the owner was quoted, growth is 18.4%.
+- **Liveness differences remain,** including a run counting a freeze at its start as run time. The plan left this to the owner.
+- **The "screen unmounted" reason in §7.4 cannot happen.**
+- **Backups and page storage still sit outside the core.**
+- **The browser store and the lifecycle were exercised here only against stand-ins,** and §6 Phase 0 has no §9 line for checks by hand.
+
+--- [55] critic L54 WRONG
+TEXT: Each step of the moves was shown to change nothing, by differentials of old code against new and by 4,000 seeded walks.
+PROBLEM: Only the lifecycle's steps were shown to change nothing (no walk line changed). The stores' moves were not. Each switch's differential declared where old and new still differ, one switch changed a browser's behaviour without declaring it, and the review after the switch found more that the switches had changed, which the differentials could not see. §9.2 of the same draft says all of this, so the Summary contradicts it.
+EVIDENCE: Draft lines 1071-1075 ("Each declared where old and new still differ"; "4834961 did not declare this") and 1083-1085. Subjects: 0072574 "(fixes 4834961 writing one look's take-up over another's of the same tab ... deleted the session again once Undo put it back)"; ae466da "(fixes 95e0361 holding every such record's text at once, where the files had read and let go of each in turn)"; 78ec02d "(fixes c01c5a9's look at it answering every time that it changed ...)"; b8ab8c5 "(fixes c01c5a9's move noting every record's key as it stored them ...)"; c96678b "(fixes 4834961's change of what a browser keeps going unpinned ...)"; 3b7f853 "4834961's change to a browser's tombstones going undeclared". store-result.json gate: "0072574 ... This restores 1c6f0db's behaviour." store-result.json core step 2.1 (caa07a9) had no differential: "New unit tests ... The existing suites pass unchanged."
+FIX: Each step of the moves was checked against the code before it. In the lifecycle's, 4,000 seeded walks changed in no line. In the stores', differentials of the old code against the new matched except where each switch declared a difference. The review after the stores' switch still found that the switches had changed more than they declared, a browser's take-up among it; each change was fixed or pinned (§9.2).
+
+--- [56] critic L1166 IMPRECISE
+TEXT: and holds no times
+PROBLEM: Such a group or copy holds no characters' times (charTimes). It still holds its answer time (timeToCompleteMs, from the end of its send with the pause left out) and its sends. For both kinds, the stored score charges that answer time and the average answer time counts it, as for any group. The plan defined 'timing information' as charTimes alone and left taking the answer time out of the score to the owner. §9 says neither, so the owner will read 'no timing information' as fully met.
+EVIDENCE: crates/cw-core/src/session.rs:966 (`pub time_to_complete_ms: f64`, not optional) and :329-339 (`timing()` sets it from the answer for every group). session.rs:1755-1776: `points()` passes every group's `timing.ms_per_char` to the time factor (score.rs:125-148). contest/machine.rs:642-653: `Kept::stored` clears only `char_times`. contest/record.rs:373 and :401: a run's average answer time, and `result.score = result.points()`. Test doc at src/session_runtime.rs:2925-2928: "stored with no times and says it was paused, its answer timed with the pause left out". dedup/runtime-plan-main.md:121-122 ("Timing information is the character times ... The answer time (timeToCompleteMs) is the score's input. It is kept"), :925 and :940 ("Decisions for the owner", 1).
+FIX: and holds no characters' times (`charTimes`), which is what the plan took 'timing information' to mean. It keeps its answer time (`timeToCompleteMs`, with the pause left out), which the stored score charges and the average answer time counts, as for any group. The plan left taking that time out of the score to the owner, and it has not been done.
+
+--- [57] critic L1167 WRONG
+TEXT: End while paused keeps the group or the QSO the pause cut.
+PROBLEM: A session's group that the pause cut is kept only if something was typed into it. A group cut before any key of it was typed is not stored; the plan chose this. A run's open QSO is kept, as lost.
+EVIDENCE: crates/cw-core/src/machine.rs:642-647 at 984d718 (finish_now: "// Something typed but not yet confirmed is kept.", then `if typed { self.record_answer(..) }`). dedup/runtime-plan-main.md:131 (rule 3: "a group whose answer had begun is kept") and :924 (not doing: "Storing a group nobody began to answer ... A run's open QSO is kept as lost"). src/lifecycle_walk.rs:18-19 ("the group a session's pause cut, its answer begun, stays in the history").
+FIX: End while paused keeps the QSO the pause cut, as lost. It keeps the group the pause cut if anything was typed into it. A group cut before any key of it was typed is not stored: the plan chose this because every build would count such a group as missed.
+
+--- [58] critic L1128 WRONG
+TEXT: One difference stays, by the owner's rule.
+PROBLEM: Two differences stay in what a pause untimes, one in each direction. The session's side is not the owner's rule: the session's rule predates this work, and the fix round, not the owner, rejected making the two kinds one rule. The second difference: in a turn that played out, a run's copy keyed across a pause keeps the times of the keys typed before the pause, while a session's answer left open by a pause keeps none. The plan offered the owner the session's rule for runs too.
+EVIDENCE: 06c581d's message: "a session, by its own earlier rule, keeps timed a group whose answer was complete when a pause cut its send". runtime-result.json fix1 step 9: "I rejected unifying the two ... The session's complete-answer rule predates this work." session.rs:660-676 (note_paused: an open answer gets `sounding.distrust(Untimed::Paused)`). contest/machine.rs:488-524 (`Sends::paused`/`until`: keys from the pause on say nothing) and :565 (`timed_by`: Paused only where no earlier key counts). Test doc at contest/machine.rs:14548-14551: "the pause after it taking only what is keyed from then on". dedup/runtime-plan-main.md:926-928 and :943 ("Optional ...: the session's all-or-nothing rule for a run's copy keyed across a pause").
+FIX: Two differences stay in what a pause untimes, one in each direction, and the fix round chose not to make either one rule (`06c581d`). First, a run keeps no times from a turn that a pause cut short, not even from a copy keyed in full before the pause, as the owner asked for a paused run. A session, by its own rule from before this work, keeps timed a group answered in full before a pause that cut its send. Second, in a turn that played out, a run's copy keyed across a pause keeps the times of the keys typed before the pause, while a session's answer left open by a pause keeps none. The plan offered the owner the session's rule for runs too.
+
+--- [59] critic L54 IMPRECISE
+TEXT: and it holds the owner's four invariants for a turn a pause interrupts
+PROBLEM: The invariants hold only under readings the plan made and §9 never states. Timing information is taken to mean charTimes only, so the answer time is kept and scored. A session's group cut before anything was typed is not stored. The two kinds still differ on what a pause untimes. The 'incomplete' mark is the existing `untimed: "paused"` reason, which a group finished after Resume also carries. The owner has not ruled on any of these.
+EVIDENCE: See the entries for lines 1166, 1167 and 1128. dedup/runtime-plan-main.md:112-134 (what a turn is, and the rules as tested) and :923 ("A new `incomplete` key, or a new `untimed` reason ... `"paused"` already says it"). src/session_runtime.rs:2925-2930: a group that was cut, resumed and answered "says it was paused".
+FIX: and it holds the owner's four invariants for a turn a pause interrupts, as the plan read them (§9.3). An interrupted turn keeps no characters' times and says `paused`, but keeps its answer time, which the score charges. A session's group cut before anything was typed is not stored. The two kinds still differ on what a pause untimes. The owner has not ruled on these.
+
+--- [60] critic L54 WRONG
+TEXT: Before any code moved, every difference between the copies was pinned
+PROBLEM: After the stores' switch, the review found differences between the copies that nothing had pinned. In the runtimes, dc661df's own body names only four of the differences and part of a fifth. Line 1021 repeats the claim ("tests pinned them").
+EVIDENCE: 73b383c: "(fixes 54420dc holding idb.js to make_steps by a differential that gives every record a place of its own, so where they differ went unsaid and untested)"; its body adds "1c6f0db's idb.js refused the same". c96678b: "(fixes 4834961's change of what a browser keeps going unpinned ...)"; "before 4834961 idb.rs handed idb.js every deletion ... and idb.js ... kept the last". dc661df body: "New tests pin differences 1, 2, 3 and 6, the groups' side of 5" (dedup/runtime-map.md:76-98 lists 19 differences).
+FIX: Before any code moved, the differences the plans found between the copies were mapped and pinned, and each one that was a defect was fixed test first: 22 in the stores and 9 in the runtimes, counting those that answered reviews of the first fixes. After the stores' switch, the review found two more that nothing had pinned (`73b383c`, `c96678b`). (At line 1021: "The differences between the copies were mapped, and tests pinned those the plans found.")
+
+--- [61] critic L54 IMPRECISE
+TEXT: Through the consolidation, the lifecycle's own files grew by 9.9% in code lines, within the 8–10% the owner accepted
+PROBLEM: The 8–10% the owner accepted was the plan's estimate measured against 814 code lines at ab0cbf7. Against that base, the files hold 964 code lines, 18.4% more, where the plan's later estimate was about 11%. The 9.9% instead uses a base after the fixes (877) and counts only the four files. The consolidation and its review's fixes added 92 code lines in all (§9.4's own table row), which is 10.5% of 877. The consolidation stage's own record called its result above the owner's limit. The Summary leaves out the 18.4% that §9.4 gives.
+EVIDENCE: dedup/runtime-plan.md:345 ("code lines go from 814 to about 880-900, an increase of 8 to 10%"). dedup/runtime-plan-main.md:498-510 (size table "Against 814"; "End state about 903, about +11%"; "The owner allowed 8 to 10%"). Draft §9.4: row "06c581d..6a424c6 | +325 | +92" and line 1207 (814 to 964, +18.4%). My count with the draft's definition (s9check/prodcount.py), code lines 06c581d to 6a424c6: session_runtime 435 to 301, contest_runtime 417 to 293, live_run 0 to 310, state/live 25 to 60, state/keep 135 to 139, main 168 to 169. runtime-result.json core.deviations[7]: "+12.1% code lines against 06c581d (877 -> 983). That is above the owner's 8 to 10%."
+FIX: Measured as in the plan the owner accepted, against the runtimes and state/live at `ab0cbf7` (814 code lines), the lifecycle's files grew by 18.4% in code lines. The owner accepted 8–10%, and the plan's later estimate was about 11%. The consolidation and its review's fixes alone added 92 code lines: 10.5% of the 877 left after the fixes made first, 87 of them in those files (+9.9%). With their doc comments, the four files grew by 26% through the consolidation (§9.4).
+
+--- [62] critic L1206 IMPRECISE
+TEXT: These four files grew from 877 code lines to 964 through the consolidation (+9.9%), within the 8–10% the owner accepted.
+PROBLEM: This is the same issue as the Summary entry above. The +9.9% leaves out the 5 code lines the consolidation added in state/keep.rs and main.rs (its own table row gives +92 in all), and it uses a base after the fixes. The owner's figure was measured from 814.
+EVIDENCE: Draft §9.4 table row "06c581d..6a424c6 | +325 | +92"; 964 - 877 = 87. state/keep.rs went from 135 to 139 code lines and main.rs from 168 to 169 (my count). dedup/runtime-plan.md:345.
+FIX: These four files grew from 877 code lines to 964 through the consolidation (+9.9%). Counting the 5 lines it added in state/keep.rs and main.rs, the consolidation and its review's fixes added 92 (+10.5%). The owner's 8–10% was the plan's estimate measured from 814 lines (next line).
+
+--- [63] critic L584 WRONG
+TEXT: One heartbeat for both would change when a run pauses: on a gap while its screen is unmounted, and up to a tick earlier or later.
+PROBLEM: A run's screen is never unmounted while the run is live, so the first case cannot happen; the workflow's own inventory says so. What one heartbeat would change is when a run is first watched for a gap, what keeps a run seen, and the phase of the 250 ms beat. Also in this row, "after the runtimes' differences were fixed" overstates: only the differences that were defects were fixed. The plan kept differences 1-4, 10 and 11, among others.
+EVIDENCE: src/live_run.rs:179 (go_live sets Training) and :500-502 (end sets Results or Home). src/state/keep.rs:194 (keep_and_show; its only production caller is live_run.rs:477, the others are inside the test modules of routes.rs and state.rs). src/state.rs:2696-2699 (go_to returns while session_running). dedup/runtime-map.md:74: "A live run's screen is never unmounted at the pin ... So §7.4's 'gap while its screen is unmounted' cannot happen. ... What remains are differences 2 and 3, plus the phase of the 250 ms cadence." dedup/runtime-plan-main.md:419-441 (differences kept) and :912.
+FIX: One heartbeat for both would change when a run pauses. A run would be watched for a gap from its start rather than from its screen's first tick, what keeps it seen would change for one kind or the other, and its 250 ms beat would run from its start rather than from when its screen mounts. A run's screen stays up for its whole life. (And: "after the differences between the runtimes that were defects were fixed".)
+
+--- [64] critic L1162 IMPRECISE
+TEXT: Liveness is still each kind's own: a session is seen by its heartbeat, and a run by its screen's ticks, each every `SEEN_EVERY_MS` (250 ms).
+PROBLEM: This leaves out kept differences the owner needs to know about. A session is watched from its start and is kept seen by everything it hears. A run is watched only from its screen's first tick, and only its ticks keep it seen. So when a phone freezes as a run starts, the run runs on and the gap counts as run time, while a session pauses from its start. Each kind also stamps its away pause in its own way. The plan left arming a run from its start to the owner.
+EVIDENCE: src/state/live.rs:41-44 (`seen`: "a session from its start, seen by every heartbeat and by everything it hears; a run from its screen's first tick, seen by its ticks alone"). src/contest_runtime.rs:245 `go_live(.., None, ..)` against src/session_runtime.rs:342 `Some(now)`. Tests: `a_run_held_back_before_its_first_tick_runs_on` (contest_runtime.rs:1429-1433: "runs on, the gap counted as run time"), `keys_do_not_keep_a_run_seen_between_ticks`, and `a_session_held_back_before_its_first_beat_pauses_from_its_start` (session_runtime.rs:2775-2780). Stamping: session_runtime.rs:373-385 against contest_runtime.rs:321-331. dedup/runtime-plan-main.md:422 and :913 ("a separate decision for the owner").
+FIX: Liveness is still each kind's own, and each is seen every `SEEN_EVERY_MS` (250 ms). A session is watched from its start, by its heartbeat and by everything it hears. A run is watched only from its screen's first tick, by its ticks alone. So when a phone freezes as a run starts, the run runs on with the gap counted as run time, while a session pauses from its start (`a_run_held_back_before_its_first_tick_runs_on`). The plan left arming a run from its start to the owner.
+
+--- [65] critic L1035 IMPRECISE
+TEXT: "I would implement the generic lifecycle. The additional 8–10% code is a reasonable trade-off."
+PROBLEM: The quote is cut short. The owner's sentence continues "if it provides:" and lists six conditions. Ending it at "trade-off." makes a conditional acceptance read as unconditional, and §9 never says which of the six conditions the lifecycle meets.
+EVIDENCE: The owner's words as given in the task: "The additional 8–10% code is a reasonable trade-off if it provides: * Consistent initialization and termination. * Predictable state transitions. * Centralized error handling. * Better reproducibility of application runs. * Easier testing and debugging. * Separation between application logic and execution management."
+FIX: The owner took the first: "I would implement the generic lifecycle. The additional 8–10% code is a reasonable trade-off if it provides" consistent initialization and termination, predictable state transitions, centralized error handling, better reproducibility of application runs, easier testing and debugging, and separation between application logic and execution management. (§9.3 should then say which of these the lifecycle provides.)
+
+--- [66] critic L54 IMPRECISE
+TEXT: so each was made one implementation behind a trait
+PROBLEM: The Summary says what was made one, but not what stays each store's or each kind's own, which is what the owner asked about. It also gives the store's growth only as a share of both crates. Missing: each store still makes its own backup of the history (the plan's step to make it once was dropped for lack of time); a browser whose database will not open keeps the history in page storage for that visit, outside the core; each kind's liveness stays its own; `Store` is not split. And the files' and browser's code plus the core grew from 2,253 code lines to 2,913 (+29%).
+EVIDENCE: Each store's own backup: src/persist/files.rs:411-449 (`stream_backup`), src/persist/idb.rs:380-405 (`back_up`), src/persist/memory.rs:494-506 (`save_backup`). store-result.json core step "2.9 / 2.10 Backups written once (optional) | not done ... dropped for lack of time". src/persist/web.rs:86-96 (`enum History { Database(..), Page { whole: BlobHistory<Local>, .. } }`) and :113-115 ("Where the database will not open, will not take the history, or stops answering as it is read, the page storage keeps it this visit"). dedup/store-plan-main.md:918 (not doing: "Page storage (`BlobHistory`) as a backend"). Draft §9.4 lines 1198-1199: 2,253 to 1,781, plus 1,132.
+FIX: After "...and the test store." add: "Each store's protocol stays its own, each store still makes its own backup of the history, and a browser whose database will not open keeps the history in page storage for that visit, outside the core. The files' and browser's code and the core hold 2,913 code lines where the two copies held 2,253 (+29%)." After the lifecycle sentence add: "Each kind's liveness stays its own (§9.3), and `Store` is not split (§9.6)."
+
+--- [67] critic L21 IMPRECISE
+TEXT: the record store one core under every store
+PROBLEM: Not every store is under the core. When a browser's database will not open, will not take the history, or stops answering, the history is kept for that visit in page storage (BlobHistory), which does not go through the core. §9.2 names three stores.
+EVIDENCE: src/persist/web.rs:86-96 and :113-115 at 984d718. dedup/store-plan-main.md:918. Draft line 54: "one core over the files, a browser's database and the test store".
+FIX: the record store one core under the files, a browser's database and the test store
+
+--- [68] critic L583 IMPRECISE
+TEXT: after the copies' differences were fixed, and a suite of 13 cases that every store runs (§9.2)
+PROBLEM: This contradicts §9.2 ("The files run all 13, a browser 12 and the test store 10"); 3b7f853 already corrected the same overclaim once. Also, only the differences that were defects were fixed: the row's own right-hand column says the protocols stay each store's own.
+EVIDENCE: Conformance case lists: src/persist/files.rs:4848-4862 (13), src/persist/idb/tests.rs:1872-1885 (12), src/persist/memory.rs:2530-2541 (10). Draft line 1079. 3b7f853 subject: "fixes 061bfea's claims ... that what every store must do was tested once on all three". dedup/store-plan-main.md:925 (differences that are protocol by design were kept).
+FIX: after the differences between the copies that were defects were fixed, and a suite of 13 cases, of which the files run all 13, a browser 12 and the test store 10 (§9.2)
+
+--- [69] critic L1023 WRONG
+TEXT: 3. The code was moved in steps, each shown to change nothing: the stores by differentials that ran the old code beside the new, the lifecycle by 4,000 seeded walks compared line by line.
+PROBLEM: This repeats the Summary's claim for the stores, and §9.2 contradicts it: the switches' differentials declared remaining differences, and the review found further changes the switches had made (0072574, ae466da, 78ec02d, b8ab8c5, c96678b).
+EVIDENCE: See the first entry for line 54. Draft lines 1071-1075 and 1083-1085.
+FIX: 3. The code was moved in steps, each checked against the code before it. For the lifecycle, 4,000 seeded walks were compared line by line, and no line changed. For the stores, differentials ran the old code beside the new and matched except where each switch declared a difference, though the review later found more that the switches had changed (§9.2).
+
+--- [70] critic L410 IMPRECISE
+TEXT: and items 8 and 9 are done but for one part each (§9)
+PROBLEM: §6 now marks items 8 and 9 done, but Phase 0 (the checks to make before this branch is merged) gains nothing for §9. Yet a browser's history now goes through the core, and here it was run only on stand-ins for a browser's database; the lifecycle was run only with the fake player. Nothing outside the §9.5 placeholder says what must still run in CI or by hand.
+EVIDENCE: Draft line 422: "- **§8's fixes:** the checks by hand that §8.4 lists.", with no line for §9. src/persist/conformance.rs:1-8 ("a browser's database on the tests' stand-in for one"). src/persist/idb/page_tests.rs:1-3 ("in Node, on a browser's database made up in memory (`src/fake_idb.mjs`)"). src/lifecycle_walk.rs:1-7 ("the fake player failing, stalling, running late or skipping"). 4834961 moved the browser onto the core.
+FIX: Add to Phase 0: "- **§9's work:** a browser's history now goes through the record store's core (`4834961`), which ran here only on stand-ins for a browser's database, and the lifecycle ran only with the fake player. In a real browser with two tabs open, delete, Undo, restore and back up. On the web and on a phone, pause a session and a run by hiding the page, then end one and resume the other, and look at what the history keeps."
+
+--- [71] critic L1115 IMPRECISE
+TEXT: `dc661df` pinned each way the two differed
+PROBLEM: dc661df's own body says it pinned four differences and a session's side of a fifth. The plan's inventory lists 19 differences, many of them kept by design.
+EVIDENCE: dc661df body: "New tests pin differences 1, 2, 3 and 6, the groups' side of 5, and the owner's rules where they hold already". dedup/runtime-map.md:76-98.
+FIX: `dc661df` pinned four of the ways the two differed, and a session's side of a fifth
+
+--- [72] critic L1170 IMPRECISE
+TEXT: Nor did anything pin the owner's rules for a cut turn.
+PROBLEM: Targeted tests from the fixes made first still pinned these rules after ffa0d14. What was missing was a check in the walks, which is what the reviewer reported.
+EVIDENCE: `git grep -c "fn <name>" f2e0714` finds `nothing_heard_in_a_turn_a_pause_cut_short_is_timed`, `a_call_whose_first_sending_a_pause_cut_says_paused`, `a_turn_that_played_out_before_a_pause_keeps_its_times` (contest/machine.rs), `ending_a_session_paused_part_way_through_a_send_keeps_the_group_untimed` (machine.rs), `a_run_paused_part_way_through_a_call_stores_its_copy_as_paused` (contest_runtime.rs) and `a_session_hidden_mid_send_and_ended_stores_the_group_as_paused` (session_runtime.rs). runtime-result.json r2[1], medium: "no check in the walks covers the owner's invariant".
+FIX: Nor did any check in the walks hold the owner's rules for a cut turn, which the hashes had held across every walk; the fixes' own tests held only the cases they were written for.
+
+--- [73] critic L1123 IMPRECISE
+TEXT: A review of these found nine problems, one high
+PROBLEM: Four of the nine were medium. Every other review count in §9 gives its mediums, so leaving them out here suggests the other eight were low.
+EVIDENCE: runtime-result.json r1 severities: high 1, medium 4, low 4 (reviewer 0: high, medium, medium, low, low; reviewer 1: medium, medium, low, low).
+FIX: A review of these found nine problems, one high and four medium
+
+--- [74] critic L1154 IMPRECISE
+TEXT: a trait of 33 items that each kind implements: 7 types, 2 constants and 24 functions, 6 of them with default bodies
+PROBLEM: The count is right. But §9 never weighs it against what the owner asked for ("a small abstraction rather than a framework of its own", §9.1), or against the report's earlier estimate, "it needs about ten hook methods", which this draft removes from §7.4.
+EVIDENCE: src/live_run.rs:40-151 at 984d718: 7 `type`, 2 `const`, 24 `fn`; defaults: watch, before, effects_done, resumed, ending, settle. docs/code-review.md:582 at 984d718 ("it needs about ten hook methods"). dedup/runtime-plan.md:29 ("The price is 36 trait items").
+FIX: Append: "That is more than the 'about ten hook methods' that §7.4 first estimated, and close to the 36 the plan counted for this design. Whether it is the small abstraction the owner asked for is for the owner to judge."
+
+--- [75] critic L1176 IMPRECISE
+TEXT: One was not taken: removing `Stage::Ending`, which the end now asks first (`1d6fb74`).
+PROBLEM: The rejected finding also asked that Resume return when its claim is refused, and that was not taken either. The plan had left dropping Ending to the owner, as its one lever on the code's size; the reviewer's patch removed 17 lines. The fix round rejected it, not the owner.
+EVIDENCE: runtime-result.json r2[2], low, on 1112f37: "Remove Ending ... Net -17 lines ... In resume, return before dispatching when claimed() refuses". fix2 step 9: "Rejected, for three reasons". dedup/runtime-plan-main.md:902-903 ("If the owner holds to 10%: the stage's `Ending` value and `ending()` move could go"). core.deviations[7]: "The plan's risk-12 lever ... was not pulled; it is the owner's call."
+FIX: One was not taken: removing `Stage::Ending`, and with it having Resume return when its claim is refused, a case the reviewer found unreachable. The fix round kept `Ending` as the last stage of the lifecycle the owner asked for, and the end now asks it first (`1d6fb74`). The plan had left dropping it, its one lever on the size, to the owner.
+
+--- [76] critic L1060 IMPRECISE
+TEXT: the medium one by `1073fc9` and `04236c7`
+PROBLEM: 04236c7 does not answer the review. It fixes a wait for nothing that 0dac6c7 (one of the 15) and 1073fc9 had themselves brought in, which the review did not raise. Also, the Undo race the review raised is closed in a browser, but on the files it is only narrowed to the Undo's own two steps.
+EVIDENCE: 04236c7 body: "Since 0dac6c7 a tombstone that could not be read, and since 1073fc9 a record, made such a move MovePending too". store-result.json fix1: "Follow-up 04236c7, which the review did not raise". de8dd8d body: "the files' takes away the tombstone before it stores the record, so one whose own two steps span this copy's first read and its listing still leaves the session neither: the window is the Undo's own".
+FIX: the medium one by `1073fc9`; `04236c7` fixes a wait for nothing that `0dac6c7` and `1073fc9` had brought in. The Undo race is closed in a browser (`0e222e3`); on the files, whose Undo takes two steps, `de8dd8d` narrows it to the Undo's own steps.
+
+--- [77] critic L1095 IMPRECISE
+TEXT: Its cases now hold all of them, and the near copies they replace in the stores' own tests are gone.
+PROBLEM: This is true of the five cases named. But the review's medium finding on the suite was answered only in part. The notes past the first telling, and a tombstone that cannot be read, stay in the files' and the test store's own tests, because the harness cannot hold a record open or make such a tombstone. Meanwhile §9.2 says each finding was fixed.
+EVIDENCE: store-result.json fix2 step 7: "Done in part ... Not moved: the notes cases ... and the unreadable-tombstone cases". src/persist/conformance.rs:16-62: the Harness has no hold-open hook, and plant_tombstone takes text or none. 4f8d642 body: "some of them over a case's ground on the way".
+FIX: Append: "The notes past the first telling, and a tombstone that cannot be read, stay in the files' and the test store's own tests, because the suite cannot hold a record open or make such a tombstone; that finding was answered in part."
+
+--- [78] critic L1222 IMPRECISE
+TEXT: These cannot be amended:
+PROBLEM: The list leaves out commit messages that the reviews found wrong and that only later commits' subjects answer: a8f452b, 54420dc, f2e0714's claim about its doc, and dc661df's subject.
+EVIDENCE: a8f452b subject: "tested once, on the files, a browser's database and the test store alike", answered by 4f8d642 ("fixes a8f452b's saying what every store must do is tested once for all of them, while near copies stayed in the stores' tests"). 54420dc subject: "the page script is held to them", answered by 73b383c. f2e0714 subject: "its doc names every hook called with what is live borrowed", answered by a4fc719 ("fixes f2e0714's doc leaving out over, of, of_mut and unboxed"). dc661df subject: "tests pin each way the two differ", while its body pins four differences and part of a fifth.
+FIX: Add four bullets. "- `a8f452b` says what every store must do is tested once, on all three alike. Near copies stayed in the stores' own tests until `5d03f77`, `c6df3c8` and `0661bd4`, and a browser and the test store run fewer cases (§9.2)." "- `54420dc` says the page script is held to the change's steps. It is held to them only where each record of a change has a place of its own (`73b383c`)." "- `f2e0714` also says its doc names every hook called with what is live borrowed. The doc left out `over`, `of`, `of_mut` and `unboxed` (`a4fc719`)." "- `dc661df` says tests pin each way the two runtimes differ. They pin four, and a session's side of a fifth."
+
+--- [79] critic L440 IMPRECISE
+TEXT: *Done but for the split of `Store` (§9.2).*
+PROBLEM: The item asked for the algorithm to be made generic over "a small backend trait". The Backend trait has 35 items.
+EVIDENCE: src/persist/record_store.rs:449, `pub(super) trait Backend` at 984d718: 3 types (Refused, Look, Listed), 2 consts (ORDER, FALLS_BACK) and 30 fns (keys ... loaded).
+FIX: *Done but for the split of `Store` (§9.2), over a `Backend` trait of 35 items, 30 of them functions, rather than a small one.*
+
+--- [80] critic L1030 IMPRECISE
+TEXT: with three things from the first: its stateless core, its exactness notes and its order tests
+PROBLEM: The plan's verdict took four things from the first design, the fixes it found among them.
+EVIDENCE: dedup/store-plan-main.md:34: "graft in A's stateless core, its exactness notes, the fixes it found and its order tests".
+FIX: with four things from the first: its stateless core, its exactness notes, the fixes it found and its order tests
+
+--- [81] critic L133 IMPRECISE
+TEXT: Section 9 records how the first two rows were then made one each.
+PROBLEM: The second row's proposed consolidation also unified liveness, and that was not done.
+EVIDENCE: Draft line 120 (the row: "It would also unify liveness"), line 439 ("Done but for the heartbeat") and line 1162.
+FIX: Section 9 records how the first two rows were then made one each, except liveness, which stays each kind's own (§9.3).
+
+--- [82] critic L1026 IMPRECISE
+TEXT: Neither made the code shorter: production code grew by 1,872 lines, 1,011 of them code (§9.4).
+PROBLEM: 421 of the 1,872 lines (258 code lines) came from the fixes made first, not from the moves. The sentence reads as if the whole figure were the cost of making each one.
+EVIDENCE: §9.4 table rows (which I reproduced): fixes first 176/99, 91/63 and 154/96; the moves and their reviews' fixes 1,082/640, 44/21 and 325/92.
+FIX: Neither made the code shorter. The moves and their reviews' fixes added 1,451 production lines, 753 of them code, and the fixes made first added 421 more, 258 of them code: 1,872 and 1,011 in all (§9.4).

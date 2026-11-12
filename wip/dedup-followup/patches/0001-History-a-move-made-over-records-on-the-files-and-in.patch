@@ -1,0 +1,691 @@
+From 7250373a52ce0e5fe56c793832cf2c427d31dd41 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 06:59:02 +0000
+Subject: [PATCH] History: a move made over records on the files and in the
+ test store goes by the tombstones read before what is here is listed as well
+ as after the records are read, as in a browser (fixes a deletion another copy
+ made in between being undone, and an Undo made in between leaving its session
+ stored twice)
+
+record_store::here_of, the look at what is here that the move of a store
+that moves before it reads makes (Order::MoveThenRead: the files and the
+test store), listed the records and tombstones, read the tombstones
+once, and then read what the records under names the move does not give
+hold. A session another copy deleted after that one read and before its
+record was read was neither here nor deleted, and the move stored it
+again from the history kept whole: the deletion was undone. One it put
+back, by Undo or a restore, after the listing and before that read was
+neither listed nor named by a tombstone, and the move stored it beside
+the record the Undo put back. here_of now reads the tombstones before
+the listing as well as after the texts, takes the keys of both reads,
+and by name goes by the later, as read_in's move in a browser does since
+2ec6e8e and 0e222e3; a refused read, or a tombstone that cannot be read
+just then, refuses the move as the one read did, and nothing is here
+only where neither the first read nor the listing finds anything.
+de8dd8d gave the files' take-up these reads and left the move made again
+as it was. On the files an Undo takes the tombstone away before it
+stores the record, so one whose own two steps span this copy's first
+read of the tombstones and its listing of the records still leaves the
+session neither: that window is the Undo's own, as at a take-up.
+
+For a test to act between the move's reads, the files' hook for another
+copy (HistoryFiles::meanwhile) is now done too as Disk::here has read
+each folder and as Disk::tombstones has read them, and the test store
+gains one, MemoryStore::elsewhere, done as InMem::here and
+InMem::tombstones have read. Each new test has another copy make its
+change at every such read in turn. Before the fix,
+persist::files::tests::a_deletion_another_copy_makes_as_this_one_moves_is_not_undone,
+with its worker twin, found the session back, under the move's own name,
+with the deletion made at the third read, once the tombstones were read,
+and there alone; an_undo_another_copy_makes_as_this_one_moves_leaves_one_record,
+with its twin, found it twice with the Undo made at the first or the
+second, once the records or the tombstones were listed; and the test
+store's tests of the same names failed so at its second read and at its
+first. Which reads failed was seen in a run of the four that noted each
+read's outcome rather than stop at the first failure. The core's
+a_store_that_moves_first_moves_again_over_records_reading_the_tombstones_before_and_after
+pins the order, and failed seeing here, tombstones, texts;
+a_store_that_moves_first_makes_the_move_and_then_reads_what_it_made
+expects the tombstones read before here. The hook's new calls move on by
+one the two files tests that count its calls through a take-up's read of
+the tombstones (a_take_up_that_cannot_be_made_now_is_still_to_take_up,
+an_undo_another_copy_makes_as_this_one_takes_up_leaves_one_record),
+which now act at the fourth, the moment they meant; and
+the_move_and_the_read_say_how_far_they_have_got looks at the first count
+seen, as the move's look at what is here counts nothing.
+
+Ran: cargo fmt --all --check; cargo clippy -D warnings for desktop
+(--workspace --all-targets), web (wasm32-unknown-unknown) and
+mobile-silent (--all-targets); cargo test -p dust --features desktop
+persist, 437 passed, and the whole desktop suite, 1843 passed; cargo
+test -p dust --no-default-features --features mobile-silent persist,
+437 passed; lifecycle_walk, 10 passed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TPYNqAhYUraMjPNX4DAreP
+---
+ src/persist/files.rs              | 144 ++++++++++++++++++++++--
+ src/persist/memory.rs             | 180 +++++++++++++++++++++++++++---
+ src/persist/record_store.rs       |  45 +++++---
+ src/persist/record_store/tests.rs |  57 +++++++++-
+ 4 files changed, 385 insertions(+), 41 deletions(-)
+
+diff --git a/src/persist/files.rs b/src/persist/files.rs
+index 4b965c6..aa73493 100644
+--- a/src/persist/files.rs
++++ b/src/persist/files.rs
+@@ -1020,6 +1020,8 @@ impl Backend for Disk<'_> {
+         }
+     }
+ 
++    /// A test's other copy acts once they are read
++    /// ([`HistoryFiles::meanwhile()`]).
+     async fn tombstones(&self) -> io::Result<Vec<Tombstone>> {
+         let tombstones = self.0.tombstones();
+         let mut found = Vec::new();
+@@ -1031,6 +1033,7 @@ impl Backend for Disk<'_> {
+             };
+             found.push(Tombstone { id: Some(id), read });
+         }
++        self.0.meanwhile();
+         Ok(found)
+     }
+ 
+@@ -1109,9 +1112,15 @@ impl Backend for Disk<'_> {
+         }))
+     }
+ 
+-    /// The loose records alone, by name, beside the tombstones.
++    /// The loose records alone, by name, beside the tombstones, listed
++    /// after them, as a listing lists them: a test's other copy acts once
++    /// each folder is read ([`HistoryFiles::meanwhile()`]).
+     async fn here(&self) -> io::Result<(BTreeSet<RecordId>, BTreeSet<RecordId>)> {
+-        Ok((ids_in(&self.0.records())?, ids_in(&self.0.tombstones())?))
++        let records = ids_in(&self.0.records())?;
++        self.0.meanwhile();
++        let gone = ids_in(&self.0.tombstones())?;
++        self.0.meanwhile();
++        Ok((records, gone))
+     }
+ 
+     async fn texts(&self, ids: &[RecordId]) -> io::Result<Vec<(RecordId, String)>> {
+@@ -1873,10 +1882,12 @@ mod tests {
+             count: Some((40, 40)),
+         };
+         let seen = seen.lock().unwrap().clone();
++        // Nothing is counted yet as the move looks at what is here, before
++        // it writes.
+         assert_eq!(
+-            seen.first(),
++            seen.iter().find(|seen| seen.count.is_some()),
+             Some(&moved),
+-            "as the folders are listed after the move"
++            "as the folders are listed after the move: {seen:?}"
+         );
+         let read = HistoryProgress {
+             moving: false,
+@@ -2891,7 +2902,8 @@ mod tests {
+         files.load();
+         let newer = finished(now + 60_000);
+         keep_whole(&dir, &[old, newer.clone()]);
+-        // Its place is taken once the history is listed for the take-up.
++        // Its place is taken once the history is listed for the take-up,
++        // the tombstones read before it: at the fourth folder read.
+         let place = Record::of(&newer, |json| RecordId::placed(newer.timestamp, json))
+             .expect("a record")
+             .id;
+@@ -2900,7 +2912,7 @@ mod tests {
+         let mut looks = 0;
+         files.meanwhile(move || {
+             looks += 1;
+-            if looks == 3 {
++            if looks == 4 {
+                 fs::create_dir(&standing).unwrap();
+             }
+         });
+@@ -3007,7 +3019,8 @@ mod tests {
+             files.apply(&forget(&[(&here, &session)]));
+             // An older build's copy, holding it as new, writes its history
+             // back; and another copy undoes the deletion once this one has
+-            // listed the records.
++            // listed the records, the tombstones read before them, at the
++            // fourth folder read.
+             keep_whole(&dir, &[old, session.clone()]);
+             let history = dir.0.join(HISTORY);
+             let (tombstone, record) = (
+@@ -3023,7 +3036,7 @@ mod tests {
+             let undone = here.json.clone();
+             looking.meanwhile(move || {
+                 looks += 1;
+-                if looks == 3 {
++                if looks == 4 {
+                     fs::remove_file(&tombstone).unwrap();
+                     fs::write(&record, &undone).unwrap();
+                 }
+@@ -4292,6 +4305,119 @@ mod tests {
+         assert_eq!(Files::at(&dir.0).listing(), Some(Vec::new()));
+     }
+ 
++    /// Have another copy of the app on the history in `root` make `change`
++    /// the `nth` time a folder of it has been read, from the next look of
++    /// `files` on. What it came to, once the look is over: none, where no
++    /// `nth` read came; else whether the move was still being made then,
++    /// how the history is kept not yet written, and what became of the
++    /// change.
++    fn made_meanwhile(
++        files: &Files,
++        root: &Path,
++        change: HistoryChange,
++        nth: usize,
++    ) -> Arc<Mutex<Option<(bool, HistorySaved)>>> {
++        let made = Arc::new(Mutex::new(None));
++        let (root, said) = (root.to_path_buf(), Arc::clone(&made));
++        let mut looked = 0;
++        files.meanwhile(move || {
++            looked += 1;
++            if looked == nth {
++                let moving = !root.join(HISTORY).join(LAYOUT_FILE).exists();
++                let saved = HistoryFiles::at(&root).apply(&change);
++                *said.lock().unwrap() = Some((moving, saved));
++            }
++        });
++        made
++    }
++
++    /// A deletion another copy makes as this one makes the move over
++    /// records stored before it, of a session stored under a name the move
++    /// does not give it, as a restore made while the move waited names one,
++    /// is not undone, wherever between this copy's reads it is made: the
++    /// move reads the tombstones again once it has read what the records
++    /// hold. It read them once, after it listed the records and before it
++    /// read them, so a deletion made in between left the session neither
++    /// here nor deleted, and the move stored it again under its own name.
++    #[test]
++    fn a_deletion_another_copy_makes_as_this_one_moves_is_not_undone() {
++        let now = crate::time::now_ms();
++        let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
++        let restored =
++            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
++        let mut moving = 0;
++        for nth in 1.. {
++            let dir = TempDir::new("deleted-as-moved");
++            keep_whole(&dir, &[first.clone(), second.clone()]);
++            // Restored before the move was made.
++            let files = Files::at(&dir.0);
++            assert_eq!(
++                files.apply(&put(std::slice::from_ref(&restored))),
++                HistorySaved::Stored { kept: 1 }
++            );
++            let deleted = forget(&[(&restored, &first)]);
++            let made = made_meanwhile(&files, &dir.0, deleted, nth);
++            let read = files.load();
++            let Some((while_moving, saved)) = made.lock().unwrap().take() else {
++                break;
++            };
++            assert_eq!(saved, HistorySaved::Stored { kept: 0 }, "at read {nth}");
++            moving += usize::from(while_moving);
++            assert!(read.complete, "at read {nth}");
++            assert_eq!(stamps(&read), [second.timestamp], "deleted at read {nth}");
++            let again = Files::at(&dir.0).load();
++            assert_eq!(stamps(&again), [second.timestamp], "deleted at read {nth}");
++        }
++        assert!(moving >= 3, "deleted as the move read, {moving} times");
++    }
++
++    /// An Undo another copy makes of a deletion here as this one makes the
++    /// move over records, of a session deleted under a name the move does
++    /// not give it, leaves the session stored once, wherever between this
++    /// copy's reads the Undo is made: the tombstones read before what is
++    /// here is listed still name it. Read only once the records were
++    /// listed, they no longer named it, the record the Undo put back had
++    /// not been listed, and the move stored the session again beside it.
++    /// An Undo on the files takes the tombstone away before it stores the
++    /// record, so one whose own two steps span this copy's first read of
++    /// the tombstones and its listing of the records still leaves the
++    /// session neither here nor deleted, and stored twice: that window is
++    /// the Undo's own, as at a take-up.
++    #[test]
++    fn an_undo_another_copy_makes_as_this_one_moves_leaves_one_record() {
++        let now = crate::time::now_ms();
++        let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
++        let restored =
++            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
++        let undo = HistoryChange {
++            unforget: vec![restored.id],
++            ..put(std::slice::from_ref(&restored))
++        };
++        let mut moving = 0;
++        for nth in 1.. {
++            let dir = TempDir::new("undo-as-moved");
++            keep_whole(&dir, &[first.clone(), second.clone()]);
++            // Restored before the move was made, and deleted.
++            let files = Files::at(&dir.0);
++            files.apply(&put(std::slice::from_ref(&restored)));
++            files.apply(&forget(&[(&restored, &first)]));
++            let made = made_meanwhile(&files, &dir.0, undo.clone(), nth);
++            files.load();
++            let Some((while_moving, saved)) = made.lock().unwrap().take() else {
++                break;
++            };
++            assert_eq!(saved, HistorySaved::Stored { kept: 1 }, "at read {nth}");
++            moving += usize::from(while_moving);
++            let again = Files::at(&dir.0).load();
++            assert_eq!(
++                stamps(&again),
++                [first.timestamp, second.timestamp],
++                "once, undone at read {nth}"
++            );
++        }
++        assert!(moving >= 3, "undone as the move read, {moving} times");
++    }
++
+     /// A move made over records stored while it waited, as a restore stores
+     /// one while the history kept whole cannot be read, waits again while a
+     /// record here under a name the move does not give cannot be read, as a
+@@ -4931,6 +5057,8 @@ mod tests {
+         an_undo_another_copy_makes_as_this_one_takes_up_leaves_one_record,
+         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
+         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
++        a_deletion_another_copy_makes_as_this_one_moves_is_not_undone,
++        an_undo_another_copy_makes_as_this_one_moves_leaves_one_record,
+         #[cfg(unix)]
+         a_move_made_over_a_record_that_cannot_be_read_now_waits_for_it,
+         #[cfg(unix)]
+diff --git a/src/persist/memory.rs b/src/persist/memory.rs
+index 2cd578d..1fe19e1 100644
+--- a/src/persist/memory.rs
++++ b/src/persist/memory.rs
+@@ -5,11 +5,12 @@
+ //! by the rules every store keeps it by ([`super::record_store`]), with what
+ //! a test needs to make it misbehave as a real one can: full,
+ //! failing, unlisted, slow to answer, short of room as a browser's page
+-//! storage is, or losing a record from under the app. Beside it is the
+-//! history as an older build keeps it whole, which it moves and takes up as
+-//! the files do ([`super::legacy`]). Or else it keeps the history whole in
+-//! a browser's page storage, as a browser does where its database will not
+-//! open ([`MemoryStore::in_page`]).
++//! storage is, losing a record from under the app, or changed by another
++//! copy of the app between its reads. Beside it is the history as an older
++//! build keeps it whole, which it moves and takes up as the files do
++//! ([`super::legacy`]). Or else it keeps the history whole in a browser's
++//! page storage, as a browser does where its database will not open
++//! ([`MemoryStore::in_page`]).
+ 
+ use std::cell::{Cell, RefCell};
+ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+@@ -109,6 +110,12 @@ pub struct MemoryStore {
+     /// read, too, as the files read one that cannot be read at all
+     /// ([`HistoryLoad::failed`]).
+     pub held_open: RefCell<BTreeSet<RecordId>>,
++    /// What another copy of the app does while this one reads the history,
++    /// for a test to set: done each time this one has listed what is here,
++    /// as a move made over it lists it, and each time it has read the
++    /// tombstones, as the files have another copy act each time a folder of
++    /// theirs has been read ([`Self::meanwhile`]).
++    elsewhere: RefCell<Option<Elsewhere>>,
+     /// Changes to the history are made only when the test says
+     /// ([`Self::settle`]), the way a browser's database makes them a
+     /// moment after they are asked for.
+@@ -220,6 +227,10 @@ pub struct MemoryStore {
+     pub progress: LoadProgress,
+ }
+ 
++/// What another copy of the app does to a [`MemoryStore`] while a copy
++/// reads it, as a test sets it ([`MemoryStore::elsewhere`]).
++type Elsewhere = Box<dyn FnMut(&MemoryStore)>;
++
+ /// What became of the marks of a [`MemoryStore`], for a test to follow.
+ #[derive(Clone, Debug, PartialEq)]
+ pub enum MarkEvent {
+@@ -967,8 +978,12 @@ impl Backend for InMem<'_> {
+             .collect()
+     }
+ 
++    /// A test's other copy acts once they are read
++    /// ([`MemoryStore::meanwhile`]).
+     async fn tombstones(&self) -> Result<Vec<Tombstone>, Refused> {
+-        Ok(self.0.tombstones_read())
++        let tombstones = self.0.tombstones_read();
++        self.0.meanwhile();
++        Ok(tombstones)
+     }
+ 
+     async fn tombstones_of(&self, ids: &[RecordId]) -> Option<TombstonesOf> {
+@@ -1023,16 +1038,21 @@ impl Backend for InMem<'_> {
+ 
+     /// None, while one here cannot be read for now, as one held open
+     /// cannot, as the files' move waits on each it reads: it may hold a
+-    /// session the move would write again.
++    /// session the move would write again. A test's other copy acts once
++    /// they are listed ([`MemoryStore::meanwhile`]).
+     async fn here(&self) -> Result<(BTreeSet<RecordId>, BTreeSet<RecordId>), Refused> {
+-        let records = self.0.records.borrow();
+-        let held_open = self.0.held_open.borrow();
+-        if records.keys().any(|id| held_open.contains(id)) {
+-            let why = "a record here could not be read just now".to_string();
+-            return Err(Refused(HistorySaved::Failed(why)));
+-        }
+-        let gone = self.0.tombstones.borrow().keys().copied().collect();
+-        Ok((records.keys().copied().collect(), gone))
++        let here = {
++            let records = self.0.records.borrow();
++            let held_open = self.0.held_open.borrow();
++            if records.keys().any(|id| held_open.contains(id)) {
++                let why = "a record here could not be read just now".to_string();
++                return Err(Refused(HistorySaved::Failed(why)));
++            }
++            let gone = self.0.tombstones.borrow().keys().copied().collect();
++            (records.keys().copied().collect(), gone)
++        };
++        self.0.meanwhile();
++        Ok(here)
+     }
+ 
+     async fn texts(&self, ids: &[RecordId]) -> Result<Vec<(RecordId, String)>, Refused> {
+@@ -1293,6 +1313,14 @@ impl MemoryStore {
+             .collect()
+     }
+ 
++    /// Let another copy do what a test has it do while this one reads the
++    /// history ([`Self::elsewhere`]): nothing, where it sets nothing.
++    fn meanwhile(&self) {
++        if let Some(elsewhere) = self.elsewhere.borrow_mut().as_mut() {
++            elsewhere(self);
++        }
++    }
++
+     /// Every tombstone, as a store reads them: each holds what was written
+     /// for it.
+     fn tombstones_read(&self) -> Vec<Tombstone> {
+@@ -2310,6 +2338,128 @@ mod tests {
+         assert_eq!(stamps, [first.timestamp, second.timestamp], "each once");
+     }
+ 
++    /// Have another copy of the app make `change` on `store` the `nth`
++    /// time this one has read part of the history, from the next read on
++    /// ([`MemoryStore::elsewhere`]). What it came to, once the read is
++    /// over: none, where no `nth` read came; else whether the move was
++    /// still being made then, and what became of the change.
++    fn made_meanwhile(
++        store: &MemoryStore,
++        change: HistoryChange,
++        nth: usize,
++    ) -> Rc<RefCell<Option<(bool, HistorySaved)>>> {
++        let made = Rc::new(RefCell::new(None));
++        let said = Rc::clone(&made);
++        let mut reads = 0;
++        *store.elsewhere.borrow_mut() = Some(Box::new(move |store: &MemoryStore| {
++            reads += 1;
++            if reads == nth {
++                let moving = store.layout.borrow().is_none();
++                *said.borrow_mut() = Some((moving, store.apply(&change)));
++            }
++        }));
++        made
++    }
++
++    /// When each session `store` holds finished, deleted ones left out, as
++    /// the next launch would show them.
++    fn stamps_held(store: &MemoryStore) -> Vec<u64> {
++        let held = store.load_sessions();
++        held.iter().map(|session| session.timestamp).collect()
++    }
++
++    /// A deletion another copy makes as this one makes the move over
++    /// records stored before it, of a session stored under a name the move
++    /// does not give it, as a restore names one, is not undone, wherever
++    /// between this one's reads it is made, as on the files: the move reads
++    /// the tombstones again once it has read what the records hold. It read
++    /// them once, after it listed the records and before it read them, so
++    /// a deletion made in between left the session neither here nor
++    /// deleted, and the move stored it again under its own name.
++    #[test]
++    fn a_deletion_another_copy_makes_as_this_one_moves_is_not_undone() {
++        let now_ms = crate::time::now_ms();
++        let (first, second) = (finished(now_ms - 9 * DAY), finished(now_ms - 8 * DAY));
++        let restored =
++            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
++        let deleted = HistoryChange {
++            forget: vec![(restored.id, Deleted::of(&first, 7))],
++            ..HistoryChange::default()
++        };
++        let mut moving = 0;
++        for nth in 1.. {
++            let store = MemoryStore::default();
++            store.keep_whole(&[first.clone(), second.clone()]);
++            assert_eq!(
++                now(store.change_history(put(std::slice::from_ref(&restored)))),
++                HistorySaved::Stored { kept: 1 }
++            );
++            let made = made_meanwhile(&store, deleted.clone(), nth);
++            let read = store.load_history();
++            let Some((while_moving, saved)) = made.borrow_mut().take() else {
++                break;
++            };
++            assert_eq!(saved, HistorySaved::Stored { kept: 0 }, "at read {nth}");
++            moving += usize::from(while_moving);
++            assert!(read.complete, "at read {nth}");
++            let stamps: Vec<u64> = read
++                .sessions
++                .iter()
++                .map(|(_, session)| session.timestamp)
++                .collect();
++            assert_eq!(stamps, [second.timestamp], "deleted at read {nth}");
++            assert_eq!(
++                stamps_held(&store),
++                [second.timestamp],
++                "deleted at read {nth}"
++            );
++        }
++        assert!(moving >= 2, "deleted as the move read, {moving} times");
++    }
++
++    /// An Undo another copy makes of a deletion here as this one makes the
++    /// move over records, of a session deleted under a name the move does
++    /// not give it, leaves the session stored once, wherever between this
++    /// one's reads it is made, as on the files: the tombstones read before
++    /// what is here is listed still name it. Read only once it was listed,
++    /// they no longer named it, the record the Undo put back had not been
++    /// listed, and the move stored the session again beside it.
++    #[test]
++    fn an_undo_another_copy_makes_as_this_one_moves_leaves_one_record() {
++        let now_ms = crate::time::now_ms();
++        let (first, second) = (finished(now_ms - 9 * DAY), finished(now_ms - 8 * DAY));
++        let restored =
++            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
++        let deleted = HistoryChange {
++            forget: vec![(restored.id, Deleted::of(&first, 7))],
++            ..HistoryChange::default()
++        };
++        let undo = HistoryChange {
++            unforget: vec![restored.id],
++            ..put(std::slice::from_ref(&restored))
++        };
++        let mut moving = 0;
++        for nth in 1.. {
++            let store = MemoryStore::default();
++            store.keep_whole(&[first.clone(), second.clone()]);
++            now(store.change_history(put(std::slice::from_ref(&restored))));
++            now(store.change_history(deleted.clone()));
++            let made = made_meanwhile(&store, undo.clone(), nth);
++            store.load_history();
++            let Some((while_moving, saved)) = made.borrow_mut().take() else {
++                break;
++            };
++            assert_eq!(saved, HistorySaved::Stored { kept: 1 }, "at read {nth}");
++            moving += usize::from(while_moving);
++            assert_eq!(
++                stamps_held(&store),
++                [first.timestamp, second.timestamp],
++                "once, undone at read {nth}"
++            );
++        }
++        assert!(moving >= 2, "undone as the move read, {moving} times");
++    }
++
+     /// A move with nothing to move waits for no record, as the files' waits
+     /// for none: it writes nothing.
+     #[test]
+diff --git a/src/persist/record_store.rs b/src/persist/record_store.rs
+index 68a7e27..170795a 100644
+--- a/src/persist/record_store.rs
++++ b/src/persist/record_store.rs
+@@ -409,9 +409,10 @@ pub(super) struct Made<R> {
+ }
+ 
+ /// What a store holds as the move is made over it ([`Here::not_moved_yet`]):
+-/// every record, every tombstone by name and by the session it names, and
+-/// what records hold, those under a name the move does not give among
+-/// them.
++/// every record; every tombstone, by name as the tombstones read after the
++/// records name them, and by the session each names, read before the
++/// records or after; and what records hold, those under a name the move
++/// does not give among them.
+ #[derive(Default)]
+ pub(super) struct Here {
+     pub(super) records: BTreeSet<RecordId>,
+@@ -897,31 +898,49 @@ async fn move_in<B: Backend>(
+ /// What a store that moves before it reads holds, as the move made over it
+ /// looks at it ([`Here`]), the move making `moved`: nothing, for a move
+ /// that has nothing to write, which so looks at nothing, and waits for
+-/// nothing. Why it cannot be looked at now, as a tombstone, or a record
+-/// under a name the move does not give, that cannot be read just then: the
+-/// move waits.
++/// nothing; and nothing where nothing is here, no tombstone read before
++/// the listing and nothing listed. Why it cannot be looked at now, as a
++/// tombstone, or a record under a name the move does not give, that cannot
++/// be read just then: the move waits.
++///
++/// The tombstones are read before what is here is listed, and again once
++/// what the records under a name the move does not give hold is read, as
++/// a browser's move reads them about its records ([`read_in`]): a session
++/// another copy deletes in between, under such a name, is either here,
++/// what it holds read, or deleted after, and one it puts back in between,
++/// by Undo or a restore, is either deleted before or here. By name the
++/// later read alone says what is deleted. An Undo that takes the tombstone
++/// away before it stores the record, as one on the files does, still
++/// leaves its session neither where its two steps span the first read of
++/// the tombstones and the listing of the records: that window is the
++/// Undo's own.
+ async fn here_of<B: Backend>(store: &B, moved: &[Record]) -> Result<Here, String> {
+     if moved.is_empty() {
+         return Ok(Here::default());
+     }
+-    let (records, gone) = store.here().await.map_err(|refused| refused.words())?;
+-    if records.is_empty() && gone.is_empty() {
+-        return Ok(Here::default());
+-    }
+-    let tombstones = store
++    let before = store
+         .tombstones()
+         .await
+         .map_err(|refused| refused.words())?;
+-    let gone_keys = keys_of_tombstones(&tombstones, Reading::Strict)?;
++    let mut gone_keys = keys_of_tombstones(&before, Reading::Strict)?;
++    let (records, listed) = store.here().await.map_err(|refused| refused.words())?;
++    if before.is_empty() && records.is_empty() && listed.is_empty() {
++        return Ok(Here::default());
++    }
+     let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
+     let elsewhere: Vec<RecordId> = records.difference(&names).copied().collect();
+     let texts = store
+         .texts(&elsewhere)
+         .await
+         .map_err(|refused| refused.words())?;
++    let after = store
++        .tombstones()
++        .await
++        .map_err(|refused| refused.words())?;
++    gone_keys.extend(keys_of_tombstones(&after, Reading::Strict)?);
+     Ok(Here {
+         records,
+-        gone,
++        gone: after.iter().filter_map(|tombstone| tombstone.id).collect(),
+         texts: texts.into_iter().collect(),
+         gone_keys,
+     })
+diff --git a/src/persist/record_store/tests.rs b/src/persist/record_store/tests.rs
+index 6c8395d..984f6d3 100644
+--- a/src/persist/record_store/tests.rs
++++ b/src/persist/record_store/tests.rs
+@@ -713,11 +713,11 @@ fn kept_whole(sessions: &[SessionResult]) -> Legacy {
+ 
+ /// A store that moves before it reads makes the move, each of its steps,
+ /// and only then reads what it made: the history kept whole, where it
+-/// sets aside what does not read, the deletions it remembers, what is here
+-/// already, and the records with how the history is kept; then what a
+-/// change cut short left, the records listed and read, as of a look taken
+-/// before they were listed, and the notes of what was told, read before
+-/// any is written.
++/// sets aside what does not read, the deletions it remembers, the
++/// tombstones and what is here already, and the records with how the
++/// history is kept; then what a change cut short left, the records listed
++/// and read, as of a look taken before they were listed, and the notes of
++/// what was told, read before any is written.
+ #[test]
+ fn a_store_that_moves_first_makes_the_move_and_then_reads_what_it_made() {
+     let mut script = Script::<false>::new(Ok(Gate::Unmoved));
+@@ -732,6 +732,7 @@ fn a_store_that_moves_first_makes_the_move_and_then_reads_what_it_made() {
+             "legacy",
+             "moving",
+             "legacy_deleted",
++            "tombstones",
+             "here",
+             "write_move(1)",
+             "cut_short",
+@@ -755,6 +756,52 @@ fn record_of(at: u64) -> Record {
+     Record::of(&session, |json| RecordId::next(at, None, json)).unwrap()
+ }
+ 
++/// A store that moves first, making the move again over a record here
++/// under a name the move does not give, as a restore names one, reads the
++/// tombstones before it lists what is here, and again once it has read
++/// what that record holds, as a browser reads them about its records: a
++/// session another copy deletes, or puts back, between any two of those
++/// reads is either here or deleted. Of the session the record holds, the
++/// move writes nothing. They were read once, between the listing and the
++/// read of what the record held.
++#[test]
++fn a_store_that_moves_first_moves_again_over_records_reading_the_tombstones_before_and_after() {
++    let mut script = Script::<false>::new(Ok(Gate::Unmoved));
++    let (first, second) = (on_day(1), on_day(2));
++    script.legacy = Ok(kept_whole(&[first.clone(), second]));
++    let restored = Record::of(&first, |json| RecordId::placed(first.timestamp, json)).unwrap();
++    script.hold(restored.id, &restored.json);
++    let load = now(load(&script)).expect("read");
++    assert!(load.complete);
++    assert_eq!(load.sessions.len(), 2, "each once");
++    assert_eq!(
++        script.calls(),
++        calls(&[
++            "open_gate",
++            "legacy",
++            "moving",
++            "legacy_deleted",
++            "tombstones",
++            "here",
++            "texts",
++            "tombstones",
++            "write_move(1)",
++            "cut_short",
++            "legacy_look",
++            "look",
++            "list",
++            "saw",
++            "read_listed",
++            "note(Failing)",
++            "note(Told)",
++            "note(UnreadTold)",
++            "note(DamagedTold)",
++            "legacy_look",
++            "loaded",
++        ])
++    );
++}
++
+ /// A store that moves first, with a history moved already, an older
+ /// build's change to take up, and a record left beside its tombstone: the
+ /// tombstones are read before the records are listed, the record beside
+-- 
+2.43.0
+

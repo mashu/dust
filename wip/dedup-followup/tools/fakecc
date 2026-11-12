@@ -1,0 +1,20 @@
+#!/bin/bash
+# A stand-in C/C++ compiler for type-checking Android builds without the NDK:
+# clippy never links, so a build script's objects only have to exist.
+out=""
+pre=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2;;
+    -o*) out="${1#-o}"; shift;;
+    -Fo*) out="${1#-Fo}"; shift;;
+    -E) pre=1; shift;;
+    *) shift;;
+  esac
+done
+if [ "$pre" = 1 ] && [ -z "$out" ]; then
+  # cc-rs asks the preprocessor which family it is
+  echo '"clang"'; echo 'clang'; echo '"gcc"'
+fi
+if [ -n "$out" ]; then : > "$out"; fi
+exit 0
