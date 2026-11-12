@@ -15,6 +15,8 @@
 //!   then, so that the app stopping keeps that;
 //! - a group, or a run's copy, that says why it holds no times — paused,
 //!   held up, sent again — holds none, in the history and in the mark;
+//! - the group a session's pause cut, its answer begun, stays in the
+//!   history: the mark holds it last, as typed, while the session is paused;
 //! - the history only grows, and a session stored stays as it was stored.
 //!
 //! The walks held what the lifecycle did, line for line, while it was
@@ -40,8 +42,8 @@ use std::time::Duration;
 
 use cw_core::{
     ContestEffect, ContestEvent, ContestPhase, CountersKey, EntryField, MonoMs, OpKey, PauseWhy,
-    Rng, RowStatus, RunStyle, SessionEffect, SessionEvent, SessionResult, SessionTiming,
-    SplitMix64, TrainingSettings, Untimed, answer_length_matches,
+    Rng, RowStatus, RunStyle, SessionEffect, SessionEvent, SessionPhase, SessionResult,
+    SessionTiming, SplitMix64, TrainingSettings, Untimed, answer_length_matches,
 };
 
 use dioxus::prelude::*;
@@ -669,6 +671,7 @@ impl Walk {
         }
         self.check_mark(&at);
         self.check_timing(&at);
+        self.check_cut_kept(&at);
         let stored: Vec<String> = self
             .h
             .store
@@ -706,6 +709,36 @@ impl Walk {
                 );
             }
         }
+    }
+
+    /// The group a session's pause cut, its answer begun and not confirmed,
+    /// stays in the history: the owner's rule for a turn cut short. While
+    /// the session shows it paused, the mark holds it last, as typed, as
+    /// End or the app stopping would keep it.
+    fn check_cut_kept(&self, at: &str) {
+        let cut = match self.h.app.session.borrow().as_ref() {
+            Some(Live::Groups(live)) => match live.machine.session().phase() {
+                SessionPhase::Paused { index, .. } => live
+                    .machine
+                    .session()
+                    .group(index)
+                    .filter(|group| !group.input().is_empty() && !group.confirmed())
+                    .map(|group| (group.sent().to_string(), group.input().to_string())),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((sent, typed)) = cut else {
+            return;
+        };
+        let marked = self.h.store.open().and_then(|open| open.so_far);
+        let last = marked
+            .as_ref()
+            .and_then(|so_far| so_far.result.groups.last());
+        assert!(
+            last.is_some_and(|group| group.sent == sent && group.received == typed),
+            "{at}: the group {sent} the pause cut, {typed} typed, is not the mark's last"
+        );
     }
 
     /// While what is live is paused, its mark holds what End would keep
