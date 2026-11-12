@@ -52,7 +52,7 @@ use crate::audio::fake::{Behaviour, Call};
 use crate::contest_runtime::{change_speed, pause_run, press_key, resume_run, tick};
 use crate::persist::Store;
 use crate::session_runtime::{abort_run, finish_run, hold_run, send_event};
-use crate::state::live::Stage;
+use crate::state::live::{SEEN_EVERY_MS, Stage};
 use crate::state::{Finished, Live, Screen};
 use crate::testing::{
     Harness, contest_settings, copy_what_was_heard, quiet, run, test_settings, type_into,
@@ -60,8 +60,9 @@ use crate::testing::{
 use crate::time::{POLL_MS, mono_ms};
 
 /// How often the run screen's clock ticks, telling the run the app is still
-/// running it, as the screen's own loop does.
-const TICK_MS: u64 = 250;
+/// running it: as often as the screen's own loop does, every
+/// [`SEEN_EVERY_MS`].
+const TICK_MS: u64 = SEEN_EVERY_MS as u64;
 
 /// The seeds the suite walks of each kind: 1 to this many, and the kind's
 /// [`Kind::further`].
