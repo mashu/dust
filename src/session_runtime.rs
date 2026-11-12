@@ -1037,6 +1037,65 @@ mod tests {
         });
     }
 
+    /// A session held back with nothing due — its group sent, no answer
+    /// window, nothing typed — is paused by its heartbeat alone as the app
+    /// runs again, from when it was last seen: from its start, and once
+    /// resumed alike, as Resume starts the heartbeat again under its claim.
+    #[test]
+    fn a_session_held_back_with_nothing_due_is_paused_by_its_heartbeat() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 0.0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            for held in ["from its start", "once resumed"] {
+                assert!(
+                    h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await,
+                    "{held}"
+                );
+                // Held back: the clock runs on, and nothing is polled.
+                tokio::time::advance(std::time::Duration::from_secs(5)).await;
+                tokio::task::yield_now().await;
+                h.pump();
+                assert_eq!(
+                    h.phase(),
+                    Some(SessionPhase::Paused {
+                        index: 0,
+                        why: cw_core::PauseWhy::Hidden
+                    }),
+                    "held back {held}"
+                );
+                h.send(SessionEvent::Resume);
+            }
+        });
+    }
+
+    /// Resumed, a session waits for its answer however long it is thought
+    /// over: its heartbeat keeps it seen, so the answer that comes after a
+    /// quiet spell is heard, not taken for the end of a gap.
+    #[test]
+    fn a_resumed_session_waits_for_an_answer_however_long_it_is_thought_over() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 0.0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            h.send(SessionEvent::Pause);
+            h.send(SessionEvent::Resume);
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            h.advance(3_000).await;
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            assert_eq!(h.awaiting_answer(), Some(0), "{:?}", h.phase());
+            let confirmed = |h: &Harness| {
+                let runtime = h.ctx.runtime.peek();
+                runtime.as_ref().is_some_and(|s| s.view().confirmed[0])
+            };
+            assert!(h.run_until(2_000, confirmed).await, "{:?}", h.phase());
+        });
+    }
+
     /// End session while paused keeps what was typed and stores the session,
     /// though the audio was given back with the pause.
     #[test]
