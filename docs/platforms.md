@@ -685,8 +685,12 @@ waits for one that does, or for that mark to go. A copy that stops
 before that lets go of it as it stops, and the next copy to look finds it
 again: what a mark carried is in one mark or another all along, told of
 twice at worst and kept once. Each group
-answered, and each QSO logged, puts in the mark what Exit would keep were
-it pressed then; the history itself is written only once the session ends.
+answered, each QSO logged, and each pause puts in the mark what Exit would
+keep were it pressed then: at a pause, the group it cut as it stood, or the
+QSO it cut as lost. What a paused session or run hears that changes that,
+a send found held up after the pause, which takes the times of what was
+heard in it, puts it there again. The history itself is written only once
+the session ends.
 A session the store has yet to take, for want of room say, rides along in
 every mark after it until it is stored (`OpenSession::unstored`), so a copy
 that stops first leaves it to the next launch all the same.

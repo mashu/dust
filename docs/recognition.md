@@ -91,8 +91,11 @@ back with it.
 
 A group whose first send could not be timed from says why instead, under
 `untimed`: `"heldUp"` (the audio held it up on its way), `"sentAgain"`
-(tried again from the start, heard in part already) or `"paused"` (paused
-with its answer open). The first reason found is the one kept. It is
+(tried again from the start, heard in part already) or `"paused"` (a pause
+came while its answer was open, or cut its send). The first reason found
+is the one kept, and a pause is found as it comes: a send it cut, heard of
+after it as held up, as a hidden page's is, still says `"paused"`. An
+answer complete when the pause came stands as timed. It is
 written only where there is one, which healthy audio never gives, and read
 as leniently: a reason this build does not know reads as none. A session
 run with Lock typing while sending on says so, `"typingLocked": true`, so
@@ -235,11 +238,26 @@ A caller's call, or an exchange token, is timed the same way, in run time
   carried on from a turn you keyed over), alone (no other caller, QRM or
   your own message sounding over it) and as one word in its send, with no
   other sending of it begun before (its caller's timeouts counted), in a
-  turn that played on time and was not retried, with Show copy off. Keys
+  turn that played on time, was not retried and no pause cut short, with
+  Show copy off. Keys
   from its second sending on are `null`, as a group's are, and so are keys
   after a pause: run time stands still while paused, and would leave the
   pause out of the time. A turn found held up after its QSO was logged
   takes the time back when the run is kept.
+
+A copy its turn leaves untimed says why, under `untimed`, as a group does:
+`"heldUp"` for a turn the audio held up on its way or skipped in part,
+`"sentAgain"` for one tried again, and `"paused"` for one a pause cut short,
+the first reason found kept. A copy whose first sending a pause cut part
+way, where heard whole it would have been timed from, says `"paused"` too,
+the turn the pause cut giving its reason, and so does one every key of
+which came after a pause, as a group answered only after a pause does,
+unless the turn it was heard in says otherwise. A copy heard in a turn a
+pause cut short has no times even when it was keyed in full before the
+pause, unlike a group whose answer was complete when a pause cut its send,
+which stands timed (above): a run keeps no times from a turn a pause
+interrupted. A run kept
+by an earlier build has such a copy with neither, and reads as it did.
 
 So a pile-up leaves most calls untimed, and Simple QSO's doubled
 exchanges leave all of them untimed: both are honest. Simple QSO's caller

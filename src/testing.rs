@@ -596,6 +596,67 @@ impl Harness {
     }
 }
 
+/// Whether a run is on and nothing is on the air: the moment to key.
+pub fn quiet(h: &Harness) -> bool {
+    h.ctx
+        .contest
+        .peek()
+        .as_ref()
+        .is_some_and(|view| view.phase == cw_core::ContestPhase::Running && view.air.is_none())
+}
+
+/// Press `key` the way the run screen's keys and buttons do.
+pub fn press(h: &mut Harness, key: cw_core::OpKey) {
+    let ctx = h.ctx;
+    h.in_app(|| crate::contest_runtime::press_key(ctx, key));
+    h.pump();
+}
+
+/// Type `text` into a run's `field`, as its box is typed into now.
+pub fn type_into(h: &mut Harness, field: cw_core::EntryField, text: &str) {
+    let entry = h.ctx.entry;
+    let now = MonoMs(crate::time::mono_ms());
+    h.in_app(|| entry.edit(field, text.to_string(), Some(now)));
+}
+
+/// What the callers sent in the last turn, as the player was told it.
+pub fn last_replies(h: &Harness) -> Vec<String> {
+    h.recorder
+        .starts()
+        .last()
+        .map(|start| {
+            start
+                .transcript
+                .others
+                .iter()
+                .map(|other| other.text.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Copy what the last turn's callers sent into the fields, as an operator
+/// who hears every character would: a call, a call put right, or an
+/// exchange's serial.
+pub fn copy_what_was_heard(h: &mut Harness) {
+    use cw_core::EntryField;
+    for text in last_replies(h) {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        match words.as_slice() {
+            ["DE", call] => type_into(h, EntryField::Call, call),
+            [one, two] if one == two => type_into(h, EntryField::Call, one),
+            [call] if cw_core::parse_callsign(call).is_some() => {
+                type_into(h, EntryField::Call, call);
+            }
+            _ if words.contains(&"5NN") => {
+                let serial = words.last().copied().unwrap_or_default();
+                type_into(h, EntryField::Exchange, serial);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Run a test body on a paused clock, every seed it draws pinned to one
 /// ([`crate::time::pin_seeds`]): a fresh one each run, unless the test pins
 /// its own, or `DUST_TEST_SEED` gives one. A test that fails in `body` says

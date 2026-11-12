@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use cw_core::{
-    Completion, CountersKey, CountersUpdate, SessionResult, TrainingSettings, apply_auto_level,
-    complete_result,
+    AutoLevelChange, CountersKey, CountersUpdate, SessionResult, TrainingSettings,
+    apply_auto_level, complete_result,
 };
 use dioxus::prelude::*;
 
@@ -10,22 +10,26 @@ use super::{AppCtx, Finished, Notice, Screen};
 use crate::persist::record::{Record, RecordId};
 use crate::persist::{CutOff, SessionKey, SoFar};
 
-/// Store what finishing a session did to its level's run, and move the
-/// level if the run earned it, saying so. A change the level has moved
-/// away from since is not made, and nothing is said of it
+/// Store what finishing a session did to its level's run, `counters`, and
+/// move the level if the run earned it, `change`, saying so. A change the
+/// level has moved away from since is not made, and nothing is said of it
 /// ([`apply_auto_level`]). What it said, if anything.
-pub fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
+pub fn settle_level(
+    ctx: AppCtx,
+    counters: &CountersUpdate,
+    change: Option<&AutoLevelChange>,
+) -> Option<String> {
     let AppCtx {
         mut settings,
         toasts,
         ..
     } = ctx;
     let store = ctx.app().store;
-    match &done.counters {
+    match counters {
         CountersUpdate::Keep(key, counters) => store.save_auto_counters(key, *counters),
         CountersUpdate::Clear(keys) => store.clear_auto_counters(keys),
     }
-    let change = done.change.as_ref()?;
+    let change = change?;
     // Onto the settings as they are now, not as the session started with
     // them, so the level is all it moves. Stored by the app's settings
     // effect.
@@ -152,7 +156,7 @@ pub async fn keep_cut_off(ctx: AppCtx, cut: Vec<CutOff>) {
         }
         let run = store.load_auto_counters(&CountersKey::of(&settings));
         let done = complete_result(result, &settings, run);
-        settle_level(ctx, &done);
+        settle_level(ctx, &done.counters, done.change.as_ref());
     }
     let mut notices = ctx.notices;
     ctx.store_held(held, move |saved| {

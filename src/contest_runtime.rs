@@ -3,25 +3,214 @@
 //! run screen hands it keys, with the fields as typed, and says when the
 //! page has gone out of sight.
 //!
+//! Its life — going live, each step, pausing and resuming, ending kept or
+//! let go — is [`crate::live_run`]'s, as a session of groups' is; what is
+//! here is what only a run does: its turns, its keys and fields, its gap
+//! check at each tick, what it says to a screen reader.
+//!
 //! As for a session of groups ([`crate::session_runtime`]), its tasks are
 //! spawned on the root scope, and the lease, not a component, decides how
 //! long they live. A pause gives the audio back altogether, so the band
 //! falls silent and the screen may sleep; Resume claims it again inside the
 //! tap, where a browser lets a player start.
 
+use std::borrow::Cow;
+
 use cw_core::{
-    ContestEffect, ContestEvent, ContestMachine, ContestPhase, EntryField, MonoMs, OpKey, PauseWhy,
-    TrainingSettings, Turn, plan_turn,
+    ContestEffect, ContestEvent, ContestMachine, ContestView, EntryField, MonoMs, OpKey, PauseWhy,
+    Sampler, SessionResult, TrainingSettings, Turn, plan_turn,
 };
-use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
+use crate::live_run::{self, Outgoing, RunMachine};
 use crate::page::{Caret, control_id, focus_by_id_anywhere};
 use crate::persist::SoFar;
-use crate::player::{AudioError, Lease, SendNews};
-use crate::state::live::AWAY_GAP_MS;
-use crate::state::{AppCtx, Finished, Live, LiveContest, Preview, Said, Screen, keep_and_show};
-use crate::time::{local_date_string, local_hour, mono_ms, now_ms, seed_rng};
+use crate::player::{AudioError, Lease, SendNews, Sent};
+use crate::state::live::RunOwn;
+use crate::state::{AppCtx, Finished, Live, LiveContest, Said, Screen};
+use crate::time::{local_hour, mono_ms, now_ms, seed_rng};
+
+/// A contest run, as its life knows it ([`live_run`]).
+pub(crate) type Run = ContestMachine<Sampler>;
+
+impl RunMachine for Run {
+    type Event = ContestEvent;
+    type Effect = ContestEffect;
+    type View = ContestView;
+    type Progress = ();
+    type Own = RunOwn;
+    /// The turn a send is.
+    type Tag = u64;
+    const RESUME: ContestEvent = ContestEvent::Resume;
+    const IS_RUN: bool = true;
+    /// A run moves no level.
+    type Level = ();
+
+    fn of(live: &Live) -> Option<&LiveContest> {
+        match live {
+            Live::Contest(live) => Some(live),
+            Live::Groups(_) => None,
+        }
+    }
+
+    fn of_mut(live: &mut Live) -> Option<&mut LiveContest> {
+        match live {
+            Live::Contest(live) => Some(live),
+            Live::Groups(_) => None,
+        }
+    }
+
+    fn boxed(run: LiveContest) -> Live {
+        Live::Contest(Box::new(run))
+    }
+
+    fn unboxed(live: Live) -> Option<LiveContest> {
+        match live {
+            Live::Contest(live) => Some(*live),
+            Live::Groups(_) => None,
+        }
+    }
+
+    fn shown(ctx: AppCtx) -> Signal<Option<ContestView>> {
+        ctx.contest
+    }
+
+    fn hear(&mut self, event: ContestEvent, now: MonoMs) -> Vec<ContestEffect> {
+        self.apply(event, now)
+    }
+
+    fn timer_fired(id: u64) -> ContestEvent {
+        ContestEvent::TimerFired { id }
+    }
+
+    /// The run's own settings, fading off ([`RunOwn::sound`]): every claim
+    /// and every turn of it has the one band.
+    fn sound(live: &LiveContest) -> &TrainingSettings {
+        &live.own.sound
+    }
+
+    /// The paused page is shorter, so a phone scrolled down to Pause is
+    /// left part way down it, the run bar and the fields above the
+    /// screen's top: the run carries on from its top, as every screen
+    /// opens. Pausing scrolls nothing, so nothing moves under the finger
+    /// that paused.
+    fn resumed(_ctx: AppCtx) {
+        crate::page::scroll_to_top();
+    }
+
+    /// Before a run hears anything, a gap since its screen last ticked,
+    /// longer than any tick takes, is credited as paused, from that tick: a
+    /// process frozen whole — a locked phone — hears nothing until it
+    /// thaws, and then its first news is old.
+    fn first(live: &mut LiveContest, _ctx: AppCtx, now: MonoMs) -> Vec<ContestEffect> {
+        let away = live.away(now, false);
+        away.map_or_else(Vec::new, |at| away_from(live, at, now))
+    }
+
+    fn over(&self) -> bool {
+        self.is_terminal()
+    }
+
+    fn as_shown(&self) -> Cow<'_, ContestView> {
+        Cow::Owned(self.view())
+    }
+
+    fn progress(&self) {}
+
+    /// A QSO logged, or its check shown.
+    fn progressed(&self, (): (), published: Option<&ContestView>, shown: &ContestView) -> bool {
+        published.is_some_and(|before| before.log != shown.log)
+    }
+
+    /// What End run would keep: none while it has worked nobody.
+    fn so_far(live: &LiveContest, now: MonoMs, finished_at: u64) -> Option<SoFar> {
+        let mut ended = live.machine.clone();
+        let effects = ended.apply(ContestEvent::FinishNow, now);
+        effects
+            .contains(&ContestEffect::PersistAndShowResults)
+            .then(|| SoFar {
+                result: ended.result(finished_at, live.started_on.clone()),
+                settings: None,
+            })
+    }
+
+    fn carry_out(ctx: AppCtx, lease: &Lease, effect: ContestEffect) {
+        match effect {
+            ContestEffect::PlayTurn(turn) => play_turn(ctx, lease, turn),
+            ContestEffect::StopAudio => lease.stop_sending(),
+            ContestEffect::ReleaseAudio => live_run::give_back::<Self>(ctx, lease),
+            ContestEffect::StartTimer { id, ms } => {
+                live_run::start_timer::<Self>(ctx, lease, id, ms);
+            }
+            ContestEffect::ClearFields => ctx.entry.clear(),
+            ContestEffect::Focus(field) => focus_field(ctx, field),
+            ContestEffect::Announce(text) => announce(ctx, text),
+            ContestEffect::PersistAndShowResults => {
+                live_run::keep::<Self>(ctx);
+            }
+            // A run with no station worked has nothing for any stat: it is
+            // let go, and the results screen says so, with another run a
+            // press away.
+            ContestEffect::ShowNothingKept => {
+                live_run::let_go::<Self>(ctx, Some(Finished::NothingKept));
+            }
+            ContestEffect::AbortToHome => {
+                live_run::let_go::<Self>(ctx, None);
+            }
+        }
+    }
+
+    /// What it holds for a screen reader is said once the air is silent.
+    fn effects_done(ctx: AppCtx) {
+        speak_if_silent(ctx);
+    }
+
+    /// Each attempt, retries too: when its sound goes to the output, and
+    /// when it reaches the ear, the player's lead, any wait for its moment
+    /// and latency after it starts; what of it went unheard, as soon as
+    /// that is found, before anything heard after it counts; and whether
+    /// it was held up on its way, however it ended.
+    fn news(id: u64, news: SendNews<'_>) -> ContestEvent {
+        match news {
+            SendNews::Started(start) => ContestEvent::TurnStarted {
+                id,
+                heard_from: start.heard_at(),
+                output_from: start.output_at,
+            },
+            SendNews::Missed {
+                from_sec,
+                until_sec,
+            } => ContestEvent::TurnMissed {
+                id,
+                from_sec,
+                until_sec,
+            },
+            SendNews::HeldUp => ContestEvent::TurnHeldUp { id },
+        }
+    }
+
+    /// Stopped, as by a stop, a newer turn or a pause, the machine has
+    /// moved on; only a failure after every retry pauses it.
+    fn sent(id: u64, sent: Result<Sent, AudioError>) -> ContestEvent {
+        match sent {
+            Ok(_) => ContestEvent::TurnEnded { id },
+            Err(AudioError::Cancelled) => ContestEvent::TurnCancelled { id },
+            Err(_) => ContestEvent::TurnFailed { id },
+        }
+    }
+
+    /// Its sound has stopped, so what it held for a screen reader is said
+    /// now.
+    fn ending(ctx: AppCtx, live: &mut LiveContest) {
+        say(ctx, std::mem::take(&mut live.own.unsaid));
+    }
+
+    /// A session of the history, its log beside its groups, shown as a
+    /// session of groups is shown.
+    fn kept(_ctx: AppCtx, live: &LiveContest) -> (SessionResult, ()) {
+        (live.machine.result(now_ms(), live.started_on.clone()), ())
+    }
+}
 
 /// Start a run of `settings`, clamped already: the training screen comes up
 /// on its countdown, or on its first CQ. A run that cannot start says what
@@ -33,28 +222,13 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     }
     let rules = settings.contest.contest_kind.rules();
     let side = settings.contest.side();
-    let AppCtx {
-        mut screen,
-        contest: mut view,
-        mut announced,
-        mut preview,
-        toasts,
-        entry,
-        ..
-    } = ctx;
     // The audio is claimed with what the run plays from, so every claim and
     // every turn of it has the one band.
     let mut sound = settings.clone();
     sound.band.qsb_enabled = false;
     // The run has the audio now, whether or not it can open it: any preview
     // that had it has stopped.
-    preview.set(Preview::Idle);
-    let app = ctx.app();
-    let Ok(lease) = app
-        .player
-        .claim(&sound)
-        .inspect_err(|err| toasts.show(err.to_string()))
-    else {
+    let Some(lease) = live_run::take_audio(ctx, &sound) else {
         return;
     };
     // The callers' calls lean on what the history says is hard, and on what
@@ -64,27 +238,28 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     let (mut machine, effects) = ContestMachine::start(seed_rng(), now, settings, sampler);
     // Before anything of yours that greets: the first CQ greets nobody.
     machine.set_local_hour(local_hour());
-    entry.start(rules, side);
+    ctx.entry.start(rules, side);
+    let mut announced = ctx.announced;
     announced.set(None);
-    view.set(Some(machine.view()));
-    screen.set(Screen::Training);
-    let mark = ctx.mark_running(true);
-    *app.session.borrow_mut() = Some(Live::Contest(Box::new(LiveContest {
-        machine,
+    // Seen from its screen's first tick.
+    live_run::go_live(ctx, lease, machine, effects, None, || RunOwn {
         sound,
-        lease: lease.clone(),
-        last_tick: None,
         unsaid: Vec::new(),
-        started_on: local_date_string(),
-        mark,
-    })));
-    run_effects(ctx, &lease, effects);
+    });
 }
 
 /// Hand the run something the user did: End run, Discard, the page going
-/// out of sight. Nothing happens when no run is live.
+/// out of sight. Nothing happens when no run is live. Resume claims the
+/// audio first ([`resume_run`]), as a session's does.
+///
+/// What comes under the run's own lease is its to hear while it holds the
+/// audio, and while it is paused, having given the audio back, as a paused
+/// session hears it: what is done to it then, and the news of the send its
+/// pause cut short ([`live_run::hears`]). News under another lease — a run
+/// that has ended, one before it — is dropped. A timer never comes to a
+/// paused run: the lease it was armed under drops it ([`Lease::after`]).
 pub fn send_run_event(ctx: AppCtx, event: ContestEvent) {
-    apply(ctx, Some(event));
+    live_run::send::<Run>(ctx, event);
 }
 
 /// A key or a message button: whatever paddle letter is keyed in full goes
@@ -92,18 +267,12 @@ pub fn send_run_event(ctx: AppCtx, event: ContestEvent) {
 /// carries the fields as they are then.
 pub fn press_key(ctx: AppCtx, key: OpKey) {
     ctx.entry.finish_letter();
-    let Some(lease) = run_lease(ctx) else {
+    let Some(lease) = live_run::lease::<Run>(ctx) else {
         return;
     };
     lease.wake();
-    let fields = ctx.entry.snapshot();
-    apply(
-        ctx,
-        Some(ContestEvent::Key {
-            key,
-            fields: Box::new(fields),
-        }),
-    );
+    let fields = Box::new(ctx.entry.snapshot());
+    live_run::dispatch::<Run>(ctx, &lease, ContestEvent::Key { key, fields });
 }
 
 /// − / +: your speed, moved by `delta` WPM from your next message on, and
@@ -111,11 +280,11 @@ pub fn press_key(ctx: AppCtx, key: OpKey) {
 /// press, as for a key. The setting is stored once the run screen is left,
 /// as nothing is stored while a run is on.
 pub fn change_speed(ctx: AppCtx, delta: i32) {
-    let Some(lease) = run_lease(ctx) else {
+    let Some(lease) = live_run::lease::<Run>(ctx) else {
         return;
     };
     lease.wake();
-    apply(ctx, Some(ContestEvent::Speed { delta }));
+    live_run::dispatch::<Run>(ctx, &lease, ContestEvent::Speed { delta });
     let moved = ctx.contest.peek().as_ref().map(|view| view.my_wpm);
     if let Some(wpm) = moved {
         // Whole already: − / + move it from the whole speed nearest it.
@@ -131,185 +300,42 @@ pub fn change_speed(ctx: AppCtx, delta: i32) {
 /// sight.
 pub fn pause_run(ctx: AppCtx, why: PauseWhy) {
     let at = MonoMs(mono_ms());
-    apply(ctx, Some(ContestEvent::Pause { why, at }));
+    send_run_event(ctx, ContestEvent::Pause { why, at });
 }
 
-/// Carry on after a pause. The audio is claimed afresh here, inside the tap
-/// on Resume, so the player opens — or, after the sound failed, is built
-/// anew — where a browser lets it start. A run that is not paused is left
-/// alone: a claim would cut the turn on the air from under it.
+/// Carry on after a pause: the audio claimed afresh inside the tap, and the
+/// run on under the new claim from the top of its page
+/// ([`live_run::resume`]).
 pub fn resume_run(ctx: AppCtx) {
-    let app = ctx.app();
-    let paused = match app.session.borrow().as_ref() {
-        Some(Live::Contest(live))
-            if matches!(live.machine.phase(), ContestPhase::Paused { .. }) =>
-        {
-            Some(live.sound.clone())
-        }
-        _ => None,
-    };
-    let Some(sound) = paused else {
-        return;
-    };
-    let Ok(lease) = app
-        .player
-        .claim(&sound)
-        .inspect_err(|err| ctx.toasts.show(err.to_string()))
-    else {
-        return;
-    };
-    if let Some(Live::Contest(live)) = app.session.borrow_mut().as_mut() {
-        live.lease = lease;
-    }
-    apply(ctx, Some(ContestEvent::Resume));
-    // The paused page is shorter, so a phone scrolled down to Pause is left
-    // part way down it, the run bar and the fields above the screen's top:
-    // the run carries on from its top, as every screen opens. Pausing
-    // scrolls nothing, so nothing moves under the finger that paused.
-    crate::page::scroll_to_top();
+    live_run::resume::<Run>(ctx);
 }
 
-/// The run screen's clock ticked. A tick long after the one before is time
-/// the app was not running, and the run is paused from that one first.
+/// The run screen's clock ticked: the run is seen running now. A tick long
+/// after the one before is time the app was not running, and the run is
+/// paused from that one first.
 pub fn tick(ctx: AppCtx) {
-    let now = MonoMs(mono_ms());
-    let away = match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(live)) => live.away_since(now).is_some(),
-        _ => return,
+    let Some(lease) = live_run::lease::<Run>(ctx) else {
+        return;
     };
-    if away {
-        apply(ctx, None);
-    }
-    if let Some(Live::Contest(live)) = ctx.app().session.borrow_mut().as_mut() {
-        live.last_tick = Some(now);
-    }
+    live_run::step::<Run>(ctx, &lease, None, |live, now| {
+        let at = live.away(now, true)?;
+        Some(away_from(live, at, now))
+    });
 }
 
-impl LiveContest {
-    /// The tick the app was last seen running at, if it has not been seen
-    /// since for longer than a tick can take.
-    fn away_since(&self, now: MonoMs) -> Option<MonoMs> {
-        self.last_tick.filter(|tick| now.since(*tick) > AWAY_GAP_MS)
-    }
-
-    /// What the run would keep were it ended at `now`, as End run keeps it,
-    /// worked out on a copy of it: none while it has worked nobody.
-    fn so_far(&self, now: MonoMs) -> Option<SoFar> {
-        let mut ended = self.machine.clone();
-        let effects = ended.apply(ContestEvent::FinishNow, now);
-        effects
-            .contains(&ContestEffect::PersistAndShowResults)
-            .then(|| SoFar {
-                result: ended.result(now_ms(), self.started_on.clone()),
-                settings: None,
-            })
-    }
-}
-
-/// The run's hold on the audio, while a run is live.
-fn run_lease(ctx: AppCtx) -> Option<Lease> {
-    match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(live)) => Some(live.lease.clone()),
-        _ => None,
-    }
-}
-
-/// Hand the run news from its own tasks: a timer, a send. News from a lease
-/// the run no longer holds — a run that has ended, a send a pause let go of
-/// — is dropped.
-fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
-    let current = matches!(
-        ctx.app().session.borrow().as_ref(),
-        Some(Live::Contest(live)) if live.lease.is(lease) && lease.is_current()
-    );
-    if current {
-        apply(ctx, Some(event));
-    }
-}
-
-/// Let the machine decide what `event` means, then do what it says.
-///
-/// Before anything is heard, a gap since the run screen last ticked longer
-/// than any tick takes is credited as paused, from that tick: a process
-/// frozen whole — a locked phone — hears nothing until it thaws, and then
-/// its first news is old.
-fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
-    let mut view = ctx.contest;
-    let app = ctx.app();
-    let (lease, effects, so_far) = {
-        let mut slot = app.session.borrow_mut();
-        let Some(Live::Contest(live)) = slot.as_mut() else {
-            return;
-        };
-        let now = MonoMs(mono_ms());
-        let mut effects = Vec::new();
-        if let Some(tick) = live.away_since(now) {
-            live.last_tick = Some(now);
-            let away = ContestEvent::Pause {
-                why: PauseWhy::Hidden,
-                at: tick,
-            };
-            effects.extend(live.machine.apply(away, now));
-        }
-        if let Some(event) = event {
-            effects.extend(live.machine.apply(event, now));
-        }
-        // Much of what arrives changes nothing — a stale send's news, a key
-        // that sends nothing — and publishing it anyway would redraw the
-        // screen for it.
-        let shown = live.machine.view();
-        // A QSO logged, or its check shown, the run going on: what it would
-        // keep now goes with its mark, should the app stop under it.
-        let logged = view
-            .peek()
-            .as_ref()
-            .is_some_and(|before| before.log != shown.log);
-        let so_far = (logged && !live.machine.is_terminal())
-            .then(|| live.so_far(now).map(|so_far| (live.mark.clone(), so_far)))
-            .flatten();
-        if view.peek().as_ref() != Some(&shown) {
-            view.set(Some(shown));
-        }
-        (live.lease.clone(), effects, so_far)
-    };
-    if let Some((mark, so_far)) = so_far {
-        ctx.mark_so_far(&mark, so_far);
-    }
-    run_effects(ctx, &lease, effects);
-}
-
-fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
-    for effect in effects {
-        match effect {
-            ContestEffect::PlayTurn(turn) => play_turn(ctx, lease, turn),
-            ContestEffect::StopAudio => lease.stop_sending(),
-            ContestEffect::ReleaseAudio => {
-                lease.release();
-            }
-            ContestEffect::StartTimer { id, ms } => {
-                // One wait for the whole of it. A timer the machine has since
-                // forgotten wakes once, is told so, and is gone; one a pause
-                // let go of with the audio never wakes.
-                lease.after(ms, move |lease| {
-                    dispatch(ctx, lease, ContestEvent::TimerFired { id });
-                });
-            }
-            ContestEffect::ClearFields => ctx.entry.clear(),
-            ContestEffect::Focus(field) => focus_field(ctx, field),
-            ContestEffect::Announce(text) => announce(ctx, text),
-            ContestEffect::PersistAndShowResults => keep_run(ctx),
-            ContestEffect::ShowNothingKept => keep_nothing(ctx),
-            ContestEffect::AbortToHome => abandon_run(ctx),
-        }
-    }
-    speak_if_silent(ctx);
+/// The run paused from `at`, when it was last seen before a gap the app was
+/// not running in.
+fn away_from(live: &mut LiveContest, at: MonoMs, now: MonoMs) -> Vec<ContestEffect> {
+    let why = PauseWhy::Hidden;
+    live.machine.apply(ContestEvent::Pause { why, at }, now)
 }
 
 /// Hold `text` for a screen reader until the air is silent.
 fn announce(ctx: AppCtx, text: String) {
-    match ctx.app().session.borrow_mut().as_mut() {
-        Some(Live::Contest(live)) => live.unsaid.push(text),
-        _ => say(ctx, vec![text]),
+    let app = ctx.app();
+    match app.session.borrow_mut().as_mut().and_then(Run::of_mut) {
+        Some(live) => live.own.unsaid.push(text),
+        None => say(ctx, vec![text]),
     }
 }
 
@@ -323,9 +349,15 @@ fn speak_if_silent(ctx: AppCtx) {
     if !silent {
         return;
     }
-    let unsaid = match ctx.app().session.borrow_mut().as_mut() {
-        Some(Live::Contest(live)) => std::mem::take(&mut live.unsaid),
-        _ => return,
+    let unsaid = match ctx
+        .app()
+        .session
+        .borrow_mut()
+        .as_mut()
+        .and_then(Run::of_mut)
+    {
+        Some(live) => std::mem::take(&mut live.own.unsaid),
+        None => return,
     };
     say(ctx, unsaid);
 }
@@ -342,13 +374,17 @@ fn say(ctx: AppCtx, unsaid: Vec<String>) {
 /// Play `turn`, and tell the machine when each attempt at it started, and
 /// how it went.
 ///
-/// It plays from the run's own settings, fading off ([`LiveContest::sound`]),
+/// It plays from the run's own settings, fading off ([`RunOwn::sound`]),
 /// not from whatever the settings screen holds now.
 fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
-    let sound = match ctx.app().session.borrow().as_ref() {
-        Some(Live::Contest(live)) if live.lease.is(lease) => Some(live.sound.clone()),
-        _ => None,
-    };
+    let sound = ctx
+        .app()
+        .session
+        .borrow()
+        .as_ref()
+        .and_then(Run::of)
+        .filter(|live| live.lease.is(lease))
+        .map(|live| live.own.sound.clone());
     let Some(settings) = sound else {
         return;
     };
@@ -357,7 +393,7 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     let Some(transcript) = turn.transcript() else {
         // A turn with nothing in it is over as soon as it begins; the
         // machine never plays one.
-        dispatch(ctx, &lease, ContestEvent::TurnEnded { id });
+        live_run::dispatch::<Run>(ctx, &lease, ContestEvent::TurnEnded { id });
         return;
     };
     let plan = plan_turn(&turn, &settings);
@@ -368,46 +404,13 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     // runs: a stop handled before then ends it, and a turn before it still
     // waiting out a retry gives up rather than start over it.
     let asked = lease.ask_to_send();
-    spawn_forever(async move {
-        let heard = lease.clone();
-        // Each attempt, retries too: when its sound goes to the output, and
-        // when it reaches the ear, the player's lead, any wait for its
-        // moment and latency after it starts; what of it went unheard, as
-        // soon as that is found, before anything heard after it counts; and
-        // whether it was held up on its way, however it ended.
-        let news = move |news: SendNews<'_>| {
-            let event = match news {
-                SendNews::Started(start) => ContestEvent::TurnStarted {
-                    id,
-                    heard_from: start.heard_at(),
-                    output_from: start.output_at,
-                },
-                SendNews::Missed {
-                    from_sec,
-                    until_sec,
-                } => ContestEvent::TurnMissed {
-                    id,
-                    from_sec,
-                    until_sec,
-                },
-                SendNews::HeldUp => ContestEvent::TurnHeldUp { id },
-            };
-            dispatch(ctx, &heard, event);
-        };
-        let event = match lease
-            .send_planned(asked, &plan, &transcript, &settings, starts_at, news)
-            .await
-        {
-            Ok(_) => ContestEvent::TurnEnded { id },
-            // A stop, a newer turn, a pause: the machine has moved on.
-            Err(AudioError::Cancelled) => ContestEvent::TurnCancelled { id },
-            Err(failure) => {
-                ctx.toasts.show(failure.to_string());
-                ContestEvent::TurnFailed { id }
-            }
-        };
-        dispatch(ctx, &lease, event);
-    });
+    let outgoing = Outgoing::Turn {
+        asked,
+        plan,
+        transcript,
+        starts_at,
+    };
+    live_run::play::<Run>(ctx, &lease, id, settings, outgoing);
 }
 
 /// A field's id, and what it is called.
@@ -437,103 +440,22 @@ pub fn refocus_run(ctx: AppCtx) {
     }
 }
 
-/// The run, taken out of the app, with the audio given back: marked over
-/// once it is stored or let go. Its sound has stopped, so what it held for a
-/// screen reader is said now.
-fn end_run(ctx: AppCtx) -> Option<LiveContest> {
-    let taken = ctx
-        .app()
-        .session
-        .borrow_mut()
-        .take_if(|live| matches!(live, Live::Contest(_)));
-    let Some(Live::Contest(mut live)) = taken else {
-        return None;
-    };
-    live.lease.release();
-    say(ctx, std::mem::take(&mut live.unsaid));
-    Some(*live)
-}
-
-/// Store the run as a session of the history, its log beside its groups,
-/// and show it, as a session of groups is shown.
-fn keep_run(ctx: AppCtx) {
-    let Some(live) = end_run(ctx) else {
-        return;
-    };
-    let AppCtx {
-        contest: mut view,
-        mut auto_message,
-        ..
-    } = ctx;
-    view.set(None);
-    // A run moves no level.
-    auto_message.set(None);
-    let result = live.machine.result(now_ms(), live.started_on.clone());
-    // Held with its mark as it is to be stored: the app stopping from here
-    // on keeps it once.
-    ctx.mark_so_far(
-        &live.mark,
-        SoFar {
-            result: result.clone(),
-            settings: None,
-        },
-    );
-    keep_and_show(ctx, result);
-}
-
-/// A run with no station worked has nothing for any stat: it is let go, and
-/// the results screen says so, with another run a press away.
-fn keep_nothing(ctx: AppCtx) {
-    let AppCtx {
-        mut screen,
-        contest: mut view,
-        mut result,
-        mut auto_message,
-        ..
-    } = ctx;
-    if end_run(ctx).is_none() {
-        return;
-    }
-    ctx.mark_ended();
-    view.set(None);
-    result.set(Some(Finished::NothingKept));
-    auto_message.set(None);
-    screen.set(Screen::Results);
-}
-
-/// End the run without keeping it.
-fn abandon_run(ctx: AppCtx) {
-    let AppCtx {
-        mut screen,
-        contest: mut view,
-        ..
-    } = ctx;
-    if end_run(ctx).is_none() {
-        return;
-    }
-    ctx.mark_ended();
-    view.set(None);
-    screen.set(Screen::Home);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audio::fake::{Behaviour, Call};
     use crate::persist::Store;
     use crate::persist::backup::{read_backup, write_backup};
-    use crate::testing::{Harness, contest_settings, run};
+    use crate::testing::{
+        Harness, contest_settings, copy_what_was_heard, press, quiet, run, type_into,
+    };
     use crate::time::POLL_MS;
     use cw_core::band::BandKey;
-    use cw_core::{
-        CharSetMode, ContestView, MONITOR_LEVEL, parse_callsign, plan_morse_playback_for,
-    };
+    use cw_core::{CharSetMode, ContestPhase, ContestView, MONITOR_LEVEL, plan_morse_playback_for};
 
-    impl LiveContest {
-        /// The run's hold on the audio, for a test to end or to stop.
-        pub(crate) fn lease(&self) -> &Lease {
-            &self.lease
-        }
+    /// Hand the run `event`, come under `lease`.
+    fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
+        live_run::dispatch::<Run>(ctx, lease, event);
     }
 
     fn view(h: &Harness) -> Option<ContestView> {
@@ -542,58 +464,6 @@ mod tests {
 
     fn phase(h: &Harness) -> Option<ContestPhase> {
         view(h).map(|view| view.phase)
-    }
-
-    /// Whether the run is on and nothing is on the air: the moment to key.
-    fn quiet(h: &Harness) -> bool {
-        view(h).is_some_and(|view| view.phase == ContestPhase::Running && view.air.is_none())
-    }
-
-    /// Press `key` the way the run screen's keys and buttons do.
-    fn press(h: &mut Harness, key: OpKey) {
-        let ctx = h.ctx;
-        h.in_app(|| press_key(ctx, key));
-        h.pump();
-    }
-
-    fn type_into(h: &mut Harness, field: EntryField, text: &str) {
-        let entry = h.ctx.entry;
-        h.in_app(|| entry.edit(field, text.to_string(), Some(MonoMs(mono_ms()))));
-    }
-
-    /// What the callers sent in the last turn, as the player was told it.
-    fn last_replies(h: &Harness) -> Vec<String> {
-        h.recorder
-            .starts()
-            .last()
-            .map(|start| {
-                start
-                    .transcript
-                    .others
-                    .iter()
-                    .map(|other| other.text.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Copy what the last turn's callers sent into the fields, as an
-    /// operator who hears every character would: a call, a call put right,
-    /// or an exchange's serial.
-    fn copy_what_was_heard(h: &mut Harness) {
-        for text in last_replies(h) {
-            let words: Vec<&str> = text.split_whitespace().collect();
-            match words.as_slice() {
-                ["DE", call] => type_into(h, EntryField::Call, call),
-                [one, two] if one == two => type_into(h, EntryField::Call, one),
-                [call] if parse_callsign(call).is_some() => type_into(h, EntryField::Call, call),
-                _ if words.contains(&"5NN") => {
-                    let serial = words.last().copied().unwrap_or_default();
-                    type_into(h, EntryField::Exchange, serial);
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Work the run as a perfect operator until it is over or `budget_ms`
@@ -1489,6 +1359,583 @@ mod tests {
             h.in_app(|| pause_run(ctx, PauseWhy::You));
             let again = h.ctx.announced.peek().clone().map(|said| said.serial);
             assert_ne!(first, again, "the same words, said again");
+        });
+    }
+
+    /// The run the store holds last, and its log.
+    fn stored_last(h: &Harness) -> (cw_core::SessionResult, cw_core::ContestRun) {
+        let kept = h.store.load_sessions().pop().expect("a run stored");
+        let log = kept
+            .contest
+            .as_ref()
+            .and_then(|log| log.run(kept.groups.len()))
+            .expect("its log");
+        (kept, log)
+    }
+
+    /// End the run as End run does.
+    fn end(h: &mut Harness) {
+        let ctx = h.ctx;
+        h.in_app(|| crate::session_runtime::finish_run(ctx));
+        h.pump();
+    }
+
+    /// Work the run on from one QSO logged until the next station has
+    /// taken the call sent to it, its exchange come: a second QSO open.
+    async fn open_a_second_qso(h: &mut Harness) {
+        let first = view(h)
+            .and_then(|view| view.log.first().map(|row| row.call.clone()))
+            .expect("a QSO logged");
+        let open = |h: &Harness| {
+            view(h).is_some_and(|view| {
+                view.qsos == 1 && view.qso.call_taken && view.qso.call_sent != first
+            })
+        };
+        let mut waited = 0;
+        while !open(h) {
+            assert!(waited < 30_000, "no second station took its call");
+            if quiet(h) {
+                copy_what_was_heard(h);
+                press(h, OpKey::Esm);
+            }
+            h.advance(u64::from(POLL_MS)).await;
+            waited += u64::from(POLL_MS);
+        }
+    }
+
+    /// A paused run's ticks change nothing: a gap between two of them is
+    /// found, but the run is paused already, as you paused it, and nothing
+    /// is said of it.
+    #[test]
+    fn a_paused_runs_ticks_change_nothing() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let ctx = h.ctx;
+            h.advance(500).await;
+            h.in_app(|| tick(ctx));
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            let said = h.ctx.announced.peek().clone();
+            assert_eq!(said.as_ref().map(|said| said.text.as_str()), Some("Paused"));
+            h.advance(5_000).await;
+            h.in_app(|| tick(ctx));
+            h.pump();
+            assert_eq!(phase(&h), Some(ContestPhase::Paused { why: PauseWhy::You }));
+            assert_eq!(*h.ctx.announced.peek(), said, "something was said");
+        });
+    }
+
+    /// A run held back before its screen first ticks, a phone frozen as it
+    /// started, runs on, the gap counted as run time: its gap check waits
+    /// for the first tick, where a session's is armed as it starts.
+    #[test]
+    fn a_run_held_back_before_its_first_tick_runs_on() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            let started = mono_ms();
+            h.start_training();
+            tokio::time::advance(std::time::Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+            h.pump();
+            let ctx = h.ctx;
+            h.in_app(|| tick(ctx));
+            let shown = view(&h).expect("a run");
+            assert_eq!(shown.phase, ContestPhase::Running);
+            let now = MonoMs(mono_ms());
+            let clock = shown.clock.expect("running");
+            assert_eq!(clock.peek_ms(now), now.0 - started, "the gap is run time");
+            assert_eq!(clock.paused_ms(now), 0);
+        });
+    }
+
+    /// Keys pressed while every task is held back do not keep a run seen,
+    /// as a session's news keeps it: only its screen's ticks do, so a gap
+    /// between two ticks pauses it from the first, keys or not.
+    #[test]
+    fn keys_do_not_keep_a_run_seen_between_ticks() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let ctx = h.ctx;
+            h.advance(500).await;
+            h.in_app(|| tick(ctx));
+            let ticked = mono_ms();
+            for _ in 0..2 {
+                tokio::time::advance(std::time::Duration::from_millis(1_500)).await;
+                tokio::task::yield_now().await;
+                h.in_app(|| change_speed(ctx, 2));
+            }
+            let shown = view(&h).expect("a run");
+            assert_eq!(
+                shown.phase,
+                ContestPhase::Paused {
+                    why: PauseWhy::Hidden
+                }
+            );
+            let now = MonoMs(mono_ms());
+            let clock = shown.clock.expect("running");
+            assert_eq!(clock.paused_ms(now), now.0 - ticked, "paused from the tick");
+        });
+    }
+
+    /// End run while paused keeps the run, as it would running.
+    #[test]
+    fn ending_a_paused_run_keeps_it() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            assert!(!h.lease().is_current());
+            end(&mut h);
+            assert_eq!(h.screen(), Screen::Results);
+            assert!(
+                h.ctx
+                    .result
+                    .peek()
+                    .clone()
+                    .and_then(Finished::kept)
+                    .is_some()
+            );
+            let (_, log) = stored_last(&h);
+            assert_eq!(log.qsos.len(), 1);
+            assert_eq!(h.store.load_sessions().len(), 1);
+        });
+    }
+
+    /// News under an earlier run's lease never reaches a paused run, nor
+    /// the copies it keeps: told that every turn of the run before was held
+    /// up, the run keeps its copies timed.
+    #[test]
+    fn news_of_an_earlier_run_never_reaches_a_paused_run() {
+        run(|| async {
+            crate::time::pin_seeds(Some(7));
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let older = h.lease();
+            let ctx = h.ctx;
+            h.in_app(|| crate::session_runtime::abort_run(ctx));
+            h.pump();
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            let writes = h.count_writes(h.ctx.contest);
+            h.in_app(|| {
+                for id in 1..=200 {
+                    dispatch(ctx, &older, ContestEvent::TurnHeldUp { id });
+                }
+            });
+            h.pump();
+            assert_eq!(
+                writes.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "an earlier run's news was published"
+            );
+            h.in_app(|| resume_run(ctx));
+            h.pump();
+            end(&mut h);
+            let (kept, _) = stored_last(&h);
+            assert!(
+                kept.group_timings
+                    .iter()
+                    .all(|timing| timing.char_times.is_some() && timing.untimed.is_none()),
+                "{:?}",
+                kept.group_timings
+            );
+        });
+    }
+
+    /// The owner's first rule: a QSO worked with no pause, every turn of it
+    /// played out as planned, keeps its copies' times, and says of none
+    /// why it has none.
+    #[test]
+    fn a_qso_logged_with_no_pause_is_stored_timed() {
+        run(|| async {
+            crate::time::pin_seeds(Some(7));
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            end(&mut h);
+            let (kept, log) = stored_last(&h);
+            assert_eq!(log.qsos.len(), 1);
+            assert_eq!(kept.groups.len(), 2, "the call and its number");
+            assert!(
+                kept.group_timings
+                    .iter()
+                    .all(|timing| timing.char_times.is_some() && timing.untimed.is_none()),
+                "{:?}",
+                kept.group_timings
+            );
+        });
+    }
+
+    /// The owner's third rule, at End: a run ended while paused with a QSO
+    /// open keeps that QSO, as lost, beside the one logged.
+    #[test]
+    fn ending_a_run_paused_mid_qso_keeps_that_qso_as_lost() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            open_a_second_qso(&mut h).await;
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            end(&mut h);
+            let (_, log) = stored_last(&h);
+            let kinds: Vec<&str> = log.qsos.iter().map(|qso| qso.k.as_str()).collect();
+            assert_eq!(kinds, ["", "lost"]);
+        });
+    }
+
+    /// The owner's fourth rule: a pause and Resume change no QSO logged
+    /// before the pause, its record or its groups, field for field and
+    /// time for time, against what the mark held of it before the pause:
+    /// paused by Back, by the page going out of sight, or by a gap the app
+    /// was not running in.
+    #[test]
+    fn resuming_a_run_changes_no_qso_logged_before_its_pause() {
+        run(|| async {
+            for way in ["Back", "the page hidden", "a gap away"] {
+                let mut h = Harness::with_settings(contest_settings());
+                h.start_training();
+                work(&mut h, 60_000, Some(1)).await;
+                let checked = |h: &Harness| {
+                    view(h).is_some_and(|view| {
+                        view.log
+                            .first()
+                            .is_some_and(|row| matches!(row.status, cw_core::RowStatus::Checked(_)))
+                    })
+                };
+                assert!(h.run_until(15_000, checked).await, "{way}");
+                let before = h
+                    .store
+                    .open()
+                    .and_then(|open| open.so_far)
+                    .expect("the QSO with the mark")
+                    .result;
+                let before_log = before
+                    .contest
+                    .as_ref()
+                    .and_then(|log| log.run(before.groups.len()))
+                    .expect("its log");
+                let owned = before_log.qsos[0].g as usize;
+                let ctx = h.ctx;
+                match way {
+                    "Back" => assert!(h.in_app(|| crate::session_runtime::hold_run(ctx)), "{way}"),
+                    "the page hidden" => {
+                        h.set_page_hidden(true);
+                        h.advance(u64::from(POLL_MS)).await;
+                        h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
+                    }
+                    _ => {
+                        h.in_app(|| tick(ctx));
+                        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+                        tokio::task::yield_now().await;
+                        h.pump();
+                        h.in_app(|| tick(ctx));
+                    }
+                }
+                h.pump();
+                assert!(
+                    matches!(phase(&h), Some(ContestPhase::Paused { .. })),
+                    "{way}: {:?}",
+                    phase(&h)
+                );
+                h.advance(5_000).await;
+                h.set_page_hidden(false);
+                h.in_app(|| resume_run(ctx));
+                h.pump();
+                work(&mut h, 60_000, Some(2)).await;
+                end(&mut h);
+                let (kept, log) = stored_last(&h);
+                assert!(log.qsos.len() >= 2, "{way}: {:?}", log.qsos);
+                assert_eq!(log.qsos[0], before_log.qsos[0], "{way}");
+                assert_eq!(kept.groups[..owned], before.groups[..owned], "{way}");
+                assert_eq!(
+                    kept.group_timings[..owned],
+                    before.group_timings[..owned],
+                    "{way}"
+                );
+            }
+        });
+    }
+
+    /// A run whose turns were held up on their way, as a native stream
+    /// fallen behind the wall clock finds them, keeps its copies untimed,
+    /// each saying so, as a session's group says it.
+    #[test]
+    fn a_run_whose_turn_was_held_up_stores_its_copies_saying_so() {
+        run(|| async {
+            crate::time::pin_seeds(Some(7));
+            let mut h = Harness::with_settings(contest_settings());
+            h.set_behaviour(Behaviour::Late);
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            end(&mut h);
+            let (kept, log) = stored_last(&h);
+            assert_eq!(log.qsos.len(), 1);
+            assert_eq!(kept.groups.len(), 2, "the call and its number");
+            for timing in &kept.group_timings {
+                assert_eq!(
+                    (timing.char_times.clone(), timing.untimed),
+                    (None, Some(cw_core::Untimed::HeldUp))
+                );
+            }
+        });
+    }
+
+    /// The owner's second rule, for a run: a call heard whole and alone in
+    /// the turn on the air, and keyed as soon as it was heard, is stored
+    /// with no times when the page going out of sight cut that turn short,
+    /// in the moment before the turn's end was told, and says it was
+    /// paused.
+    #[test]
+    fn a_run_paused_mid_turn_stores_the_copies_heard_in_it_as_paused() {
+        run(|| async {
+            crate::time::pin_seeds(Some(7));
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let cq = h.recorder.starts()[0].clone();
+            let call = cq.transcript.others[0].text.clone();
+            let heard_by = cq.plan.others[0]
+                .events
+                .iter()
+                .map(|tone| tone.end_sec())
+                .fold(0.0, f64::max);
+            let call_ends = cq.at.0 + (heard_by * 1_000.0).ceil() as u64;
+            // The turn's end is told a poll or so after its sound ends.
+            h.advance(call_ends - mono_ms()).await;
+            type_into(&mut h, EntryField::Call, &call);
+            h.advance(4).await;
+            assert!(
+                view(&h).is_some_and(|view| view.air.is_some()),
+                "the turn's end was told"
+            );
+            let ctx = h.ctx;
+            h.set_page_hidden(true);
+            h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
+            h.pump();
+            h.advance(5_000).await;
+            h.set_page_hidden(false);
+            h.in_app(|| resume_run(ctx));
+            h.pump();
+            // Its call sent, its number copied, and the QSO logged.
+            assert!(h.run_until(10_000, quiet).await);
+            press(&mut h, OpKey::Esm);
+            work(&mut h, 30_000, Some(1)).await;
+            end(&mut h);
+            let (kept, _) = stored_last(&h);
+            assert_eq!(kept.groups[0].sent, call);
+            let timing = &kept.group_timings[0];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(cw_core::Untimed::Paused))
+            );
+        });
+    }
+
+    /// The owner's second rule, for a run, as it comes most often: the page
+    /// going out of sight part way through a caller's call, its first
+    /// sending, leaves the copy of that call with no times, saying it was
+    /// paused, where a run worked with no pause keeps it timed.
+    #[test]
+    fn a_run_paused_part_way_through_a_call_stores_its_copy_as_paused() {
+        run(|| async {
+            for cut in [false, true] {
+                crate::time::pin_seeds(Some(7));
+                let mut h = Harness::with_settings(contest_settings());
+                h.start_training();
+                let cq = h.recorder.starts()[0].clone();
+                let call = cq.transcript.others[0].text.clone();
+                let tones = &cq.plan.others[0].events;
+                let begins = tones
+                    .iter()
+                    .map(|tone| tone.start_sec)
+                    .fold(f64::INFINITY, f64::min);
+                let heard_by = tones.iter().map(|tone| tone.end_sec()).fold(0.0, f64::max);
+                let mid = cq.at.0 + ((begins + heard_by) / 2.0 * 1_000.0) as u64;
+                h.advance(mid - mono_ms()).await;
+                assert!(view(&h).is_some_and(|view| view.air.is_some()), "{cut}");
+                if cut {
+                    let ctx = h.ctx;
+                    h.set_page_hidden(true);
+                    h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
+                    h.pump();
+                    h.advance(5_000).await;
+                    h.set_page_hidden(false);
+                    h.in_app(|| resume_run(ctx));
+                    h.pump();
+                }
+                work(&mut h, 30_000, Some(1)).await;
+                end(&mut h);
+                let (kept, _) = stored_last(&h);
+                assert_eq!(kept.groups[0].sent, call, "{cut}");
+                let timing = &kept.group_timings[0];
+                if cut {
+                    assert_eq!(
+                        (timing.char_times.clone(), timing.untimed),
+                        (None, Some(cw_core::Untimed::Paused))
+                    );
+                } else {
+                    assert!(
+                        timing.char_times.is_some() && timing.untimed.is_none(),
+                        "{timing:?}"
+                    );
+                }
+            }
+        });
+    }
+
+    /// The owner's third rule, cut off: a run the app stops under while it
+    /// is paused is kept at the next launch as End run would have kept it
+    /// at the pause, the QSO the pause cut kept as lost beside the one
+    /// logged.
+    #[test]
+    fn a_run_the_app_stops_under_while_paused_keeps_the_qso_the_pause_cut() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.store.mark_tutorial_done();
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            open_a_second_qso(&mut h).await;
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::Hidden));
+            h.pump();
+            assert!(matches!(phase(&h), Some(ContestPhase::Paused { .. })));
+            assert!(h.store.load_sessions().is_empty(), "stored while paused");
+
+            let (mut ui, _recorder) = crate::testing::Ui::launch(h.store.clone());
+            ui.advance(20).await;
+            let (_, log) = stored_last(&h);
+            let kinds: Vec<&str> = log.qsos.iter().map(|qso| qso.k.as_str()).collect();
+            assert_eq!(kinds, ["", "lost"]);
+        });
+    }
+
+    /// A paused run still hears what comes under the lease its pause gave
+    /// back, as a paused session does: told that the turns of its QSO were
+    /// held up, it keeps the QSO's copies untimed, each saying so, where a
+    /// run told nothing keeps them timed.
+    #[test]
+    fn a_paused_run_hears_the_news_of_its_own_sends() {
+        run(|| async {
+            for told in [false, true] {
+                crate::time::pin_seeds(Some(7));
+                let mut h = Harness::with_settings(contest_settings());
+                h.start_training();
+                work(&mut h, 60_000, Some(1)).await;
+                let cut = h.lease();
+                let ctx = h.ctx;
+                h.in_app(|| pause_run(ctx, PauseWhy::You));
+                h.pump();
+                assert!(!cut.is_current(), "{told}");
+                if told {
+                    h.in_app(|| {
+                        for id in 1..=200 {
+                            dispatch(ctx, &cut, ContestEvent::TurnHeldUp { id });
+                        }
+                    });
+                    h.pump();
+                }
+                h.in_app(|| resume_run(ctx));
+                h.pump();
+                end(&mut h);
+                let (kept, log) = stored_last(&h);
+                assert!(!log.qsos.is_empty(), "{told}");
+                for timing in &kept.group_timings {
+                    if told {
+                        assert_eq!(
+                            (timing.char_times.clone(), timing.untimed),
+                            (None, Some(cw_core::Untimed::HeldUp)),
+                            "{told}"
+                        );
+                    } else {
+                        assert!(
+                            timing.char_times.is_some() && timing.untimed.is_none(),
+                            "{told}: {timing:?}"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    /// Resume handed to a run as an event goes the way Resume's button
+    /// does: the audio is claimed afresh inside the tap, and the run goes
+    /// on under the new claim, a CQ keyed after it going out.
+    #[test]
+    fn resume_sent_as_an_event_claims_the_audio_first() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            assert!(h.run_until(10_000, quiet).await);
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            h.pump();
+            let paused = h.lease();
+            assert!(!paused.is_current());
+            h.in_app(|| send_run_event(ctx, ContestEvent::Resume));
+            h.pump();
+            let lease = h.lease();
+            assert!(
+                lease.is_current() && !lease.is(&paused),
+                "resumed under the lease the pause gave back"
+            );
+            assert_eq!(phase(&h), Some(ContestPhase::Running));
+            let sends = h.texts().len();
+            press(&mut h, OpKey::Cq);
+            assert!(
+                h.run_until(1_500, |h| h.texts().len() > sends).await,
+                "nothing went out after Resume"
+            );
+        });
+    }
+
+    /// What a paused run hears goes in its mark, as it would go in what
+    /// End keeps: told while paused that the turns of its QSO were held
+    /// up, the run the app stops under then is kept at the next launch as
+    /// End would keep it, the QSO's copies untimed and saying so.
+    #[test]
+    fn news_a_paused_run_hears_goes_in_its_mark() {
+        run(|| async {
+            for stop in [false, true] {
+                crate::time::pin_seeds(Some(7));
+                let mut h = Harness::with_settings(contest_settings());
+                h.store.mark_tutorial_done();
+                h.start_training();
+                work(&mut h, 60_000, Some(1)).await;
+                let cut = h.lease();
+                let ctx = h.ctx;
+                h.in_app(|| pause_run(ctx, PauseWhy::You));
+                h.pump();
+                assert!(!cut.is_current(), "{stop}");
+                h.in_app(|| {
+                    for id in 1..=200 {
+                        dispatch(ctx, &cut, ContestEvent::TurnHeldUp { id });
+                    }
+                });
+                h.pump();
+                if stop {
+                    let (mut ui, _recorder) = crate::testing::Ui::launch(h.store.clone());
+                    ui.advance(20).await;
+                } else {
+                    end(&mut h);
+                }
+                let (kept, log) = stored_last(&h);
+                assert!(!log.qsos.is_empty(), "stopped {stop}");
+                for timing in &kept.group_timings {
+                    assert_eq!(
+                        (timing.char_times.clone(), timing.untimed),
+                        (None, Some(cw_core::Untimed::HeldUp)),
+                        "stopped {stop}"
+                    );
+                }
+            }
         });
     }
 }
