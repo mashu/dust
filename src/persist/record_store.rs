@@ -409,9 +409,10 @@ pub(super) struct Made<R> {
 }
 
 /// What a store holds as the move is made over it ([`Here::not_moved_yet`]):
-/// every record, every tombstone by name and by the session it names, and
-/// what records hold, those under a name the move does not give among
-/// them.
+/// every record; every tombstone, by name as the tombstones read after the
+/// records name them, and by the session each names, read before the
+/// records or after; and what records hold, those under a name the move
+/// does not give among them.
 #[derive(Default)]
 pub(super) struct Here {
     pub(super) records: BTreeSet<RecordId>,
@@ -897,31 +898,49 @@ async fn move_in<B: Backend>(
 /// What a store that moves before it reads holds, as the move made over it
 /// looks at it ([`Here`]), the move making `moved`: nothing, for a move
 /// that has nothing to write, which so looks at nothing, and waits for
-/// nothing. Why it cannot be looked at now, as a tombstone, or a record
-/// under a name the move does not give, that cannot be read just then: the
-/// move waits.
+/// nothing; and nothing where nothing is here, no tombstone read before
+/// the listing and nothing listed. Why it cannot be looked at now, as a
+/// tombstone, or a record under a name the move does not give, that cannot
+/// be read just then: the move waits.
+///
+/// The tombstones are read before what is here is listed, and again once
+/// what the records under a name the move does not give hold is read, as
+/// a browser's move reads them about its records ([`read_in`]): a session
+/// another copy deletes in between, under such a name, is either here,
+/// what it holds read, or deleted after, and one it puts back in between,
+/// by Undo or a restore, is either deleted before or here. By name the
+/// later read alone says what is deleted. An Undo that takes the tombstone
+/// away before it stores the record, as one on the files does, still
+/// leaves its session neither where its two steps span the first read of
+/// the tombstones and the listing of the records: that window is the
+/// Undo's own.
 async fn here_of<B: Backend>(store: &B, moved: &[Record]) -> Result<Here, String> {
     if moved.is_empty() {
         return Ok(Here::default());
     }
-    let (records, gone) = store.here().await.map_err(|refused| refused.words())?;
-    if records.is_empty() && gone.is_empty() {
-        return Ok(Here::default());
-    }
-    let tombstones = store
+    let before = store
         .tombstones()
         .await
         .map_err(|refused| refused.words())?;
-    let gone_keys = keys_of_tombstones(&tombstones, Reading::Strict)?;
+    let mut gone_keys = keys_of_tombstones(&before, Reading::Strict)?;
+    let (records, listed) = store.here().await.map_err(|refused| refused.words())?;
+    if before.is_empty() && records.is_empty() && listed.is_empty() {
+        return Ok(Here::default());
+    }
     let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
     let elsewhere: Vec<RecordId> = records.difference(&names).copied().collect();
     let texts = store
         .texts(&elsewhere)
         .await
         .map_err(|refused| refused.words())?;
+    let after = store
+        .tombstones()
+        .await
+        .map_err(|refused| refused.words())?;
+    gone_keys.extend(keys_of_tombstones(&after, Reading::Strict)?);
     Ok(Here {
         records,
-        gone,
+        gone: after.iter().filter_map(|tombstone| tombstone.id).collect(),
         texts: texts.into_iter().collect(),
         gone_keys,
     })
