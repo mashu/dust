@@ -429,17 +429,19 @@ pub(crate) fn give_back<M: RunMachine>(ctx: AppCtx, lease: &Lease) {
 }
 
 /// What is live, taken out of the app if it is of kind `M`, to be kept or
-/// let go: Ending, with the audio given back. It is marked over once it is
-/// stored or let go.
+/// let go: Ending, with the audio given back. Its stage is asked before it
+/// is taken out, so what cannot end is left as it is. It is marked over
+/// once it is stored or let go.
 pub(crate) fn end<M: RunMachine>(ctx: AppCtx) -> Option<LiveRun<M, M::Own>> {
-    let taken = ctx
-        .app()
-        .session
-        .borrow_mut()
-        .take_if(|live| M::of(live).is_some())?;
-    let mut live = M::unboxed(taken)?;
-    // What the app holds lives Running or Paused, so is taken out once.
-    live.stage = live.stage.ending()?;
+    let mut live = {
+        let app = ctx.app();
+        let mut slot = app.session.borrow_mut();
+        // What the app holds lives Running or Paused, so is taken out once.
+        let ending = slot.as_ref().and_then(M::of)?.stage.ending()?;
+        let mut live = slot.take().and_then(M::unboxed)?;
+        live.stage = ending;
+        live
+    };
     live.lease.release();
     M::ending(ctx, &mut live);
     Some(live)
@@ -810,6 +812,36 @@ mod tests {
         run(|| async {
             kept_once::<Groups>().await;
             kept_once::<Run>().await;
+        });
+    }
+
+    /// What is live of kind `M` whose stage refuses to end is left where it
+    /// is by an end, which asks the stage before it takes anything out:
+    /// still the app's, holding its audio, still shown, and neither kept
+    /// nor let go. The app never holds such a stage; a test makes one.
+    async fn left_as_it_is_when_it_cannot_end<M: Driven>() {
+        let name = M::NAME;
+        let mut h = Harness::with_settings(M::settings());
+        let ctx = h.ctx;
+        h.start_training();
+        let lease = h.lease();
+        if let Some(live) = h.app.session.borrow_mut().as_mut().and_then(M::of_mut) {
+            live.stage = Stage::Ending;
+        }
+        assert!(h.in_app(|| end::<M>(ctx)).is_none(), "{name}: ended again");
+        assert_eq!(stage::<M>(&h), Some(Stage::Ending), "{name}: taken out");
+        assert!(lease.is_current(), "{name}: its audio given back");
+        assert!(M::shown(ctx).peek().is_some(), "{name}: no longer shown");
+        assert!(!h.in_app(|| keep::<M>(ctx)), "{name}: kept");
+        assert!(!h.in_app(|| let_go::<M>(ctx, None)), "{name}: let go");
+        assert_eq!(stage::<M>(&h), Some(Stage::Ending), "{name}: taken out");
+    }
+
+    #[test]
+    fn either_kind_whose_stage_cannot_end_is_left_as_it_is() {
+        run(|| async {
+            left_as_it_is_when_it_cannot_end::<Groups>().await;
+            left_as_it_is_when_it_cannot_end::<Run>().await;
         });
     }
 }
