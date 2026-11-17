@@ -3071,7 +3071,6 @@ mod tests {
     #[test]
     fn an_undo_another_copy_makes_as_an_older_build_writes_while_this_one_reads_leaves_one_record()
     {
-        let mut acted = 0;
         for nth in 1..=3 {
             let dir = TempDir::new("undo-as-older-writes");
             let now = crate::time::now_ms();
@@ -3105,23 +3104,24 @@ mod tests {
             );
             let written = serde_json::to_vec(&[old, session.clone(), fresh.clone()]).unwrap();
             let undone = here.json.clone();
-            let made = Arc::new(Mutex::new(false));
-            let said = Arc::clone(&made);
+            let reads = Arc::new(Mutex::new(0));
+            let counted = Arc::clone(&reads);
             let looking = Files::at(&dir.0);
-            let mut looks = 0;
             looking.meanwhile(move || {
-                looks += 1;
-                if looks == nth {
+                let mut looks = counted.lock().unwrap();
+                *looks += 1;
+                if *looks == nth {
                     fs::write(&whole, &written).unwrap();
                     fs::remove_file(&tombstone).unwrap();
                     fs::write(&record, &undone).unwrap();
-                    *said.lock().unwrap() = true;
                 }
             });
             let load = looking.load();
-            if *made.lock().unwrap() {
-                acted += 1;
-            }
+            // Eight folder reads: the listing's three, the change made at
+            // the nth, and no tombstone read before them, as the load found
+            // the history kept whole as it was; then the take-up's, the
+            // tombstones, its own listing's three and the tombstones again.
+            assert_eq!(*reads.lock().unwrap(), 8, "read with the change at {nth}");
             let holding = |session: &SessionResult| {
                 let key = SessionKey::of(session);
                 names(&history.join(RECORDS))
@@ -3146,7 +3146,6 @@ mod tests {
                 "finished since, read at the folder read {nth}: {read:?}"
             );
         }
-        assert_eq!(acted, 3, "made as the records were listed");
     }
 
     /// Which records were deleted by hand comes with when each was, as its
