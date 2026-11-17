@@ -409,9 +409,10 @@ pub(super) struct Made<R> {
 }
 
 /// What a store holds as the move is made over it ([`Here::not_moved_yet`]):
-/// every record, every tombstone by name and by the session it names, and
-/// what records hold, those under a name the move does not give among
-/// them.
+/// every record; every tombstone, by name as the tombstones read after the
+/// records name them, and by the session each names, read before the
+/// records or after; and what records hold, those under a name the move
+/// does not give among them.
 #[derive(Default)]
 pub(super) struct Here {
     pub(super) records: BTreeSet<RecordId>,
@@ -680,7 +681,10 @@ async fn read_in<B: Backend>(
     // What the tombstones name before the records are read, for a take-up
     // of what an older build changed: a session another copy deletes
     // meanwhile is either still here or deleted after, and one it puts back
-    // meanwhile is either deleted before or here.
+    // meanwhile is either deleted before or here, but where a put-back's
+    // two steps on the files span this read and the listing, or where it
+    // both deletes and puts back one, deleted as the records are listed
+    // (take_up).
     let before = match &layout {
         Some(layout) if !read_first => match store.legacy_look(layout).await {
             LegacyLook::Changed(_) => Some(store.tombstones().await),
@@ -782,13 +786,21 @@ async fn read_in<B: Backend>(
         && sorted.failed.is_empty()
         && !skipped
     {
-        let live = live_of(&sessions, &sorted.later);
-        let taken = match before.unwrap_or_else(|| Ok(HashSet::new())) {
-            Ok(before) => take_up(store, layout, Some((live, before))).await,
-            Err(why) => {
+        let taken = match before {
+            Some(Ok(before)) => {
+                let live = live_of(&sessions, &sorted.later);
+                take_up(store, layout, Some((live, before))).await
+            }
+            Some(Err(why)) => {
                 eprintln!("could not read what was deleted here: {why}");
                 Err(HeldBack)
             }
+            // The history kept whole was as it was last taken up, or could
+            // not be looked at, when this read looked at it, so no tombstone
+            // was read before the records: a change an older build makes to
+            // it since is taken up as at a listing, the tombstones read
+            // before what is here is listed again.
+            None => take_up(store, layout, None).await,
         };
         match taken {
             Ok(Some(change)) => taken_up(&mut sessions, &change),
@@ -897,31 +909,53 @@ async fn move_in<B: Backend>(
 /// What a store that moves before it reads holds, as the move made over it
 /// looks at it ([`Here`]), the move making `moved`: nothing, for a move
 /// that has nothing to write, which so looks at nothing, and waits for
-/// nothing. Why it cannot be looked at now, as a tombstone, or a record
-/// under a name the move does not give, that cannot be read just then: the
-/// move waits.
+/// nothing; and nothing where nothing is here, no tombstone read before
+/// the listing and nothing listed. Why it cannot be looked at now, as a
+/// tombstone, or a record under a name the move does not give, that cannot
+/// be read just then: the move waits.
+///
+/// The tombstones are read before what is here is listed, and again once
+/// what the records under a name the move does not give hold is read, as
+/// a browser's move reads them about its records ([`read_in`]): a session
+/// another copy deletes in between, under such a name, is either here,
+/// what it holds read, or deleted after, and one it puts back in between,
+/// by Undo or a restore, is either deleted before or here. By name the
+/// later read alone says what is deleted. On the files every put-back
+/// takes the tombstone away before it stores the record, an Undo, a
+/// restore of a session deleted under the name the restore gives it and a
+/// sync's take-back alike: one whose two steps span the first read of the
+/// tombstones and the listing of the records still leaves its session
+/// neither, and that window is the put-back's own. A session another copy
+/// both deletes and puts back in between, under such a name, deleted as
+/// what is here is listed, is left neither as well, as at a take-up: the
+/// move stores it again beside the record put back.
 async fn here_of<B: Backend>(store: &B, moved: &[Record]) -> Result<Here, String> {
     if moved.is_empty() {
         return Ok(Here::default());
     }
-    let (records, gone) = store.here().await.map_err(|refused| refused.words())?;
-    if records.is_empty() && gone.is_empty() {
-        return Ok(Here::default());
-    }
-    let tombstones = store
+    let before = store
         .tombstones()
         .await
         .map_err(|refused| refused.words())?;
-    let gone_keys = keys_of_tombstones(&tombstones, Reading::Strict)?;
+    let mut gone_keys = keys_of_tombstones(&before, Reading::Strict)?;
+    let (records, listed) = store.here().await.map_err(|refused| refused.words())?;
+    if before.is_empty() && records.is_empty() && listed.is_empty() {
+        return Ok(Here::default());
+    }
     let names: BTreeSet<RecordId> = moved.iter().map(|record| record.id).collect();
     let elsewhere: Vec<RecordId> = records.difference(&names).copied().collect();
     let texts = store
         .texts(&elsewhere)
         .await
         .map_err(|refused| refused.words())?;
+    let after = store
+        .tombstones()
+        .await
+        .map_err(|refused| refused.words())?;
+    gone_keys.extend(keys_of_tombstones(&after, Reading::Strict)?);
     Ok(Here {
         records,
-        gone,
+        gone: after.iter().filter_map(|tombstone| tombstone.id).collect(),
         texts: texts.into_iter().collect(),
         gone_keys,
     })
@@ -939,7 +973,17 @@ async fn here_of<B: Backend>(store: &B, moved: &[Record]) -> Result<Here, String
 /// The tombstones are read again after the records: a session another
 /// copy deletes in between is either still here or deleted after, and one
 /// it puts back in between, by Undo or a restore, is either deleted before
-/// or here, once its Undo has put it back.
+/// or here. On the files every put-back takes the tombstone away before it
+/// stores the record, an Undo, a restore of a session deleted under the
+/// name the restore gives it and a sync's take-back alike: one whose two
+/// steps span the first read of the tombstones and the listing of the
+/// records still leaves its session neither, and that window is the
+/// put-back's own, as at a move made again. On any store, a session
+/// another copy both deletes and puts back in between, deleted as the
+/// records are listed, is left neither as well: no read of the tombstones
+/// names it, the listing leaves it out, and it is taken up again beside
+/// the record put back. No order of these reads closes that window, which
+/// only two changes made within one take-up's reads open.
 ///
 /// It is no restore: what was taken up is noted only once it is stored,
 /// in how the history is kept, written last or with it, so a take-up cut

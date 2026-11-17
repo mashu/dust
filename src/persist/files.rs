@@ -1020,6 +1020,8 @@ impl Backend for Disk<'_> {
         }
     }
 
+    /// A test's other copy acts once they are read
+    /// ([`HistoryFiles::meanwhile()`]).
     async fn tombstones(&self) -> io::Result<Vec<Tombstone>> {
         let tombstones = self.0.tombstones();
         let mut found = Vec::new();
@@ -1031,6 +1033,7 @@ impl Backend for Disk<'_> {
             };
             found.push(Tombstone { id: Some(id), read });
         }
+        self.0.meanwhile();
         Ok(found)
     }
 
@@ -1109,9 +1112,15 @@ impl Backend for Disk<'_> {
         }))
     }
 
-    /// The loose records alone, by name, beside the tombstones.
+    /// The loose records alone, by name, beside the tombstones, listed
+    /// after them, as a listing lists them: a test's other copy acts once
+    /// each folder is read ([`HistoryFiles::meanwhile()`]).
     async fn here(&self) -> io::Result<(BTreeSet<RecordId>, BTreeSet<RecordId>)> {
-        Ok((ids_in(&self.0.records())?, ids_in(&self.0.tombstones())?))
+        let records = ids_in(&self.0.records())?;
+        self.0.meanwhile();
+        let gone = ids_in(&self.0.tombstones())?;
+        self.0.meanwhile();
+        Ok((records, gone))
     }
 
     async fn texts(&self, ids: &[RecordId]) -> io::Result<Vec<(RecordId, String)>> {
@@ -1873,10 +1882,12 @@ mod tests {
             count: Some((40, 40)),
         };
         let seen = seen.lock().unwrap().clone();
+        // Nothing is counted yet as the move looks at what is here, before
+        // it writes.
         assert_eq!(
-            seen.first(),
+            seen.iter().find(|seen| seen.count.is_some()),
             Some(&moved),
-            "as the folders are listed after the move"
+            "as the folders are listed after the move: {seen:?}"
         );
         let read = HistoryProgress {
             moving: false,
@@ -2891,7 +2902,8 @@ mod tests {
         files.load();
         let newer = finished(now + 60_000);
         keep_whole(&dir, &[old, newer.clone()]);
-        // Its place is taken once the history is listed for the take-up.
+        // Its place is taken once the history is listed for the take-up,
+        // the tombstones read before it: at the fourth folder read.
         let place = Record::of(&newer, |json| RecordId::placed(newer.timestamp, json))
             .expect("a record")
             .id;
@@ -2900,7 +2912,7 @@ mod tests {
         let mut looks = 0;
         files.meanwhile(move || {
             looks += 1;
-            if looks == 3 {
+            if looks == 4 {
                 fs::create_dir(&standing).unwrap();
             }
         });
@@ -3007,7 +3019,8 @@ mod tests {
             files.apply(&forget(&[(&here, &session)]));
             // An older build's copy, holding it as new, writes its history
             // back; and another copy undoes the deletion once this one has
-            // listed the records.
+            // listed the records, the tombstones read before them, at the
+            // fourth folder read.
             keep_whole(&dir, &[old, session.clone()]);
             let history = dir.0.join(HISTORY);
             let (tombstone, record) = (
@@ -3023,7 +3036,7 @@ mod tests {
             let undone = here.json.clone();
             looking.meanwhile(move || {
                 looks += 1;
-                if looks == 3 {
+                if looks == 4 {
                     fs::remove_file(&tombstone).unwrap();
                     fs::write(&record, &undone).unwrap();
                 }
@@ -3042,6 +3055,96 @@ mod tests {
                 })
                 .count();
             assert_eq!(holding, 1, "reading whole {reading_whole}");
+        }
+    }
+
+    /// An Undo another copy makes of a deletion here as this one reads the
+    /// history, once the records are listed, while an older build's copy
+    /// writes its history back holding the session as new, leaves one
+    /// record of it, though the history kept whole was as this copy last
+    /// took it up when it looked: the take-up, which finds the change only
+    /// then, reads the tombstones itself before it lists what is here, as
+    /// at a listing, and takes up there and then a session the older build
+    /// finished since. Handed none read before the records, as though none
+    /// were there, it went by its later read alone, and took up again the
+    /// session the Undo put back, neither listed nor named by a tombstone.
+    #[test]
+    fn an_undo_another_copy_makes_as_an_older_build_writes_while_this_one_reads_leaves_one_record()
+    {
+        for nth in 1..=3 {
+            let dir = TempDir::new("undo-as-older-writes");
+            let now = crate::time::now_ms();
+            let old = finished(now - 10 * DAY);
+            keep_whole(&dir, std::slice::from_ref(&old));
+            let files = Files::at(&dir.0);
+            files.load();
+            // Held here as a later build stored it, so not as the older
+            // build's bytes, and deleted here.
+            let session = finished(now - 5 * DAY);
+            let mut held = serde_json::to_value(&session).unwrap();
+            held["laterKey"] = serde_json::json!(1);
+            let json = serde_json::to_string(&held).unwrap();
+            let here = Record {
+                id: RecordId::placed(session.timestamp, &json),
+                json,
+            };
+            files.apply(&put(std::slice::from_ref(&here)));
+            files.apply(&forget(&[(&here, &session)]));
+            // At the nth folder read of the listing, once the load has
+            // looked at the history kept whole and found it as it was: an
+            // older build's copy, holding the session as new, and one it
+            // finished since, writes its history back, and another copy
+            // undoes the deletion.
+            let fresh = finished(now - 4 * DAY);
+            let history = dir.0.join(HISTORY);
+            let (whole, tombstone, record) = (
+                dir.0.join(SESSIONS),
+                history.join(TOMBSTONES).join(file_name(here.id)),
+                history.join(RECORDS).join(file_name(here.id)),
+            );
+            let written = serde_json::to_vec(&[old, session.clone(), fresh.clone()]).unwrap();
+            let undone = here.json.clone();
+            let reads = Arc::new(Mutex::new(0));
+            let counted = Arc::clone(&reads);
+            let looking = Files::at(&dir.0);
+            looking.meanwhile(move || {
+                let mut looks = counted.lock().unwrap();
+                *looks += 1;
+                if *looks == nth {
+                    fs::write(&whole, &written).unwrap();
+                    fs::remove_file(&tombstone).unwrap();
+                    fs::write(&record, &undone).unwrap();
+                }
+            });
+            let load = looking.load();
+            // Eight folder reads: the listing's three, the change made at
+            // the nth, and no tombstone read before them, as the load found
+            // the history kept whole as it was; then the take-up's, the
+            // tombstones, its own listing's three and the tombstones again.
+            assert_eq!(*reads.lock().unwrap(), 8, "read with the change at {nth}");
+            let holding = |session: &SessionResult| {
+                let key = SessionKey::of(session);
+                names(&history.join(RECORDS))
+                    .iter()
+                    .filter(|name| {
+                        fs::read_to_string(history.join(RECORDS).join(name))
+                            .is_ok_and(|json| key_of(&json).as_ref() == Some(&key))
+                    })
+                    .count()
+            };
+            assert_eq!(holding(&session), 1, "undone at the folder read {nth}");
+            // Taken up by this load, once.
+            assert_eq!(
+                holding(&fresh),
+                1,
+                "finished since, at the folder read {nth}"
+            );
+            let read = stamps(&load);
+            assert_eq!(
+                read.iter().filter(|&&at| at == fresh.timestamp).count(),
+                1,
+                "finished since, read at the folder read {nth}: {read:?}"
+            );
         }
     }
 
@@ -4292,6 +4395,196 @@ mod tests {
         assert_eq!(Files::at(&dir.0).listing(), Some(Vec::new()));
     }
 
+    /// Have another copy of the app on the history in `root` make `change`
+    /// the `nth` time a folder of it has been read, from the next look of
+    /// `files` on. What it came to, once the look is over: none, where no
+    /// `nth` read came; else whether the move was still being made then,
+    /// how the history is kept not yet written, and what became of the
+    /// change.
+    fn made_meanwhile(
+        files: &Files,
+        root: &Path,
+        change: HistoryChange,
+        nth: usize,
+    ) -> Arc<Mutex<Option<(bool, HistorySaved)>>> {
+        let made = Arc::new(Mutex::new(None));
+        let (root, said) = (root.to_path_buf(), Arc::clone(&made));
+        let mut looked = 0;
+        files.meanwhile(move || {
+            looked += 1;
+            if looked == nth {
+                let moving = !root.join(HISTORY).join(LAYOUT_FILE).exists();
+                let saved = HistoryFiles::at(&root).apply(&change);
+                *said.lock().unwrap() = Some((moving, saved));
+            }
+        });
+        made
+    }
+
+    /// A deletion another copy makes as this one makes the move over
+    /// records stored before it, of a session stored under a name the move
+    /// does not give it, as a restore made while the move waited names one,
+    /// is not undone, wherever between this copy's reads it is made: the
+    /// move reads the tombstones again once it has read what the records
+    /// hold. It read them once, after it listed the records and before it
+    /// read them, so a deletion made in between left the session neither
+    /// here nor deleted, and the move stored it again under its own name.
+    #[test]
+    fn a_deletion_another_copy_makes_as_this_one_moves_is_not_undone() {
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
+        let restored =
+            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
+        let mut moving = 0;
+        for nth in 1.. {
+            let dir = TempDir::new("deleted-as-moved");
+            keep_whole(&dir, &[first.clone(), second.clone()]);
+            // Restored before the move was made.
+            let files = Files::at(&dir.0);
+            assert_eq!(
+                files.apply(&put(std::slice::from_ref(&restored))),
+                HistorySaved::Stored { kept: 1 }
+            );
+            let deleted = forget(&[(&restored, &first)]);
+            let made = made_meanwhile(&files, &dir.0, deleted, nth);
+            let read = files.load();
+            let Some((while_moving, saved)) = made.lock().unwrap().take() else {
+                break;
+            };
+            assert_eq!(saved, HistorySaved::Stored { kept: 0 }, "at read {nth}");
+            moving += usize::from(while_moving);
+            assert!(read.complete, "at read {nth}");
+            assert_eq!(stamps(&read), [second.timestamp], "deleted at read {nth}");
+            let again = Files::at(&dir.0).load();
+            assert_eq!(stamps(&again), [second.timestamp], "deleted at read {nth}");
+        }
+        // Made while the move was being made, once at each of its four
+        // reads: the tombstones, the records' folder, the tombstones'
+        // folder, and the tombstones again.
+        assert!(moving >= 4, "deleted as the move read, {moving} times");
+    }
+
+    /// An Undo another copy makes of a deletion here as this one makes the
+    /// move over records, of a session deleted under a name the move does
+    /// not give it, leaves the session stored once, wherever between this
+    /// copy's reads the Undo is made: the tombstones read before what is
+    /// here is listed still name it. Read only once the records were
+    /// listed, they no longer named it, the record the Undo put back had
+    /// not been listed, and the move stored the session again beside it.
+    /// An Undo on the files takes the tombstone away before it stores the
+    /// record, as every put-back there does, a restore of a session deleted
+    /// under the name the restore gives it and a sync's take-back among
+    /// them, so one whose own two steps span this copy's first read of the
+    /// tombstones and its listing of the records still leaves the session
+    /// neither here nor deleted, and stored twice: that window is the
+    /// put-back's own, as at a take-up.
+    #[test]
+    fn an_undo_another_copy_makes_as_this_one_moves_leaves_one_record() {
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
+        let restored =
+            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
+        let undo = HistoryChange {
+            unforget: vec![restored.id],
+            ..put(std::slice::from_ref(&restored))
+        };
+        let mut moving = 0;
+        for nth in 1.. {
+            let dir = TempDir::new("undo-as-moved");
+            keep_whole(&dir, &[first.clone(), second.clone()]);
+            // Restored before the move was made, and deleted.
+            let files = Files::at(&dir.0);
+            files.apply(&put(std::slice::from_ref(&restored)));
+            files.apply(&forget(&[(&restored, &first)]));
+            let made = made_meanwhile(&files, &dir.0, undo.clone(), nth);
+            files.load();
+            let Some((while_moving, saved)) = made.lock().unwrap().take() else {
+                break;
+            };
+            assert_eq!(saved, HistorySaved::Stored { kept: 1 }, "at read {nth}");
+            moving += usize::from(while_moving);
+            let again = Files::at(&dir.0).load();
+            assert_eq!(
+                stamps(&again),
+                [first.timestamp, second.timestamp],
+                "once, undone at read {nth}"
+            );
+        }
+        // Made while the move was being made, once at each of its four
+        // reads: the tombstones, the records' folder, the tombstones'
+        // folder, and the tombstones again.
+        assert!(moving >= 4, "undone as the move read, {moving} times");
+    }
+
+    /// A deletion another copy makes as this one makes the move over
+    /// records, once this one has read the tombstones and listed what is
+    /// here and before it has read what the records hold, whose tombstone
+    /// cannot be read just then, as a folder in its place cannot, or a file
+    /// held open, has the move wait, as one there before it began does: the
+    /// tombstones read again after the records may name the session the
+    /// move would store again. Once it reads, the move is made, and the
+    /// session stays deleted. Taken at that read for one that names no
+    /// session, or with the tombstones read only once, before what the
+    /// records hold, it left the session neither here nor deleted, and the
+    /// move stored it again under its own name.
+    #[cfg(unix)]
+    #[test]
+    fn a_move_waits_on_a_tombstone_written_as_it_moves_that_cannot_be_read_now() {
+        let dir = TempDir::new("deleted-unread-as-moved");
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
+        keep_whole(&dir, &[first.clone(), second.clone()]);
+        // Restored before the move was made.
+        let restored =
+            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
+        let files = Files::at(&dir.0);
+        assert_eq!(
+            files.apply(&put(std::slice::from_ref(&restored))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        // Deleted at the third folder read, the tombstones read and both
+        // folders listed, and its tombstone cannot be read just then.
+        let tombstone = dir
+            .0
+            .join(HISTORY)
+            .join(TOMBSTONES)
+            .join(file_name(restored.id));
+        let deleted = forget(&[(&restored, &first)]);
+        let made = Arc::new(Mutex::new(None));
+        let (root, at, said) = (dir.0.clone(), tombstone.clone(), Arc::clone(&made));
+        let mut looked = 0;
+        files.meanwhile(move || {
+            looked += 1;
+            if looked == 3 {
+                let moving = !root.join(HISTORY).join(LAYOUT_FILE).exists();
+                let saved = HistoryFiles::at(&root).apply(&deleted);
+                let held = fs::read(&at).unwrap();
+                fs::remove_file(&at).unwrap();
+                fs::create_dir(&at).unwrap();
+                *said.lock().unwrap() = Some((moving, saved, held));
+            }
+        });
+        let waited = files.load();
+        let (moving, saved, held) = made.lock().unwrap().take().expect("deleted");
+        assert!(moving, "deleted as the move read");
+        assert_eq!(saved, HistorySaved::Stored { kept: 0 });
+        assert!(
+            matches!(&waited.notices[..], [HistoryNotice::MovePending(_)]),
+            "{:?}",
+            waited.notices
+        );
+        assert!(!waited.complete);
+        fs::remove_dir(&tombstone).unwrap();
+        fs::write(&tombstone, held).unwrap();
+        let read = Files::at(&dir.0).load();
+        assert!(
+            read.complete && read.notices.is_empty(),
+            "{:?}",
+            read.notices
+        );
+        assert_eq!(stamps(&read), [second.timestamp], "still deleted");
+    }
+
     /// A move made over records stored while it waited, as a restore stores
     /// one while the history kept whole cannot be read, waits again while a
     /// record here under a name the move does not give cannot be read, as a
@@ -4929,8 +5222,13 @@ mod tests {
         #[cfg(unix)]
         a_history_kept_whole_that_cannot_be_looked_at_is_taken_as_unchanged,
         an_undo_another_copy_makes_as_this_one_takes_up_leaves_one_record,
+        an_undo_another_copy_makes_as_an_older_build_writes_while_this_one_reads_leaves_one_record,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
+        a_deletion_another_copy_makes_as_this_one_moves_is_not_undone,
+        an_undo_another_copy_makes_as_this_one_moves_leaves_one_record,
+        #[cfg(unix)]
+        a_move_waits_on_a_tombstone_written_as_it_moves_that_cannot_be_read_now,
         #[cfg(unix)]
         a_move_made_over_a_record_that_cannot_be_read_now_waits_for_it,
         #[cfg(unix)]

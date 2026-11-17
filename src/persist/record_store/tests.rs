@@ -713,11 +713,11 @@ fn kept_whole(sessions: &[SessionResult]) -> Legacy {
 
 /// A store that moves before it reads makes the move, each of its steps,
 /// and only then reads what it made: the history kept whole, where it
-/// sets aside what does not read, the deletions it remembers, what is here
-/// already, and the records with how the history is kept; then what a
-/// change cut short left, the records listed and read, as of a look taken
-/// before they were listed, and the notes of what was told, read before
-/// any is written.
+/// sets aside what does not read, the deletions it remembers, the
+/// tombstones and what is here already, and the records with how the
+/// history is kept; then what a change cut short left, the records listed
+/// and read, as of a look taken before they were listed, and the notes of
+/// what was told, read before any is written.
 #[test]
 fn a_store_that_moves_first_makes_the_move_and_then_reads_what_it_made() {
     let mut script = Script::<false>::new(Ok(Gate::Unmoved));
@@ -732,6 +732,7 @@ fn a_store_that_moves_first_makes_the_move_and_then_reads_what_it_made() {
             "legacy",
             "moving",
             "legacy_deleted",
+            "tombstones",
             "here",
             "write_move(1)",
             "cut_short",
@@ -753,6 +754,52 @@ fn a_store_that_moves_first_makes_the_move_and_then_reads_what_it_made() {
 fn record_of(at: u64) -> Record {
     let session = finished(at);
     Record::of(&session, |json| RecordId::next(at, None, json)).unwrap()
+}
+
+/// A store that moves first, making the move again over a record here
+/// under a name the move does not give, as a restore names one, reads the
+/// tombstones before it lists what is here, and again once it has read
+/// what that record holds, as a browser reads them about its records: a
+/// session another copy deletes, or puts back, between any two of those
+/// reads is either here or deleted. Of the session the record holds, the
+/// move writes nothing. They were read once, between the listing and the
+/// read of what the record held.
+#[test]
+fn a_store_that_moves_first_moves_again_over_records_reading_the_tombstones_before_and_after() {
+    let mut script = Script::<false>::new(Ok(Gate::Unmoved));
+    let (first, second) = (on_day(1), on_day(2));
+    script.legacy = Ok(kept_whole(&[first.clone(), second]));
+    let restored = Record::of(&first, |json| RecordId::placed(first.timestamp, json)).unwrap();
+    script.hold(restored.id, &restored.json);
+    let load = now(load(&script)).expect("read");
+    assert!(load.complete);
+    assert_eq!(load.sessions.len(), 2, "each once");
+    assert_eq!(
+        script.calls(),
+        calls(&[
+            "open_gate",
+            "legacy",
+            "moving",
+            "legacy_deleted",
+            "tombstones",
+            "here",
+            "texts",
+            "tombstones",
+            "write_move(1)",
+            "cut_short",
+            "legacy_look",
+            "look",
+            "list",
+            "saw",
+            "read_listed",
+            "note(Failing)",
+            "note(Told)",
+            "note(UnreadTold)",
+            "note(DamagedTold)",
+            "legacy_look",
+            "loaded",
+        ])
+    );
 }
 
 /// A store that moves first, with a history moved already, an older
