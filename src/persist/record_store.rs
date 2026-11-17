@@ -909,11 +909,12 @@ async fn move_in<B: Backend>(
 /// another copy deletes in between, under such a name, is either here,
 /// what it holds read, or deleted after, and one it puts back in between,
 /// by Undo or a restore, is either deleted before or here. By name the
-/// later read alone says what is deleted. An Undo that takes the tombstone
-/// away before it stores the record, as one on the files does, still
-/// leaves its session neither where its two steps span the first read of
-/// the tombstones and the listing of the records: that window is the
-/// Undo's own.
+/// later read alone says what is deleted. On the files every put-back
+/// takes the tombstone away before it stores the record, an Undo, a
+/// restore of a session deleted under the name the restore gives it and a
+/// sync's take-back alike: one whose two steps span the first read of the
+/// tombstones and the listing of the records still leaves its session
+/// neither, and that window is the put-back's own.
 async fn here_of<B: Backend>(store: &B, moved: &[Record]) -> Result<Here, String> {
     if moved.is_empty() {
         return Ok(Here::default());

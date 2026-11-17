@@ -4379,10 +4379,12 @@ mod tests {
     /// listed, they no longer named it, the record the Undo put back had
     /// not been listed, and the move stored the session again beside it.
     /// An Undo on the files takes the tombstone away before it stores the
-    /// record, so one whose own two steps span this copy's first read of
-    /// the tombstones and its listing of the records still leaves the
-    /// session neither here nor deleted, and stored twice: that window is
-    /// the Undo's own, as at a take-up.
+    /// record, as every put-back there does, a restore of a session deleted
+    /// under the name the restore gives it and a sync's take-back among
+    /// them, so one whose own two steps span this copy's first read of the
+    /// tombstones and its listing of the records still leaves the session
+    /// neither here nor deleted, and stored twice: that window is the
+    /// put-back's own, as at a take-up.
     #[test]
     fn an_undo_another_copy_makes_as_this_one_moves_leaves_one_record() {
         let now = crate::time::now_ms();
