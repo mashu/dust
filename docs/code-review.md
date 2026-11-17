@@ -18,7 +18,7 @@
   The weak points are a few god objects (`ContestMachine`, `AppCtx`, the `Store` trait), stringly typed errors at subsystem boundaries, booleans standing in for states, and some layering inversions (§2).
 - **Well written?** Mostly. Doc comments are dense and say what holds rather than what the code does, tests read as sentences and run on a virtual clock, and the history of each fix is in its commit message. Against it: a private vocabulary ("taken up", "told of", "put back") that a newcomer must learn, and functions that branch on platform × feature × test, which hides the path that ships (§2.4).
 - **Monolithic?** Not at the function level: 39 of about 2,900 production functions exceed 100 lines, about half of them UI markup. A handful of files and types have absorbed too much and should be split (§2.2).
-- **Redundant?** Textual duplication is low. Structural duplication remains in a few places, the largest being the record-store algorithm written twice (desktop files and IndexedDB) and the two near-identical run runtimes (§2.3). The record store has since been made one core (§7.7).
+- **Redundant?** Textual duplication is low. Structural duplication remained in a few places, the largest being the record-store algorithm written twice (desktop files and IndexedDB) and the two near-identical run runtimes (§2.3). Each of those two has since been made one: the record store one core over the files, a browser's database and the test store, and the run lifecycle one state machine under both kinds of run (§9).
 - **Bugs, lock-ups, races.** The code base was well defended, but not free of them. This review found and fixed (§3, §4):
   - **7 crashes**: 3 reachable in release builds (the contest simulator in a browser, from Esc after the page fell behind; the closing, on Linux, of an audio stream whose ALSA worker had died of its own panic; a narrow sync race) and 4 latent or debug-only panics;
   - **5 fixes for a large or crafted file picked to restore**: in four of them the app could be stopped for want of memory (eight ways in all); in the fifth a browser page grew by up to a gigabyte it never gave back;
@@ -50,6 +50,12 @@
 **Follow-up (§7).** After this review was merged, the module cycles of §2.4 were removed from both crates by moving items, and most of the duplication of §2.3 was folded into shared code without changing behaviour; §7.4 gives the reason for each piece left (a change in behaviour, no code saved, the stores' protocols, or not a copy at all). The app now has no module cycle under any of the rules §7.1 defines; cw-core has none under the default rule, and one, left on purpose, under the stricter two. The suites, the lints, an Android type-check and reviews of the commits show nothing else changed.
 
 **Follow-up (§8).** The owner then asked for every deferred defect of §5 to be fixed where feasible, and decided four questions: a boot screen while the history is read, the AGC's sound fixed rather than its help text, a content security policy and `sync.json` the user's alone on Windows, and a format version in every stored session. Of the 38 defects §5 lists, 30 are fixed, one of them in part, and five found since; each fix has a regression test seen to fail first where its code runs here, but for those §8.4 names. The reviews found 111 problems (2 high, 19 medium): 58 in the four rounds' fixes, each answered before its round was merged, and 53 in four reviews after them, two of which were defects older than this work; of the 53, all are fixed but two residuals, one stated in the docs and one accepted on the owner's behalf, and the fourth review's eight, seven fixed and one stated in the docs (§8.6). The other eight defects of §5 are out of scope or left by decision (§8.3).
+
+**Follow-up (§9).** The owner then asked whether the two largest duplications of §2.3 had been fixed. They had not, so each was made one implementation behind a trait.
+- **The record store** is one core over the files, a browser's database and the test store. Each store keeps its own protocol and its own backup, and a browser whose database will not open keeps the history in page storage, outside the core.
+- **The run lifecycle** is one explicit state machine (`Running`, `Paused`, `Ending`) under both a session of groups and a contest run. Each kind keeps its own liveness. It holds the owner's four invariants as the plan read them: a turn a pause interrupts keeps no characters' times and says `paused` (or `heldUp` or `sentAgain`, where its send was found so before the pause), but keeps its answer time, which the score charges; a group cut before anything was typed into it is not stored; and the two kinds still differ in what a pause untimes.
+
+Before any code moved, the differences the plans found between the copies were pinned, but for a few in the stores judged unreachable and one the store plan left to pin and fix once code had moved; and the defects among them, with the runtimes' gaps against the owner's rules for a pause, were fixed test first: 22 in the stores and 9 in the runtimes, counting those that answered reviews of the first fixes. Three more in the stores were fixed only once code had moved: that one, by plan, once in the core (`9e39026`), and two that this report's fact-checks found, one of them noted at the time but left unfixed (§9.5). The lifecycle's steps changed no line of 4,000 seeded walks. The stores' switches matched their old code under differentials but for what each declared, and a review found more that they changed, each fixed or pinned since. Production code grew by 1,925 lines (1,024 of them code), or 2.1% of the two crates. The lifecycle's own code grew by 18.4%, against the 8–10% the owner accepted: 10.7 points for the consolidation, and 7.7 for the fixes made first (§9.4). §9.6 lists what is left, among it two narrow windows in which another copy's change during a look can leave a session stored twice, and what is the owner's to decide.
 
 ## 1. How the review was done
 
@@ -128,7 +134,7 @@ Literal copy-paste is rare (a clone scan over 6-line windows found only ~40 dupl
 | JNI call scaffolding | `persist/android.rs` (4 copies) ↔ `sync/auth/android.rs` (`with_activity`) | one `with_activity` |
 | One restore at a time | `AppCtx`'s queue (`41eb9f1`) ↔ the backup card's wait for any restore under way | keep one; the card never queued, so the queue ran only in tests, until `7227bc6` made the queue the one path |
 
-Section 7.4 records what has since been consolidated, and why the rest was left.
+Section 7.4 records what was consolidated next, and why the rest was left. Section 9 records how the first two rows were then made one each, but for liveness, which stays each kind's own (§9.3).
 
 Dead code was not swept for as such; two items surfaced: `BandSource::fill` and `board_place` are used only by tests (`pub mod band` is exempt from the dead-code check cw-core otherwise relies on).
 
@@ -405,7 +411,7 @@ All Low; each was judged not worth the risk of a change in this review.
 
 ## 6. Refactoring plan
 
-Ordered by risk removed per unit of effort. Phases 1–2 are worth doing before new features; phase 3 is hygiene to do as files are touched. Section 7.6 says how the follow-up changed items 7, 8, 9, 12, 13 and 15. Items 1, 4, 13, 17 and 18 are now done, or done in part (§8).
+Ordered by risk removed per unit of effort. Phases 1–2 are worth doing before new features; phase 3 is hygiene to do as files are touched. Section 7.6 says how the follow-up changed items 7, 8, 9, 12, 13 and 15. Items 1, 4, 13, 17 and 18 are now done, or done in part (§8), and items 8 and 9 are done but for one part each (§9).
 
 ### Phase 0: before this branch is merged
 
@@ -418,6 +424,7 @@ Run CI's jobs that could not run here: the Android and iOS type-checks, desktop 
 - **Phones:** the file picker with a large backup, a second file chosen while one is read, a UTF-16 word list (`4f9fae7`, `b4bfb12`, `6bc3baa`); Android sign-in with two taps on "Sign in to sync" (`ee3e218`, `7670958`, `b22f265`).
 - **Windows:** a `sync.json` held open by another program for a moment does not turn sync off (`0a81487`).
 - **§8's fixes:** the checks by hand that §8.4 lists.
+- **§9's work:** a browser's history now goes through the record store's core (`4834961`), which ran here only on stand-ins for a browser's database, and the lifecycle ran only with the fake player. In a real browser with two tabs open, delete, Undo, restore and back up. On the web and on a phone, pause a session and a run by hiding the page, end one and resume the other, and look at what the history keeps.
 
 ### Phase 1: close the largest remaining correctness gaps (1–2 weeks)
 
@@ -434,8 +441,8 @@ The other §5.1 items (cut-off marks released only once held, read failures read
 
 6. **Split `ContestMachine`** (`contest/machine.rs`, ~5k production lines, 101 methods; 99 in 0.16.9) into `machine/{mod, air, plan, heard, log, undo, view}.rs`. Give stations a stable `StationId` instead of a `Vec` index that Esc truncates: that is the root of the crash fixed in C-1. Replace `Air`'s parallel vectors with one `Vec<PlannedSegment>`.
 7. **Split `AppCtx`** into `HistoryCtx` (sync with store, delete/undo), `RestoreCtx` (restore and its Undo), `SettingsCtx` (store/merge, card undo) and `MarksCtx`, as in §2.2 (`Toasts` is separate already), each with its own signals. Have state return typed outcomes and let `ui::` word them. Together with item 8 and a neutral `text` module for the wording, that removes most of the module cycles listed in §2.4; `contest_runtime↔ui` also needs `ui::contest::field_name` and `ui::widgets::focus_end_script` moved out of `ui`, and `app↔page_closed` needs `app::store_settings_now` moved.
-8. **One run runtime.** A `RunMachine` trait (start, apply, effects, view) and a generic `LiveRun<M>` replace the parallel skeletons of `session_runtime.rs` and `contest_runtime.rs`, with one heartbeat owned by the runtime (runs currently depend on a mounted component's `use_ticks`).
-9. **One record-store core.** Make the algorithm duplicated between `persist/files.rs` and `persist/idb.rs` (10 function pairs) generic over a small backend trait; idb's `Glue` is close to it already. Split `Store` (45 methods; 36 in 0.16.9) into focused traits.
+8. **One run runtime.** A `RunMachine` trait (start, apply, effects, view) and a generic `LiveRun<M>` replace the parallel skeletons of `session_runtime.rs` and `contest_runtime.rs`, with one heartbeat owned by the runtime (runs currently depend on a mounted component's `use_ticks`). *Done but for the heartbeat (§9.3): one lifecycle for both, with an explicit stage, and one rule for a gap. A run is still seen by its screen's ticks, since one heartbeat would change when it pauses.*
+9. **One record-store core.** Make the algorithm duplicated between `persist/files.rs` and `persist/idb.rs` (10 function pairs) generic over a small backend trait; idb's `Glue` is close to it already. Split `Store` (45 methods; 36 in 0.16.9) into focused traits. *Done but for the split of `Store` (§9.2), over a `Backend` trait of 35 items, 30 of them functions, rather than a small one.*
 10. **Phase-specific state in enums.** `SessionMachine`'s `resume`/`countdown_to`/`missed`/… become fields of a machine-private phase enum mirroring the public `SessionPhase` (`Paused { … }`, `Playing { … }`, `Countdown { … }`). `WaitFlags` becomes an enum. `Caller`'s ~13 booleans split into `OperatorTraits` and a progress enum.
 
 11. **A `Page` trait with a fake** for what the UI asks of the page (focus, scripts, file reading), as `MorseBackend` is for audio, in place of the `#[cfg(test)]` branches inside production functions, so tests run the path that ships.
@@ -578,8 +585,8 @@ At the end of these moves (`95975ef`), cw-core's 395 exported names and its publ
 
 | §2.3 row | Now | Left, and why |
 |---|---|---|
-| Record-store algorithm | `KeyOnly`/`key_of`/`keyed`/`taken_up` once, in `persist::record`, also for `state.rs`'s third copy (`94a72ea`, `87e9c93`); the move's four-rule filter, the tombstone, deletions and told-of reads shared, each store passing its own inputs (`6c2ca6a`). Since then one core, `persist::record_store`, over a `Backend` trait with `async fn`s and no `Send` bound, each store a private view of itself answering it with its own reads and writes: the files (`Disk`, every future done as first polled on the worker), a browser's database (`InDb`, awaited on the page) and the test store (`InMem`). The core reads the history whole, moves it in, takes up what an older build changed, makes changes, lists, reads, answers the three asks of deletions and tells of what does not read; the notes of what was told are one set of rules (`record_store::notes`) and a change one set of steps (`record_store::steps`), which idb.js's transaction is held to by a page differential. After the divergences were fixed in the copy that differed (`e401d80` to `a56788e`), each store was switched in a commit of its own (`95e0361`, `4834961`, `c01c5a9`), each proved against its old code, pasted beside it, on seeded sequences of 40 steps, compared bit for bit and then deleted: the files on 2,000, the browser on 2,000, the test store on 4,000. `9e39026` then fixed one bug the copies shared (a record stored under the next name was read, and by a browser noted, under the name asked), and a review of the work found more, each fixed since (§7.7), a browser's take-up written over another look's among them. What every store must do with the history is a suite of 13 cases (`persist::conformance`): the files run all of them, a browser 12 and the test store 10, each leaving out by name what it cannot hold; each store's own tests hold what its protocol adds, some going over a case's ground on the way | The protocols stay each store's own, behind the trait: durable steps and journals on the files, one transaction with a compare-and-swap on the layout in a browser. Production code is longer, not shorter: the core and its two rule modules are 1,726 lines, 1,132 of them code and 448 doc comments, against 588 taken out of `files.rs` and `idb.rs` (§7.7) |
-| Run lifecycle | one `AWAY_GAP_MS`, and `Lease::after` for the three timer spawns; the four claim-or-toast blocks were rewritten in one shorter let-else form, though each is still written out at its site (`cf2a5e6`) | `RunMachine` plus `LiveRun<M>`: it needs about ten hook methods, so it moves the code behind a trait rather than removing it. Unifying liveness changes behaviour: a run's time away would be judged by a root heartbeat instead of its screen's ticks, so it would pause at other moments: on a gap while its screen is unmounted, and up to a tick earlier or later |
+| Record-store algorithm | `KeyOnly`/`key_of`/`keyed`/`taken_up` once, in `persist::record`, also for `state.rs`'s third copy (`94a72ea`, `87e9c93`); the move's four-rule filter, the tombstone, deletions and told-of reads shared, each store passing its own inputs (`6c2ca6a`). Since then, one core, `persist::record_store`, over a `Backend` trait, for the files, a browser's database and the test store, after the differences between the copies that were defects were fixed (but for one fixed by plan, once, in the core during the switches, `9e39026`, and two since, §9.5), and a suite of 13 cases, of which the files run all 13, a browser 12 and the test store 10 (§9.2) | The protocols stay each store's own, behind the trait: durable steps and journals on the files, and one transaction with a compare-and-swap on the layout in a browser. Each store keeps its own backup, and a browser's page storage, its fallback, stays outside the core. Production code is longer, not shorter (§9.4) |
+| Run lifecycle | one `AWAY_GAP_MS`, and `Lease::after` for the three timer spawns; the four claim-or-toast blocks were rewritten in one shorter let-else form, each still written out at its site (`cf2a5e6`). Since then, at the owner's decision, one lifecycle, after the differences between the runtimes that were defects were fixed (two in what a pause untimes stay, by choice, §9.3): a `RunMachine` trait and a generic `LiveRun<M, O>` with an explicit `Stage`, the claim among what is written once (§9.3) | Liveness: a session is still seen by its heartbeat and a run by its screen's ticks. One heartbeat for both would change when a run pauses: a run would be watched for a gap from its start rather than from its screen's first tick, what keeps it seen would change for one kind or the other, and its 250 ms beat would run from its start rather than from when its screen mounts. The trait moves each kind's half behind hooks rather than removing it, so the code is longer (§9.4) |
 | Band sync and continuation timing | — | Band sync: sharing it needs a new trait for about zero lines saved, and adds a module edge. Continuation timing: the two backends use different clocks and round the fade origin differently |
 | Grid-belief replay | — | The shared part is boilerplate, about 45 lines of code in each type, of which a trait would save about 20; both types are crate-private |
 | Percent formatting | `format::percent` for a share in whole percent, in place of 13 copies (`0b7f1e7`, `8f66ca8`). Auto-level's helper, which takes a value already in percent, is renamed `percent_to_tenth` so the two cannot be confused (`e359c82`) | Some of the other helpers differ on purpose: a value already in percent, a tenth below ten, "under 1%". The rest took a tie away from zero with `.round()` where `{:.0}` takes it to even, and nothing showed that difference was chosen; since `84c94b8` they go to the even percent too (§8.2) |
@@ -629,47 +636,14 @@ All were bit-identical.
 ### 7.6 Effect on the plan (§6)
 
 - **Item 7:** the cycles were removed without splitting `AppCtx`. The split remains worth doing for its own sake.
-- **Item 8:** only the small consolidations above. A `RunMachine` trait would not make the code shorter, and one heartbeat for both runtimes would change when a run pauses.
-- **Item 9:** the core is done: one record-store core, the stores' protocols kept behind a trait rather than redesigned (§7.4, §7.7). `Store` is not split.
+- **Item 8:** at first, only the small consolidations above. A `RunMachine` trait would not make the code shorter, and one heartbeat for both runtimes would change when a run pauses. The owner then chose the trait for an explicit lifecycle, at the cost of longer code. The heartbeat is still not shared (§9.3).
+- **Item 9:** the core is done: one record-store core, the stores' protocols kept behind a trait rather than redesigned (§7.4, §9.2). `Store` is not split.
 - **Item 12:** closer. `sync` depends only on `persist`, `time` and, for Android's sign-in, the leaf `jvm`. `persist`'s core depends only on cw-core and the clock.
 - **Item 13:** both kept, as two policies, until `7227bc6` made the queue the one path (§8.2).
 - **Item 15:** done, with these exceptions:
   - `Lender<T>`: each call site would stay about as long;
   - the `GridModel` trait: it would save only about 20 lines of boilerplate in two crate-private types;
   - the percent helpers that differ from `format::percent` on purpose; those that took a tie away from zero with `.round()` go to the even percent since `84c94b8` (§8.2).
-
-### 7.7 The record store as one core
-
-The plan judged two designs, a coroutine core answered by each store and a generic core over a typed backend trait, and took the second, with the first's stateless core, its exactness notes and its order tests (scripted backends that log every call). Each divergence between the copies was first fixed, test first, in the copy that differed; then the shared reads, the notes' rules and the change's steps were moved out one at a time (`caa07a9`, `e5a52e0`, `8bcf3d0`, `54420dc`), the core written beside them and used by its tests alone (`2590056`), and each store switched onto it (`95e0361`, `4834961`, `c01c5a9`), under a differential that ran the old code beside the new:
-
-| Store | Sequences of 40 steps | Of them |
-|---|---|---|
-| Files | 2,000 | 11,929 loads, 16,063 changes, 8,018 listings, 4,062 reads, 3,923 + 4,044 + 4,061 asks of deletions, 4,039 of records still unread, 23,861 steps by another copy, an older build, other programs and a damaged disk |
-| Browser | 2,000 | 9,662 opens, 20,050 changes, 4,026 changes by another tab, 6,434 listings, 4,013 reads, 3,282 + 3,161 + 3,196 asks of deletions, 1,591 backups, 19,757 steps outside |
-| Test store | 4,000 | 19,166 loads, 40,014 changes, 14,355 listings, 7,945 reads, 6,405 + 6,379 + 6,407 asks of deletions, 6,392 of records still unread, 48,085 steps outside |
-
-Each was also seen to fail on a mutation of the new code before its pasted copy was deleted. What they declared, and why it cannot be reached or is a test store's own: the files' `still_unread` reads the note of damage where it took it as there by its file (`95e0361`); a tombstone that cannot be written down fails a change, where a browser wrote `{}` (`4834961`); a record a change names twice keeps its first tombstone in a browser too, as on the files, where idb.js kept the last, which `4834961` did not declare (its message says idb.js kept the first) and `c96678b` pins: no change the app makes names a record twice; the test store writes its note of damage, empty, the first time it notes a record still unread, and, short of room, lets a take-up's oldest records go after the read that tells of them (`c01c5a9`).
-
-A review of the work then found what the differentials, which drew their steps from one tab and one copy at a time, could not, and more; each was fixed test first, or pinned where it was a doc's or a test's:
-
-- **A browser's take-up** was written over the layout as the tab last held it, not over the one it was worked out from (`4834961`; idb.rs had held the latter). Two looks of one tab run at once (news, the page shown again, the read-again timer, a backup, a restore), and the earlier, made second, replaced what the later took up: a deletion an older build made was left to take up again, and deleted the session once more after Undo put it back. A take-up is now written only over the layout it was worked out from (`0072574`).
-- **The files' take-up** read every record it knew no session of at once (`95e0361`), where the files had read one at a time: 4,000 records of some 25 kB another copy stored raised the peak of memory by 100 MB. It reads them 256 at a time, on every store (`ae466da`).
-- **The test store** answered every look at the history kept whole as a change, so the app's tests never ran the path the real stores take at nearly every look; and it noted the session of each record its move made, which no real store notes, so it took up what an older build stored while such a record could not be read (`c01c5a9`). It looks and moves as they do (`78ec02d`, `b8ab8c5`).
-- **Decisions written more than once:** a browser's telling of every record still unread (three places), a take-up that took nothing (two), a check of the gate made twice in a browser; and four reads with default bodies that no store ran, which would have read nothing for a store that left one out. Each is in one place, and the defaults stop where they are reached (`b4d5a71`).
-- **Docs and tests:** the files' look at the history kept whole said the opposite of what it does (`890c8ae`). The suite reached neither a tombstone that names no session, which left idb.rs's reading of one a browser holds as no text untested (`5d03f77`), nor two copies, nor an older build's look, nor the app's own change under the next name (`1f8fedb`, `c6df3c8`, `0661bd4`); its cases now hold them, and the near copies they replace in the stores' own tests are gone. The page script refuses a change two of whose records would go under one name, as one record twice, where every other store stores each once; no change the app makes holds such records, so the refusal is kept, and said, and pinned (`73b383c`).
-
-Production lines (outside `#[cfg(test)]`) of the files the work touched, before it (`1c6f0db`), after it (`061bfea`), and after the review's fixes:
-
-| File | Before | After | After the review |
-|---|---|---|---|
-| `files.rs` | 1,859 | 1,410 | 1,417 |
-| `idb.rs` | 1,334 | 1,165 | 1,188 |
-| `idb.js` | 542 | 551 | 557 |
-| `record_store.rs` | — | 1,297 | 1,307 |
-| `record_store/notes.rs` | — | 273 | 273 |
-| `record_store/steps.rs` | — | 142 | 146 |
-
-`legacy.rs`, `record.rs`, `worker.rs`, `desktop.rs` and `web.rs` did not change. Production code grew by 1,153 lines, 669 of them code. What the review found written more than once is in one place, and each store's half is its own reads and writes; but the trait, its documented hooks and the core's shared types cost more than the two copies they replaced. The test store (all of it test code) went from 1,492 lines to 1,558 before its tests.
 
 ## 8. Follow-up: the deferred defects fixed
 
@@ -1040,6 +1014,313 @@ The low ones were, as in the rounds, mostly gaps a fix left, and docs or tests t
 - stated, not fixed, as its fix needs one more stored note: once this build has written `damaged-told.json`, a record a build before formats finds damaged and tells of first is told of again here (`d74796e`, with a test that pins it).
 
 A last check of the eight found no regression in what the code does, the randomized test's counts unchanged, and one doc that claimed too much: an edit made before a sync gives way unless this copy took up another copy's store of that setting first (`c484499`).
+
+## 9. Follow-up: one record store and one run lifecycle
+
+*After §8 was merged (`2207d65`), on two branches of their own, `wip/dedup-store` and `wip/dedup-runtime`, each merged into this one, and §9.5's fixes on a third, `wip/move-again`, merged after them.* The owner asked whether the two largest duplications of §2.3 had been fixed: the record-store algorithm written out for each store, and the two near-identical run runtimes. They had not. §7.4 had shared small parts of each and left the rest: the stores' protocols differed, and a `RunMachine` trait would move the lifecycle's code behind hooks rather than remove it, while one heartbeat for both would change when a run pauses. Each is now one implementation, behind a trait:
+
+- **The record store:** one core over the files, a browser's database and the test store (§9.2), merged at `58133f1`. Its account was §7.7 at `061bfea` and `3b7f853`.
+- **The run lifecycle:** one explicit state machine under a session of groups and a contest run (§9.3), merged at `984d718`.
+
+Each went the same way:
+1. The differences between the copies were mapped, and tests pinned those the plans found, but one the store plan left to pin and fix once code had moved (`9e39026`, item 2). A few in the stores, judged unreachable, were left to the switches, which declared them; one of these, a record that a change names twice, changed undeclared, and was pinned only after the review (`c96678b`, §9.2).
+2. Each difference that was a defect was fixed, test first, in the copy that had it, before any code moved, but three in the stores: the one the store plan left to pin and fix once, in the core, after the files' and a browser's switches (`9e39026`, §9.2), and two that this report's fact-checks found, fixed since (§9.5).
+3. The code was moved in steps. For the lifecycle, 4,000 seeded walks were compared line by line at each step, and no line changed. For the stores, the shared reads moved first were checked by the suites as they stood (`caa07a9`), and each later step that moved code by a differential that ran the old code beside the new and matched but for what it declared; the review found more that the switches had changed, each fixed or pinned since (§9.2).
+4. A review of the result, its fixes, and a last check of those.
+
+Neither made the code shorter. The moves and their reviews' fixes added 1,451 production lines, 753 of them code; the fixes made first added 421, 258 of them code; and §9.5's two fixes, with the answers to their reviews, added 53, 13 of them code (§9.4). §9.6 says what is left, and what is the owner's to decide.
+
+### 9.1 What was decided
+
+- **The record store.** Two designs were judged: a coroutine core that each store answers, and a generic core over a typed backend trait. The second was taken, with four things from the first: its stateless core, its exactness notes, the two fixes it found that the second had missed (made as `abe9586` and `66e652f`), and its order tests (scripted backends that log every call).
+- **The run lifecycle.** Two designs were judged:
+  - a `RunMachine` trait with a generic `LiveRun<M>`, which makes the lifecycle one implementation, for more code: the plan's sketch took the runtimes' 814 code lines to 880–900;
+  - the shared steps as free functions with no trait, about as long as before (a sketch of it was 23 code lines shorter, 791 against 814), but leaving each runtime its own start, dispatch, effects, play and keep.
+
+  The owner took the first: "I would implement the generic lifecycle. The additional 8–10% code is a reasonable trade-off if it provides" consistent initialization and termination, predictable state transitions, centralized error handling, better reproducibility of application runs, easier testing and debugging, and separation between application logic and execution management. They asked for an explicit lifecycle state machine, a small abstraction rather than a framework of its own, and these invariants:
+  - completed turns have timing information;
+  - interrupted turns have no timing information;
+  - interrupted turns remain in the execution history;
+  - a paused run can be resumed without corrupting previous records.
+
+  An interrupted turn is to be stored, explicitly marked incomplete, with no timing.
+
+### 9.2 The record store as one core
+
+**Now.** One core, `persist::record_store`, over a `Backend` trait with `async fn`s and no `Send` bound. Each store is a private view of itself that answers the core with its own reads and writes:
+- the files (`Disk`, every future done as first polled on the worker);
+- a browser's database (`InDb`, awaited on the page);
+- the test store (`InMem`).
+
+The core does the work:
+- it reads the history whole, moves it in, and takes up what an older build changed;
+- it makes changes, lists and reads;
+- it answers the three asks of deletions, and tells of what does not read.
+
+The notes of what was told are one set of rules (`record_store::notes`). A change is one set of steps (`record_store::steps`), and a page differential holds idb.js's transaction to them where each record of a change has a place of its own (`73b383c`). The protocols stay each store's own, behind the trait: durable steps and journals on the files, and one transaction with a compare-and-swap on the layout in a browser. Two things stay outside the core, and the trait is not as small as the plan hoped:
+- each store's backup of the history (`stream_backup` on the files, `back_up` in a browser, the test store's `save_backup`): writing it once was optional in the plan, and was dropped for lack of time;
+- a browser's page storage (`BlobHistory`), which keeps the history for a visit where the database will not open, will not take the history, or stops answering: it is the older builds' whole-by-key format;
+- the `Backend` trait has 35 items (3 types, 2 constants, 30 functions, 24 of them `async`), where idb.rs's `Glue`, which the plan took to be nearly that trait, has 11.
+
+**The differences, first.**
+- Three commits came first and changed no behaviour: `1282a11` holds idb.js's `COMPATIBLE` and `BUMPS` to the Rust ones, `33a43ef` holds the notes of what was told to the names builds read them by, and `97e34cb` lets a test pin the wall clock, so that one sequence runs twice alike.
+- 15 fixes followed, `e401d80` to `a56788e`, each test first, each making the copies agree where one was wrong, or both.
+- A review of the pins and those 15 found seven problems, one medium: a move made over records stored a session a second time when the record that held it could not be read just then. Seven more fixes, `1073fc9` to `de8dd8d`, answer five of the problems: the medium one by `1073fc9`, with `04236c7` mending a wait for nothing that `0dac6c7` and `1073fc9` had brought in. The other two were gaps in the tests: no browser test held `e401d80`'s look at the tombstones by name first, and nothing held the page script's own read of the note `33a43ef` pinned. `5af6787` and `1c6f0db` pin them. Of the review's races with another copy's Undo made alone, those in a browser, at a take-up and at a move made again, are closed (`0e222e3`). At the files' take-up, where an Undo takes two steps, as every put-back there does, `de8dd8d` narrows the race to those two steps, and so, where a load finds what to take up only after its first look, does `71ca06d` since (§9.5). The files' move made again, which the review did not raise, kept that race, and one with a deletion, until `7250373` (§9.5). On every store, a session another copy both deletes and puts back between a look's two reads of the tombstones can still be stored twice (§9.6).
+- Of the 22 fixes, 8 are in the files (`6f8460c` in the test store too), 5 in a browser, 6 in the test store, and 3 in `legacy.rs`, which the stores share (`e401d80`, `0642e2f`, `6563c5c`; `e401d80`'s fault was reached on the files alone).
+
+**The switch.** The shared parts were moved out one at a time: the reads (`caa07a9`), the notes' rules (`e5a52e0`, `8bcf3d0`) and the change's steps (`54420dc`). The first of these was checked by the suites as they stood, the others by differentials of their own. The core was written beside them, and at first only its tests used it (`2590056`). Then each store was switched onto it (`95e0361`, `4834961`, `c01c5a9`). Each switch ran under a differential: the old code, pasted beside the new, ran on seeded sequences of 40 steps, and everything the two answered and held was compared and found the same, but for what each declared (on the files, set-aside names were compared without the second they were made in):
+
+| Store | Sequences of 40 steps | Of them |
+|---|---|---|
+| Files | 2,000 | 11,929 loads, 16,063 changes, 8,018 listings, 4,062 reads, 3,923 + 4,044 + 4,061 asks of deletions, 4,039 of records still unread, 23,861 steps by another copy, an older build, other programs and a damaged disk |
+| Browser | 2,000 | 9,662 opens, 20,050 changes, 4,026 changes by another tab, 6,434 listings, 4,013 reads, 3,282 + 3,161 + 3,196 asks of deletions, 1,591 backups, 19,757 steps outside |
+| Test store | 4,000 | 19,166 loads, 40,014 changes, 14,355 listings, 7,945 reads, 6,405 + 6,379 + 6,407 asks of deletions, 6,392 of records still unread, 48,085 steps outside |
+
+Each differential was also seen to fail on a mutation of the new code, then deleted with the old code. What each declared, and why it cannot be reached or is the test store's own:
+- the files' `still_unread` reads the note of damage, where it had taken the note as there by its file (`95e0361`);
+- a tombstone that cannot be written down fails a change, where a browser wrote `{}` (`4834961`);
+- the test store writes its note of damage, empty, the first time it notes a record still unread; and, short of room, it lets a take-up's oldest records go after the read that tells of them, not before (`c01c5a9`).
+
+One change went undeclared: a record that a change names twice now keeps its first tombstone in a browser too, as on the files, where idb.js had kept the last. `4834961`'s message says idb.js kept the first; `c96678b` pins both halves. No change the app makes names a record twice.
+
+Between the browser's switch and the test store's, `9e39026` fixed a bug the files and a browser shared, once, in the core, as the store plan had it (the test store, not yet switched, passed its twin test before it as after): a record stored under the next name was read under the name asked, and in a browser noted under it. What every store must do with the history became a suite of cases (`persist::conformance`, from `a8f452b`): eight then, and 13 once the review's cases were added (`1f8fedb`, `5d03f77`, `c6df3c8`). The files run all 13, a browser 12 and the test store 10, each leaving out by name what it cannot hold. Each store's own tests hold what its protocol adds.
+
+**The review** of the switch, by three reviewers, found eleven problems, two medium. Nine were places where the old code and the new answer alike: docs, tests, memory, code written twice, and what a store did alike before and after. No differential of the one against the other can find those. Of the two that changed what a store keeps, one needed two looks of one tab at once, which the differentials, taking one step at a time, never made; the other was the record that a change names twice (above). A browser's take-up was fixed test first, as was each of the rest whose fix changed what a store does; the record named twice stays as the switch left it, pinned (`c96678b`); each in a doc or a test was pinned or corrected, the suite's in part (below); and the code written twice was put in one place, with no change to what any store does:
+
+- **A browser's take-up** was written over the layout as the tab last held it, not over the one it was worked out from (`4834961`; idb.rs had held the latter). Two looks of one tab run at once (news, the page shown again, the read-again timer, a backup, a restore). The earlier look, made second, replaced what the later took up: a deletion an older build made was left to take up again, and deleted the session once more after Undo put it back. A take-up is now written only over the layout it was worked out from (`0072574`).
+- **The files' take-up** read at once every record it knew no session of (`95e0361`), where the files had read them one at a time: 4,000 records of some 25 kB that another copy stored raised the peak of memory by 100 MB. It reads them 256 at a time, on every store (`ae466da`).
+- **The test store** answered every look at the history kept whole as a change, so the app's tests never ran the path the real stores take at nearly every look. It also noted the session of each record its move made, which no real store notes, so it took up what an older build stored while such a record could not be read (`c01c5a9`). It now looks and moves as they do (`78ec02d`, `b8ab8c5`).
+- **Decisions written more than once:**
+  - a browser's telling of every record still unread, in three places;
+  - a take-up that took nothing, in two;
+  - a check of the gate made twice in a browser;
+  - four reads with default bodies that no store ran, which would have read nothing for a store that left one out.
+
+  Each is in one place now, and the defaults stop where they are reached (`b4d5a71`).
+- **Docs and tests:**
+  - The files' look at the history kept whole was documented as doing the opposite of what it does (`890c8ae`).
+  - The suite reached none of these: a tombstone that names no session, which left idb.rs's reading of one a browser holds as no text untested (`5d03f77`); two copies and an older build's look (`c6df3c8`); a deletion an older build made before the move (`0661bd4`); and the app's own change under the next name (`1f8fedb`). Its cases now hold them, and the near copies they replace in the stores' own tests are gone. The notes past the first telling, and a tombstone that cannot be read, stay in the files' and the test store's own tests, because the suite cannot hold a record open or make such a tombstone: that finding was answered in part.
+  - The page script refuses a change two of whose records would go under one name, as one record twice, where every other store stores each once. No change the app makes holds such records, so the refusal is kept, said and pinned (`73b383c`).
+
+Three commits came after `3b7f853` wrote the review into §7.7: two more of the review's fixes, and one that a last check of them asked for.
+- `9344052` compiles for Unix alone a test helper that only Unix tests use, as the Windows lint requires.
+- `4f8d642` says in the suite's own doc that each case is written once for every store, and that what a store's protocol adds is held by its own tests, where the doc had said all of it was tested once for all of them.
+- The last check found one test regression: `c6df3c8`'s case let every store put off a take-up that the files' own test, which it replaced, required at the first listing. `aa6af38` holds the files to the first listing again, and the test store too, which no test had held to it before; only a browser, whose looks may race, is held to its next.
+
+### 9.3 The run lifecycle as one state machine
+
+**What was written twice.** `session_runtime.rs` and `contest_runtime.rs` each held:
+- a start, building its kind's live record (the two record types, `LiveSession` and `LiveContest`, sat side by side in `state/live.rs`);
+- the rule that finds a gap the app was not running in;
+- the step that hands the machine what it hears;
+- a dispatch, an effects loop and a timer;
+- the task that plays a group or a turn;
+- Resume, with its claim of the audio;
+- the give-back as it pauses;
+- an end: a keep and a let-go, written three times in all.
+
+**The differences, first.** `dc661df` pinned, with seeded walks of both kinds, what a session and a run do after every action. A walk drives the calls the screens make: a start, taps and keys, Pause and Resume, Back, the page going out of sight, End and Discard. Time passes between them, held back now and then as a frozen phone holds it, and the fake player fails, stalls, runs late or skips. After every action the walk writes one line of what the app shows, plays, says, marks and stores. The commit's new tests pinned four of the 20 differences the plan's map lists, and the groups' side of a fifth. Tests already there held most of the rest, and the fixes' own tests those they changed; two rules of a session's away pause were held only by the walks' kept hashes, which this commit added (below). They also pinned each of the owner's rules that already held. Then six fixes, test first:
+- **`a1a7e90`:** every copy of a run left untimed says why, held up or sent again, as a group does. *Was:* untimed, with nothing to say so.
+- **`f954ac7`:** nothing heard in a turn that a pause cut short is timed, and its copies say paused. *Was:* timed from what was heard in that turn, which a sound held up as the page hid could have made wrong.
+- **`97c816e`:** a session's group that a pause cut part way through its send, kept by End while paused, is untimed and says paused. *Was:* its keys along the cut send were timed as if the send had played out.
+- **`ef88e31`:** a pause writes into the mark what End would keep then. *Was:* the app stopping under a paused session lost the group the pause cut, and under a paused run the QSO it cut.
+- **`88ac261`:** a paused run still hears the news of its own sends, as a paused session does. *Was:* a turn told late that it was held up kept its copies' times.
+- **`c654e9d`:** Resume handed to a run as an event claims the audio first. *Was:* such a Resume would have carried on under the lease its pause gave back; no screen sends Resume that way, so no user could reach it.
+
+Two reviewers of these found nine problems, seven of them distinct: one high, three medium and three low. The high one, which both found: the mark a pause wrote went stale as the paused session or run heard the news of its own sends, so the app stopping while paused kept times from a send it knew was held up. What a paused machine hears that changes what End would keep now goes into its mark at once (`5d20794`). They also found:
+- a session's group said "heldUp" on the web where a run's copy said "paused", because a hidden page's held-up send was heard after the pause, and the pins of it never hid the page (`13b94bf`);
+- a run's copy left untimed by a pause gave no reason where the pause cut its first sending part way, or came before every key of it (`457b4a7`);
+- the walks' hashes saw of a session stored only its accuracy and each group's text and timing class; the walks never checked the training screen; and they typed into a paused run and moved its speed (`cc90b44`, `865958b`, `c0b29fa`).
+
+Two differences stay in what a pause untimes, one in each direction; the fix round chose not to make either one rule (`06c581d`):
+- A run keeps no times from a turn that a pause cut short, not even from a copy keyed in full before the pause, as the owner asked for a paused run. A session, by its own rule from before this work, keeps timed a group answered in full before a pause that cut its send.
+- In a turn that played out, a run's copy keyed across a pause keeps the times of the keys typed before the pause, while a session's answer left open by a pause keeps none. The plan offered the owner the session's rule for runs too (§9.6).
+
+**The consolidation.** Nine steps, `b67c9f8` to `ffa0d14`:
+1. each kind a `LiveRun` of its machine, with one gap rule;
+2. the stage, with one give-back and one take-out;
+3. one step;
+4. one keep and one let-go;
+5. one dispatch, effects loop and timer;
+6. one play task;
+7. one claim, one Resume, and one door for what the user does;
+8. one go-live;
+9. walks that check what must always hold.
+
+After each step, 2,000 seeded walks of each kind were compared line by line with the base, `06c581d`: no line changed at any step. A step meant to change nothing has no test that fails first. Where a step added a rule or a check (the gap rule, the walks' stage check, the marks test), a mutation stood in: the gap rule made to see a run only when told, and `give_back` left not moving the stage or not writing the mark, each seen to fail the tests that hold it. Two more commits followed: `3307d10` had docs/contest-mode.md name where a run's lifecycle now lives, and `f2e0714` put `RunMachine`'s items in the order of a run's life.
+
+**What it is now:**
+- **`state::live::LiveRun<M, O>`** holds the machine, its lease, its `Stage`, when it was last seen, the day it counts towards, its open mark, and what only its kind holds (`GroupsOwn`, `RunOwn`). `LiveSession` and `LiveContest` are its two kinds.
+- **`Stage`** is `Running` (it holds the audio), `Paused` (the audio given back) or `Ending` (taken out to be kept or let go). Each move has one rule:
+  - `gave_back`, from `Running` only;
+  - `claimed`, from `Paused` only;
+  - `ending`, once, from either.
+
+  `hears` says what reaches each stage:
+  - `Running`: what comes under its own current lease;
+  - `Paused`: what comes under any lease of its own (End, Discard, typing, and the news of the send its pause cut);
+  - `Ending`: nothing.
+- **`live_run`** holds the lifecycle once, over `RunMachine`, a trait of 33 items that each kind implements: 7 types, 2 constants and 24 functions, 6 of them with default bodies. That is more than the "about ten hook methods" that §7.4 estimated before this work (at `2207d65`), and close to the 36 the plan counted for this design; whether it is the small abstraction the owner asked for is the owner's to judge. It has:
+  - one step for what a machine hears;
+  - one dispatch, effects loop and timer;
+  - one task that plays a group or a turn;
+  - one claim of the audio, for a start and for Resume;
+  - one give-back;
+  - one end, with one keep and one let-go in one durability order;
+  - one go-live.
+- **`LiveRun::away`** is one rule, for both kinds, for a gap the app was not running in, and each kind is seen every `SEEN_EVERY_MS` (250 ms). How each is seen stays its own. A session is watched from its start, by its heartbeat and by everything it hears. A run is watched only from its screen's first tick, by its ticks alone. So when a phone freezes as a run starts, the run runs on with the gap counted as run time, where a session pauses from its start (`a_run_held_back_before_its_first_tick_runs_on`, `a_session_held_back_before_its_first_beat_pauses_from_its_start`). One heartbeat for both would change when a run pauses (§7.4); arming a run from its start is the owner's to decide (§9.6).
+
+**The owner's invariants,** as the plan read them, and what holds each:
+- **Completed turns keep their times.** A group answered in full keeps its characters' times, even if a pause comes after it, and so does a copy keyed along a turn that played out before the pause, unless news of the send says it was held up or sent again (the second case of `ending_a_session_paused_part_way_through_a_send_keeps_the_group_untimed`, and `a_turn_that_played_out_before_a_pause_keeps_its_times`).
+- **Interrupted turns keep none.** A group or a run's copy left untimed by a pause, a send held up or a send made again says why (`paused`, `heldUp` or `sentAgain`, which 0.16.9 already reads), and holds no characters' times (`charTimes`), which is what the plan took "timing information" to mean. It keeps its answer time (`timeToCompleteMs`, with the pause left out), which the stored score charges and the average answer time counts, as for any group; taking it out of the score is the owner's to decide (§9.6). The mark of an interrupted turn is the reason `paused`, which every build keeps; a turn whose send was found held up or sent again before the pause keeps that reason instead, as the first found. A group a pause cut, resumed and then answered carries `paused` too. After every action the walks check, in the history and in the mark, that a group or copy that says why it is untimed holds no characters' times (`97a77d5`).
+- **Interrupted turns stay in the history.** End while paused keeps the QSO the pause cut, as lost, and the group the pause cut if anything was typed into it. A group cut before any key of it was typed is not stored: the plan chose this, as every build would count such a group as missed (`ending_a_session_paused_mid_group_keeps_the_group_begun`, `ending_a_run_paused_mid_qso_keeps_that_qso_as_lost`). The mark the pause writes holds the same, and is brought up to date as the paused machine hears news that changes it, so the app stopping while paused keeps it too (`ef88e31`, `5d20794`). The walks check that the mark holds the cut group last, as typed, while the session is paused with its answer begun (`25ef0bd`).
+- **Resume corrupts nothing.** A pause and Resume change no group answered or QSO logged before the pause, field for field and time for time, whether Back, the page going out of sight or a gap away paused it (`resuming_a_session_changes_no_group_answered_before_its_pause`, `resuming_a_run_changes_no_qso_logged_before_its_pause`). Resume claims the audio afresh, only from `Paused`, before the machine hears it (`c654e9d`, `Stage::claimed`). After every action the walks check that the history only grows, that a session stored stays as it was stored, and that the stage is `Running` exactly while the audio is held and `Paused` exactly while the screen shows paused.
+
+**What the owner asked of the lifecycle**, against what it does:
+- *Consistent initialization and termination:* one go-live for both kinds, and one end, with one keep and one let-go in one durability order.
+- *Predictable state transitions:* the stage moves by one rule each and is refused anywhere else, and the walks check it after every action.
+- *Centralized error handling:* in part. A refused claim of the audio is handled in one place for a start and for Resume, and a send that fails in the one play task; what each machine does with a failure stays its own.
+- *Better reproducibility of application runs:* in tests. The seeded walks drive both kinds as the screens do, check what must always hold after every action, and write their lines out (`DUST_LIFECYCLE`) for one build to be compared with another. A user's session or run is no more replayable than before: the app keeps no seeds (§2.1).
+- *Easier testing and debugging:* the walks, and tests written once for both kinds (`either_kind_lives_one_life` and its siblings in `live_run.rs`).
+- *Separation of application logic and execution management:* each machine, in cw-core, decides; `live_run` carries out what it says; each kind's hooks are its own.
+
+**The review** of the consolidation, by three reviewers, found eleven problems, seven of them distinct: two medium and five low. Once the walks' kept hashes were gone (`ffa0d14`), nothing pinned two rules of a session's away pause: that it takes the typing still waiting in the box before it pauses, and that Resume starts the heartbeat again. Nor did any check in the walks hold the owner's rules for a cut turn, which the hashes had held across every walk; tests, `dc661df`'s pins and the fixes' own, held only the cases they were written for. Each now has a test or a walk check, seen to fail under a mutation of what it guards (`a8f8ca2`, `462e2ee`, `97a77d5`, `25ef0bd`). The low ones:
+- `end` took what is live out of the app before it asked the stage, so a stage that could not end would have dropped it, its audio still held and its view still shown (`1d6fb74`);
+- the trait's doc of which hooks run with what is live borrowed (`a4fc719`);
+- docs/contest-mode.md, which named a function `fec64e7` removed (`c4f3e9d`);
+- the walks' own 250 ms tick, now `SEEN_EVERY_MS` (`6a424c6`).
+
+One was not taken: removing `Stage::Ending`, and with it having Resume return when its claim is refused, a case the reviewer found unreachable. The fix round kept `Ending` as the last stage of the lifecycle the owner asked for, and the end now asks it first (`1d6fb74`). The plan had named dropping it as its one lever on the code's size, and left that to the owner (§9.6).
+
+A last check of the eight fixes found no regression. 8,000 walks, seeds 1 to 4,000 of each kind, pass every check, and give the same lines with `f2e0714`'s build as with `6a424c6`'s.
+
+### 9.4 Code size
+
+Production lines are those outside test-only files and outside every item compiled for tests alone; code lines are those that are not blank once comments are taken out. At each stage:
+
+| Stage | Range | Lines | Code lines |
+|---|---|---|---|
+| The store: fixes first | `2207d65`..`1c6f0db` | +176 | +99 |
+| The store: the consolidation | `1c6f0db`..`061bfea` | +1,082 | +640 |
+| The store: the review's fixes | `061bfea`..`aa6af38` | +44 | +21 |
+| The lifecycle: fixes first, in the app | `ab0cbf7`..`06c581d` | +91 | +63 |
+| The lifecycle: fixes first, in cw-core | `ab0cbf7`..`06c581d` | +154 | +96 |
+| The lifecycle: the consolidation and its review's fixes | `06c581d`..`6a424c6` | +325 | +92 |
+| The store: §9.5's two fixes, with the answers to their reviews | `984d718`..`95edc03` | +53 | +13 |
+| Both | `ab0cbf7`..`95edc03` | +1,925 | +1,024 |
+
+In all, the two crates' production code went from 89,648 lines (62,882 code) to 91,573 (63,906 code).
+
+Where the copies went:
+- **The store.**
+  - `files.rs` and `idb.rs` held 2,265 code lines before the consolidation, and 1,793 after the review (−472).
+  - The core and its two rule modules then held 1,132: `record_store.rs` 890, `notes.rs` 159 and `steps.rs` 83. With them, the stores' halves and the core held 2,925 code lines where the two copies had held 2,265 (+29%).
+  - §9.5's fixes added 8 code lines to `record_store.rs`, and 5 to `files.rs` to call their tests' hook between reads, a hook that does nothing outside tests: 2,938 in all (+30%).
+  - The page script, `idb.js`, went from 521 lines to 557 (392 to 411 code lines): 542 (408) after the fixes made first. It is not in the table above.
+
+  Every decision the review found made in more than one place is now in one, and each store's half is its own reads and writes. But the trait, its documented hooks and the core's shared types cost more than the copies they replaced.
+- **The lifecycle.** The plan's 8–10% was reckoned on the runtimes and `state/live.rs` as they were at `ab0cbf7`: 814 code lines.
+  - These files hold 964 code lines now: 18.4% more, against the 8–10% the owner accepted, where the plan's last estimate was about 11%.
+  - Of the 150 lines more, 63 are the fixes made first (7.7 points), and 87 the consolidation and its review's fixes (10.7 points; 9.9% of the 877 the files held after the fixes). The consolidation added 5 more lines in `state/keep.rs` and `main.rs`.
+  - The two runtimes went from 852 code lines to 594 (−258); `live_run.rs` holds 310, and `state/live.rs` 35 more, for the stage and the gap rule.
+  - In all their production lines, comments and blank lines included, the four files grew through the consolidation from 1,239 to 1,561 (+26%); in code and doc-comment lines, from 1,086 to 1,355 (+25%).
+
+Test code grew by 7,358 lines in the app (4,069 with the store, 2,799 with the lifecycle and 490 with §9.5's fixes and the answers to their reviews), and by 477 in cw-core.
+
+### 9.5 Found by this report's fact-checks
+
+The fact-check of this report's first draft found a defect where the copies had differed, which the work's own rule should have had fixed before any code moved. The agent fixing the first review's races with an Undo had noted it, and left it "for a fix commit before step 2.1"; none was made.
+
+When the history kept whole must be moved in again, the files and the test store take `Order::MoveThenRead`, and their look at what is here, `record_store::here_of`, read the tombstones once, after listing the records and before reading them:
+- a deletion another copy made after that read, and before the records were read, left its session neither here nor deleted, and the move stored it again: the deletion was undone;
+- an Undo, or a restore, another copy made after the listing and before that read left its session neither listed nor named by a tombstone, and the move stored it beside the record put back: it was stored twice.
+
+A browser's move, and the files' take-up, already read the tombstones before and after (`2ec6e8e`, `0e222e3`, `de8dd8d`), but for a take-up a load found only after its first look (below). `7250373` gives `here_of` the same. It reads the tombstones before the listing and again after the records, goes by the sessions either read names, and, by name, by the later read. Its tests have another copy make its change after each of the move's reads in turn but that of the records' texts, on the files (with each test's twin on the worker) and in the test store. Before the fix, on the files, a deletion made at the third read came back under the move's own name, and an Undo made at the first or the second left its session stored twice; the test store failed the same way, at its second read and at its first. A test of the core's order pins the reads: tombstones, listing, texts, tombstones.
+
+On the files every put-back takes the tombstone away before it stores the record: an Undo, a restore of a session deleted under the name the restore gives it, and a sync's take-back alike. So one whose own two steps span this copy's first read of the tombstones and its listing of the records still leaves its session neither here nor deleted, and so stored twice once it is done: that window is the put-back's own, as at a take-up (§9.6). A browser's put-back is one transaction.
+
+**Its review.** Two reviewers, one on what the fix does and one on what it reaches, found no fault in what it does, and three low problems, each answered:
+- the window it leaves was put down to an Undo alone, where a restore and a sync's take-back leave it too (`28db258`); `2b2ea0a` says the same in the take-up's docs, which had said that a session put back in between is either deleted before or here;
+- no test held that the second read of the tombstones refuses the move when a tombstone written in between cannot be read just then: with that read made lenient, such a deletion was undone, and every persist test still passed (`3d59ecc` adds the test, with its twin on the worker);
+- the tests asked that the change be made at least three times on the files, and twice in the test store, while the move read, where another copy acts after four of its reads and three, all but its read of the texts; so the hook at one read could have been lost unnoticed, and with it the one case only that read tries (`1ecdbff`).
+
+At `7250373`, with `984d718`'s `here_of` put back, eight persist tests failed, the seven `7250373` adds and the core's order test it changed; the rest passed, by the reviewers' runs. `3d59ecc`'s test, with its twin, fails so too. With each change made alone and split into its two real steps, at every pair of the files' reads, a deletion was never undone, and an Undo was stored twice only in the window above; a deletion and an Undo of one session, both made within the same reads, leave another (below). The browser's move, idb.js and the conformance cases are unchanged.
+
+**A second, found by this report's second fact-check.** A take-up could still leave a wider window than a put-back's own. A load on the files and in the test store reads the tombstones before it lists the records only where its first look at the history kept whole finds that history changed. Where the look found it as last taken up, or could not look at it, the load read none, yet handed the take-up an empty set as the tombstones so read. If an older build changed the history kept whole before the take-up's own look, the take-up went by its later read of the tombstones alone: a session another copy put back between the listing and that read, in one step or two, was neither listed nor named by a tombstone, and where the older build's history held it, it was taken up again beside the record put back. `de8dd8d` had left it so on the files, and the core had it from when it was written (`2590056`); a browser reads the tombstones with the records whole, and was not reached. `71ca06d` hands the take-up what was read before the records only where it was read; otherwise the take-up reads the tombstones itself before it lists what is here, as at a listing. Its test, with its twin on the worker, has an older build's copy write its history back and another copy undo a deletion at each folder read of a load's listing in turn: before the fix, the session was stored twice at each of the three.
+
+**Its review.** Two reviewers found no fault in what it does, and five low problems, four of them distinct, each answered:
+- its test would have passed without the fix had the load's first look found the history kept whole changed, and passed too with a take-up that looked and took nothing in the fix's place: it now pins the load's eight folder reads, and asks that a session the older build finished since is taken up there and then, once (`0d52c7a`, `e9dbf5f`);
+- its comment gave one reason for no read before the records, where there are two (`d321abe`);
+- the docs gave the put-back's two steps as the only window left, where a session another copy both deletes and puts back between the two reads of the tombstones, the records listed in between, is left neither, and, where the history kept whole holds it, can be stored twice, at a take-up and at a move made again (`95edc03`). Both reviewers found that window by probes on the files, and one read it in a browser's code. No order of these reads closes it, and only two changes made within one look's reads open it: the docs now name it (§9.6).
+
+### 9.6 What is left, and what is the owner's
+
+**For the owner to decide.** Each stands as the plans left it:
+1. **An interrupted group's answer time stays in the score**, with the pause left out. Taking it out would score those sessions afresh in this build only, so one session would rank differently in two builds.
+2. **A pause now writes the mark** (`ef88e31`). A session or run the app stops under while paused is kept as End would have kept it, its interrupted group answered as it stood or its open QSO lost, and counted towards its level once.
+3. **The lifecycle's size:** 18.4% more code lines, against the 8–10% accepted (§9.4). The plan's one lever, dropping `Stage::Ending`, would save about 6 to 8 code lines (the plan reckoned about 4), about one point of the 18.4%.
+4. **A run's copy keyed across a pause** keeps the times of the keys typed before the pause, in a turn that played out; the session's all-or-nothing rule for it is offered, not made (§9.3).
+5. **A run's away check from its start:** a run is watched for a gap only from its screen's first tick, so a freeze as it starts counts as run time (§9.3).
+
+**Left by the plans, with their reasons:**
+- each store's own backup, and a browser's page storage outside the core (§9.2);
+- `Store`, not split;
+- each kind's liveness, kept its own (§9.3).
+
+**Left by the fixes made since the plans, with their reasons:**
+- on the files, every put-back another copy makes takes two steps (an Undo, a restore of a session deleted under the name the restore gives it, a sync's take-back), so one whose two steps span this copy's first read of the tombstones and its listing of the records can still leave its session stored twice, at a take-up and at a move made again (`de8dd8d`, §9.5): closing that window would take a change to how the files put a session back, which now takes the tombstone away before it stores the record;
+- on every store, a session another copy both deletes and puts back between this copy's two reads of the tombstones, the records listed in between, is left neither listed nor deleted, and so, where the history kept whole holds it, can be stored twice, at a take-up and at a move made again (`95edc03`, §9.5): no order of the reads closes it; closing it would take a look that another copy's change cannot come between unseen, which no store's look is now. On the files it was found by probes; in a browser, by reading the code.
+
+**To check by hand,** since here a browser's history ran only on stand-ins for its database, and the lifecycle only with the fake player: §6's Phase 0 lists them.
+
+### 9.7 Verification
+
+On this branch's head, whose code is that of §9.5's fixes as merged (`95edc03`, merged at `f9f6a7c`), with Rust 1.99.1 and `CI=1` (so that a missing Node fails the page tests rather than skipping them):
+- **Format and lints:** `cargo fmt --check`, and clippy `-D warnings` for desktop, web (wasm32) and silent, are clean. So is the Android lint, run here as §7.5 describes.
+- **Tests:** they all pass: cw-core 1,412 and its doctest; desktop 1,847, with 12 ignored; silent 1,716, with 12 ignored. The ignored ones are run by hand: the 8 walks of §9.3 that take a count of seeds, and the 4 of §8.4.
+- **Test names:** the suites hold, name for name, every test `ab0cbf7` held, with these exceptions: they add the 113 the store's branch added, the 52 the lifecycle's added and the 11 §9.5's fixes added, and they leave out the 17 the store's branch took out. Of those 17, 15 were near copies, in the stores' own tests, of what conformance cases now hold (`5d03f77`, `c6df3c8`, `0661bd4`), and 2 are a browser's tests moved, under their names, into the core's own (`4834961`). That makes 1,859 in the desktop suite and 1,728 in the silent one, ignored tests included.
+- **The walks:** seeds 1 to 2,000 of each kind pass every check. In all 4,000, their lines are those of `984d718`'s build, line for line, and so of `6a424c6`'s, though the test store the walks keep their sessions in now runs the record store's core.
+- **Doc links and graphs:** the doc links are the same broken set as before (13 in the app, 4 in cw-core). The module graphs show no cycle in the app under any of §7.1's rules, and in cw-core only the 9-module `settings` family, under the two stricter rules.
+- **Windows:** the Windows lint, simulated as §8.6 describes, is clean: every Unix-only item of the test code (43 of them) compiled out, and the desktop clippy run over all targets.
+
+The first fix's head with its review's answers, `2b2ea0a`, and the merged head before the fixes, `984d718`, were checked the same way, as was each branch at its head before it was merged, and each branch's review's last check ran again on its fixes (§9.2, §9.3).
+
+| Suite | §8.4's final (`4f6d29d`) | The store (`aa6af38`) | The lifecycle (`6a424c6`) | Merged (`984d718`) | With §9.5's fixes (`95edc03`) |
+|---|---|---|---|---|---|
+| `cw-core` tests | 1,404 | 1,404 | 1,412 | 1,412 | 1,412 |
+| `cw-core` doctests | 1 | 1 | 1 | 1 | 1 |
+| desktop app tests | 1,695 | 1,791 | 1,740 | 1,836 | 1,847 |
+| silent (mobile) build tests | 1,564 | 1,660 | 1,609 | 1,705 | 1,716 |
+
+All counts are tests passed, none failed. The store's branch starts from `2207d65`, and the lifecycle's from `ab0cbf7`, whose fix to the computer's sign-in (`44dbf48`) added one test to each app suite.
+
+**Run only by CI:**
+- the iOS type-check;
+- the Android type-check's build of cpal's oboe C++, which the stand-in compiler here skips;
+- desktop lint on macOS, and on Windows as it really builds;
+- the web site's build, with its browser checks.
+
+CI runs them on a pull request, not on a push to this branch.
+
+### 9.8 Effect on the plan (§6)
+
+- **Item 8:** done: one lifecycle for both runtimes, with an explicit stage (§9.3). The heartbeat is still not shared, though the gap rule and its period are.
+- **Item 9:** the core is done (§9.2), over a `Backend` trait of 35 items, 30 of them functions, rather than a small one. `Store` is not split.
+
+### 9.9 Corrections to commit messages
+
+These cannot be amended:
+- `0642e2f` says the browser test's listing took nothing up. As committed, the test's `takenThrough` assertion fails first; the listing fails as stated once that assertion is set aside.
+- `4834961` says idb.js kept the first tombstone of a record a change names twice. It kept the last (§9.2).
+- `54420dc` says the page script is held to the change's steps. It is held to them only where each record of a change has a place of its own (`73b383c`).
+- `a8f452b` says what every store must do is tested once, on all three stores alike. Near copies stayed in the stores' own tests until `5d03f77`, `c6df3c8` and `0661bd4`, and a browser and the test store run fewer cases than the files (§9.2).
+- `dc661df` says its tests pin each way the two runtimes differ. They pin four of the 20 the plan's map lists, and the groups' side of a fifth (§9.3).
+- `35dd3fa` says a signal's readers see a write only once the call returns. They see it at once: a set changes the value as it is made, and only what is subscribed to the signal runs again later. What makes the moved order safe, and holds, is that `write_mark` and `mark_so_far` read neither signal.
+- `5d134e2` says the runtimes no longer name the live record's fields. They no longer build it or name the preview, but they still read its fields: `machine`, `own` and `started_on` in both, `lease` in the run's `play_turn`, and `stage` in `hold_run`.
+- `f2e0714` says every check passes as before. When it was written only fmt and clippy had run; the full verification after it bore it out. It also says the trait's doc names every hook called with what is live borrowed: the doc left out `over`, `of`, `of_mut` and `unboxed` (`a4fc719`).
+- `58133f1` names §7.7 for the store's account: it is §9.2 now. It also says that before the switch every difference between the copies that was a defect was fixed test first, in the copy that had it: one was fixed once, in the core, after two of the switches (`9e39026`), and two only after the merge (§9.5); and that a conformance suite holds all three stores to the same cases, where a browser and the test store run fewer (§9.2).
+- `de8dd8d` and `7250373` call the window they leave on the files the Undo's own, `de8dd8d` "no longer this copy's whole look". It is every put-back's there, a restore's and a sync's take-back's too (`28db258`, `2b2ea0a`), and it is not the only one: until `71ca06d`, a take-up a load found only after its first look left a wider one, as `de8dd8d` had left it; and at a take-up and at a move made again, on every store, a session another copy deletes and puts back between the two reads of the tombstones can be stored twice (`95edc03`; §9.5).
+- `984d718` says an interrupted turn keeps no times and says it was paused. It keeps no characters' times but does keep its answer time, and one whose send was found held up or sent again before the pause says that instead, the first reason found being the one kept (§9.3).
 
 ## Appendix A: examined and found sound
 
