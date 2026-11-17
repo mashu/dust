@@ -585,8 +585,9 @@ pub(super) fn deleted_of(raw: Option<&[u8]>) -> Vec<Deleted> {
 /// The move from a history kept whole: each of `sessions`, oldest first,
 /// as a record ([`record::records_for_blob`]), and the layout to write once
 /// every record is, `now`. `fingerprint` is the history kept whole as it
-/// was read, and `deleted` the deletions it remembers, already done to it,
-/// and so taken. What a later take-up looks at is cut off at the newest
+/// was read, where it is still there, `kept_whole` whether it read as a
+/// list, and `deleted` the deletions it remembers, already done to it, and
+/// so taken. What a later take-up looks at is cut off at the newest
 /// session moved that finished no later than `now`, or what stands for it
 /// where it moves none ([`taken_through`]): a clock ahead of the time, or a
 /// session stamped ahead of the clock, holds back no session an older build
@@ -594,6 +595,7 @@ pub(super) fn deleted_of(raw: Option<&[u8]>) -> Vec<Deleted> {
 pub(super) fn moved(
     sessions: &[SessionResult],
     fingerprint: Option<Fingerprint>,
+    kept_whole: bool,
     deleted: &[Deleted],
     now: u64,
 ) -> (Vec<record::Record>, Layout) {
@@ -611,7 +613,7 @@ pub(super) fn moved(
         legacy: fingerprint,
         imported_keys: keys,
         deleted_seen: latest(deleted),
-        taken_through: Some(taken_through(sessions, fingerprint.is_some(), deleted, now)),
+        taken_through: Some(taken_through(sessions, kept_whole, deleted, now)),
         deletions_taken: Some(DeletionsTaken {
             seen: latest(deleted),
             taken: deleted.iter().map(DeletionSeen::of).collect(),
@@ -630,8 +632,9 @@ pub(super) fn moved(
 /// deleted, `deleted`, at the clock or before it, stands for it: what an
 /// older copy left open brings back from before that stays out. Where it
 /// says it deleted none either, and the move found no history kept whole
-/// (`kept_whole` false: none was there, or what was there did not read and
-/// was set aside), no session it took can come back, and an older build's
+/// (`kept_whole` false: none was there, or what was there did not read as a
+/// list, and was set aside, whether or not it stays where it was too, as
+/// in a browser), no session it took can come back, and an older build's
 /// found there after it is one the history here never held: nothing is cut
 /// off. Else the clock: an empty history says nothing of what came before
 /// it.
@@ -649,12 +652,15 @@ fn taken_through(
 
 /// Of `moved`, the records a move makes, those to write into a store that
 /// holds records already, each store saying for itself what it holds: one
-/// there under its own name, as `here` says, is written; one deleted by
-/// name, in `gone`, is not; one whose session is there under a name the
-/// move does not give, as `elsewhere`, what each record there under such a
-/// name holds, holds it ([`as_moved`]), is not, as many times as they hold
-/// it; nor is one whose session's key a tombstone names, in `gone_keys`.
-/// The rest are written.
+/// deleted by name, in `gone`, is not written, though its record is there
+/// too, left beside its tombstone by a deletion cut short, and damaged
+/// where it lies since, as the move would take for other bytes under its
+/// name and write it beside them; one there under its own name, as `here`
+/// says, is written; one whose session is there under a name the move does
+/// not give, as `elsewhere`, what each record there under such a name
+/// holds, holds it ([`as_moved`]), is not, as many times as they hold it;
+/// nor is one whose session's key a tombstone names, in `gone_keys`. The
+/// rest are written.
 pub(super) fn not_moved_yet(
     moved: Vec<record::Record>,
     here: impl Fn(RecordId) -> bool,
@@ -669,11 +675,11 @@ pub(super) fn not_moved_yet(
     moved
         .into_iter()
         .filter(|record| {
-            if here(record.id) {
-                return true;
-            }
             if gone.contains(&record.id) {
                 return false;
+            }
+            if here(record.id) {
+                return true;
             }
             if !held.is_empty()
                 && let Some(count) = held
@@ -732,7 +738,9 @@ fn as_moved(json: &str) -> String {
 ///
 /// A deletion the older build made is made here too, of every record with
 /// its key, as it would have been there, once: each taken is noted
-/// ([`Layout::deletions_taken`]), whatever its stamp says. Where a layout
+/// ([`Layout::deletions_taken`]), whatever its stamp says. Two of one
+/// session, as two of its copies each made one, delete each record once,
+/// as the later. Where a layout
 /// notes none, as an earlier build wrote it, each made no later than the
 /// latest taken is taken, as such builds take them; where a build that
 /// notes none has taken deletions up since ([`DeletionsTaken::seen`]),
@@ -822,12 +830,22 @@ pub(super) fn imported(
                 .map(DeletionSeen::of),
         );
     }
+    // A record has one tombstone: of two deletions of its session, as two
+    // copies there each made one, the later.
+    let mut forgotten: HashMap<RecordId, usize> = HashMap::new();
     for gone in deleted
         .iter()
         .filter(|gone| !made.contains(&DeletionSeen::of(gone)))
     {
-        for id in live.get(&gone.key()).into_iter().flatten() {
-            change.forget.push((*id, gone.clone()));
+        for &id in live.get(&gone.key()).into_iter().flatten() {
+            match forgotten.get(&id) {
+                Some(&at) if change.forget[at].1.at < gone.at => change.forget[at].1 = gone.clone(),
+                Some(_) => {}
+                None => {
+                    forgotten.insert(id, change.forget.len());
+                    change.forget.push((id, gone.clone()));
+                }
+            }
         }
     }
     let mut next = layout.clone();
@@ -1807,7 +1825,13 @@ mod tests {
     #[test]
     fn a_session_an_older_build_stores_after_a_move_made_with_the_clock_ahead_is_taken_up() {
         let first = finished(T);
-        let (records, layout) = moved(std::slice::from_ref(&first), written(1), &[], T + 10 * YEAR);
+        let (records, layout) = moved(
+            std::slice::from_ref(&first),
+            written(1),
+            true,
+            &[],
+            T + 10 * YEAR,
+        );
         let since = finished(T + DAY);
         let (change, next) = imported(
             &layout,
@@ -1866,7 +1890,7 @@ mod tests {
     fn a_session_an_older_build_stores_after_a_move_of_no_session_made_with_the_clock_ahead_is_taken_up()
      {
         let since = finished(T + DAY);
-        let (_, layout) = moved(&[], None, &[], T + 10 * YEAR);
+        let (_, layout) = moved(&[], None, false, &[], T + 10 * YEAR);
         let (change, next) = imported(
             &layout,
             written(2),
@@ -1880,7 +1904,13 @@ mod tests {
         assert_eq!(next.taken_through, Some(0));
 
         let gone = Deleted::of(&finished(T), T + 1);
-        let (_, layout) = moved(&[], written(1), std::slice::from_ref(&gone), T + 10 * YEAR);
+        let (_, layout) = moved(
+            &[],
+            written(1),
+            true,
+            std::slice::from_ref(&gone),
+            T + 10 * YEAR,
+        );
         assert_eq!(layout.taken_through, Some(T));
         let (change, _) = imported(
             &layout,
@@ -1899,8 +1929,20 @@ mod tests {
     /// the newest session it took, as it did.
     #[test]
     fn a_move_of_an_empty_history_kept_whole_takes_through_its_clock() {
-        let (_, layout) = moved(&[], written(1), &[], T + 10 * YEAR);
+        let (_, layout) = moved(&[], written(1), true, &[], T + 10 * YEAR);
         assert_eq!(layout.taken_through, Some(T + 10 * YEAR));
+    }
+
+    /// A move from a history kept whole that does not read as a list takes
+    /// no session of it, wherever it is left: set aside, as on a computer,
+    /// or in its place beside a copy of it, as in a browser, where it still
+    /// has a fingerprint. Nothing it took can come back, so nothing is cut
+    /// off, as where there was none.
+    #[test]
+    fn a_move_from_a_history_kept_whole_that_does_not_read_cuts_nothing_off() {
+        let (_, layout) = moved(&[], written(1), false, &[], T + 10 * YEAR);
+        assert_eq!(layout.taken_through, Some(0));
+        assert_eq!(layout.legacy, written(1), "where it is, as it is");
     }
 
     /// One session stamped far ahead of the clock as the move was made, by
@@ -1912,6 +1954,7 @@ mod tests {
         let (records, layout) = moved(
             &[first.clone(), far.clone()],
             written(1),
+            true,
             &[],
             T + 3_600_000,
         );
@@ -1943,6 +1986,7 @@ mod tests {
         let (records, layout) = moved(
             &[kept.clone(), other.clone()],
             written(1),
+            true,
             std::slice::from_ref(&far),
             T + 2 * DAY,
         );
@@ -1971,6 +2015,42 @@ mod tests {
         )
         .expect("taken up");
         assert!(change.forget.is_empty(), "made once: {:?}", change.forget);
+    }
+
+    /// Two deletions of one session that an older build remembers, both
+    /// new here, as two of its copies each deleted it, forget its record
+    /// once, with the later: a record has one tombstone, and which one a
+    /// store kept of two was the first on a computer and the last in a
+    /// browser. In whatever order they are remembered.
+    #[test]
+    fn two_deletions_of_one_session_taken_up_at_once_forget_its_record_once_with_the_later() {
+        let (kept, other) = (finished(T), finished(T + DAY));
+        let (records, layout) = moved(
+            &[kept.clone(), other.clone()],
+            written(1),
+            true,
+            &[],
+            T + 2 * DAY,
+        );
+        let (first, later) = (
+            Deleted::of(&other, T + 3 * DAY),
+            Deleted::of(&other, T + 4 * DAY),
+        );
+        let live = live_of(&records);
+        for deleted in [[first.clone(), later.clone()], [later.clone(), first]] {
+            let (change, next) = imported(
+                &layout,
+                written(2),
+                std::slice::from_ref(&kept),
+                &deleted,
+                &live,
+                &HashSet::new(),
+            )
+            .expect("taken up");
+            assert_eq!(change.forget, [(records[1].id, later.clone())]);
+            let taken = next.deletions_taken.expect("noted").taken;
+            assert_eq!(taken.len(), 2, "both taken");
+        }
     }
 
     /// A layout an earlier build wrote says nothing of which deletions were
@@ -2076,6 +2156,7 @@ mod tests {
         let (records, layout) = moved(
             &older,
             written(1),
+            true,
             std::slice::from_ref(&noted),
             T + 10 * YEAR,
         );
@@ -2129,7 +2210,7 @@ mod tests {
         assert_eq!(next.deletions_taken.expect("noted").taken.len(), 3);
 
         // Noted as none where there was no history kept whole, and read so.
-        let (_, none) = moved(&[], None, &[], T);
+        let (_, none) = moved(&[], None, false, &[], T);
         assert_eq!(none.taken_legacy, Some(None));
         let raw = none.written().expect("written");
         assert_eq!(Gate::of(Some(&raw)), Gate::Open(Box::new(none)));
@@ -2264,6 +2345,7 @@ mod tests {
         let (records, layout) = moved(
             &older,
             written(1),
+            true,
             std::slice::from_ref(&noted),
             T + 3 * DAY,
         );
@@ -2303,6 +2385,7 @@ mod tests {
         let (_, layout) = moved(
             std::slice::from_ref(&first),
             written(1),
+            true,
             std::slice::from_ref(&gone),
             T + 2,
         );
@@ -2320,6 +2403,26 @@ mod tests {
         let raw = without.written().expect("written");
         let held: serde_json::Value = serde_json::from_slice(&raw).expect("JSON");
         assert!(held.get("takenThrough").is_none() && held.get("deletionsTaken").is_none());
+    }
+
+    /// A record of the move's that a store holds under its own name, and
+    /// has a tombstone of by that name, is deleted, and not written: its
+    /// deletion was cut short, the record left beside its tombstone, and
+    /// what it holds there may be damaged since, which the move would take
+    /// for other bytes and write beside. One there by its name with no
+    /// tombstone is written, which writes nothing.
+    #[test]
+    fn a_record_of_the_move_there_by_its_name_and_deleted_by_it_is_not_written() {
+        let moved = record::records_for_blob(&[finished(T), finished(T + DAY)]);
+        let gone: BTreeSet<RecordId> = [moved[0].id].into();
+        let left = not_moved_yet(
+            moved.clone(),
+            |_| true,
+            &gone,
+            std::iter::empty::<String>(),
+            &HashSet::new(),
+        );
+        assert_eq!(left, [moved[1].clone()]);
     }
 
     /// A browser's history kept whole, by the record API, on `shelf`.

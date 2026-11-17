@@ -1570,6 +1570,63 @@ mod tests {
         assert_eq!(session_untimed(&twice).keyed_in_repeat, 1);
     }
 
+    /// A group a pause interrupted is kept, said to be paused and with no
+    /// times (docs/recognition.md): it counts wherever a group counts, in
+    /// the accuracy, the letters' tally, the points and the hint's groups
+    /// and characters, and is timed nowhere, its letters' recognition read
+    /// from the group timed alone. Its mark changes no figure but those.
+    #[test]
+    fn an_interrupted_group_is_counted_but_never_timed() {
+        let mut session = plain("2026-09-01", 1, &[("KM", "KM"), ("KR", "KX")]);
+        let mut tally = CopyTally::default();
+        for group in &session.groups {
+            tally.add(&group.sent, &group.received);
+        }
+        session.accuracy = tally.accuracy();
+        session.tally = tally;
+        // The first keyed along as it sounded; the second interrupted.
+        session.group_timings[0].char_times = Some(CharTimes {
+            ends: vec![300, 700],
+            keys: vec![Some(550), Some(900)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        });
+        session.group_timings[1].untimed = Some(Untimed::Paused);
+
+        // Timed from the first alone.
+        let recognised = session_recognition(&session).expect("recognised");
+        assert_eq!(recognised.timed, 2);
+        let letters = character_diagnostics(std::slice::from_ref(&session));
+        let letter = |ch: char| {
+            let row = letters.iter().find(|row| row.letter == ch).expect("a row");
+            (row.correct, row.total, row.recognition_tries)
+        };
+        assert_eq!(letter('K'), (2, 2, 1), "K counted in both, timed in one");
+        assert_eq!(letter('M'), (1, 1, 1));
+        assert_eq!(letter('R'), (0, 1, 0), "R counted, never timed");
+        // Counted in both.
+        assert_eq!(session.accuracy, 0.75);
+        let untimed = session_untimed(&session);
+        assert_eq!(
+            (
+                untimed.groups,
+                untimed.chars,
+                untimed.timed,
+                untimed.held_up
+            ),
+            (2, 4, 2, 0)
+        );
+        // The points count it as answered, mark or not.
+        let mut unmarked = session.clone();
+        unmarked.group_timings[1].untimed = None;
+        assert_eq!(session.points(), unmarked.points());
+        let mut alone = session.clone();
+        alone.groups.truncate(1);
+        alone.group_timings.truncate(1);
+        assert_ne!(session.points(), alone.points());
+    }
+
     /// `KM` copied after it ended, 900 ms after the group did and M 200 ms
     /// after K: ends at 300 and 700 ms, keys at 1600 and 1800.
     fn copied_km() -> CharTimes {

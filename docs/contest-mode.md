@@ -296,8 +296,8 @@ no settings saves mid-run. Four things change:
   paused page is shorter, so a phone scrolled down to Pause was left part
   way down it, and the run carried on with its header, clock and run bar
   above the screen's top. Pausing scrolls nothing, so nothing moves under
-  the finger that paused (`scroll_to_top`, `src/page.rs`, from
-  `resume_run`).
+  the finger that paused (`scroll_to_top`, `src/page.rs`, from the run's
+  `resumed`, `src/contest_runtime.rs`).
 
 ## 3. Contest catalogue
 
@@ -757,9 +757,9 @@ pub enum OpKey { Esm, Cq, Exchange, Tu, MyCall, HisCall, HisCallAndExchange,
 
 The machine needs the fields only at a key press. The runtime maps
 `Err(AudioError::Cancelled)` to `TurnCancelled` and any other error to
-`TurnFailed` (`play_turn`, `src/contest_runtime.rs`), as a group session's
-`play` tells the two apart (`src/session_runtime.rs`). The effects are
-`PlayTurn(Turn)`, `StopAudio`, `ReleaseAudio`, `StartTimer{id, ms}`,
+`TurnFailed` (the run's `sent`, `src/contest_runtime.rs`), where a group
+session hears either as its send stopped (`src/session_runtime.rs`). The
+effects are `PlayTurn(Turn)`, `StopAudio`, `ReleaseAudio`, `StartTimer{id, ms}`,
 `ClearFields`, `Focus(EntryField)`, `Announce(text)`, `PersistAndShowResults`,
 `ShowNothingKept` and `AbortToHome`. Every apply that emits `StopAudio` or
 `ReleaseAudio` also sets `air = Silent`.
@@ -772,14 +772,14 @@ The machine needs the fields only at a key press. The runtime maps
 | Running, Turn | Key but StopTx | what of the turn has reached you counts first, so Enter decides on what you have heard; a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing |
 | Running, Turn | TimerFired (heard) | what of the turn has reached you counts, a look at the clock (6.3): Enter's QSO and the screen follow the audio, a correction is said, and the checks whose TU is out show; the timer runs on to the next end of a send of the station you work, or to those checks → Turn |
 | Running, Turn | StopTx (Esc) | with nothing of yours left to go out (your message out whole, or none in the turn), nothing: Esc stops only your station (`MyStn.pas:108-116`), so the turn plays on, a reply yet to begin coming on time (5.2) → Turn. Else `StopAudio`; C and N reset for a call or exchange of the message keyed last not fully sent (`Main.pas:884-891`), not for one carried from an earlier key, heard then; the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it; the callers listening answer what they heard of it as garbage (5.2); the callers still sending and QRM go on from where they were, as over a key, and wait from the end of their sends → a turn of them and those replies, or Silent |
-| Turn(id) | TurnStarted{id} | `heard_from` and `output_from` re-stamped; a second start, a retry, marks the turn untimed (docs/recognition.md); no effects, no limit check |
+| Turn(id) | TurnStarted{id} | `heard_from` and `output_from` re-stamped; a second start, a retry, marks the turn untimed, as sent again (docs/recognition.md); no effects, no limit check |
 | Turn(id) | TurnEnded{id} | all segments count; each caller waits as the turn planned it (4.3); the patience timer starts if anyone waits → Silent |
 | Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused, but not time the clock was read at since (6.3), so the run bar steps back by the retries; every caller in the turn sends again after Resume, as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout that never began, which waits afresh; timers forgotten; `ReleaseAudio` → Paused{Sound} |
-| any | TurnHeldUp{id} | the turn is marked untimed, on the air or not; no effects |
-| any | TurnMissed{id, from, until} | the turn is marked untimed; on the air, a caller's send any of which the browser skipped is no send heard, as one under your message (5.3, `Counted::Muted`), a call on its timeout spending its try; no effects |
+| any | TurnHeldUp{id} | the turn is marked untimed, as held up, on the air or not: as the run is kept, the copies heard in it lose their times and say so; no effects |
+| any | TurnMissed{id, from, until} | the turn is marked untimed, as held up; on the air, a caller's send any of which the browser skipped is no send heard, as one under your message (5.3, `Counted::Muted`), a call on its timeout spending its try; no effects |
 | any | TurnCancelled, or another id | ignored |
 | Silent | TimerFired (patience) | waiting callers call again (4.3); if the station you work has left, "K5XYZ has gone" is announced, by the call it put yours right with, or else the call you had for it, or "The station", and Enter starts afresh, as after a CQ, calling CQ in place of its call (4.4) → a turn of replies |
-| Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count. A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout, which waits afresh; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
+| Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count, and the turn is marked untimed, as paused: nothing heard in a turn a pause cut short is timed (docs/recognition.md), and a call or an exchange whose first sending it cut part way, which heard whole would have been timed, is marked as cut by it, its copies saying they were paused. A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout, which waits afresh; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
 | Paused | Resume | clock resumes; run end re-armed with the time left; a 1 s resume timer → Running |
 | Running | the resume timer | callers the pause or failure cut short send again, as the rows above say; the others wait for you afresh, as after a turn, so what was heard whole comes again only on a timeout or at your asking: a pause is no free `?`. A key that sends forgets the timer; one that sends nothing (Wipe, Shift+Enter, Esc with nothing on the air) leaves it to bring the callers back |
 | Running | run-end timer, or the limit passed on any event but TurnStarted (a look at the clock, which stamps nothing, 6.3) | → Finished. While the turn on the air may be retrying its sound (an attempt after the first has started, or the one playing is past its length and 2 s), only what keeps its reading ends the run (its end, a key, End run): its failure gives the retries back (5.2), and the run end waits until its last attempt would have failed |
@@ -2022,12 +2022,21 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   band falls
   silent and the screen may sleep. Callers and the open QSO wait; the fields
   lock, so a pause gives no free thinking time, and a copy typed before it
-  and sent after it is timed in run time, the pause left out (9.1). A send
+  and sent after it is timed in run time, the pause left out (9.1), unless
+  the pause cut short the turn it was heard in: nothing heard in that turn
+  is timed, not even a copy keyed in full before the pause (where a session
+  keeps timed a group answered in full before a pause that cut its send),
+  and its copies say they were paused. So do the copies of a call
+  or an exchange whose first sending the pause cut part way, and a copy
+  every key of which came after a pause. A send
   the pause cut after it began to reach you is owed on its caller's
   timeout, as one heard whole, so a pause is no free `?`; one cut before
-  it began goes again a moment after Resume (4.2).
+  it began goes again a moment after Resume (4.2). The news of its own
+  sends still reaches the paused run, as it reaches a paused session
+  (`Stage::hears`, `src/state/live.rs`), so a turn told of as held up only
+  after the pause leaves its copies untimed all the same; no timer does.
 - **Resume** claims a new lease inside the tap, as Start does
-  (`resume_run`, `src/contest_runtime.rs`), so the player opens, or after a
+  (`resume`, `src/live_run.rs`), so the player opens, or after a
   sound failure
   is rebuilt, within the browser's gesture: a player that failed every
   attempt is thrown away, so that claim opens a fresh one. Every contest
@@ -2041,8 +2050,9 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   - on desktop, where wry never hides a minimised window, a
     `use_wry_event_handler` (`listen_minimised`) checking
     `window.is_minimized()` on Resized and Focused;
-  - a heartbeat: the run bar's ticker stamps `last_tick`; before any event,
-    a gap over 2 s first dispatches `Pause{Hidden, at: last_tick}`, so a
+  - a heartbeat: the run bar's ticker stamps when the run was last seen
+    (`LiveRun::away`, `src/state/live.rs`); before any event, a gap over
+    2 s first dispatches `Pause{Hidden, at}` from then, so a
     process frozen before any message arrived is still credited. The check
     starts with the ticker's first tick, so nothing is read into the moment
     before the run screen is up.
@@ -3741,14 +3751,15 @@ Effects carry `Turn`, which derives `PartialEq` (as `StationVoice` does,
 do (the tests of `crates/cw-core/src/machine.rs`). The runtime calls
 `plan_turn(&turn, &settings)`,
 then `lease.send_planned(asked, &plan, &transcript, &settings, turn.starts_at,
-news)` (`play_turn`, `src/contest_runtime.rs`), with `news` told each
+news)` (`play_turn`, `src/contest_runtime.rs`, through the send task
+`play`, `src/live_run.rs`), with `news` told each
 `SendNews` (5.2): every attempt's start, its lead plus latency and a
 continuation's wait for its moment among it (as built, 5a), what of it went
 unheard, and whether it was held up; and `asked` from `lease.ask_to_send()`
 as the turn goes on the air (5.2). The
 view holds no caller truth until a row's check resolves, but for what Show
 copy shows, each text with the moment it may show, and is published only
-when it changes (`apply`, `src/contest_runtime.rs`).
+when it changes (`step`, `src/live_run.rs`).
 
 `ContestEntry`, in `AppCtx` beside `answer: AnswerOutbox`, holds `call`
 and `exch` with their edit stamps (one `CopyValue<Fields>`, stamped by
@@ -3759,9 +3770,11 @@ or paddle letters, Wipe and `clear()`. Every key and message button goes
 through one entry point, `press_key`, which calls `paddle.finish_letter()`
 (lent by the run screen through `ContestEntry::use_letters`, as
 `AnswerOutbox::use_entry` lends it), `lease.wake()` and
-`entry.snapshot()`, then dispatches `Key`. `run_effects` handles
-`ClearFields` and `Focus` through `ctx.entry` and the focus script
-(`focus_end_script`, `page.rs`, beside the group boxes' `focus_script`);
+`entry.snapshot()`, then dispatches `Key`. The run's `carry_out`
+(`src/contest_runtime.rs`, called by `live_run::run_effects`,
+`src/live_run.rs`) handles `ClearFields` and `Focus` through `ctx.entry`
+and the focus script (`focus_end_script`, `page.rs`, beside the group
+boxes' `focus_script`);
 `Announce` sets
 `ctx.announced` once nothing is on the air, held until then; the one
 polite region that speaks it sits in the app's frame, so what the run
@@ -3823,7 +3836,9 @@ assisted runs, contest speed evidence, `whole_evidence`);
 space keys, 5b); `soak.rs`, `lib.rs` (the contest soak; exports).
 
 **New in the app:** `src/contest_runtime.rs` (`LiveContest`'s methods, start,
-dispatch, effects, `play_turn`, finish, the heartbeat check);
+dispatch, effects, `play_turn`, finish, the heartbeat check; its start,
+steps, effects, send task, pause, Resume and end since made one with a
+session's, in `src/live_run.rs`);
 `src/ui/contest.rs` (run bar, hint, air line, fields, key bar, log, paused
 panel, the pause on a hidden page, whose visibility listener and minimise
 handler are in `src/page_hidden.rs` as built); `src/ui/contest_keys.rs`; `src/ui/contest_results.rs`;
@@ -3834,7 +3849,7 @@ Hear a QSO, 2c); `src/ui/scores/runs.rs` (the Runs card, as built 4b);
 
 **Changed in the app:** `src/session_runtime.rs` (`start_session` routing,
 `finish_run`, `abort_run`); `src/state/live.rs` (`Live::{Groups, Contest}`,
-`LiveSession` and `LiveContest`, whose methods stay in the runtimes);
+`LiveSession` and `LiveContest`, since each a `LiveRun` of its machine);
 `src/state.rs` (`contest: Signal<Option<ContestView>>`, `entry: ContestEntry`,
 `session_running`, the restore message); `src/routes.rs` (Training and
 Results branches); `src/app.rs`, `src/ui/tour.rs` (Exit and Discard,

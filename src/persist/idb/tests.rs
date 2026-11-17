@@ -7,7 +7,12 @@ use std::ops::Bound;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
+use cw_core::SessionResult;
+
 use super::*;
+use crate::persist::conformance::Harness;
+use crate::persist::record::{HistoryNotice, key_of};
+use crate::persist::record_store::steps::{Steps, There, make_steps};
 use crate::persist::tests::session;
 
 /// What a future made of answers given at once comes to.
@@ -91,9 +96,11 @@ impl Aside for Page {
 /// A browser's database, as far as the history goes: what every tab
 /// shares.
 #[derive(Default)]
-struct Shelves {
-    sessions: BTreeMap<String, String>,
-    deleted: BTreeMap<String, String>,
+pub(super) struct Shelves {
+    pub(super) sessions: BTreeMap<String, String>,
+    /// Each tombstone, and what it holds: none where it holds no text, as a
+    /// later build may store, and as the page script answers then.
+    pub(super) deleted: BTreeMap<String, Option<String>>,
     meta: BTreeMap<String, String>,
     /// How many changes were made, and how many other tabs told of.
     changes: u64,
@@ -104,6 +111,17 @@ struct Shelves {
     failing: Option<String>,
     /// What another tab does just before the next change is made here.
     first: Option<Before>,
+    /// What another tab does just before the records and tombstones are
+    /// next listed here.
+    before_list: Option<Before>,
+    /// What another tab does just after they are next listed here.
+    after_list: Option<Before>,
+    /// What another tab does just before the first page of records is next
+    /// read here.
+    before_pages: Option<Before>,
+    /// What another tab does just after the last page of records is next
+    /// read here.
+    after_pages: Option<Before>,
 }
 
 /// What another tab does to the database before this one's next change.
@@ -158,9 +176,10 @@ impl Fake {
         }
     }
 
-    /// Make `writes` on `shelves`, as the page script makes them; what is
-    /// made of a change refused is put back by the caller.
-    fn make(shelves: &mut Shelves, writes: Writes) -> Result<(), Refused> {
+    /// Make `writes` on `shelves`, as the page script makes them, and say
+    /// where each record went; what is made of a change refused is put back
+    /// by the caller.
+    fn make(shelves: &mut Shelves, writes: Transaction) -> Result<Vec<Option<String>>, Refused> {
         let held = shelves.meta.get("layout").cloned();
         let over = matches!(writes.layout, Some(LayoutWrite::Over { .. }));
         if let Some(LayoutWrite::Over { expect, .. }) = &writes.layout
@@ -180,34 +199,28 @@ impl Fake {
             || !writes.forget.is_empty()
             || !writes.unforget.is_empty()
             || over;
-        let undone: HashSet<&String> = writes.unforget.iter().collect();
-        for name in &writes.unforget {
-            shelves.deleted.remove(name);
-        }
-        for (name, json) in &writes.put {
-            let undoing = undone.contains(name);
-            if !undoing && shelves.deleted.contains_key(name) {
-                continue;
-            }
-            let mut id = RecordId::parse(name).expect("a name");
-            loop {
-                match shelves.sessions.get(&id.name()) {
-                    None => {
-                        shelves.sessions.insert(id.name(), json.clone());
-                        break;
-                    }
-                    Some(there) if there == json || (undoing && id.name() == *name) => break,
-                    Some(_) => id = id.bumped(),
-                }
-            }
-        }
-        for (name, tombstone) in &writes.forget {
-            shelves
-                .deleted
-                .entry(name.clone())
-                .or_insert_with(|| tombstone.clone());
-            shelves.sessions.remove(name);
-        }
+        let id = |name: &String| RecordId::parse(name).expect("a name");
+        let put: Vec<Record> = writes
+            .put
+            .iter()
+            .map(|(name, json)| Record {
+                id: id(name),
+                json: json.clone(),
+            })
+            .collect();
+        let forget: Vec<(RecordId, &str)> = writes
+            .forget
+            .iter()
+            .map(|(name, held)| (id(name), held.as_str()))
+            .collect();
+        let unforget: Vec<RecordId> = writes.unforget.iter().map(id).collect();
+        let (placed, made) = make_steps(
+            &Making(RefCell::new(&mut *shelves)),
+            &put,
+            &forget,
+            &unforget,
+        );
+        made?;
         for (key, value) in &writes.meta {
             shelves.meta.insert(key.clone(), value.clone());
         }
@@ -223,7 +236,70 @@ impl Fake {
         if wrote {
             shelves.changes += 1;
         }
+        Ok(placed
+            .into_iter()
+            .map(|id| id.map(RecordId::name))
+            .collect())
+    }
+}
+
+/// A browser's database, as a change is made in it step by step, as the
+/// page script makes it in one transaction ([`make_steps`]).
+pub(super) struct Making<'a>(pub(super) RefCell<&'a mut Shelves>);
+
+impl Steps for Making<'_> {
+    type Error = Refused;
+
+    fn tombstoned(&self, id: RecordId) -> bool {
+        self.0.borrow().deleted.contains_key(&id.name())
+    }
+
+    fn holds(&self, id: RecordId) -> bool {
+        self.0.borrow().sessions.contains_key(&id.name())
+    }
+
+    fn there(&self, id: RecordId, json: &str) -> Result<There, Refused> {
+        Ok(match self.0.borrow().sessions.get(&id.name()) {
+            None => There::Free,
+            Some(there) if there == json => There::Same,
+            Some(_) => There::Other,
+        })
+    }
+
+    fn add(&self, id: RecordId, json: &str) -> Result<(), Refused> {
+        self.0.borrow_mut().sessions.insert(id.name(), json.into());
         Ok(())
+    }
+
+    fn no_name_free(&self, id: RecordId) -> Refused {
+        Refused::Failed(format!("no name was free for the session stored as {id}"))
+    }
+
+    fn unforget(&self, ids: &[RecordId]) -> Result<(), Refused> {
+        let mut shelves = self.0.borrow_mut();
+        for id in ids {
+            shelves.deleted.remove(&id.name());
+        }
+        Ok(())
+    }
+
+    fn records_durable(&self) -> Result<(), Refused> {
+        Ok(())
+    }
+
+    fn tombstone(&self, new: &[(RecordId, &str)]) -> Result<(), Refused> {
+        let mut shelves = self.0.borrow_mut();
+        for (id, held) in new {
+            shelves.deleted.insert(id.name(), Some((*held).into()));
+        }
+        Ok(())
+    }
+
+    fn unlink(&self, ids: &[RecordId]) {
+        let mut shelves = self.0.borrow_mut();
+        for id in ids {
+            shelves.sessions.remove(&id.name());
+        }
     }
 }
 
@@ -242,16 +318,27 @@ impl Glue for Fake {
     }
 
     fn page(&self, after: Option<String>, count: usize) -> Pending<Result<Stored, Refused>> {
-        let shelves = self.db.borrow();
+        let mut shelves = self.shelves();
+        if after.is_none()
+            && let Some(then) = shelves.before_pages.take()
+        {
+            then(&mut shelves);
+        }
         let from = after.map_or(Bound::Unbounded, Bound::Excluded);
-        answer(self.failing().map(|()| {
+        let page: Result<Stored, Refused> = self.failing_now(&shelves).map(|()| {
             shelves
                 .sessions
                 .range((from, Bound::Unbounded))
                 .take(count)
                 .map(|(name, json)| (name.clone(), Some(json.clone())))
                 .collect()
-        }))
+        });
+        if page.as_ref().is_ok_and(|page| page.len() < count)
+            && let Some(then) = shelves.after_pages.take()
+        {
+            then(&mut shelves);
+        }
+        answer(page)
     }
 
     fn tombstones(&self) -> Pending<Result<Stored, Refused>> {
@@ -260,17 +347,24 @@ impl Glue for Fake {
             shelves
                 .deleted
                 .iter()
-                .map(|(name, held)| (name.clone(), Some(held.clone())))
+                .map(|(name, held)| (name.clone(), held.clone()))
                 .collect()
         }))
     }
 
     fn list(&self) -> Pending<Result<Listed, Refused>> {
-        let shelves = self.db.borrow();
-        answer(self.failing().map(|()| Listed {
+        let mut shelves = self.shelves();
+        if let Some(first) = shelves.before_list.take() {
+            first(&mut shelves);
+        }
+        let listed = self.failing_now(&shelves).map(|()| Listed {
             sessions: shelves.sessions.keys().cloned().collect(),
             deleted: shelves.deleted.keys().cloned().collect(),
-        }))
+        });
+        if let Some(then) = shelves.after_list.take() {
+            then(&mut shelves);
+        }
+        answer(listed)
     }
 
     fn read(&self, names: Vec<String>) -> Pending<Result<Vec<Option<String>>, Refused>> {
@@ -290,13 +384,13 @@ impl Glue for Fake {
                 .into_iter()
                 .filter_map(|name| {
                     let tombstone = shelves.deleted.get(&name)?.clone();
-                    Some((name, Some(tombstone)))
+                    Some((name, tombstone))
                 })
                 .collect()
         }))
     }
 
-    fn apply(&self, writes: Writes) -> Pending<Result<(), Refused>> {
+    fn apply(&self, writes: Transaction) -> Pending<Result<Vec<Option<String>>, Refused>> {
         let mut shelves = self.shelves();
         if let Some(first) = shelves.first.take() {
             first(&mut shelves);
@@ -455,7 +549,8 @@ fn two_tabs_moving_at_once_move_once() {
     let theirs = held.clone();
     let fingerprint = page.held(KEYS.history).as_deref().map(fingerprint_of);
     fake.shelves().first = Some(Box::new(move |shelves: &mut Shelves| {
-        let (records, layout) = legacy::moved(&theirs, fingerprint, &[], crate::time::now_ms());
+        let (records, layout) =
+            legacy::moved(&theirs, fingerprint, true, &[], crate::time::now_ms());
         for record in records {
             shelves.sessions.insert(record.id.name(), record.json);
         }
@@ -510,6 +605,36 @@ fn what_does_not_read_is_set_aside_and_not_moved() {
     assert_eq!(opened(&second).load().set_aside, []);
 }
 
+/// A history kept whole that does not read as a list, moved in, cuts
+/// nothing off what an older build's tab, open since before it was
+/// damaged, stores there after the move: the move took no session of it,
+/// so one written back is a session the history here never held, and is
+/// taken up, as on a computer, where such a history is set aside. It stays
+/// where it was in the page storage, beside its copy, and the move cut what
+/// was found there after it off at its clock, as if it had read.
+#[test]
+fn a_history_kept_whole_that_does_not_read_cuts_nothing_off_what_an_older_build_stores_after() {
+    let page = Page::default();
+    page.set(KEYS.history, "not a list");
+    let fake = Fake::on(&page);
+    let tab = opened(&fake);
+    assert_eq!(tab.load().set_aside, [SetAside::History { kept: None }]);
+    assert_eq!(
+        fake.layout().and_then(|layout| layout.taken_through),
+        Some(0),
+        "nothing cut off"
+    );
+    // An older build's tab, open since before, writes its history back.
+    page.keep(&[ago(2)]);
+    assert!(tab.changed());
+    assert_eq!(
+        done(tab.listing()).map(|listed| listed.len()),
+        Some(1),
+        "taken up"
+    );
+    assert_eq!(sessions_of(&opened(&fake).load()), [ago(2)]);
+}
+
 /// A page storage that cannot be read now leaves the move for the next
 /// launch, and says so: the database still takes what is stored meanwhile,
 /// and the move made then writes no session twice.
@@ -546,6 +671,225 @@ fn a_history_kept_whole_that_cannot_be_read_now_is_moved_later() {
     assert_eq!(sessions_of(&load), all);
     assert_eq!(fake.records().len(), 3, "none twice");
     assert!(fake.layout().is_some());
+}
+
+/// A move made again over a record left beside its tombstone counts it as
+/// here, as the files do, where the tombstone names no session, as an empty
+/// one names none: the session it holds, under a name the move does not
+/// give, is not written again. Left out, the move wrote it again, under the
+/// move's own name, and a session deleted came back. A browser leaves no
+/// record beside its tombstone of its own accord: latent.
+#[test]
+fn a_move_made_again_counts_a_record_left_beside_its_tombstone_as_here() {
+    let session = ago(4);
+    let page = Page::holding(std::slice::from_ref(&session));
+    let fake = Fake::on(&page);
+    let json = serde_json::to_string(&session).expect("writes");
+    let placed = RecordId::placed(session.timestamp, &json);
+    {
+        let mut shelves = fake.shelves();
+        shelves.sessions.insert(placed.name(), json);
+        shelves.deleted.insert(placed.name(), Some("{}".into()));
+        shelves.meta.insert("layout".into(), "{ damaged".into());
+    }
+    let load = opened(&fake).load();
+    assert!(load.complete);
+    assert_eq!(load.sessions, [], "still deleted");
+    assert_eq!(
+        fake.records().into_keys().collect::<Vec<_>>(),
+        [placed],
+        "none written"
+    );
+}
+
+/// The same under the move's own name, its record left beside its
+/// tombstone and damaged where it lies since, as the files' test of it has
+/// it: the session stays deleted, in the load as in the database. Since
+/// 54a897a the move counts such a record as here, so only its look at the
+/// tombstones by name first (e401d80) keeps the session deleted; no test in
+/// a browser held that order.
+#[test]
+fn a_move_made_again_over_its_own_record_beside_its_tombstone_keeps_it_deleted() {
+    let session = ago(4);
+    let page = Page::holding(std::slice::from_ref(&session));
+    let fake = Fake::on(&page);
+    let moved = record::records_for_blob(std::slice::from_ref(&session));
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    {
+        let mut shelves = fake.shelves();
+        shelves
+            .sessions
+            .insert(moved[0].id.name(), "{ damaged".into());
+        shelves.deleted.insert(moved[0].id.name(), Some(tombstone));
+        shelves.meta.insert("layout".into(), "{ damaged".into());
+    }
+    let load = opened(&fake).load();
+    assert!(load.complete);
+    assert_eq!(load.sessions, [], "still deleted");
+    assert_eq!(records_holding(&fake, &session), 0, "none written");
+}
+
+/// A deletion another tab makes as this one makes the move over records
+/// stored here already, in a visit that could not read the page storage,
+/// once this one has read them, is not undone: the tombstones are read
+/// again after the records, so a session the other tab deleted, under a
+/// name the move does not give it, is not moved in. Read only before the
+/// records, they held no word of it, and the move wrote it again.
+#[test]
+fn a_deletion_another_tab_makes_as_this_one_moves_is_not_undone() {
+    let session = ago(3);
+    let page = Page::holding(std::slice::from_ref(&session));
+    let fake = Fake::on(&page);
+    let stored = record_of(&ago(5));
+    fake.shelves()
+        .sessions
+        .insert(stored.id.name(), stored.json.clone());
+    // The other tab takes the session up, under the name a take-up gives
+    // it, and it is deleted there.
+    let json = serde_json::to_string(&session).expect("writes");
+    let placed = RecordId::placed(session.timestamp, &json);
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    fake.shelves().after_pages = Some(Box::new(move |shelves: &mut Shelves| {
+        shelves.deleted.insert(placed.name(), Some(tombstone));
+    }));
+    let load = opened(&fake).load();
+    assert!(load.complete);
+    assert_eq!(sessions_of(&load), [ago(5)], "not moved in");
+    assert_eq!(fake.records().into_keys().collect::<Vec<_>>(), [stored.id]);
+}
+
+/// A deletion another tab makes as this one takes up what an older build
+/// stored, between this one's look at the tombstones and at the records,
+/// is not undone: the tombstones are read after the records, as on a
+/// computer, so a session the other tab deleted, under a name the take-up
+/// does not give it, is not stored again. Read before, they held no word
+/// of it, the record was gone by the time the records were listed, and
+/// the session came back.
+#[test]
+fn a_deletion_another_tab_makes_as_this_one_takes_up_is_not_undone() {
+    let old = ago(10);
+    let page = Page::holding(std::slice::from_ref(&old));
+    let fake = Fake::on(&page);
+    let tab = opened(&fake);
+    let load = tab.load();
+    let [(moved, _)] = load.sessions[..] else {
+        panic!("moved: {:?}", load.sessions);
+    };
+    // A session filled in beside the one moved, as a restore fills one in.
+    let session = ago(1);
+    let json = serde_json::to_string(&session).expect("writes");
+    let filled = RecordId::beside(moved, &json);
+    let change = HistoryChange {
+        put: vec![Record { id: filled, json }],
+        ..HistoryChange::default()
+    };
+    assert_eq!(done(tab.apply(change)), HistorySaved::Stored { kept: 1 });
+    // An older build's tab, still open, stores it, as one it holds as new;
+    // and another tab deletes it as this one goes to list the records.
+    page.keep(&[old, session.clone()]);
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    fake.shelves().before_list = Some(Box::new(move |shelves: &mut Shelves| {
+        shelves.sessions.remove(&filled.name());
+        shelves.deleted.insert(filled.name(), Some(tombstone));
+    }));
+    assert_eq!(done(tab.listing()), Some(vec![moved]), "not taken up");
+    assert_eq!(fake.records().into_keys().collect::<Vec<_>>(), [moved]);
+}
+
+/// How many records `fake` holds of `session`, by its key.
+fn records_holding(fake: &Fake, session: &SessionResult) -> usize {
+    let key = SessionKey::of(session);
+    fake.records()
+        .values()
+        .filter(|json| key_of(json).as_ref() == Some(&key))
+        .count()
+}
+
+/// An Undo another tab makes of a deletion here as this one takes up what
+/// an older build stored, between this one's listing of the records and
+/// its read of the tombstones, leaves the session stored once: the
+/// tombstones read before the records still name it. Read after them
+/// alone, as since 2ec6e8e, the session was neither here nor deleted, and
+/// was taken up beside the record the Undo put back.
+#[test]
+fn an_undo_another_tab_makes_as_this_one_takes_up_leaves_one_record() {
+    let old = ago(10);
+    let page = Page::holding(std::slice::from_ref(&old));
+    let fake = Fake::on(&page);
+    let tab = opened(&fake);
+    tab.load();
+    // Held here as a later build stored it, so not as the older build's
+    // bytes, and deleted here.
+    let session = ago(1);
+    let mut held = serde_json::to_value(&session).expect("writes");
+    held["laterKey"] = serde_json::json!(1);
+    let json = serde_json::to_string(&held).expect("writes");
+    let here = RecordId::placed(session.timestamp, &json);
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    fake.shelves().deleted.insert(here.name(), Some(tombstone));
+    // An older build's tab, holding it as new, writes its history back;
+    // and another tab undoes the deletion once this one lists the records.
+    page.keep(&[old, session.clone()]);
+    fake.shelves().after_list = Some(Box::new(move |shelves: &mut Shelves| {
+        shelves.deleted.remove(&here.name());
+        shelves.sessions.insert(here.name(), json);
+    }));
+    done(tab.listing());
+    assert_eq!(records_holding(&fake, &session), 1, "{:?}", fake.records());
+}
+
+/// The same, as this tab makes the move again over a layout that no longer
+/// reads, the Undo made once it has read the pages: the session the Undo
+/// puts back, under a name the move does not give it, is not moved in
+/// beside it.
+#[test]
+fn an_undo_another_tab_makes_as_this_one_moves_leaves_one_record() {
+    let session = ago(3);
+    let page = Page::holding(std::slice::from_ref(&session));
+    let fake = Fake::on(&page);
+    let json = serde_json::to_string(&session).expect("writes");
+    let here = RecordId::placed(session.timestamp, &json);
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    {
+        let mut shelves = fake.shelves();
+        shelves.deleted.insert(here.name(), Some(tombstone));
+        shelves.meta.insert("layout".into(), "{ damaged".into());
+    }
+    fake.shelves().after_pages = Some(Box::new(move |shelves: &mut Shelves| {
+        shelves.deleted.remove(&here.name());
+        shelves.sessions.insert(here.name(), json);
+    }));
+    let load = opened(&fake).load();
+    assert!(load.complete);
+    assert_eq!(records_holding(&fake, &session), 1, "{:?}", fake.records());
+}
+
+/// An Undo another tab makes of a deletion under the move's own name,
+/// once this tab has read the tombstones and before it reads the pages,
+/// puts the session back for the move as for the load: it is in both,
+/// once. The tombstones read before the pages name it by key alone, never
+/// by name.
+#[test]
+fn an_undo_another_tab_makes_before_the_pages_under_the_moves_name_is_in_the_load() {
+    let session = ago(5);
+    let page = Page::holding(std::slice::from_ref(&session));
+    let fake = Fake::on(&page);
+    let moved = record::records_for_blob(std::slice::from_ref(&session));
+    let (name, json) = (moved[0].id.name(), moved[0].json.clone());
+    let tombstone = serde_json::to_string(&Deleted::of(&session, 7)).expect("writes");
+    {
+        let mut shelves = fake.shelves();
+        shelves.deleted.insert(name.clone(), Some(tombstone));
+        shelves.meta.insert("layout".into(), "{ damaged".into());
+    }
+    fake.shelves().before_pages = Some(Box::new(move |shelves: &mut Shelves| {
+        shelves.deleted.remove(&name);
+        shelves.sessions.insert(name, json);
+    }));
+    let load = opened(&fake).load();
+    assert!(load.complete);
+    assert_eq!(records_holding(&fake, &session), 1);
+    assert_eq!(sessions_of(&load), [session], "in the load");
 }
 
 /// A database that will not take the move leaves the history to the page
@@ -669,7 +1013,7 @@ fn a_layout_that_does_not_read_is_set_aside_and_the_move_made_again() {
 /// deleted here; and a deletion it made since is made here too. Two tabs
 /// taking them up at once take them up once.
 #[test]
-fn what_an_older_build_stores_after_the_move_is_taken_up_once() {
+fn what_an_older_build_stores_and_deletes_is_taken_up_once_whatever_the_tab() {
     let before = [ago(10), ago(9)];
     let page = Page::holding(&before);
     let fake = Fake::on(&page);
@@ -719,6 +1063,155 @@ fn what_an_older_build_stores_after_the_move_is_taken_up_once() {
     assert!(done(first.listing()).is_some_and(|listed| listed.len() == 2));
     assert!(done(second.listing()).is_some_and(|listed| listed.len() == 2));
     assert_eq!(fake.records().len(), 2, "taken up once");
+}
+
+/// One tab's way to the database, each answer given a moment after it is
+/// asked for where it is set to wait, as a browser gives its answers: two
+/// looks of one tab then take turns, each where the other waits.
+#[derive(Clone)]
+struct Slow {
+    fake: Fake,
+    waits: Rc<Cell<bool>>,
+}
+
+impl Slow {
+    /// `answer`, made as it was asked for, and given at the second ask,
+    /// where this waits.
+    fn later<T: 'static>(&self, mut answer: Pending<T>) -> Pending<T> {
+        if !self.waits.get() {
+            return answer;
+        }
+        let mut asked = false;
+        Box::pin(std::future::poll_fn(move |waiting| {
+            if !std::mem::replace(&mut asked, true) {
+                waiting.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            answer.as_mut().poll(waiting)
+        }))
+    }
+}
+
+impl Glue for Slow {
+    fn head(&self) -> Pending<Result<Head, Refused>> {
+        self.later(self.fake.head())
+    }
+
+    fn page(&self, after: Option<String>, count: usize) -> Pending<Result<Stored, Refused>> {
+        self.later(self.fake.page(after, count))
+    }
+
+    fn tombstones(&self) -> Pending<Result<Stored, Refused>> {
+        self.later(self.fake.tombstones())
+    }
+
+    fn list(&self) -> Pending<Result<Listed, Refused>> {
+        self.later(self.fake.list())
+    }
+
+    fn read(&self, names: Vec<String>) -> Pending<Result<Vec<Option<String>>, Refused>> {
+        self.later(self.fake.read(names))
+    }
+
+    fn tombstones_of(&self, names: Vec<String>) -> Pending<Result<Stored, Refused>> {
+        self.later(self.fake.tombstones_of(names))
+    }
+
+    fn apply(&self, writes: Transaction) -> Pending<Result<Vec<Option<String>>, Refused>> {
+        self.later(self.fake.apply(writes))
+    }
+
+    fn stamp(&self) -> Option<String> {
+        self.fake.stamp()
+    }
+
+    fn news(&self) -> u64 {
+        self.fake.news()
+    }
+
+    fn next_news(&self) -> Pending<()> {
+        self.fake.next_news()
+    }
+
+    fn legacy_len(&self, key: &str) -> Result<Option<u64>, ()> {
+        self.fake.legacy_len(key)
+    }
+}
+
+/// What `future` comes to, asked of as often as it takes, as each answer
+/// that waits is given at the next ask.
+fn awaited<T>(future: impl Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    for _ in 0..10_000 {
+        if let Poll::Ready(value) = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            return value;
+        }
+    }
+    panic!("it waits, on nothing that answers");
+}
+
+/// Two looks of one tab taking up what an older build changed, as the
+/// app's looks at news, at the page shown again and at its timer may run
+/// at once, the later made first: the earlier, worked out from how the
+/// history was kept before the later noted what it took, makes nothing, as
+/// it would were the later another tab's, and a deletion the later took up
+/// stays taken up. Written over the later's, as since 4834961, the earlier
+/// noted the deletion as still to take up, and the next look deleted the
+/// session again once Undo had put it back.
+#[test]
+fn a_take_up_worked_out_before_another_look_of_the_tab_took_up_makes_nothing() {
+    let (first, second, third) = (ago(30), ago(20), ago(10));
+    let page = Page::holding(&[first.clone(), second.clone()]);
+    let fake = Fake::on(&page);
+    let slow = Slow {
+        fake: fake.clone(),
+        waits: Rc::default(),
+    };
+    let tab = done(BrowserHistory::open(
+        slow.clone(),
+        false,
+        page.clone(),
+        KEYS,
+    ))
+    .expect("opened");
+    let (id, _) = tab.load().sessions[1].clone();
+    let record = Record {
+        id,
+        json: fake.records()[&id].clone(),
+    };
+    // An older build stores a third session, and a look begins to take it
+    // up: it has read the history kept whole as the older build left it.
+    page.keep(&[first.clone(), second.clone(), third.clone()]);
+    slow.waits.set(true);
+    let mut earlier = std::pin::pin!(tab.listing());
+    assert!(
+        earlier
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending(),
+        "it waits on the database"
+    );
+    // The older build deletes the second; a later look takes both up.
+    page.keep(&[first, third]);
+    page.deleted(&[Deleted::of(&second, crate::time::now_ms())]);
+    let listed = awaited(tab.listing()).expect("listed");
+    assert!(!listed.contains(&id), "deleted: {listed:?}");
+    let taken = fake.layout();
+    awaited(earlier);
+    assert_eq!(fake.layout(), taken, "the earlier look made nothing");
+    // Undo puts the second back, and the next look leaves it there.
+    slow.waits.set(false);
+    let undo = HistoryChange {
+        put: vec![record],
+        unforget: vec![id],
+        ..HistoryChange::default()
+    };
+    assert_eq!(done(tab.apply(undo)), HistorySaved::Stored { kept: 1 });
+    let listed = done(tab.listing()).expect("listed");
+    assert!(listed.contains(&id), "put back, and kept: {listed:?}");
 }
 
 /// A session a later build stored in the database, in a record this build
@@ -920,6 +1413,67 @@ fn a_record_this_build_cannot_read_is_left_and_told_of_once() {
     assert_eq!(load.notices, [HistoryNotice::Later { count: 1 }]);
     assert_eq!(opened(&fake).load().notices, [], "told once");
     assert!(fake.records().contains_key(&id), "left where it is");
+}
+
+/// What this build notes of the records it told of is kept under the name
+/// older builds and this one read it by: `told`, beside how the history is
+/// kept, which 0.16.4 to 0.16.9 go by too. Under another name the note is
+/// lost to every build that reads it, and what it held back is told of
+/// again. A browser notes nothing of a record still unread after the app's
+/// tries, so a damaged one is all there is to note.
+#[test]
+fn the_note_of_what_was_told_keeps_the_name_builds_read_it_by() {
+    let fake = Fake::default();
+    opened(&fake);
+    let damaged = RecordId {
+        order: 5_000,
+        nonce: 9,
+    };
+    fake.shelves().sessions.insert(damaged.name(), "[".into());
+    assert_eq!(
+        opened(&fake).load().notices,
+        [HistoryNotice::Damaged { count: 1 }]
+    );
+    let told = fake.db.borrow().meta.get("told").cloned();
+    assert_eq!(
+        record::names_noted(told.as_deref().map(str::as_bytes)),
+        [damaged.name()].into()
+    );
+}
+
+/// What a build before formats noted as told of, a record it cannot read
+/// that this build reads (0.16.9's, of a session stored with a null score),
+/// stays noted when this build has something new of its own to tell, as
+/// told.json does on a computer: dropped, such a build tells of it again
+/// as it next opens. This build only adds names to the note, in order. It
+/// wrote the note over with what it could not read just then.
+#[test]
+fn what_an_older_build_noted_as_told_of_stays_when_this_build_tells_of_another() {
+    let fake = Fake::default();
+    let tab = opened(&fake);
+    tab.load();
+    let first = record_of(&ago(3));
+    let change = HistoryChange {
+        put: vec![first.clone()],
+        ..HistoryChange::default()
+    };
+    assert_eq!(done(tab.apply(change)), HistorySaved::Stored { kept: 1 });
+    let noted = serde_json::to_string(&[first.id.name()]).expect("writes");
+    fake.shelves().meta.insert("told".into(), noted);
+    let damaged = RecordId {
+        order: 5_000,
+        nonce: 9,
+    };
+    fake.shelves().sessions.insert(damaged.name(), "[".into());
+    assert_eq!(
+        opened(&fake).load().notices,
+        [HistoryNotice::Damaged { count: 1 }]
+    );
+    assert_eq!(
+        fake.db.borrow().meta.get("told").cloned(),
+        Some(serde_json::to_string(&[damaged.name(), first.id.name()]).expect("writes")),
+        "the older build's name stays"
+    );
 }
 
 /// The history is read whole, a page at a time, however long it is: more
@@ -1146,147 +1700,187 @@ fn a_database_cleared_under_the_page_has_how_it_is_kept_written_back() {
     assert_eq!(fake.records().into_keys().collect::<Vec<_>>(), [now.id]);
 }
 
-/// A session an older build stored, as it writes one, with no format, is
-/// there under another name for a move made again, wherever the format
-/// would be written: none, or one carried at the end, as an older build
-/// writes back this build's. This build writes the format in every session
-/// ([`cw_core::SESSION_FORMAT`]), so its bytes were never an older
-/// build's, and the move stored the session a second time.
+/// Two deletions of one session an older build remembers, as two of its
+/// tabs each deleted it, are made here as one, its tombstone stamped with
+/// the later, as on a computer: the page script kept the last, and the
+/// files and this Fake the first.
 #[test]
-fn a_move_made_again_writes_no_session_an_older_build_stored_twice() {
-    let held = [ago(9), ago(8), ago(7)];
-    let moved = record::records_for_blob(&held);
-    let older = crate::persist::tests::as_an_older_build_wrote(&held[1]);
-    let carried = format!(
-        "{},\"format\":{}}}",
-        crate::persist::tests::as_an_older_build_wrote(&held[2])
-            .strip_suffix('}')
-            .expect("an object"),
-        cw_core::SESSION_FORMAT
-    );
-    let read = Read {
-        raw: [&older, &carried]
-            .into_iter()
-            .zip([&held[1], &held[2]])
-            .map(|(json, session)| (RecordId::placed(session.timestamp, json), json.clone()))
-            .collect(),
-        ..Read::default()
-    };
-    let left = not_moved_yet(moved.clone(), &read, &BTreeSet::new(), &HashSet::new());
-    assert_eq!(left, [moved[0].clone()]);
-}
-
-/// A move is made over nothing but what is not there already: a record
-/// there by its own name is written again, which writes nothing; one
-/// deleted by name or by key, or there under another name, is not.
-#[test]
-fn a_move_made_again_writes_no_session_twice() {
-    let held = [ago(9), ago(8), ago(7), ago(6)];
-    let moved = record::records_for_blob(&held);
-    let elsewhere =
-        Record::of(&held[2], |json| RecordId::placed(held[2].timestamp, json)).expect("a record");
-    let read = Read {
-        raw: [
-            (moved[0].id, moved[0].json.clone()),
-            (elsewhere.id, elsewhere.json),
-        ]
-        .into_iter()
-        .collect(),
-        ..Read::default()
-    };
-    let gone: BTreeSet<RecordId> = [moved[1].id].into_iter().collect();
-    let gone_keys: HashSet<SessionKey> = [SessionKey::of(&held[3])].into_iter().collect();
-    let left = not_moved_yet(moved.clone(), &read, &gone, &gone_keys);
-    assert_eq!(left, [moved[0].clone()]);
-    // Into a database that holds nothing, all of it.
-    assert_eq!(
-        not_moved_yet(
-            moved.clone(),
-            &Read::default(),
-            &BTreeSet::new(),
-            &gone_keys
-        ),
-        moved
-    );
-}
-
-/// A session an older build stored in the history kept whole after a move
-/// made long after the sessions it took, which a build before this one's
-/// take-up rules looked at first, is taken up here, as the page opens and
-/// as the history is listed. Such a build (0.16.9) takes up by its own
-/// rules, which leave it out, and writes the layout back with `legacy`
-/// moved on, `takenLegacy`, this build's note, left as it was. Gated by
-/// `legacy`, the change looked taken up already.
-#[test]
-fn a_change_an_older_build_looked_at_first_is_taken_up_in_a_browser() {
-    let before = [ago(30), ago(20)];
-    let page = Page::holding(&before);
+fn two_deletions_of_one_session_an_older_build_made_are_one_tombstone_stamped_with_the_later() {
+    let (first, second) = (ago(10), ago(9));
+    let page = Page::holding(&[first.clone(), second.clone()]);
     let fake = Fake::on(&page);
-    opened(&fake).load();
-    let older_looks = |fake: &Fake| {
-        let raw = page.held(KEYS.history).expect("held");
-        let mut shelves = fake.shelves();
-        let mut layout: serde_json::Value =
-            serde_json::from_str(&shelves.meta["layout"]).expect("a layout");
-        layout["legacy"] = serde_json::to_value(fingerprint_of(&raw)).expect("JSON");
-        let written = serde_json::to_string_pretty(&layout).expect("JSON");
-        shelves.meta.insert("layout".into(), written);
-    };
-    let since = ago(10);
-    page.keep(&[before[0].clone(), before[1].clone(), since.clone()]);
-    older_looks(&fake);
-    assert_eq!(
-        opened(&fake).load().sessions.len(),
-        3,
-        "taken up as the page opens"
-    );
-    // Another, as the history is listed.
+    let load = opened(&fake).load();
+    let second_id = load.sessions[1].0;
+    page.keep(std::slice::from_ref(&first));
+    let now = crate::time::now_ms();
+    page.deleted(&[Deleted::of(&second, now), Deleted::of(&second, now + 1)]);
     let tab = opened(&fake);
-    tab.load();
-    page.keep(&[before[0].clone(), before[1].clone(), since, ago(9)]);
-    older_looks(&fake);
-    assert!(tab.changed(), "the history kept whole changed");
-    done(tab.listing());
+    assert_eq!(sessions_of(&tab.load()), [first]);
     assert_eq!(
-        done(tab.listing()).map(|listed| listed.len()),
-        Some(4),
-        "and as it is listed"
+        done(tab.deletions(vec![second_id])),
+        Some(vec![(second_id, Some(now + 1))])
     );
 }
 
-/// The same where a build before this one's take-up rules made the move as
-/// well, as every build from 0.16.3 to 0.16.9 did: its layout holds none of
-/// this build's notes (`takenLegacy` among them), and the change its tab
-/// looked at first is taken up as the page opens here. Gated by `legacy`
-/// where `takenLegacy` is missing, the change looked taken up already.
+/// A move made again over a record whose name other bytes have stores
+/// the session under the next name, and the load holds it there.
 #[test]
-fn a_change_an_older_build_looked_at_first_is_taken_up_in_a_browser_where_it_made_the_move() {
-    let before = [ago(30), ago(20)];
-    let page = Page::holding(&before);
+fn a_session_moved_under_a_name_other_bytes_have_is_read_where_it_went() {
+    let held = [ago(30), ago(20)];
+    let page = Page::holding(&held);
     let fake = Fake::on(&page);
-    opened(&fake).load();
-    // The layout as 0.16.9 writes it as it moves the history and as it
-    // looks: `legacy` moved on to the history kept whole as it took it.
-    let as_an_older_build_wrote_it = |fake: &Fake| {
-        let raw = page.held(KEYS.history).expect("held");
-        let mut shelves = fake.shelves();
+    let moved = record::records_for_blob(&held);
+    let other = serde_json::to_string(&ago(5)).expect("JSON");
+    fake.shelves()
+        .sessions
+        .insert(moved[1].id.name(), other.clone());
+    let load = opened(&fake).load();
+    let went = moved[1].id.bumped();
+    assert!(
+        load.sessions.contains(&(went, held[1].clone())),
+        "where it went: {:?}",
+        load.sessions
+    );
+    assert_eq!(fake.records().get(&moved[1].id), Some(&other));
+}
+
+/// A browser's database, on the tests' stand-in for one, as every store's
+/// cases reach it ([`Harness`]): each load a tab opened anew, which the
+/// asks after it go to.
+struct InBrowser {
+    fake: Fake,
+    tab: Option<Tab>,
+}
+
+impl InBrowser {
+    fn tab(&self) -> &Tab {
+        self.tab.as_ref().expect("a tab opened")
+    }
+}
+
+impl Harness for InBrowser {
+    /// A tab keeps how the history is kept as it last read or wrote it.
+    const LOOK_MAY_RACE: bool = true;
+
+    fn holding(whole: &[SessionResult]) -> Self {
+        let page = if whole.is_empty() {
+            Page::default()
+        } else {
+            Page::holding(whole)
+        };
+        Self {
+            fake: Fake::on(&page),
+            tab: None,
+        }
+    }
+
+    fn load(&mut self) -> HistoryLoad {
+        let tab = opened(&self.fake);
+        let load = tab.load();
+        self.tab = Some(tab);
+        load
+    }
+
+    fn apply(&self, change: HistoryChange) -> HistorySaved {
+        done(self.tab().apply(change))
+    }
+
+    fn listing(&self) -> Option<Vec<RecordId>> {
+        done(self.tab().listing())
+    }
+
+    fn read(&self, ids: Vec<RecordId>) -> Vec<Option<String>> {
+        let read = done(self.tab().read(ids)).into_iter();
+        read.map(|read| read.ok().map(|record| record.json))
+            .collect()
+    }
+
+    fn deletions(&self, ids: Vec<RecordId>) -> Option<Deletions> {
+        done(self.tab().deletions(ids))
+    }
+
+    fn deleted_sessions(&self, ids: Vec<RecordId>) -> Option<Vec<(RecordId, SessionKey)>> {
+        done(self.tab().deleted_sessions(ids))
+    }
+
+    fn deleted_keys(&self, keys: Vec<SessionKey>) -> Option<Vec<SessionKey>> {
+        done(self.tab().deleted_keys(keys))
+    }
+
+    /// None asked: a browser notes no record still unread, and tells of
+    /// every one each time, as the store's own answer has it
+    /// ([`super::super::Store::still_unread`]), so the case that asks
+    /// leaves it out.
+    fn still_unread(&self, _ids: Vec<RecordId>) -> Vec<HistoryNotice> {
+        unreachable!("a browser notes no record still unread");
+    }
+
+    fn changed(&self) -> bool {
+        self.tab().changed()
+    }
+
+    fn keep_whole(&self, sessions: &[SessionResult]) {
+        self.fake.page.keep(sessions);
+    }
+
+    fn keep_deleted(&self, deleted: &[Deleted]) {
+        self.fake.page.deleted(deleted);
+    }
+
+    fn plant(&self, id: RecordId, json: &str) {
+        self.fake.shelves().sessions.insert(id.name(), json.into());
+    }
+
+    fn plant_tombstone(&self, id: RecordId, held: Option<&str>) {
+        let held = held.map(str::to_string);
+        self.fake.shelves().deleted.insert(id.name(), held);
+    }
+
+    /// Another tab, on the same database and page storage.
+    fn another(&self) -> Self {
+        Self {
+            fake: self.fake.clone(),
+            tab: None,
+        }
+    }
+
+    /// The layout in the database written back, by the length and hash of
+    /// the history kept whole now.
+    fn as_an_older_build_looks(&self, made_the_move: bool) {
+        let raw = self.fake.page.held(KEYS.history).expect("held");
+        let mut shelves = self.fake.shelves();
         let mut layout: serde_json::Value =
             serde_json::from_str(&shelves.meta["layout"]).expect("a layout");
-        let held = layout.as_object_mut().expect("an object");
-        for key in ["takenThrough", "deletionsTaken", "takenLegacy"] {
-            held.remove(key);
+        if made_the_move {
+            let held = layout.as_object_mut().expect("an object");
+            for key in ["takenThrough", "deletionsTaken", "takenLegacy"] {
+                held.remove(key);
+            }
         }
         layout["legacy"] = serde_json::to_value(fingerprint_of(&raw)).expect("JSON");
         let written = serde_json::to_string_pretty(&layout).expect("JSON");
         shelves.meta.insert("layout".into(), written);
-    };
-    as_an_older_build_wrote_it(&fake);
-    let since = ago(10);
-    page.keep(&[before[0].clone(), before[1].clone(), since]);
-    as_an_older_build_wrote_it(&fake);
-    assert_eq!(
-        opened(&fake).load().sessions.len(),
-        3,
-        "taken up as the page opens"
+    }
+}
+
+/// What every store must do with the history ([`crate::persist::conformance`]).
+/// Left out: records still unread after the app's tries, which a browser
+/// tells of each time, as it notes none (D31).
+mod conformance {
+    use super::InBrowser;
+
+    crate::persist::conformance::conformance_tests!(InBrowser:
+        a_history_kept_whole_moves_in_once,
+        a_deletion_is_a_tombstone_that_names_its_session,
+        a_session_put_back_is_there_again,
+        what_an_older_build_stores_after_the_move_is_taken_up_once,
+        a_deletion_an_older_build_made_after_the_move_is_honoured,
+        a_record_this_build_cannot_read_is_told_of_once,
+        a_session_taken_up_under_a_name_other_bytes_have_is_read_where_it_went,
+        a_session_stored_under_a_name_other_bytes_have_is_known_by_where_it_went,
+        a_tombstone_that_names_no_session_still_deletes_its_record,
+        two_copies_take_up_each_others_changes,
+        a_change_another_copy_made_first_is_taken_up_after_ones_own,
+        a_change_an_older_build_looked_at_first_is_taken_up,
     );
 }

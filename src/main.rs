@@ -23,8 +23,11 @@ mod history;
 #[cfg(all(target_os = "android", not(test)))]
 mod jvm;
 mod keep_awake;
+#[cfg(test)]
+mod lifecycle_walk;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod linux_webview;
+mod live_run;
 #[cfg(feature = "desktop")]
 mod menus;
 mod page;

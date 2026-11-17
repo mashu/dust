@@ -20,6 +20,7 @@ use crate::contest_runtime::{
 use crate::format::{counted, minutes_seconds};
 use crate::page_hidden::{RUN_HIDDEN, use_page_hidden};
 use crate::session_runtime::{abort_run, finish_run};
+use crate::state::live::SEEN_EVERY_MS;
 use crate::state::{AppCtx, typed_len_max};
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
@@ -29,10 +30,6 @@ use crate::ui::training::{ANSWER_INPUT_MODE, InputMethod, Keypad, PadKey, PadRow
 use crate::ui::widgets::{
     Icon, IconName, ProgressHeader, StatusDot, TOUCH_BUILD, control_id, html_bool, keep_focus,
 };
-
-/// How often the run's clock and the air are drawn again, which is also how
-/// often the run hears that the app is still running.
-const TICK_MS: u32 = 250;
 
 /// The keypad's character rows: group training's, but for `,` and `.`, which
 /// no call or exchange holds. ⌫ ends the fourth.
@@ -130,13 +127,14 @@ fn run_class(paused: bool, show_copy: bool) -> String {
     }
 }
 
-/// The time, moved on every tick: what the clock, the rate and the air are
-/// drawn from. Each tick tells the run the app is still running ([`tick`]).
+/// The time, moved on every tick, every [`SEEN_EVERY_MS`]: what the clock,
+/// the rate and the air are drawn from. Each tick tells the run the app is
+/// still running ([`tick`]).
 fn use_ticks(ctx: AppCtx) -> Signal<MonoMs> {
     let mut now = use_signal(|| MonoMs(mono_ms()));
     use_future(move || async move {
         loop {
-            sleep_ms(TICK_MS).await;
+            sleep_ms(SEEN_EVERY_MS).await;
             tick(ctx);
             now.set(MonoMs(mono_ms()));
         }

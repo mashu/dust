@@ -109,7 +109,7 @@ pub fn letters(bands: RecognitionBands) -> Element {
             }
             dt { "Not timed yet" }
             dd {
-                "No time of either kind yet. A character is timed each time you key it right, along with its group or once the group has ended; keys after a group is sent again are not timed, nor is a send the audio held up or paused, nor what the guided setup types for you. In a contest run only recognition is timed: a call or an exchange heard once and alone, with Show copy off. Nothing stands in for a time: a character never timed says so."
+                "No time of either kind yet. A character is timed each time you key it right, along with its group or once the group has ended; keys after a group is sent again are not timed, nor is a send the audio held up or paused, nor what the guided setup types for you. In a contest run only recognition is timed: a call or an exchange heard once and alone, in a turn no pause cut short, with Show copy off. Nothing stands in for a time: a character never timed says so."
             }
         }
     }

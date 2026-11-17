@@ -93,8 +93,8 @@ struct Sounding {
     char_ends_ms: Vec<u32>,
     latency_ms: u32,
     /// Why it cannot be timed from, if it cannot: it was held up, tried
-    /// again, or paused with its answer open. None while it played on time
-    /// and once.
+    /// again, or paused with its answer open or part way through it. None
+    /// while it played on time and once.
     untimed: Option<Untimed>,
     /// When a later send of the group began to go out: a key from then on
     /// came after hearing it twice.
@@ -121,8 +121,12 @@ pub enum Untimed {
     /// It went out again from the start, heard in part already: as when
     /// some of it went unheard, or the attempt failed.
     SentAgain,
-    /// The session was paused with its answer open: keys either side of a
-    /// pause cannot be timed against one send.
+    /// The session was paused with its answer open, or part way through
+    /// its send: keys either side of a pause, or along a send it cut,
+    /// cannot be timed against one send. Found as the pause begins, before
+    /// any news of the send it cut. A run's copy says so when a pause cut
+    /// short the turn it was heard in, cut part way the first sending it
+    /// would have been timed from, or came before every key of it.
     Paused,
 }
 
@@ -651,7 +655,8 @@ impl GroupSession {
     /// or sent again: the answer is timed from the end of its send as if the
     /// pause had not been, and keys typed either side of the pause cannot be
     /// timed against its characters. An answer already complete when it
-    /// paused is timed as it stands.
+    /// paused is timed as it stands. Noted as the pause begins, for none of
+    /// it yet, and again as it ends, for all of it.
     pub(crate) fn note_paused(&mut self, index: usize, ms: u64) {
         let Some(group) = self.groups.get_mut(index) else {
             return;

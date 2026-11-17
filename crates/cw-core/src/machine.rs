@@ -625,13 +625,18 @@ impl<S: GroupSource> SessionMachine<S> {
     fn finish_now(&mut self, now: MonoMs) -> Vec<SessionEffect> {
         // Ended while paused waiting on an answer: the pause is no time
         // spent answering, as on Resume. Ended while paused part way through
-        // a group, what was typed is answered as it stood at the pause.
+        // a group, what was typed is answered as it stood at the pause, and
+        // its keys, typed along a send the pause cut, are not timed against
+        // it, as on Resume; there is no pause in its time to leave out.
         let answered_at = match self.resume {
             Some((Resume::Answer(index), since)) => {
                 self.session.note_paused(index, now.since(since));
                 now
             }
-            Some((Resume::Send(_), since)) => since,
+            Some((Resume::Send(index), since)) => {
+                self.session.note_paused(index, 0);
+                since
+            }
             None => now,
         };
         // Something typed but not yet confirmed is kept.
@@ -663,7 +668,11 @@ impl<S: GroupSource> SessionMachine<S> {
     /// stopped, every timer let go. A group answered in full, its
     /// auto-confirm still waiting, needs no sending again: it is confirmed
     /// once resumed. A send cut short counts as heard once its first
-    /// character had sounded, unless some of it had gone unheard.
+    /// character had sounded, unless some of it had gone unheard. The group
+    /// held, its answer open, says from now on that a pause cut it, the
+    /// first reason found, so news of its send heard after the pause, as
+    /// that it was held up when the page hid, finds it so, as a run's turn
+    /// the pause cut does; one answered in full stands as timed.
     fn pause(&mut self, why: PauseWhy, now: MonoMs) -> Vec<SessionEffect> {
         let complete = self.auto_confirm.as_ref().map(|pending| pending.index);
         let resume = match self.phase() {
@@ -684,6 +693,7 @@ impl<S: GroupSource> SessionMachine<S> {
         };
         let (Resume::Send(index) | Resume::Answer(index)) = resume;
         self.session.cut_send(index, now);
+        self.session.note_paused(index, 0);
         self.cancel_timers();
         self.resume = Some((resume, now));
         self.set_phase(SessionPhase::Paused { index, why });
@@ -1167,7 +1177,7 @@ mod tests {
     /// A pause in the answer window is no time spent answering: the group is
     /// timed from its end as if the pause had not been, and its characters,
     /// keyed either side of the pause, are not timed against when they
-    /// ended.
+    /// ended. The group says the pause is why.
     #[test]
     fn a_pause_in_the_answer_window_is_not_answering_time() {
         let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
@@ -1195,6 +1205,7 @@ mod tests {
             timing.time_to_complete_ms
         );
         assert_eq!(timing.char_times, None, "timed across the pause");
+        assert_eq!(timing.untimed, Some(Untimed::Paused), "and says so");
     }
 
     /// `KMR` sent from 0 and heard in full by 800, as the pause tests hear it.
@@ -1215,7 +1226,8 @@ mod tests {
 
     /// End session while paused in the answer window takes the pause off the
     /// answer's time, as Resume does: the group was timed at the whole
-    /// pause, ten minutes here, and scored as answered that slowly.
+    /// pause, ten minutes here, and scored as answered that slowly. Its
+    /// characters are not timed, and it says the pause is why.
     #[test]
     fn ending_a_session_paused_in_the_answer_window_is_not_answering_time() {
         let mut m = heard_kmr();
@@ -1231,6 +1243,7 @@ mod tests {
             timing.time_to_complete_ms
         );
         assert_eq!(timing.char_times, None, "timed across the pause");
+        assert_eq!(timing.untimed, Some(Untimed::Paused), "and says so");
     }
 
     /// An answer complete when paused and corrected after it is timed from
@@ -1349,6 +1362,105 @@ mod tests {
         assert!(effects.contains(&SessionEffect::PersistAndShowResults));
         let timing = &m.session().result(0, "2026-10-30".into()).group_timings[0];
         assert_eq!((timing.sends, timing.time_to_complete_ms), (2, 900.0));
+    }
+
+    /// End session while paused part way through a send keeps what was
+    /// typed along it as it stood at the pause, with no times, and says the
+    /// pause is why, as Resume would: keys typed along a send a pause cut
+    /// cannot be timed against it. An answer complete before the pause
+    /// stands timed, as it does on Resume.
+    #[test]
+    fn ending_a_session_paused_part_way_through_a_send_keeps_the_group_untimed() {
+        let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
+        let _ = m.apply(kmr_started(0), MonoMs(0));
+        let keys = Keys {
+            at: vec![Some(MonoMs(300))],
+            corrected: Vec::new(),
+        };
+        let typed = SessionEvent::Input {
+            index: 0,
+            text: "K".into(),
+            keys,
+        };
+        let _ = m.apply(typed, MonoMs(300));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(400));
+        let effects = m.apply(SessionEvent::FinishNow, MonoMs(60_400));
+        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        let result = m.session().result(0, "2026-11-11".into());
+        assert_eq!(result.groups[0].received, "K");
+        let timing = &result.group_timings[0];
+        assert_eq!(
+            (timing.char_times.clone(), timing.untimed),
+            (None, Some(Untimed::Paused))
+        );
+
+        let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
+        let _ = m.apply(kmr_started(0), MonoMs(0));
+        let keys = Keys {
+            at: vec![Some(MonoMs(300)), Some(MonoMs(600)), Some(MonoMs(900))],
+            corrected: Vec::new(),
+        };
+        let typed = SessionEvent::Input {
+            index: 0,
+            text: "KMR".into(),
+            keys,
+        };
+        let _ = m.apply(typed, MonoMs(900));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(950));
+        let _ = m.apply(SessionEvent::FinishNow, MonoMs(60_950));
+        let timing = &m.session().result(0, "2026-11-11".into()).group_timings[0];
+        assert!(
+            timing.char_times.is_some() && timing.untimed.is_none(),
+            "{timing:?}"
+        );
+    }
+
+    /// A pause notes at once that it cut the group it holds, its answer
+    /// open: news of the cut send heard after it, that it was held up on
+    /// its way, finds the pause the first reason, as a run's turn the pause
+    /// cut says it ([`crate::Untimed`]), whether the session is then ended
+    /// or resumed. An answer complete by the pause has nothing to note, and
+    /// the news untimes it as ever.
+    #[test]
+    fn a_group_a_pause_cut_says_so_whatever_is_heard_of_its_send_after() {
+        let typed = |text: &str, at: &[u64]| SessionEvent::Input {
+            index: 0,
+            text: text.into(),
+            keys: Keys {
+                at: at.iter().map(|at| Some(MonoMs(*at))).collect(),
+                corrected: Vec::new(),
+            },
+        };
+        for resumed in [false, true] {
+            let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
+            let _ = m.apply(kmr_started(0), MonoMs(0));
+            let _ = m.apply(typed("K", &[300]), MonoMs(300));
+            let _ = m.apply(SessionEvent::Pause, MonoMs(400));
+            let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(410));
+            if resumed {
+                let _ = m.apply(SessionEvent::Resume, MonoMs(60_400));
+            }
+            let _ = m.apply(SessionEvent::FinishNow, MonoMs(60_500));
+            let result = m.session().result(0, "2026-11-11".into());
+            let timing = &result.group_timings[0];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(Untimed::Paused)),
+                "resumed {resumed}"
+            );
+        }
+
+        let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
+        let _ = m.apply(kmr_started(0), MonoMs(0));
+        let _ = m.apply(typed("KMR", &[300, 600, 900]), MonoMs(900));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(950));
+        let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(960));
+        let _ = m.apply(SessionEvent::FinishNow, MonoMs(60_950));
+        let timing = &m.session().result(0, "2026-11-11".into()).group_timings[0];
+        assert_eq!(
+            (timing.char_times.clone(), timing.untimed),
+            (None, Some(Untimed::HeldUp))
+        );
     }
 
     /// End session in the count down a resume brings, before the group

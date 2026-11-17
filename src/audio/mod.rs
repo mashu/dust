@@ -382,8 +382,11 @@ pub mod fake {
 
         fn poll(&self) -> WaitFlags {
             if self.ticket.is_cancelled() {
+                // A page out of sight says so on the poll that finds its
+                // send stopped too, as a browser's does.
                 return WaitFlags {
                     cancelled: true,
+                    suspended: self.recorder.page_hidden.get(),
                     ..Default::default()
                 };
             }

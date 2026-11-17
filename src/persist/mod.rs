@@ -13,6 +13,8 @@ mod acl;
 #[cfg(all(target_os = "android", not(test)))]
 mod android;
 pub mod backup;
+#[cfg(test)]
+mod conformance;
 #[cfg(feature = "native-runtime")]
 mod desktop;
 #[cfg(feature = "native-runtime")]
@@ -29,6 +31,7 @@ mod marks;
 pub mod memory;
 pub mod progress;
 pub mod record;
+mod record_store;
 mod saved;
 mod session;
 mod set_aside;
@@ -315,11 +318,12 @@ pub struct OpenSession {
     pub started_at: u64,
     /// A contest run, rather than a session of groups.
     pub run: bool,
-    /// What it would keep were it ended now, as of its last answered group
-    /// or logged QSO: kept in its place should the app stop under it. None
-    /// before then, in a mark from before marks held it, and in one whose
-    /// copy of it no longer reads. Once it has ended, as it was ended, until
-    /// the store has taken it.
+    /// What it would keep were it ended now, as of its last answered group,
+    /// logged QSO or pause, and of what it heard while paused that changed
+    /// that: kept in its place should the app stop under it. None before
+    /// then, in a mark from before marks held it, and in one whose copy of
+    /// it no longer reads. Once it has ended, as it was ended, until the
+    /// store has taken it.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
