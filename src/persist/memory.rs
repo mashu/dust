@@ -2414,7 +2414,9 @@ mod tests {
                 "deleted at read {nth}"
             );
         }
-        assert!(moving >= 2, "deleted as the move read, {moving} times");
+        // Made while the move was being made, once at each of its three
+        // reads: the tombstones, what is here, and the tombstones again.
+        assert!(moving >= 3, "deleted as the move read, {moving} times");
     }
 
     /// An Undo another copy makes of a deletion here as this one makes the
@@ -2457,7 +2459,9 @@ mod tests {
                 "once, undone at read {nth}"
             );
         }
-        assert!(moving >= 2, "undone as the move read, {moving} times");
+        // Made while the move was being made, once at each of its three
+        // reads: the tombstones, what is here, and the tombstones again.
+        assert!(moving >= 3, "undone as the move read, {moving} times");
     }
 
     /// A move with nothing to move waits for no record, as the files' waits
