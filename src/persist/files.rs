@@ -4420,6 +4420,75 @@ mod tests {
         assert!(moving >= 3, "undone as the move read, {moving} times");
     }
 
+    /// A deletion another copy makes as this one makes the move over
+    /// records, once this one has read the tombstones and listed what is
+    /// here and before it has read what the records hold, whose tombstone
+    /// cannot be read just then, as a folder in its place cannot, or a file
+    /// held open, has the move wait, as one there before it began does: the
+    /// tombstones read again after the records may name the session the
+    /// move would store again. Once it reads, the move is made, and the
+    /// session stays deleted. Taken at that read for one that names no
+    /// session, or with the tombstones read only once, before what the
+    /// records hold, it left the session neither here nor deleted, and the
+    /// move stored it again under its own name.
+    #[cfg(unix)]
+    #[test]
+    fn a_move_waits_on_a_tombstone_written_as_it_moves_that_cannot_be_read_now() {
+        let dir = TempDir::new("deleted-unread-as-moved");
+        let now = crate::time::now_ms();
+        let (first, second) = (finished(now - 9 * DAY), finished(now - 8 * DAY));
+        keep_whole(&dir, &[first.clone(), second.clone()]);
+        // Restored before the move was made.
+        let restored =
+            Record::of(&first, |json| RecordId::placed(first.timestamp, json)).expect("a record");
+        let files = Files::at(&dir.0);
+        assert_eq!(
+            files.apply(&put(std::slice::from_ref(&restored))),
+            HistorySaved::Stored { kept: 1 }
+        );
+        // Deleted at the third folder read, the tombstones read and both
+        // folders listed, and its tombstone cannot be read just then.
+        let tombstone = dir
+            .0
+            .join(HISTORY)
+            .join(TOMBSTONES)
+            .join(file_name(restored.id));
+        let deleted = forget(&[(&restored, &first)]);
+        let made = Arc::new(Mutex::new(None));
+        let (root, at, said) = (dir.0.clone(), tombstone.clone(), Arc::clone(&made));
+        let mut looked = 0;
+        files.meanwhile(move || {
+            looked += 1;
+            if looked == 3 {
+                let moving = !root.join(HISTORY).join(LAYOUT_FILE).exists();
+                let saved = HistoryFiles::at(&root).apply(&deleted);
+                let held = fs::read(&at).unwrap();
+                fs::remove_file(&at).unwrap();
+                fs::create_dir(&at).unwrap();
+                *said.lock().unwrap() = Some((moving, saved, held));
+            }
+        });
+        let waited = files.load();
+        let (moving, saved, held) = made.lock().unwrap().take().expect("deleted");
+        assert!(moving, "deleted as the move read");
+        assert_eq!(saved, HistorySaved::Stored { kept: 0 });
+        assert!(
+            matches!(&waited.notices[..], [HistoryNotice::MovePending(_)]),
+            "{:?}",
+            waited.notices
+        );
+        assert!(!waited.complete);
+        fs::remove_dir(&tombstone).unwrap();
+        fs::write(&tombstone, held).unwrap();
+        let read = Files::at(&dir.0).load();
+        assert!(
+            read.complete && read.notices.is_empty(),
+            "{:?}",
+            read.notices
+        );
+        assert_eq!(stamps(&read), [second.timestamp], "still deleted");
+    }
+
     /// A move made over records stored while it waited, as a restore stores
     /// one while the history kept whole cannot be read, waits again while a
     /// record here under a name the move does not give cannot be read, as a
@@ -5061,6 +5130,8 @@ mod tests {
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
         a_deletion_another_copy_makes_as_this_one_moves_is_not_undone,
         an_undo_another_copy_makes_as_this_one_moves_leaves_one_record,
+        #[cfg(unix)]
+        a_move_waits_on_a_tombstone_written_as_it_moves_that_cannot_be_read_now,
         #[cfg(unix)]
         a_move_made_over_a_record_that_cannot_be_read_now_waits_for_it,
         #[cfg(unix)]
