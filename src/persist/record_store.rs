@@ -682,7 +682,9 @@ async fn read_in<B: Backend>(
     // of what an older build changed: a session another copy deletes
     // meanwhile is either still here or deleted after, and one it puts back
     // meanwhile is either deleted before or here, but where a put-back's
-    // two steps on the files span this read and the listing (take_up).
+    // two steps on the files span this read and the listing, or where it
+    // both deletes and puts back one, deleted as the records are listed
+    // (take_up).
     let before = match &layout {
         Some(layout) if !read_first => match store.legacy_look(layout).await {
             LegacyLook::Changed(_) => Some(store.tombstones().await),
@@ -923,7 +925,10 @@ async fn move_in<B: Backend>(
 /// restore of a session deleted under the name the restore gives it and a
 /// sync's take-back alike: one whose two steps span the first read of the
 /// tombstones and the listing of the records still leaves its session
-/// neither, and that window is the put-back's own.
+/// neither, and that window is the put-back's own. A session another copy
+/// both deletes and puts back in between, under such a name, deleted as
+/// what is here is listed, is left neither as well, as at a take-up: the
+/// move stores it again beside the record put back.
 async fn here_of<B: Backend>(store: &B, moved: &[Record]) -> Result<Here, String> {
     if moved.is_empty() {
         return Ok(Here::default());
@@ -973,7 +978,12 @@ async fn here_of<B: Backend>(store: &B, moved: &[Record]) -> Result<Here, String
 /// name the restore gives it and a sync's take-back alike: one whose two
 /// steps span the first read of the tombstones and the listing of the
 /// records still leaves its session neither, and that window is the
-/// put-back's own, as at a move made again.
+/// put-back's own, as at a move made again. On any store, a session
+/// another copy both deletes and puts back in between, deleted as the
+/// records are listed, is left neither as well: no read of the tombstones
+/// names it, the listing leaves it out, and it is taken up again beside
+/// the record put back. No order of these reads closes that window, which
+/// only two changes made within one take-up's reads open.
 ///
 /// It is no restore: what was taken up is noted only once it is stored,
 /// in how the history is kept, written last or with it, so a take-up cut
