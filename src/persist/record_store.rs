@@ -793,10 +793,11 @@ async fn read_in<B: Backend>(
                 eprintln!("could not read what was deleted here: {why}");
                 Err(HeldBack)
             }
-            // The history kept whole was as it was last taken up when this
-            // look began, so no tombstone was read before the records: one
-            // an older build changes since is taken up as at a listing, the
-            // tombstones read before what is here is listed again.
+            // The history kept whole was as it was last taken up, or could
+            // not be looked at, when this read looked at it, so no tombstone
+            // was read before the records: a change an older build makes to
+            // it since is taken up as at a listing, the tombstones read
+            // before what is here is listed again.
             None => take_up(store, layout, None).await,
         };
         match taken {
