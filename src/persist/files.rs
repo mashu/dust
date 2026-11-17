@@ -3064,7 +3064,8 @@ mod tests {
     /// record of it, though the history kept whole was as this copy last
     /// took it up when it looked: the take-up, which finds the change only
     /// then, reads the tombstones itself before it lists what is here, as
-    /// at a listing. Handed none read before the records, as though none
+    /// at a listing, and takes up there and then a session the older build
+    /// finished since. Handed none read before the records, as though none
     /// were there, it went by its later read alone, and took up again the
     /// session the Undo put back, neither listed nor named by a tombstone.
     #[test]
@@ -3092,15 +3093,17 @@ mod tests {
             files.apply(&forget(&[(&here, &session)]));
             // At the nth folder read of the listing, once the load has
             // looked at the history kept whole and found it as it was: an
-            // older build's copy, holding the session as new, writes its
-            // history back, and another copy undoes the deletion.
+            // older build's copy, holding the session as new, and one it
+            // finished since, writes its history back, and another copy
+            // undoes the deletion.
+            let fresh = finished(now - 4 * DAY);
             let history = dir.0.join(HISTORY);
             let (whole, tombstone, record) = (
                 dir.0.join(SESSIONS),
                 history.join(TOMBSTONES).join(file_name(here.id)),
                 history.join(RECORDS).join(file_name(here.id)),
             );
-            let written = serde_json::to_vec(&[old, session.clone()]).unwrap();
+            let written = serde_json::to_vec(&[old, session.clone(), fresh.clone()]).unwrap();
             let undone = here.json.clone();
             let made = Arc::new(Mutex::new(false));
             let said = Arc::clone(&made);
@@ -3115,19 +3118,33 @@ mod tests {
                     *said.lock().unwrap() = true;
                 }
             });
-            looking.load();
+            let load = looking.load();
             if *made.lock().unwrap() {
                 acted += 1;
             }
-            let key = SessionKey::of(&session);
-            let holding = names(&history.join(RECORDS))
-                .iter()
-                .filter(|name| {
-                    fs::read_to_string(history.join(RECORDS).join(name))
-                        .is_ok_and(|json| key_of(&json).as_ref() == Some(&key))
-                })
-                .count();
-            assert_eq!(holding, 1, "undone at the folder read {nth}");
+            let holding = |session: &SessionResult| {
+                let key = SessionKey::of(session);
+                names(&history.join(RECORDS))
+                    .iter()
+                    .filter(|name| {
+                        fs::read_to_string(history.join(RECORDS).join(name))
+                            .is_ok_and(|json| key_of(&json).as_ref() == Some(&key))
+                    })
+                    .count()
+            };
+            assert_eq!(holding(&session), 1, "undone at the folder read {nth}");
+            // Taken up by this load, once.
+            assert_eq!(
+                holding(&fresh),
+                1,
+                "finished since, at the folder read {nth}"
+            );
+            let read = stamps(&load);
+            assert_eq!(
+                read.iter().filter(|&&at| at == fresh.timestamp).count(),
+                1,
+                "finished since, read at the folder read {nth}: {read:?}"
+            );
         }
         assert_eq!(acted, 3, "made as the records were listed");
     }
