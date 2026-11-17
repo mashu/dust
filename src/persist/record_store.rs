@@ -784,13 +784,20 @@ async fn read_in<B: Backend>(
         && sorted.failed.is_empty()
         && !skipped
     {
-        let live = live_of(&sessions, &sorted.later);
-        let taken = match before.unwrap_or_else(|| Ok(HashSet::new())) {
-            Ok(before) => take_up(store, layout, Some((live, before))).await,
-            Err(why) => {
+        let taken = match before {
+            Some(Ok(before)) => {
+                let live = live_of(&sessions, &sorted.later);
+                take_up(store, layout, Some((live, before))).await
+            }
+            Some(Err(why)) => {
                 eprintln!("could not read what was deleted here: {why}");
                 Err(HeldBack)
             }
+            // The history kept whole was as it was last taken up when this
+            // look began, so no tombstone was read before the records: one
+            // an older build changes since is taken up as at a listing, the
+            // tombstones read before what is here is listed again.
+            None => take_up(store, layout, None).await,
         };
         match taken {
             Ok(Some(change)) => taken_up(&mut sessions, &change),

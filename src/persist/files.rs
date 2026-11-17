@@ -3058,6 +3058,80 @@ mod tests {
         }
     }
 
+    /// An Undo another copy makes of a deletion here as this one reads the
+    /// history, once the records are listed, while an older build's copy
+    /// writes its history back holding the session as new, leaves one
+    /// record of it, though the history kept whole was as this copy last
+    /// took it up when it looked: the take-up, which finds the change only
+    /// then, reads the tombstones itself before it lists what is here, as
+    /// at a listing. Handed none read before the records, as though none
+    /// were there, it went by its later read alone, and took up again the
+    /// session the Undo put back, neither listed nor named by a tombstone.
+    #[test]
+    fn an_undo_another_copy_makes_as_an_older_build_writes_while_this_one_reads_leaves_one_record()
+    {
+        let mut acted = 0;
+        for nth in 1..=3 {
+            let dir = TempDir::new("undo-as-older-writes");
+            let now = crate::time::now_ms();
+            let old = finished(now - 10 * DAY);
+            keep_whole(&dir, std::slice::from_ref(&old));
+            let files = Files::at(&dir.0);
+            files.load();
+            // Held here as a later build stored it, so not as the older
+            // build's bytes, and deleted here.
+            let session = finished(now - 5 * DAY);
+            let mut held = serde_json::to_value(&session).unwrap();
+            held["laterKey"] = serde_json::json!(1);
+            let json = serde_json::to_string(&held).unwrap();
+            let here = Record {
+                id: RecordId::placed(session.timestamp, &json),
+                json,
+            };
+            files.apply(&put(std::slice::from_ref(&here)));
+            files.apply(&forget(&[(&here, &session)]));
+            // At the nth folder read of the listing, once the load has
+            // looked at the history kept whole and found it as it was: an
+            // older build's copy, holding the session as new, writes its
+            // history back, and another copy undoes the deletion.
+            let history = dir.0.join(HISTORY);
+            let (whole, tombstone, record) = (
+                dir.0.join(SESSIONS),
+                history.join(TOMBSTONES).join(file_name(here.id)),
+                history.join(RECORDS).join(file_name(here.id)),
+            );
+            let written = serde_json::to_vec(&[old, session.clone()]).unwrap();
+            let undone = here.json.clone();
+            let made = Arc::new(Mutex::new(false));
+            let said = Arc::clone(&made);
+            let looking = Files::at(&dir.0);
+            let mut looks = 0;
+            looking.meanwhile(move || {
+                looks += 1;
+                if looks == nth {
+                    fs::write(&whole, &written).unwrap();
+                    fs::remove_file(&tombstone).unwrap();
+                    fs::write(&record, &undone).unwrap();
+                    *said.lock().unwrap() = true;
+                }
+            });
+            looking.load();
+            if *made.lock().unwrap() {
+                acted += 1;
+            }
+            let key = SessionKey::of(&session);
+            let holding = names(&history.join(RECORDS))
+                .iter()
+                .filter(|name| {
+                    fs::read_to_string(history.join(RECORDS).join(name))
+                        .is_ok_and(|json| key_of(&json).as_ref() == Some(&key))
+                })
+                .count();
+            assert_eq!(holding, 1, "undone at the folder read {nth}");
+        }
+        assert_eq!(acted, 3, "made as the records were listed");
+    }
+
     /// Which records were deleted by hand comes with when each was, as its
     /// tombstone says, none for one that does not say; and which session
     /// each was, where its tombstone says. On every platform, as the
@@ -5132,6 +5206,7 @@ mod tests {
         #[cfg(unix)]
         a_history_kept_whole_that_cannot_be_looked_at_is_taken_as_unchanged,
         an_undo_another_copy_makes_as_this_one_takes_up_leaves_one_record,
+        an_undo_another_copy_makes_as_an_older_build_writes_while_this_one_reads_leaves_one_record,
         a_deletion_an_older_build_made_after_the_move_is_honoured_whatever_its_clock,
         a_layout_that_does_not_read_is_set_aside_and_the_move_made_again,
         a_deletion_another_copy_makes_as_this_one_moves_is_not_undone,
